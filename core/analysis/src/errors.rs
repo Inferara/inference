@@ -289,29 +289,145 @@ impl AnalysisDiagnostic {
     }
 }
 
+/// An analysis diagnostic paired with the file it was produced in.
+///
+/// Source locations are per-file-local in the merged arena of a multi-file
+/// program, so a bare `line:col` from an imported file would be misread as the
+/// entry file. A rule attaches the defining file's `module_path` (empty for the
+/// entry file) to every finding it produces; the rendered diagnostic then names
+/// the file. The entry file stays a bare `line:col`, so single-file programs are
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabeledDiagnostic {
+    /// Source-root-relative module path of the file the finding belongs to;
+    /// empty for the entry file.
+    pub module_path: Vec<String>,
+    pub diagnostic: AnalysisDiagnostic,
+}
+
+impl LabeledDiagnostic {
+    /// Pairs `diagnostic` with the file named by `module_path`.
+    #[must_use]
+    pub fn new(module_path: Vec<String>, diagnostic: AnalysisDiagnostic) -> Self {
+        Self {
+            module_path,
+            diagnostic,
+        }
+    }
+
+    /// Pairs `diagnostic` with the entry file (no module path). Used by rules
+    /// whose findings are always entry-local, and by tests.
+    #[must_use]
+    pub fn entry(diagnostic: AnalysisDiagnostic) -> Self {
+        Self {
+            module_path: Vec::new(),
+            diagnostic,
+        }
+    }
+}
+
+/// Renders a single finding as `[label:]line:col: severity[rule]: message`,
+/// prefixing the file label for non-entry files via the shared spelling.
+fn write_finding(
+    f: &mut Formatter<'_>,
+    module_path: &[String],
+    diagnostic: &AnalysisDiagnostic,
+    severity: Severity,
+) -> fmt::Result {
+    let location = diagnostic.location();
+    match inference_ast::nodes::file_label(module_path) {
+        Some(label) => write!(
+            f,
+            "{label}:{location}: {severity}[{}]: {diagnostic}",
+            diagnostic.rule_id()
+        ),
+        None => write!(
+            f,
+            "{location}: {severity}[{}]: {diagnostic}",
+            diagnostic.rule_id()
+        ),
+    }
+}
+
+/// Orders findings for display: by file (canonical arena order — entry first,
+/// then lexicographic module path), then by line and column within a file.
+///
+/// Sorting by location alone is wrong across files, because per-file-local
+/// offsets collide; the file key disambiguates so a multi-file report reads
+/// file-by-file rather than interleaving same-numbered lines from different
+/// files.
+fn finding_sort_key(module_path: &[String], diagnostic: &AnalysisDiagnostic) -> (Vec<String>, u32, u32) {
+    let location = diagnostic.location();
+    (
+        module_path.to_vec(),
+        location.start_line,
+        location.start_column,
+    )
+}
+
+/// The file (module path) each finding in a severity-bucketed collection belongs
+/// to, index-aligned with the collection's diagnostic vectors.
+///
+/// Stored behind a single [`Box`] on the owning collection so the diagnostics
+/// stay directly sliceable for the bare-diagnostic accessors, while the file
+/// labels add only one pointer to the owning struct (keeping the error type
+/// small enough to return by value).
+#[derive(Debug, Clone, Default)]
+struct DiagnosticFiles {
+    errors: Vec<Vec<String>>,
+    warnings: Vec<Vec<String>>,
+    infos: Vec<Vec<String>>,
+}
+
+/// Splits labeled findings into a diagnostic vector and an index-aligned
+/// module-path vector. The two stay aligned so the bare-diagnostic accessors and
+/// the file-named rendering describe the same findings.
+fn split_labeled(labeled: Vec<LabeledDiagnostic>) -> (Vec<AnalysisDiagnostic>, Vec<Vec<String>>) {
+    let mut diagnostics = Vec::with_capacity(labeled.len());
+    let mut module_paths = Vec::with_capacity(labeled.len());
+    for item in labeled {
+        diagnostics.push(item.diagnostic);
+        module_paths.push(item.module_path);
+    }
+    (diagnostics, module_paths)
+}
+
 /// Wrapper for multiple analysis errors, following the `TypeCheckErrors` pattern.
 ///
 /// Collects all analysis errors found during a single pass, allowing the user
 /// to see all issues at once rather than fixing one error at a time.
 /// Also carries any warnings and infos found alongside the errors.
+///
+/// Each severity bucket stores the bare diagnostics directly (so the accessors
+/// can hand out a slice) and the file each finding belongs to in a single boxed
+/// [`DiagnosticFiles`] for file-named rendering.
 #[derive(Debug, Clone)]
 pub struct AnalysisErrors {
     errors: Vec<AnalysisDiagnostic>,
     warnings: Vec<AnalysisDiagnostic>,
     infos: Vec<AnalysisDiagnostic>,
+    files: Box<DiagnosticFiles>,
 }
 
 impl AnalysisErrors {
     pub(crate) fn new(
-        errors: Vec<AnalysisDiagnostic>,
-        warnings: Vec<AnalysisDiagnostic>,
-        infos: Vec<AnalysisDiagnostic>,
+        errors: Vec<LabeledDiagnostic>,
+        warnings: Vec<LabeledDiagnostic>,
+        infos: Vec<LabeledDiagnostic>,
     ) -> Self {
         assert!(!errors.is_empty(), "AnalysisErrors must contain at least one error");
+        let (errors, error_files) = split_labeled(errors);
+        let (warnings, warning_files) = split_labeled(warnings);
+        let (infos, info_files) = split_labeled(infos);
         Self {
             errors,
             warnings,
             infos,
+            files: Box::new(DiagnosticFiles {
+                errors: error_files,
+                warnings: warning_files,
+                infos: info_files,
+            }),
         }
     }
 
@@ -336,31 +452,49 @@ impl AnalysisErrors {
 
 impl Display for AnalysisErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut all: Vec<(&AnalysisDiagnostic, Severity)> = Vec::new();
-        for d in &self.infos {
-            all.push((d, Severity::Info));
-        }
-        for d in &self.warnings {
-            all.push((d, Severity::Warning));
-        }
-        for d in &self.errors {
-            all.push((d, Severity::Error));
-        }
-        all.sort_by(|a, b| {
-            let la = a.0.location();
-            let lb = b.0.location();
-            (la.start_line, la.start_column).cmp(&(lb.start_line, lb.start_column))
-        });
-        let mut first = true;
-        for (d, sev) in &all {
-            if !first {
-                writeln!(f)?;
-            }
-            write!(f, "{}: {sev}[{}]: {d}", d.location(), d.rule_id())?;
-            first = false;
-        }
-        Ok(())
+        render_findings(
+            f,
+            &[
+                (&self.infos, &self.files.infos, Severity::Info),
+                (&self.warnings, &self.files.warnings, Severity::Warning),
+                (&self.errors, &self.files.errors, Severity::Error),
+            ],
+        )
     }
+}
+
+/// One severity bucket for rendering: the diagnostics, the index-aligned module
+/// paths naming each finding's file, and the severity to print.
+type FindingBucket<'a> = (&'a [AnalysisDiagnostic], &'a [Vec<String>], Severity);
+
+/// Renders findings from severity buckets, sorted by file then line/column, each
+/// prefixed with its file label. Shared by [`AnalysisErrors`] and
+/// [`AnalysisResult`] so both channels format identically.
+fn render_findings(f: &mut Formatter<'_>, buckets: &[FindingBucket]) -> fmt::Result {
+    let mut all: Vec<(&[String], &AnalysisDiagnostic, Severity)> = Vec::new();
+    for (diagnostics, files, severity) in buckets {
+        // The diagnostic and file vectors are split index-aligned in `new`; if a
+        // future change broke that, `zip` would silently drop the longer tail and
+        // mislabel findings, so guard the invariant where they are consumed.
+        debug_assert_eq!(
+            diagnostics.len(),
+            files.len(),
+            "diagnostic and file-label vectors must stay index-aligned"
+        );
+        for (diagnostic, module_path) in diagnostics.iter().zip(files.iter()) {
+            all.push((module_path, diagnostic, *severity));
+        }
+    }
+    all.sort_by_key(|(module_path, diagnostic, _)| finding_sort_key(module_path, diagnostic));
+    let mut first = true;
+    for (module_path, diagnostic, severity) in &all {
+        if !first {
+            writeln!(f)?;
+        }
+        write_finding(f, module_path, diagnostic, *severity)?;
+        first = false;
+    }
+    Ok(())
 }
 
 impl std::error::Error for AnalysisErrors {}
@@ -369,13 +503,32 @@ impl std::error::Error for AnalysisErrors {}
 ///
 /// Returned from `analyze()` when no hard errors are found, allowing the
 /// compilation pipeline to continue while still reporting lesser findings.
+///
+/// Like [`AnalysisErrors`], stores the bare diagnostics directly (for the
+/// accessors) plus a single boxed [`DiagnosticFiles`] naming each finding's file
+/// for file-named rendering.
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    pub(crate) warnings: Vec<AnalysisDiagnostic>,
-    pub(crate) infos: Vec<AnalysisDiagnostic>,
+    warnings: Vec<AnalysisDiagnostic>,
+    infos: Vec<AnalysisDiagnostic>,
+    files: Box<DiagnosticFiles>,
 }
 
 impl AnalysisResult {
+    pub(crate) fn new(warnings: Vec<LabeledDiagnostic>, infos: Vec<LabeledDiagnostic>) -> Self {
+        let (warnings, warning_files) = split_labeled(warnings);
+        let (infos, info_files) = split_labeled(infos);
+        Self {
+            warnings,
+            infos,
+            files: Box::new(DiagnosticFiles {
+                errors: Vec::new(),
+                warnings: warning_files,
+                infos: info_files,
+            }),
+        }
+    }
+
     /// Returns the list of analysis warnings.
     #[must_use = "returns the list of analysis warnings"]
     pub fn warnings(&self) -> &[AnalysisDiagnostic] {
@@ -397,27 +550,13 @@ impl AnalysisResult {
 
 impl Display for AnalysisResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut all: Vec<(&AnalysisDiagnostic, Severity)> = Vec::new();
-        for d in &self.infos {
-            all.push((d, Severity::Info));
-        }
-        for d in &self.warnings {
-            all.push((d, Severity::Warning));
-        }
-        all.sort_by(|a, b| {
-            let la = a.0.location();
-            let lb = b.0.location();
-            (la.start_line, la.start_column).cmp(&(lb.start_line, lb.start_column))
-        });
-        let mut first = true;
-        for (d, sev) in &all {
-            if !first {
-                writeln!(f)?;
-            }
-            write!(f, "{}: {sev}[{}]: {d}", d.location(), d.rule_id())?;
-            first = false;
-        }
-        Ok(())
+        render_findings(
+            f,
+            &[
+                (&self.infos, &self.files.infos, Severity::Info),
+                (&self.warnings, &self.files.warnings, Severity::Warning),
+            ],
+        )
     }
 }
 
@@ -573,9 +712,9 @@ mod tests {
     #[test]
     fn display_analysis_errors_single() {
         let errors = AnalysisErrors::new(
-            vec![AnalysisDiagnostic::BreakOutsideLoop {
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::BreakOutsideLoop {
                 location: test_location(),
-            }],
+            })],
             vec![],
             vec![],
         );
@@ -589,10 +728,10 @@ mod tests {
     fn display_analysis_errors_multiple() {
         let errors = AnalysisErrors::new(
             vec![
-                AnalysisDiagnostic::BreakOutsideLoop {
+                LabeledDiagnostic::entry(AnalysisDiagnostic::BreakOutsideLoop {
                     location: test_location(),
-                },
-                AnalysisDiagnostic::ReturnInsideLoop {
+                }),
+                LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
                     location: Location {
                         offset_start: 20,
                         offset_end: 30,
@@ -601,7 +740,7 @@ mod tests {
                         end_line: 3,
                         end_column: 20,
                     },
-                },
+                }),
             ],
             vec![],
             vec![],
@@ -612,12 +751,68 @@ mod tests {
         );
     }
 
+    /// A finding from a non-entry file is prefixed with the file's `::`-joined
+    /// module path, while an entry-file finding stays a bare `line:col`. The
+    /// sort places the entry file first, then by module path.
+    #[test]
+    fn display_analysis_errors_names_non_entry_file() {
+        let errors = AnalysisErrors::new(
+            vec![
+                LabeledDiagnostic::new(
+                    vec!["lib".to_string(), "geom".to_string()],
+                    AnalysisDiagnostic::BreakOutsideLoop {
+                        location: test_location(),
+                    },
+                ),
+                LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
+                    location: test_location(),
+                }),
+            ],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            errors.to_string(),
+            "1:5: error[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it\nlib::geom:1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
+        );
+    }
+
+    /// Two findings at the same line:col in different imported files render
+    /// distinguishably, each named by its own file.
+    #[test]
+    fn display_analysis_errors_distinguishes_same_location_in_two_files() {
+        let errors = AnalysisErrors::new(
+            vec![
+                LabeledDiagnostic::new(
+                    vec!["lib".to_string(), "a".to_string()],
+                    AnalysisDiagnostic::BreakOutsideLoop {
+                        location: test_location(),
+                    },
+                ),
+                LabeledDiagnostic::new(
+                    vec!["lib".to_string(), "b".to_string()],
+                    AnalysisDiagnostic::BreakOutsideLoop {
+                        location: test_location(),
+                    },
+                ),
+            ],
+            vec![],
+            vec![],
+        );
+        let rendered = errors.to_string();
+        assert!(
+            rendered.contains("lib::a:1:5: error[A001]:"),
+            "expected lib::a to be named, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("lib::b:1:5: error[A001]:"),
+            "expected lib::b to be named, got: {rendered}"
+        );
+    }
+
     #[test]
     fn display_analysis_result_empty() {
-        let result = AnalysisResult {
-            warnings: vec![],
-            infos: vec![],
-        };
+        let result = AnalysisResult::new(vec![], vec![]);
         assert!(result.warnings().is_empty());
         assert!(result.infos().is_empty());
         assert_eq!(result.to_string(), "");
@@ -640,10 +835,10 @@ mod tests {
     #[test]
     fn display_analysis_errors_with_warnings_sorted_by_location() {
         let errors = AnalysisErrors::new(
-            vec![AnalysisDiagnostic::BreakOutsideLoop {
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::BreakOutsideLoop {
                 location: test_location(),
-            }],
-            vec![AnalysisDiagnostic::ReturnInsideLoop {
+            })],
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
                 location: Location {
                     offset_start: 20,
                     offset_end: 30,
@@ -652,7 +847,7 @@ mod tests {
                     end_line: 3,
                     end_column: 20,
                 },
-            }],
+            })],
             vec![],
         );
         assert_eq!(
@@ -664,15 +859,15 @@ mod tests {
     #[test]
     fn display_analysis_errors_with_all_severities_sorted_by_location() {
         let errors = AnalysisErrors::new(
-            vec![AnalysisDiagnostic::BreakOutsideLoop {
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::BreakOutsideLoop {
                 location: test_location(),
-            }],
-            vec![AnalysisDiagnostic::ReturnInsideLoop {
+            })],
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
                 location: test_location(),
-            }],
-            vec![AnalysisDiagnostic::InfiniteLoopWithoutBreak {
+            })],
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::InfiniteLoopWithoutBreak {
                 location: test_location(),
-            }],
+            })],
         );
         // All at same location 1:5, so stable order within same location depends on push order:
         // infos first, then warnings, then errors
@@ -684,46 +879,62 @@ mod tests {
 
     #[test]
     fn display_analysis_result_with_warning() {
-        let result = AnalysisResult {
-            warnings: vec![AnalysisDiagnostic::ReturnInsideLoop {
+        let result = AnalysisResult::new(
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
                 location: test_location(),
-            }],
-            infos: vec![],
-        };
+            })],
+            vec![],
+        );
         assert_eq!(
             result.to_string(),
             "1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
         );
     }
 
+    /// A warning from a non-entry file is named by the file in the
+    /// `AnalysisResult` channel too, matching the error channel.
+    #[test]
+    fn display_analysis_result_names_non_entry_file() {
+        let result = AnalysisResult::new(
+            vec![LabeledDiagnostic::new(
+                vec!["lib".to_string(), "geom".to_string()],
+                AnalysisDiagnostic::ReturnInsideLoop {
+                    location: test_location(),
+                },
+            )],
+            vec![],
+        );
+        assert_eq!(
+            result.to_string(),
+            "lib::geom:1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
+        );
+    }
+
     #[test]
     fn has_findings_returns_false_when_empty() {
-        let result = AnalysisResult {
-            warnings: vec![],
-            infos: vec![],
-        };
+        let result = AnalysisResult::new(vec![], vec![]);
         assert!(!result.has_findings());
     }
 
     #[test]
     fn has_findings_returns_true_with_warning() {
-        let result = AnalysisResult {
-            warnings: vec![AnalysisDiagnostic::ReturnInsideLoop {
+        let result = AnalysisResult::new(
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::ReturnInsideLoop {
                 location: test_location(),
-            }],
-            infos: vec![],
-        };
+            })],
+            vec![],
+        );
         assert!(result.has_findings());
     }
 
     #[test]
     fn has_findings_returns_true_with_info() {
-        let result = AnalysisResult {
-            warnings: vec![],
-            infos: vec![AnalysisDiagnostic::InfiniteLoopWithoutBreak {
+        let result = AnalysisResult::new(
+            vec![],
+            vec![LabeledDiagnostic::entry(AnalysisDiagnostic::InfiniteLoopWithoutBreak {
                 location: test_location(),
-            }],
-        };
+            })],
+        );
         assert!(result.has_findings());
     }
 

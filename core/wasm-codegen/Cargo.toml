@@ -10,6 +10,7 @@ repository = { workspace = true }
 wasm-encoder = "0.249.0"
 inference-ast.workspace = true
 inference-type-checker.workspace = true
+inference-fn-key.workspace = true
 anyhow.workspace = true
 rustc-hash.workspace = true
 cov-mark.workspace = true

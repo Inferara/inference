@@ -22,5 +22,7 @@ mod extern_link;
 mod extern_link_exec;
 mod inference_wrapper;
 mod loops;
+mod multi_file;
+mod multi_file_golden;
 mod negative;
 mod validation;

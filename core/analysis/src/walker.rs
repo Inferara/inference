@@ -7,6 +7,7 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
 use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
+use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
@@ -15,6 +16,10 @@ pub(crate) struct WalkContext {
     pub loop_depth: u32,
     pub nondet_depth: u32,
     pub nondet_block_kind: Option<&'static str>,
+    /// Module path of the file whose body is currently being walked (empty for
+    /// the entry file). A rule pairs each finding with this so the report names
+    /// the file it belongs to.
+    pub module_path: Vec<String>,
 }
 
 fn block_kind_label(kind: BlockKind) -> &'static str {
@@ -40,9 +45,11 @@ pub(crate) fn walk_function_bodies(
         loop_depth: 0,
         nondet_depth: 0,
         nondet_block_kind: None,
+        module_path: Vec::new(),
     };
 
     for source_file in typed_context.source_files() {
+        walk_ctx.module_path.clone_from(&source_file.module_path);
         for_each_function_body(arena, &source_file.defs, &mut |body_id| {
             assert_eq!(walk_ctx.loop_depth, 0, "loop_depth leaked");
             assert_eq!(walk_ctx.nondet_depth, 0, "nondet_depth leaked");
@@ -152,7 +159,7 @@ pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
 #[must_use]
 fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(_) => true,
+        TypeInfoKind::Struct(_, _) => true,
         TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
         TypeInfoKind::Array(elem, _) => is_compound_type(ctx, &elem.kind),
         _ => false,
@@ -171,22 +178,36 @@ fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
 #[must_use]
 pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            ctx.lookup_struct(name).is_some_and(|s| {
-                s.fields.iter().any(|f| match &f.type_info.kind {
-                    TypeInfoKind::Struct(_) => true,
-                    TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
-                    TypeInfoKind::Array(_, _) => {
-                        is_compound_type(ctx, &f.type_info.kind)
-                            || array_nesting_depth(&f.type_info.kind) > 1
-                    }
-                    _ => false,
-                })
-            })
-        }
+        // A resolved struct carries its canonical, file-qualified key; look it up
+        // by that key so a field typed as a cross-file struct reaches the right
+        // definition. A same-named struct in another file has a distinct key, so a
+        // bare-name lookup would otherwise land on the wrong struct and misjudge
+        // its nesting depth. `Custom` is an unresolved (or alias) name with no key,
+        // for which the bare name is the only handle.
+        TypeInfoKind::Struct(_, key) => ctx
+            .lookup_struct(key)
+            .is_some_and(|s| struct_has_compound_field(ctx, &s)),
+        TypeInfoKind::Custom(name) => ctx
+            .lookup_struct(name)
+            .is_some_and(|s| struct_has_compound_field(ctx, &s)),
         TypeInfoKind::Array(elem, _) => has_compound_fields(ctx, &elem.kind),
         _ => false,
     }
+}
+
+/// Whether any field of `s` is itself a compound type (a struct, an array of
+/// structs, or a multidimensional array), which would push nesting past the one
+/// supported level.
+#[must_use = "this is a pure check with no side effects"]
+fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
+    s.fields.iter().any(|f| match &f.type_info.kind {
+        TypeInfoKind::Struct(_, _) => true,
+        TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
+        TypeInfoKind::Array(_, _) => {
+            is_compound_type(ctx, &f.type_info.kind) || array_nesting_depth(&f.type_info.kind) > 1
+        }
+        _ => false,
+    })
 }
 
 /// Returns `true` when `expr_id` is a function call that returns a compound
@@ -198,7 +219,7 @@ pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) ->
     }
     if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
         match &ti.kind {
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) => true,
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_, _) => true,
             TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
             _ => false,
         }
@@ -324,11 +345,6 @@ pub(crate) fn for_each_function_body(
             }
             Def::Spec { defs, .. } => {
                 for_each_function_body(arena, defs, callback);
-            }
-            Def::Module { defs, .. } => {
-                if let Some(body_defs) = defs {
-                    for_each_function_body(arena, body_defs, callback);
-                }
             }
             Def::Enum { .. }
             | Def::Constant { .. }
@@ -547,78 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn for_each_function_body_visits_module_function() {
-        let mut arena = AstArena::default();
-        let helper = alloc_function_with_break(&mut arena, "helper");
-        let module_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::Module {
-                name: module_name,
-                vis: Visibility::default(),
-                defs: Some(vec![helper]),
-            },
-        });
-        let mut count = 0;
-        for_each_function_body(&arena, &[module_def], &mut |_body| {
-            count += 1;
-        });
-        assert_eq!(count, 1, "should visit function inside module body");
-    }
-
-    #[test]
-    fn for_each_function_body_visits_module_struct_method() {
-        let mut arena = AstArena::default();
-        let method = alloc_function_with_break(&mut arena, "method");
-        let bar_name = alloc_ident(&mut arena, "Bar");
-        let inner_struct = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::Struct {
-                name: bar_name,
-                vis: Visibility::default(),
-                fields: vec![],
-                methods: vec![method],
-            },
-        });
-        let module_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::Module {
-                name: module_name,
-                vis: Visibility::default(),
-                defs: Some(vec![inner_struct]),
-            },
-        });
-        let mut count = 0;
-        for_each_function_body(&arena, &[module_def], &mut |_body| {
-            count += 1;
-        });
-        assert_eq!(
-            count, 1,
-            "should visit struct method inside module definition"
-        );
-    }
-
-    #[test]
-    fn for_each_function_body_skips_module_without_body() {
-        let mut arena = AstArena::default();
-        let module_name = alloc_ident(&mut arena, "external_mod");
-        let module_def = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::Module {
-                name: module_name,
-                vis: Visibility::default(),
-                defs: None,
-            },
-        });
-        let mut count = 0;
-        for_each_function_body(&arena, &[module_def], &mut |_body| {
-            count += 1;
-        });
-        assert_eq!(count, 0, "should skip module with no body (external mod)");
-    }
-
-    #[test]
     fn for_each_function_body_skips_non_function_definitions() {
         let mut arena = AstArena::default();
         let color_name = alloc_ident(&mut arena, "Color");
@@ -695,28 +639,13 @@ mod tests {
             },
         });
 
-        let mod_helper = alloc_function_with_break(&mut arena, "helper");
-        let utils_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::Module {
-                name: utils_name,
-                vis: Visibility::default(),
-                defs: Some(vec![mod_helper]),
-            },
-        });
-
         let mut count = 0;
-        for_each_function_body(
-            &arena,
-            &[free_fn, struct_def, spec_def, module_def],
-            &mut |_body| {
-                count += 1;
-            },
-        );
+        for_each_function_body(&arena, &[free_fn, struct_def, spec_def], &mut |_body| {
+            count += 1;
+        });
         assert_eq!(
-            count, 4,
-            "should visit: 1 free fn + 1 struct method + 1 spec fn + 1 module fn = 4"
+            count, 3,
+            "should visit: 1 free fn + 1 struct method + 1 spec fn = 3"
         );
     }
 }

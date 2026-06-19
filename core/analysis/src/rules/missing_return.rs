@@ -8,7 +8,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId, TypeId};
 use inference_ast::nodes::{Def, SimpleTypeKind, Stmt, TypeNode};
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Non-void functions must return on all code paths.
@@ -16,11 +16,11 @@ crate::rule! {
     #[name = "Missing return"]
     #[severity = error]
     pub struct MissingReturn;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
-            check_defs(arena, &source_file.defs, &mut errors);
+            check_defs(arena, &source_file.module_path, &source_file.defs, &mut errors);
         }
         errors
     }
@@ -37,7 +37,12 @@ fn has_non_unit_return_type(arena: &AstArena, returns: Option<TypeId>) -> bool {
     }
 }
 
-fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiagnostic>) {
+fn check_defs(
+    arena: &AstArena,
+    module_path: &[String],
+    def_ids: &[DefId],
+    errors: &mut Vec<LabeledDiagnostic>,
+) {
     for &def_id in def_ids {
         match &arena[def_id].kind {
             Def::Function {
@@ -49,10 +54,13 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
                 if has_non_unit_return_type(arena, *returns)
                     && !returns_on_all_paths(arena, *body)
                 {
-                    errors.push(AnalysisDiagnostic::MissingReturn {
-                        function_name: arena[*name].name.clone(),
-                        location: arena[def_id].location,
-                    });
+                    errors.push(LabeledDiagnostic::new(
+                        module_path.to_vec(),
+                        AnalysisDiagnostic::MissingReturn {
+                            function_name: arena[*name].name.clone(),
+                            location: arena[def_id].location,
+                        },
+                    ));
                 }
             }
             Def::Struct { methods, .. } => {
@@ -66,24 +74,23 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
                         && has_non_unit_return_type(arena, *returns)
                         && !returns_on_all_paths(arena, *body)
                     {
-                        errors.push(AnalysisDiagnostic::MissingReturn {
-                            function_name: arena[*name].name.clone(),
-                            location: arena[method_id].location,
-                        });
+                        errors.push(LabeledDiagnostic::new(
+                            module_path.to_vec(),
+                            AnalysisDiagnostic::MissingReturn {
+                                function_name: arena[*name].name.clone(),
+                                location: arena[method_id].location,
+                            },
+                        ));
                     }
                 }
             }
             Def::Spec { defs, .. } => {
-                check_defs(arena, defs, errors);
-            }
-            Def::Module { defs: Some(d), .. } => {
-                check_defs(arena, d, errors);
+                check_defs(arena, module_path, defs, errors);
             }
             Def::Enum { .. }
             | Def::Constant { .. }
             | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. }
-            | Def::Module { defs: None, .. } => {}
+            | Def::TypeAlias { .. } => {}
         }
     }
 }

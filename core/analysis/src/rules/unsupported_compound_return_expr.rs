@@ -10,7 +10,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, StmtId, TypeId};
 use inference_ast::nodes::{Def, Expr, Stmt, TypeNode};
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Return expressions in compound-returning functions must be simple forms.
@@ -18,11 +18,11 @@ crate::rule! {
     #[name = "Unsupported compound return expression"]
     #[severity = error]
     pub struct UnsupportedCompoundReturnExpr;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
-            check_defs(ctx, arena, &source_file.defs, &mut errors);
+            check_defs(ctx, arena, &source_file.module_path, &source_file.defs, &mut errors);
         }
         errors
     }
@@ -58,15 +58,16 @@ fn is_supported_sret_expr(arena: &AstArena, expr_id: ExprId) -> bool {
 fn check_defs(
     ctx: &inference_type_checker::typed_context::TypedContext,
     arena: &AstArena,
+    module_path: &[String],
     defs: &[DefId],
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     for &def_id in defs {
         match &arena[def_id].kind {
             Def::Function {
                 returns, body, ..
             } if has_compound_return_type(ctx, arena, *returns) => {
-                check_block_for_returns(arena, *body, errors);
+                check_block_for_returns(arena, module_path, *body, errors);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
@@ -75,14 +76,11 @@ fn check_defs(
                     } = &arena[method_id].kind
                         && has_compound_return_type(ctx, arena, *returns)
                     {
-                        check_block_for_returns(arena, *body, errors);
+                        check_block_for_returns(arena, module_path, *body, errors);
                     }
                 }
             }
-            Def::Spec { defs, .. } => check_defs(ctx, arena, defs, errors),
-            Def::Module {
-                defs: Some(inner), ..
-            } => check_defs(ctx, arena, inner, errors),
+            Def::Spec { defs, .. } => check_defs(ctx, arena, module_path, defs, errors),
             _ => {}
         }
     }
@@ -90,41 +88,43 @@ fn check_defs(
 
 fn check_block_for_returns(
     arena: &AstArena,
+    module_path: &[String],
     block_id: BlockId,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     let block = &arena[block_id];
     for &stmt_id in &block.stmts {
-        check_stmt_for_returns(arena, stmt_id, errors);
+        check_stmt_for_returns(arena, module_path, stmt_id, errors);
     }
 }
 
 fn check_stmt_for_returns(
     arena: &AstArena,
+    module_path: &[String],
     stmt_id: StmtId,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     match &arena[stmt_id].kind {
         Stmt::Return { expr } if !is_supported_sret_expr(arena, *expr) => {
-            errors.push(AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
+            errors.push(LabeledDiagnostic::new(module_path.to_vec(), AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
                 location: arena[*expr].location,
-            });
+            }));
         }
         Stmt::If {
             then_block,
             else_block,
             ..
         } => {
-            check_block_for_returns(arena, *then_block, errors);
+            check_block_for_returns(arena, module_path, *then_block, errors);
             if let Some(else_id) = else_block {
-                check_block_for_returns(arena, *else_id, errors);
+                check_block_for_returns(arena, module_path, *else_id, errors);
             }
         }
         Stmt::Loop { body, .. } => {
-            check_block_for_returns(arena, *body, errors);
+            check_block_for_returns(arena, module_path, *body, errors);
         }
         Stmt::Block(block_id) => {
-            check_block_for_returns(arena, *block_id, errors);
+            check_block_for_returns(arena, module_path, *block_id, errors);
         }
         _ => {}
     }

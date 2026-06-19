@@ -139,7 +139,7 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
         }
     }
     if errors.is_empty() {
-        Ok(AnalysisResult { warnings, infos })
+        Ok(AnalysisResult::new(warnings, infos))
     } else {
         Err(AnalysisErrors::new(errors, warnings, infos))
     }

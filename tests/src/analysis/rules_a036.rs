@@ -13,7 +13,10 @@
 /// *individual* frame but not the *cumulative* depth across a chain.
 #[cfg(test)]
 mod analysis_rules_tests {
-    use crate::utils::{build_ast, codegen_output_no_analysis};
+    use crate::utils::{
+        build_ast, codegen_output_multi_file_no_analysis, codegen_output_no_analysis,
+        try_type_check_multi_file,
+    };
     use inference_analysis::errors::{AnalysisDiagnostic, AnalysisErrors, AnalysisResult};
     use inference_type_checker::typed_context::TypedContext;
 
@@ -260,7 +263,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part A: compound-type frame coverage ---------------------------------
+    // Part A: compound-type frame coverage
     //
     // The tests above exercise only flat `[i32; N]` arrays. A036's per-function
     // frame estimate must also be sound for structs, mixed-alignment fields,
@@ -505,7 +508,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part B: cross-crate frame-size parity --------------------------------
+    // Part B: cross-crate frame-size parity
 
     /// Enforced cross-crate soundness guard for A036.
     ///
@@ -620,10 +623,17 @@ mod analysis_rules_tests {
             let estimate = inference_analysis::estimate_frame_sizes(&ctx);
             let output = codegen_output_no_analysis(src);
             let real = output.frame_sizes();
+            // Both maps are keyed by the structured `FnKey`, so two functions whose
+            // keys render to the same `Display` string stay distinct here; the test
+            // therefore compares each function's estimate against its own real frame.
             for (key, &real_bytes) in real {
                 if real_bytes > 0 {
                     saw_nonzero_real_frame = true;
                 }
+                assert!(
+                    estimate.contains_key(key),
+                    "analysis estimate is missing a frame entry for fn `{key}` that codegen emitted in source:\n{src}"
+                );
                 let est = estimate.get(key).copied().unwrap_or(0);
                 assert!(
                     est >= real_bytes,
@@ -635,5 +645,558 @@ mod analysis_rules_tests {
             saw_nonzero_real_frame,
             "parity corpus must exercise at least one non-zero real frame (non-vacuity)"
         );
+    }
+
+    // Part C: cross-file frames
+    //
+    // A036's soundness assumes the call graph is whole-program: a cross-file
+    // chain's cumulative depth must be summed, and an imported struct's frame
+    // must be sized from its defining file (not looked up by bare name, which
+    // misses the canonical-key index and would size the frame 0). These tests
+    // guard both — a regression let cross-file frames under-count and overflow
+    // the shadow stack at runtime with no diagnostic.
+
+    /// Type-checks a multi-file program (entry first, empty module path) and runs
+    /// the analysis pass.
+    fn analyze_multi(files: &[(Vec<&str>, &str)]) -> Result<AnalysisResult, AnalysisErrors> {
+        let ctx = try_type_check_multi_file(files)
+            .expect("multi-file type checking should succeed for analysis test input");
+        inference_analysis::analyze(&ctx)
+    }
+
+    fn has_stack_depth_exceeded_multi(files: &[(Vec<&str>, &str)]) -> bool {
+        match analyze_multi(files) {
+            Ok(_) => false,
+            Err(errors) => errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::StackDepthExceeded { .. })),
+        }
+    }
+
+    fn stack_depth_diag_multi(files: &[(Vec<&str>, &str)]) -> AnalysisDiagnostic {
+        analyze_multi(files)
+            .expect_err("expected analysis errors but got Ok")
+            .errors()
+            .iter()
+            .find(|e| matches!(e, AnalysisDiagnostic::StackDepthExceeded { .. }))
+            .expect("expected a StackDepthExceeded diagnostic")
+            .clone()
+    }
+
+    /// A cross-file chain `main -> lib::b::big` where each frame (~40 KB for an
+    /// `[i64; 5000]` array) is under budget alone but their sum (~80 KB) exceeds
+    /// it. The qualified call edge must be recorded for the cumulative depth to be
+    /// summed, and the diagnostic must name the chain across files.
+    #[test]
+    fn a036_cross_file_over_budget_chain_rejected_and_names_chain() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b;
+                    pub fn main() -> i32 {
+                        forall {
+                            let arr: [i64; 5000] = @;
+                            let x: i64 = arr[0];
+                        }
+                        return lib::b::big();
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub fn big() -> i32 {
+                        forall {
+                            let arr: [i64; 5000] = @;
+                            let x: i64 = arr[0];
+                        }
+                        return 0;
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("main -> lib.b.big"),
+            "diagnostic should name the cross-file chain `main -> lib.b.big`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
+
+    /// The same cross-file call shape with tiny arrays stays far under budget, so
+    /// A036 must not fire — the qualified edge is recorded but the cumulative
+    /// depth is small.
+    #[test]
+    fn a036_cross_file_under_budget_chain_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b;
+                    pub fn main() -> i32 {
+                        forall {
+                            let arr: [i32; 16] = @;
+                            let x: i32 = arr[0];
+                        }
+                        return lib::b::small();
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub fn small() -> i32 {
+                        forall {
+                            let arr: [i32; 16] = @;
+                            let x: i32 = arr[0];
+                        }
+                        return 0;
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_stack_depth_exceeded_multi(files),
+            "a small cross-file call chain must not trip A036"
+        );
+    }
+
+    /// An imported struct used by value as a local must be sized from its defining
+    /// file. A single `lib::big::Big` local (`[i64; 9000]` field ~ 72 KB) exceeds
+    /// the budget on its own; before the fix the bare-name lookup missed the
+    /// canonical-key index, sized the frame 0, and A036 stayed silent.
+    #[test]
+    fn a036_imported_struct_frame_sized_from_defining_file_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big;
+                    pub fn main() -> i32 {
+                        forall {
+                            let b: lib::big::Big = @;
+                            let x: i32 = b.tag;
+                        }
+                        return 0;
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i64; 9000]; tag: i32; }
+                "#,
+            ),
+        ];
+        assert!(
+            has_stack_depth_exceeded_multi(files),
+            "an imported over-budget struct frame must be sized (not 0) and trip A036"
+        );
+    }
+
+    // Part D: qualified-typed by-value parameter frames
+    //
+    // A by-value parameter whose type is written as a `::`-qualified path
+    // (`fn consume(big: lib::big::Big)`) reaches the frame estimator as an
+    // unresolved `Qualified` carrier — the estimator derives a parameter type from
+    // the raw AST, bypassing the canonicalization the type checker applies to a
+    // stored signature. The carrier must be resolved to its struct and sized; a
+    // regression sized it 0, so an oversized cross-file struct passed by value
+    // slipped past the budget and overflowed the shadow stack at runtime.
+    //
+    // The chain uses two consumers (`consume -> consume2`), each taking the struct
+    // by value, so the two qualified-parameter frames sum over the budget while the
+    // *constructor* (`mk`) and each individual frame stay under it — isolating the
+    // parameter-sizing fix from the (already-sound) constructor/local paths.
+
+    /// `Big { data: [i32; 10000]; tag: i32; }` is ~40 KB. Two chained consumers
+    /// each take it by value via a qualified parameter type, so the chain
+    /// `make_one -> consume -> consume2` sums two ~40 KB parameter frames over the
+    /// 64 KB budget. Without sizing the qualified parameter, those frames count 0
+    /// and A036 stays silent.
+    #[test]
+    fn a036_qualified_param_by_value_over_budget_chain_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big;
+                    pub fn consume2(big: lib::big::Big) -> i32 { return big.tag; }
+                    pub fn consume(big: lib::big::Big) -> i32 {
+                        return consume2(big) + big.tag;
+                    }
+                    pub fn make_one() -> i32 {
+                        let b: lib::big::Big = lib::big::mk();
+                        return consume(b);
+                    }
+                    pub fn main() -> i32 { return make_one(); }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i32; 10000]; tag: i32; }
+                    pub fn mk() -> Big {
+                        forall {
+                            let d: Big = @;
+                            return d;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("consume") && msg.contains("consume2"),
+            "qualified-parameter chain should name the consumer chain, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
+
+    /// A method whose receiver-equivalent is reached by value through a qualified
+    /// parameter type must be sized identically to the free-function form: the
+    /// `mut self` slot path already resolves through the defining file, so this
+    /// guards that a qualified *parameter* on a method (in addition to its `self`)
+    /// is counted. The method `take` holds an over-budget qualified parameter and
+    /// must trip A036 on its own.
+    #[test]
+    fn a036_qualified_param_on_method_over_budget_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big;
+                    pub struct Holder {
+                        v: i32;
+                        pub fn take(self, big: lib::big::Big) -> i32 { return big.tag + self.v; }
+                    }
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i32; 20000]; tag: i32; }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("Holder.take"),
+            "an over-budget qualified parameter on a method must trip A036 naming `Holder.take`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
+
+    /// Parity: the item-imported / bare form of the same by-value parameter behaves
+    /// identically to the qualified form. `consume(big: Big)` (with `Big`
+    /// item-imported) takes the struct by value; two chained consumers exceed
+    /// budget exactly as the qualified-path version does, proving the fix did not
+    /// special-case the qualified spelling but resolves it to the same struct.
+    #[test]
+    fn a036_item_imported_param_by_value_over_budget_chain_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big::{Big, mk};
+                    pub fn consume2(big: Big) -> i32 { return big.tag; }
+                    pub fn consume(big: Big) -> i32 { return consume2(big) + big.tag; }
+                    pub fn make_one() -> i32 {
+                        let b: Big = mk();
+                        return consume(b);
+                    }
+                    pub fn main() -> i32 { return make_one(); }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i32; 10000]; tag: i32; }
+                    pub fn mk() -> Big {
+                        forall {
+                            let d: Big = @;
+                            return d;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            has_stack_depth_exceeded_multi(files),
+            "the item-imported by-value parameter form must trip A036 identically to the qualified form"
+        );
+    }
+
+    /// An under-budget qualified-typed by-value parameter must compile: a single
+    /// `consume(small: lib::small::Small)` whose `Small` is well under the budget,
+    /// with no chain, must not trip A036. Guards that sizing the qualified
+    /// parameter does not over-reject a legitimately small one.
+    #[test]
+    fn a036_qualified_param_under_budget_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::small;
+                    pub fn consume(s: lib::small::Small) -> i32 { return s.tag; }
+                    pub fn main() -> i32 {
+                        let s: lib::small::Small = lib::small::mk();
+                        return consume(s);
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "small"],
+                r#"
+                    pub struct Small { data: [i32; 16]; tag: i32; }
+                    pub fn mk() -> Small {
+                        forall {
+                            let d: Small = @;
+                            return d;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_stack_depth_exceeded_multi(files),
+            "a small qualified-typed by-value parameter must not trip A036"
+        );
+    }
+
+    /// Cross-file frame-size parity for qualified-typed by-value parameters.
+    ///
+    /// A036's soundness rests on its estimate never *under*-counting codegen's
+    /// real frame. The single-file parity corpus in Part B cannot exercise a
+    /// qualified parameter type, which only arises across files. A qualified
+    /// struct parameter is passed by value with its own frame copy, so codegen's
+    /// real frame for the consumer is non-zero; this asserts the analysis estimate
+    /// remains an upper bound of that real frame on a cross-file program.
+    #[test]
+    fn a036_estimate_is_sound_upper_bound_for_qualified_param_frame() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big;
+                    pub fn consume(p: lib::big::Big) -> i32 { return p.tag; }
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i32; 4000]; tag: i32; }
+                "#,
+            ),
+        ];
+        let ctx = try_type_check_multi_file(files)
+            .expect("multi-file type checking should succeed for parity test input");
+        let estimate = inference_analysis::estimate_frame_sizes(&ctx);
+
+        let output = codegen_output_multi_file_no_analysis(files);
+        let real = output.frame_sizes();
+
+        // `real` is keyed by the structured `FnKey`; the entry-file free function
+        // `consume` has an empty module path, so it renders to the bare `consume`.
+        // Find it by its rendered name to avoid naming `FnKey` in the test crate.
+        let consume_real = real
+            .iter()
+            .find(|(key, _)| key.to_string() == "consume")
+            .map(|(_, &bytes)| bytes)
+            .expect("codegen must emit a frame size for `consume`");
+        assert!(
+            consume_real > 0,
+            "the qualified-typed by-value parameter must give `consume` a real frame copy"
+        );
+        for (key, &real_bytes) in real {
+            let est = estimate.get(key).copied().unwrap_or(0);
+            assert!(
+                est >= real_bytes,
+                "A036 estimate {est} < codegen real frame {real_bytes} for fn `{key}`"
+            );
+        }
+    }
+
+    // Part E (#63): cross-file struct-associated-function chains
+    //
+    // The structured `FnKey` that fixed the A035 sibling-file collision also keys
+    // A036's frame map. A cross-file chain through struct associated functions
+    // (rather than free functions) must have its cumulative depth summed: each
+    // assoc-fn node is keyed `Method`, distinct from any same-named sibling-file
+    // free fn, so the chain's edges resolve to the right nodes and the budget is
+    // checked across files.
+
+    /// A cross-file chain through struct associated functions
+    /// `main -> A::make -> lib::b::B::make`, each holding a ~40 KB frame, summing
+    /// past the budget. Must be rejected and name the chain across files.
+    #[test]
+    fn a036_cross_file_assoc_fn_over_budget_chain_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn main() -> i32 { return lib::a::A::make(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b;
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return lib::b::B::make();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub struct B {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib.a.A.make") && msg.contains("lib.b.B.make"),
+            "diagnostic should name the cross-file assoc-fn chain, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
+
+    /// The same cross-file assoc-fn call shape with small frames stays under
+    /// budget, so A036 must not fire — the chain is recorded but bounded.
+    #[test]
+    fn a036_cross_file_assoc_fn_under_budget_chain_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn main() -> i32 { return lib::a::A::make(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b;
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i32; 16] = @;
+                                let x: i32 = arr[0];
+                            }
+                            return lib::b::B::make();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub struct B {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i32; 16] = @;
+                                let x: i32 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_stack_depth_exceeded_multi(files),
+            "a small cross-file assoc-fn chain must not trip A036"
+        );
+    }
+
+    // Part F (#63): injective spec key keeps a heavy spec node visible
+    //
+    // A036 keys its frame map by `FnKey` through the shared call graph. Before the
+    // spec key became injective, a heavy spec function in `lib/checks::S` and a
+    // tiny same-folded sibling in `lib_checks::S` shared one key; the last-wins
+    // index could keep the tiny node, under-counting the heavy chain so it slipped
+    // under budget. The injective key keeps both nodes, so the heavy over-budget
+    // chain is still detected.
+
+    /// A heavy spec chain `S::heavy -> S::tail` (~80 KB summed) in `lib/checks`,
+    /// shadowed by a tiny same-folded sibling `lib_checks::S`. The over-budget
+    /// chain must still be rejected.
+    #[test]
+    fn a036_spec_over_budget_chain_with_folding_collision_sibling_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn heavy() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return tail();
+                        }
+                        fn tail() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        fn heavy() -> i32 { return 0; }
+                        fn tail() -> i32 { return 0; }
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.heavy") && msg.contains("lib_checks_S.tail"),
+            "the heavy spec chain must be detected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
     }
 }

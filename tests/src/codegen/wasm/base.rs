@@ -4035,7 +4035,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Struct uzumaki (non-deterministic initialization) tests ---
+    // Struct uzumaki (non-deterministic initialization) tests ---
 
     #[test]
     fn struct_nondet_test() {
@@ -4122,6 +4122,43 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn struct_literal_field_position_uzumaki_inline_validation() {
+        // A field-position uzumaki (`Point { x: @, y: @ }`) carries no type of its
+        // own; it inherits the field's declared type during type-checking, so
+        // codegen finds the type info and emits the right-width uzumaki per field
+        // rather than panicking on a missing type. This is the literal form of the
+        // whole-struct `let p: Point = @;` above, narrowed to individual fields.
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() {
+                forall {
+                    let p: Point = Point { x: @, y: @ };
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Field-position uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_literal_field_position_uzumaki_mixed_widths_inline_validation() {
+        // The field's declared type drives the uzumaki width independently per
+        // field: a bool, an i32, and an i64 each pick their own opcode.
+        let source = r#"
+            struct Mixed { flag: bool; count: i32; big: i64; }
+            pub fn test() {
+                forall {
+                    let m: Mixed = Mixed { flag: @, count: @, big: @ };
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Mixed-width field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
     fn struct_with_array_field_uzumaki_inline_validation() {
         cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
         let source = r#"
@@ -4201,7 +4238,7 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("Struct with bool array field uzumaki WASM is invalid: {e}"));
     }
 
-    // --- Method codegen: self parameter handling and instance method call tests ---
+    // Method codegen: self parameter handling and instance method call tests ---
 
     #[test]
     fn method_instance_test() {
@@ -4316,7 +4353,7 @@ mod base_codegen_tests {
             "test_on_param: method call on struct parameter should return p.x = 10"
         );
     }
-    // --- Method codegen: associated function call tests ---
+    // Method codegen: associated function call tests ---
 
     #[test]
     fn method_assoc_test() {
@@ -4449,7 +4486,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: methods returning structs (sret) ---
+    // Method codegen: methods returning structs (sret) ---
 
     #[test]
     fn method_return_struct_test() {
@@ -4574,7 +4611,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: mutable self tests ---
+    // Method codegen: mutable self tests ---
 
     #[test]
     fn method_self_mutate_test() {
@@ -4663,7 +4700,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: multiple structs with same method names ---
+    // Method codegen: multiple structs with same method names ---
 
     #[test]
     fn method_multi_struct_test() {
@@ -4728,7 +4765,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: cross-call tests (method-to-method, method-to-function) ---
+    // Method codegen: cross-call tests (method-to-method, method-to-function) ---
 
     #[test]
     fn method_cross_call_test() {
@@ -4798,7 +4835,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: method returning array (sret + instance method) ---
+    // Method codegen: method returning array (sret + instance method) ---
 
     #[test]
     fn method_array_return_test() {
@@ -4850,7 +4887,7 @@ mod base_codegen_tests {
         assert_eq!(result, 20, "p.to_array()[1] should return 20 (p.y)");
     }
 
-    // --- Method codegen: i64 struct fields ---
+    // Method codegen: i64 struct fields ---
 
     #[test]
     fn method_i64_fields_test() {
@@ -4904,7 +4941,7 @@ mod base_codegen_tests {
         assert_eq!(result, 300i64, "p.sum() should return 300 (100 + 200)");
     }
 
-    // --- Method codegen: three-field struct ---
+    // Method codegen: three-field struct ---
 
     #[test]
     fn method_three_fields_test() {
@@ -5270,7 +5307,7 @@ mod base_codegen_tests {
         assert_eq!(val, 4, "struct_with_array_return: val should be 4");
     }
 
-    // --- array_of_structs tests ---
+    // array_of_structs tests ---
 
     #[test]
     fn array_of_structs_golden_test() {
@@ -5412,7 +5449,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- nested_array_of_structs tests (array-of-structs at nesting depth >= 2) ---
+    // nested_array_of_structs tests (array-of-structs at nesting depth >= 2) ---
 
     #[test]
     fn nested_array_of_structs_test() {
@@ -5574,7 +5611,7 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
     }
 
-    // --- nested_struct_with_array tests ---
+    // nested_struct_with_array tests ---
 
     #[test]
     fn nested_struct_with_array_golden_test() {

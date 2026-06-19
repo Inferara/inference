@@ -111,37 +111,19 @@ mod import_tests {
         // FIXME: Struct field visibility (pub keyword on fields) not yet implemented in AST
         // When implemented, these tests should verify method and field access visibility
 
-        #[test]
-        fn test_visibility_error_message_function() {
-            let source =
-                r#"fn helper() -> i32 { return 5; } fn test() -> i32 { return helper(); }"#;
-            let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("cannot access private function"),
-                    "Error message should mention private function access violation, got: {}",
-                    error_msg
-                );
-            }
-        }
-
         // FIXME: Method visibility error testing requires methods without self to work
         // FIXME: Field visibility error testing requires pub keyword on fields in AST
         // These tests are placeholders for when those features are implemented
 
         #[test]
-        fn test_visibility_error_has_location() {
+        fn test_root_scope_function_call_with_distinct_name_type_checks() {
             let source = r#"fn private_fn() -> i32 { return 99; } fn caller() -> i32 { return private_fn(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains(":"),
-                    "Error message should include location information (line:col), got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a sibling root-scope function call must type-check, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -167,21 +149,6 @@ mod import_tests {
         }
 
         #[test]
-        fn test_visibility_context_display_function() {
-            let source =
-                r#"fn helper() -> i32 { return 42; } fn test() -> i32 { return helper(); }"#;
-            let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("function `helper`"),
-                    "Error should include function name in context, got: {}",
-                    error_msg
-                );
-            }
-        }
-
-        #[test]
         fn test_function_visibility_preserved_across_calls() {
             let source = r#"fn utility() -> i32 { return 100; } fn wrapper() -> i32 { return utility(); } fn main() -> i32 { return wrapper(); }"#;
             let result = try_type_check(source);
@@ -204,17 +171,14 @@ mod import_tests {
         }
 
         #[test]
-        fn test_visibility_error_format_includes_context() {
+        fn test_root_scope_long_named_function_call_type_checks() {
             let source = r#"fn private_function() -> i32 { return 42; } fn test() -> i32 { return private_function(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("function") || error_msg.is_empty(),
-                    "If visibility error occurs, it should include context, got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a root-scope function call type-checks regardless of name, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -250,21 +214,21 @@ mod import_tests {
             );
         }
 
+        // A root-scope function is callable from any sibling root-scope function:
+        // there is no scope boundary to cross, so no visibility error is possible
+        // in single-file source. (The cross-file private-access diagnostic is
+        // exercised by the multi-file matrix instead.) This pins the real
+        // behavior — clean type-check — rather than a never-taken error branch.
         #[test]
-        fn test_visibility_check_location_information() {
+        fn test_root_scope_function_call_is_not_a_visibility_error() {
             let source =
                 r#"fn helper() -> i32 { return 5; } fn test() -> i32 { return helper(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                let has_line_info =
-                    error_msg.contains(":") && error_msg.chars().filter(|&c| c == ':').count() >= 1;
-                assert!(
-                    has_line_info || error_msg.is_empty(),
-                    "Visibility errors should include location (line:col), got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a same-scope call crosses no visibility boundary, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -311,8 +275,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved import path, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "A brace-free file import without a project context should surface the dedicated message, got: {}",
                     error_msg
                 );
             }
@@ -332,8 +296,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved imports, got: {}",
+                    error_msg.contains("item `File` not found in file `std::io`"),
+                    "A braced item import should report the missing item by file, got: {}",
                     error_msg
                 );
             }
@@ -389,8 +353,67 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved import path, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "A file import without a project context should surface the dedicated message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        // A path-form `use` in a string-parsed (single-file) arena has no
+        // project context to resolve files against, so it must surface the
+        // dedicated `file imports require a project context` message rather than
+        // being silently accepted or reported as a generic typo (#63). Both the
+        // file form (`use math;`) and the nested form are pinned here.
+        #[test]
+        fn path_form_use_without_project_context_errors_file_form() {
+            let source = r#"use math; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "Path-form `use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn path_form_use_without_project_context_errors_nested_form() {
+            let source = r#"use lib::arith; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "Nested path-form `use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn pub_use_without_project_context_errors() {
+            let source = r#"pub use math; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "`pub use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
                     error_msg
                 );
             }
@@ -424,8 +447,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved imports, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "File-form imports without a project context should surface the dedicated message, got: {}",
                     error_msg
                 );
             }
@@ -450,8 +473,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention import resolution failure, got: {}",
+                    error_msg.contains("item `Bar` not found in file `foo`"),
+                    "A braced item import should report each missing item by file, got: {}",
                     error_msg
                 );
             }
@@ -1047,9 +1070,7 @@ mod generics_tests {
         Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
     }
 
-    // ============================================
     // Type Substitution Tests
-    // ============================================
 
     // Note: Inference language uses T' syntax for type parameters, not <T>
     // fn identity T'(x: T) -> T { ... }
@@ -1186,9 +1207,7 @@ mod generics_tests {
         );
     }
 
-    // ============================================
     // Phase 7.4.2: Error Case Tests
-    // ============================================
 
     // Note: Explicit type arguments on function calls (e.g., identity i32'(42))
     // are not yet supported in the grammar. Skipping tests that require this syntax.
@@ -1217,9 +1236,7 @@ mod generics_tests {
         }
     }
 
-    // ============================================
     // Generic Inference Tests
-    // ============================================
 
     #[test]
     fn test_infer_type_param_from_argument() {
@@ -1260,9 +1277,7 @@ mod generics_tests {
         );
     }
 
-    // ============================================
     // Additional Edge Cases
-    // ============================================
 
     #[test]
     fn test_generic_function_non_generic_call() {

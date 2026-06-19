@@ -4,7 +4,7 @@
 ///   (Power of 10, Rule 1).
 #[cfg(test)]
 mod analysis_rules_tests {
-    use crate::utils::build_ast;
+    use crate::utils::{build_ast, try_type_check_multi_file};
     use inference_analysis::errors::{AnalysisDiagnostic, AnalysisErrors, AnalysisResult};
     use inference_type_checker::typed_context::TypedContext;
 
@@ -146,5 +146,790 @@ mod analysis_rules_tests {
             has_recursion(source),
             "recursive call inside a forall block must be detected"
         );
+    }
+
+    // Cross-file recursion
+    //
+    // A `::`-qualified module call (`lib::b::pong()`) and a `root::`-qualified
+    // call back into the entry file resolve to a function in another file. The
+    // whole-program call graph must record those edges so a cycle spanning files
+    // is rejected — a regression where qualified call edges were silently dropped
+    // let cross-file mutual recursion compile and stack-overflow at runtime.
+
+    /// Type-checks a multi-file program (entry first, empty module path) and runs
+    /// the analysis pass, returning its result.
+    fn analyze_multi(files: &[(Vec<&str>, &str)]) -> Result<AnalysisResult, AnalysisErrors> {
+        let ctx = try_type_check_multi_file(files)
+            .expect("multi-file type checking should succeed for analysis test input");
+        inference_analysis::analyze(&ctx)
+    }
+
+    fn has_recursion_multi(files: &[(Vec<&str>, &str)]) -> bool {
+        match analyze_multi(files) {
+            Ok(_) => false,
+            Err(errors) => errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::RecursionDetected { .. })),
+        }
+    }
+
+    fn recursion_diag_multi(files: &[(Vec<&str>, &str)]) -> AnalysisDiagnostic {
+        analyze_multi(files)
+            .expect_err("expected analysis errors but got Ok")
+            .errors()
+            .iter()
+            .find(|e| matches!(e, AnalysisDiagnostic::RecursionDetected { .. }))
+            .expect("expected a RecursionDetected diagnostic")
+            .clone()
+    }
+
+    /// Mutual recursion across files via a `::`-qualified call out (`lib::b::pong`)
+    /// and a `root::`-qualified call back (`root::ping`) must be rejected, and the
+    /// diagnostic chain must name both files.
+    #[test]
+    fn a035_cross_file_qualified_mutual_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b;
+                    pub fn ping(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return lib::b::pong(n - 1);
+                    }
+                    pub fn main() -> i32 { return ping(5); }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use root;
+                    pub fn pong(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return root::ping(n - 1);
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("ping") && msg.contains("lib.b.pong"),
+            "cross-file cycle diagnostic should name both files (`ping` and `lib.b.pong`), got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// The item-import form (`use lib::b::{pong}` / `use root::{ping}` with bare
+    /// calls) was already caught before the qualified-call fix; this guards that
+    /// it stays caught (the discriminator was purely the call *form*).
+    #[test]
+    fn a035_cross_file_item_import_mutual_recursion_still_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b::{pong};
+                    pub fn ping(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return pong(n - 1);
+                    }
+                    pub fn main() -> i32 { return ping(5); }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use root::{ping};
+                    pub fn pong(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return ping(n - 1);
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            has_recursion_multi(files),
+            "item-import cross-file mutual recursion must stay rejected"
+        );
+    }
+
+    /// A legitimate non-recursive cross-file chain `f0 -> lib::b::f1 ->
+    /// lib::c::f2` must still compile: qualified edges are recorded, but they form
+    /// no cycle.
+    #[test]
+    fn a035_non_recursive_cross_file_chain_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b;
+                    pub fn f0(n: i32) -> i32 { return lib::b::f1(n) + 1; }
+                    pub fn main() -> i32 { return f0(1); }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use lib::c;
+                    pub fn f1(n: i32) -> i32 { return lib::c::f2(n) + 1; }
+                "#,
+            ),
+            (
+                vec!["lib", "c"],
+                r#"
+                    pub fn f2(n: i32) -> i32 { return n + 1; }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_recursion_multi(files),
+            "a non-recursive cross-file chain must not trip A035"
+        );
+    }
+
+    /// Two files each define a free `fn helper`; the entry `helper` is in a cycle
+    /// via `lib::b::ping`, but `lib::x::helper` is innocent. The same-named
+    /// innocent function must not be implicated — node identity is by defining
+    /// file, so the two `helper`s are distinct nodes.
+    #[test]
+    fn a035_same_named_cross_file_collision_does_not_falsely_implicate() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::b;
+                    use lib::x;
+                    pub fn helper(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return lib::b::ping(n - 1);
+                    }
+                    pub fn main() -> i32 { return helper(3) + lib::x::helper(2); }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use root;
+                    pub fn ping(n: i32) -> i32 {
+                        if n <= 0 { return 0; }
+                        return root::helper(n - 1);
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "x"],
+                r#"
+                    pub fn helper(n: i32) -> i32 { return n + 1; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("helper") && msg.contains("lib.b.ping"),
+            "cycle should name the entry `helper` and `lib.b.ping`, got: {msg}"
+        );
+        assert!(
+            !msg.contains("lib.x.helper"),
+            "innocent same-named `lib.x.helper` must not be implicated, got: {msg}"
+        );
+    }
+
+    // Cross-file recursion through methods and associated functions
+    //
+    // An instance-method dispatch (`recv.m()`) and a bare/namespaced associated
+    // call (`Type::assoc()`) resolve to a function whose defining file differs
+    // from the call site's. The call graph records those edges from the type
+    // checker's recorded call target, qualified by the method's/struct's defining
+    // file. A regression where the instance-method and associated-function arms
+    // did not record a target dropped those cross-file edges, letting a cycle
+    // through methods compile and stack-overflow at runtime.
+
+    /// Mutual recursion through cross-file *instance methods* (`x.ping()` calls
+    /// `y.pong()` which calls back `z.ping()`) must be rejected, naming both files'
+    /// methods.
+    #[test]
+    fn a035_cross_file_instance_method_mutual_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a::{A};
+                    pub fn main() -> i32 {
+                        let x: A = A::make();
+                        return x.ping();
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b::{B};
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> A { return A { v: 1 }; }
+                        pub fn ping(self) -> i32 {
+                            let y: B = B::make();
+                            return y.pong();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use lib::a::{A};
+                    pub struct B {
+                        v: i32;
+                        pub fn make() -> B { return B { v: 2 }; }
+                        pub fn pong(self) -> i32 {
+                            let z: A = A::make();
+                            return z.ping();
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib.a.A.ping") && msg.contains("lib.b.B.pong"),
+            "instance-method cycle should name both files' methods \
+             (`lib.a.A.ping`, `lib.b.B.pong`), got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Mutual recursion through cross-file bare *associated functions* — `A::ping()`
+    /// where `A` is item-imported (a two-segment `A::ping` path, not a namespace
+    /// path) — must be rejected. The bare associated arm records the call target so
+    /// the edge resolves to the struct's defining file.
+    #[test]
+    fn a035_cross_file_bare_assoc_mutual_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a::{A};
+                    pub fn main() -> i32 { return A::ping(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b::{B};
+                    pub struct A {
+                        v: i32;
+                        pub fn ping() -> i32 { return B::pong(); }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use lib::a::{A};
+                    pub struct B {
+                        v: i32;
+                        pub fn pong() -> i32 { return A::ping(); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib.a.A.ping") && msg.contains("lib.b.B.pong"),
+            "bare associated cycle should name both files' associated functions, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Mutual recursion through cross-file *namespace-qualified associated*
+    /// functions (`lib::b::B::pong()`) must be rejected. (The namespace-qualified
+    /// arm already recorded a target; this guards it stays caught alongside the new
+    /// method/bare-assoc arms.)
+    #[test]
+    fn a035_cross_file_namespaced_assoc_mutual_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn main() -> i32 { return lib::a::A::ping(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b;
+                    pub struct A {
+                        v: i32;
+                        pub fn ping() -> i32 { return lib::b::B::pong(); }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    use lib::a;
+                    pub struct B {
+                        v: i32;
+                        pub fn pong() -> i32 { return lib::a::A::ping(); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib.a.A.ping") && msg.contains("lib.b.B.pong"),
+            "namespaced associated cycle should name both files' functions, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// A mixed cycle: an entry free function `drive()` calls a cross-file instance
+    /// method `x.step()`, which calls back into the entry via `root::drive()`. Both
+    /// the method edge and the `root::` free-function edge must be recorded.
+    #[test]
+    fn a035_cross_file_mixed_root_and_method_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn drive() -> i32 {
+                        let x: lib::a::A = lib::a::A::make();
+                        return x.step();
+                    }
+                    pub fn main() -> i32 { return drive(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use root;
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> A { return A { v: 3 }; }
+                        pub fn step(self) -> i32 { return root::drive() + self.v; }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("drive") && msg.contains("lib.a.A.step"),
+            "mixed `root::` + method cycle should name `drive` and `lib.a.A.step`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// A legitimate non-recursive cross-file chain through an associated function
+    /// and instance methods must still compile: the method/assoc edges are
+    /// recorded, but they form no cycle.
+    #[test]
+    fn a035_non_recursive_cross_file_method_chain_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a::{A};
+                    pub fn main() -> i32 {
+                        let x: A = A::make();
+                        return x.value();
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b::{B};
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> A { return A { v: 10 }; }
+                        pub fn value(self) -> i32 {
+                            let y: B = B::make();
+                            return self.v + y.get();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub struct B {
+                        w: i32;
+                        pub fn make() -> B { return B { w: 5 }; }
+                        pub fn get(self) -> i32 { return self.w; }
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_recursion_multi(files),
+            "a non-recursive cross-file method/assoc chain must not trip A035"
+        );
+    }
+
+    // FAMILY 2 (#63): structured FnKey defeats the sibling-file collision
+    //
+    // A struct associated/instance function and a same-named free function in a
+    // sibling file render to the same flat string (`a.mid.make`): the module-join
+    // `.` conflates with the struct-method-join `.`. Under the old string key the
+    // free-fn node hijacked the method's call-graph slot, masking the method's
+    // self/back-edge, so A035 never fired and the program compiled then
+    // stack-overflowed at runtime. Keying nodes on the structured `FnKey` makes
+    // `Method { module: ["a"], struct: "mid", name: "make" }` distinct from
+    // `Free { module: ["a", "mid"], name: "make" }`, restoring the edge. Every
+    // case below has a same-named sibling free fn present.
+
+    /// F6: a struct associated function that directly recurses (`mid::make` calls
+    /// `mid::make`), with a same-named free `make` in the sibling file `a/mid`.
+    #[test]
+    fn a035_assoc_self_recursion_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn entry() -> i32 { return a::mid::make(); }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            let r: i32 = mid::make();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a.mid.make -> a.mid.make"),
+            "the struct method's self-recursion must be named, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// F7: a struct instance method that recurses on `self` (`T.m` calls
+    /// `self.m()`), with a same-named free `m` in the sibling file `a/T`, reached
+    /// through an associated `make` and entry call chain.
+    #[test]
+    fn a035_instance_method_self_recursion_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::T;
+                    pub fn entry() -> i32 {
+                        let t: a::T = a::T::make();
+                        return t.m();
+                    }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct T {
+                        v: i32;
+                        pub fn m(self) -> i32 {
+                            let r: i32 = self.m();
+                            return r;
+                        }
+                        pub fn make() -> T { return T { v: 0 }; }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "T"],
+                r#"
+                    pub fn m() -> i32 { return 9; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a.T.m -> a.T.m"),
+            "the instance method's self-recursion must be named, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// F8: an indirect/mutual cycle `bounce -> a::mid::make -> root::bounce`,
+    /// where `mid::make` is a struct associated function with a same-named free
+    /// `make` in the sibling file `a/mid`.
+    #[test]
+    fn a035_indirect_cycle_through_assoc_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn bounce() -> i32 {
+                        let r: i32 = a::mid::make();
+                        return r;
+                    }
+                    pub fn entry() -> i32 {
+                        let r: i32 = bounce();
+                        return r;
+                    }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    use root;
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            let r: i32 = root::bounce();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("bounce") && msg.contains("a.mid.make"),
+            "the indirect cycle must name both `bounce` and `a.mid.make`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Control: a struct associated function and a same-named sibling-file free
+    /// function both exist, but neither recurses. The structured key must keep
+    /// them distinct without inventing a cycle, so the program compiles.
+    #[test]
+    fn a035_assoc_and_sibling_free_fn_without_recursion_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn entry() -> i32 { return a::mid::make(); }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 { return 11; }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_recursion_multi(files),
+            "a non-recursive assoc fn with a same-named sibling free fn must compile"
+        );
+    }
+
+    /// Control: a cross-file spec-inner function that self-recurses must still be
+    /// rejected, and its key must carry the underscore-folded spec name codegen
+    /// uses (`a_S.tick`), proving the analysis spec-name fold matches codegen.
+    #[test]
+    fn a035_cross_file_spec_inner_self_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    pub fn entry() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    spec S {
+                        fn tick() -> i32 {
+                            let r: i32 = tick();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "sub"],
+                r#"
+                    pub fn tick() -> i32 { return 3; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a_S.tick -> a_S.tick"),
+            "the cross-file spec-inner self-recursion must name the folded spec key \
+             `a_S.tick`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    // Injective spec FnKey defeats the fold-collision recursion escape (#63) --
+    //
+    // The spec-name fold is lossy: `lib/checks` + spec `S` and the sibling file
+    // `lib_checks` + spec `S` both render `lib_checks_S`. When the spec key folded
+    // the file INTO the spec string with an empty module_path, the two files
+    // produced byte-identical `FnKey`s; the call-graph index is last-wins, so a
+    // recursive function's self-edge in `lib/checks::S` resolved to the
+    // non-recursive same-folded sibling node and A035 never saw the cycle — the
+    // recursive spec compiled. Keying the spec variants by the real (distinct)
+    // module_path while still rendering the folded name fixes it. Analysis runs
+    // identically in plain and proof mode, so `analyze_multi` exercises the
+    // plain-mode path the escape lived on.
+
+    /// The exact escape: `lib/checks::S::rec` recurses, and a sibling
+    /// `lib_checks::S::rec` (non-recursive) folds to the same spec name. A035 must
+    /// still fire on the recursive one — the masking sibling must not hide it.
+    #[test]
+    fn a035_rejects_spec_recursion_with_folding_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return rec(x); }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return x; }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.rec -> lib_checks_S.rec"),
+            "the recursive spec must be rejected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Control: the same recursive `lib/checks::S::rec` without the masking
+    /// sibling is still rejected — proving the sibling above was what masked it,
+    /// not some unrelated reason the recursive file compiled.
+    #[test]
+    fn a035_rejects_spec_recursion_without_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return rec(x); }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        assert!(
+            diag.to_string().contains("lib_checks_S.rec -> lib_checks_S.rec"),
+            "the recursive spec must be rejected on its own"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// The spec-*method* analogue: a recursive spec-inner method
+    /// `lib/checks::S::T::m` masked by a same-folded sibling
+    /// `lib_checks::S::T::m`. The injective `SpecMethod` key keeps them distinct.
+    #[test]
+    fn a035_rejects_spec_method_recursion_with_folding_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        struct T {
+                            v: i32;
+                            fn m(self) -> i32 { return self.m(); }
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        struct T {
+                            v: i32;
+                            fn m(self) -> i32 { return self.v; }
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.T.m -> lib_checks_S.T.m"),
+            "the recursive spec method must be rejected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
     }
 }

@@ -232,8 +232,6 @@
 //!
 //! ## Limitations
 //!
-//! - **Single-file support**: Multi-file compilation is not yet implemented.
-//!   The AST expects a single source file as input.
 //! - **Analyze phase**: The semantic analysis phase currently covers loop
 //!   control flow validation. Additional analyses are planned for future releases.
 //!
@@ -267,8 +265,13 @@ pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
 
+pub mod errors;
 pub mod extern_prelude;
+mod project;
 pub mod wasm_link;
+
+pub use errors::InferenceError;
+pub use project::{parse_project, ProjectParse, ProjectWarning};
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
@@ -572,7 +575,6 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// Returns an error if:
 /// - WebAssembly generation fails for any AST node
 /// - Type information is missing or inconsistent in the [`TypedContext`]
-/// - More than one source file is present (multi-file not yet supported)
 ///
 /// [`TypedContext`]: inference_type_checker::typed_context::TypedContext
 /// [`CodegenOutput`]: inference_wasm_codegen::CodegenOutput

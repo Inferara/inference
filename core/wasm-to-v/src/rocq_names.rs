@@ -165,6 +165,45 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
     Ok(())
 }
 
+/// Validates that joining `mod_name` and `spec_name` into the emitted Rocq
+/// grammar does not fabricate the reserved `__` separator at a join boundary.
+///
+/// The translator emits `<mod_name>__<spec_name>_specs` and
+/// `valid_<mod_name>__<spec_name>`. Each component already passed
+/// [`validate_rocq_identifier`], so neither carries an internal `__` and neither
+/// starts with `_`. The remaining hazard is a component that *ends* with `_`: the
+/// module name then abuts the `__` separator (`app_` -> `app___Foo`), and the
+/// spec name abuts the trailing `_specs` (`Spec_` -> `main__Spec__specs`). Both
+/// produce a `__` run inside the joined name, which the `<module>__<spec>` split
+/// reserves.
+///
+/// This is the boundary the per-component validation is blind to. It applies
+/// uniformly whether the module name is the entry file stem or an imported file's
+/// stem. Rejected rather than auto-escaped: the joined name is read verbatim in
+/// the generated proof, so the fix is a rename, surfaced via the hint.
+pub(crate) fn validate_spec_join_boundary(
+    mod_name: &str,
+    spec_name: &str,
+) -> Result<(), WasmToVError> {
+    if mod_name.ends_with('_') {
+        return Err(WasmToVError::SpecNameReservesSeparator {
+            offender_kind: "output module name".to_string(),
+            offender: mod_name.to_string(),
+            joined: format!("{mod_name}__{spec_name}"),
+            fix_hint: mod_name.trim_end_matches('_').to_string(),
+        });
+    }
+    if spec_name.ends_with('_') {
+        return Err(WasmToVError::SpecNameReservesSeparator {
+            offender_kind: "spec".to_string(),
+            offender: spec_name.to_string(),
+            joined: format!("{mod_name}__{spec_name}_specs"),
+            fix_hint: spec_name.trim_end_matches('_').to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Rewrites an arbitrary WASM name-section symbol into a syntactically legal
 /// Rocq identifier, returning a name that always satisfies
 /// [`validate_rocq_identifier`].
@@ -241,7 +280,56 @@ pub fn sanitize_rocq_identifier(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_rocq_identifier, validate_rocq_identifier};
+    use super::{sanitize_rocq_identifier, validate_rocq_identifier, validate_spec_join_boundary};
+    use crate::errors::WasmToVError;
+
+    /// A trailing `_` on the module name abuts the `__` separator (`app_` ->
+    /// `app___Foo`), so the join is rejected and the module is the offender.
+    #[test]
+    fn trailing_underscore_module_name_reserves_separator() {
+        let err = validate_spec_join_boundary("app_", "Foo").expect_err("must reject");
+        let WasmToVError::SpecNameReservesSeparator {
+            offender_kind,
+            offender,
+            joined,
+            fix_hint,
+        } = err
+        else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(offender_kind, "output module name");
+        assert_eq!(offender, "app_");
+        assert_eq!(joined, "app___Foo");
+        assert_eq!(fix_hint, "app");
+    }
+
+    /// A trailing `_` on the spec name abuts the trailing `_specs` (`Spec_` ->
+    /// `main__Spec__specs`), so the join is rejected and the spec is the offender.
+    #[test]
+    fn trailing_underscore_spec_name_reserves_separator() {
+        let err = validate_spec_join_boundary("main", "Spec_").expect_err("must reject");
+        let WasmToVError::SpecNameReservesSeparator {
+            offender_kind,
+            offender,
+            joined,
+            fix_hint,
+        } = err
+        else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(offender_kind, "spec");
+        assert_eq!(offender, "Spec_");
+        assert_eq!(joined, "main__Spec__specs");
+        assert_eq!(fix_hint, "Spec");
+    }
+
+    /// Clean names on both sides join without fabricating a separator.
+    #[test]
+    fn clean_names_join_without_reserving_separator() {
+        assert!(validate_spec_join_boundary("main", "Clean").is_ok());
+        // A single underscore in the interior is fine — it never abuts a boundary.
+        assert!(validate_spec_join_boundary("my_app", "My_Spec").is_ok());
+    }
 
     /// Every sanitized name must satisfy the validator — the sanitizer's core
     /// contract.

@@ -38,6 +38,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Language
 
+- File-based module hierarchy (Zig-style, no `mod` keyword) ([#63])
+  - Every `.inf` file is an implicit namespace. A multi-file project lives under `src/`
+    with `src/main.inf` as the entry point.
+  - `use a::b;` imports `src/a/b.inf` and binds the name `b` in the importing file;
+    members are accessed with `::` (`b::fn()`, `a::b::fn()`). `use a::b::{x, y};`
+    imports specific `pub` items and makes them available bare. `use a::b::*;` is a
+    hard parse error with a guiding message.
+  - `pub fn`, `pub struct`, `pub enum`, `pub const`, and `pub type` are visible to
+    importing files. Everything else is file-private by default. Struct fields have no
+    per-field visibility — a field is accessible whenever its struct is accessible.
+    `pub spec` is a parse error; specs take no visibility modifier.
+  - `pub use a::b;` re-exports a namespace so importers of the current file can
+    traverse through it (Rust-style explicit re-export). Plain `use` is private.
+  - Only the entry file's top-level `pub fn`s become WASM exports; non-entry `pub` is
+    intra-project visibility only.
+  - File import cycles are allowed; only definition-value cycles (mutually referencing
+    `const` or type-alias initialisers) are hard errors (`CircularDefinition`).
+  - `infs build` and `infs build -v` compile the full import-reachable closure into one
+    `.wasm` (and `.v`) artifact. Unreachable `src/**/*.inf` files produce a compiler
+    warning; a missing imported file errors with a nearest-match suggestion.
+  - Known limitations: `pub use … from M;` external re-export is inert (wrap externals
+    in a `pub fn`); top-level `const` declarations do not reach codegen (A032 / #171);
+    no import aliasing (`use a::b as c;`).
 - `external fn` + `use { … } from <module>` — declare and call functions from external
   `.wasm` libraries using logical (platform-independent) module references. The compiler
   emits a WASM import section with one entry per bound extern; a separate link step
@@ -131,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
+- Multi-file codegen: flatten the whole import-reachable file closure into one WASM module ([#63])
+  - Codegen iterates every `SourceFileData` in the arena (it previously rejected more than one source file); single-file output stays byte-identical, enforced by the `single_via_project` golden
+  - Function identity is the file-qualified `FnKey` from the new `inference-fn-key` leaf crate (shared with `analysis`), so same-named functions or methods in different files receive distinct WASM indices; spec names fold per file (`fold_spec_name`) for rendering while identity stays structural
+  - Struct field layout resolves a struct's fields in the struct's *defining* file, so a same-named struct in another file lays out by its own definition rather than the access site
+  - Only the entry file's top-level `pub fn`s are exported; non-entry `pub` functions, methods, and spec functions stay module-internal
 - Fixed: multi-dimensional scalar array literal initialization (`let g: [[i32; 3]; 2] = [[1, 2, 3], [4, 5, 6]];`) no longer panics in codegen. Previously the scalar-element branch of `lower_array_literal` assumed scalar leaves and either hit `unreachable!("Invalid element size")` for inner sub-arrays whose byte size is not 1/2/4/8 (e.g. an inner `[i32; 3]` = 12 bytes) or hit `unreachable!("array literal in unsupported position")` when it tried to lower a nested `ArrayLiteral` directly. A new recursive helper `store_array_literal_elements` descends the declared array type and stores each scalar leaf at its computed offset (mirroring `emit_array_uzumaki_recursive`); non-literal array elements (`let g = [r, r];`) are copied with `memory.copy`. Single-dimensional scalar array output is byte-identical to before
 - Fixed: nested array-of-structs literal initialization (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], [..]]`) no longer panics in codegen. Previously `store_array_literal_elements` recursed to a struct leaf and hit `todo!("Unsupported array element type for store")` (a `debug_assert` fired first in debug builds). Read, write, parameter passing, and indexing of nested AoS already worked; only literal construction was missing. The helper now has a struct-leaf arm that reuses the single-dimensional AoS machinery — `compute_struct_field_layout` once per leaf level, then `lower_struct_literal_fields` for `StructLiteral` elements or a full-struct `memory.copy` for non-literal elements (`let p = Pt{..}; let g = [[p, p], [p, p]];`). Enum leaves (`[[Color; 2]; 2]`) are scalar-sized and continue through the scalar leaf path. Single-dimensional AoS (`[Pt; 3]`) never enters this helper and is byte-identical to before
 - Runtime array bounds checking for dynamic indices — the dynamic half of array bounds checking ([#164])
@@ -291,6 +319,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Analysis
 
+- Whole-program call graph for the module hierarchy, keyed on the shared `FnKey` ([#63])
+  - A035 (recursion) and A036 (stack depth) span files: cross-file `::` / `root::` call edges are resolved and an imported struct's frame is sized from its defining file, so cross-file recursion and >64 KB cross-file stack chains are caught instead of compiling and overflowing at runtime
+  - The call graph indexes the structured `FnKey` from `inference-fn-key`, never a flattened name, so same-named functions across files stay distinct nodes
 - Add `core/analysis/` crate with rule-based static analysis between type checking and codegen ([#156])
   - Five analysis rules: A001 break-outside-loop, A002 break-in-nondet, A003 return-in-loop, A004 infinite-loop-without-break, A005 return-in-nondet
   - `Rule` trait with `rule!` declarative macro for zero-boilerplate rule definitions
@@ -380,6 +411,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Type Checker
 
+- Cross-file name resolution and file-based visibility for the module hierarchy ([#63])
+  - Each source file gets a nested file scope (`enter_file_scope`) keyed by its source-root-relative module path; structs/enums/consts are stored under canonical file-qualified keys (`canonical_key_for_scope`) so same-named types in different files never unify
+  - Type/struct/enum identity carries the canonical defining-file key and all assignability comparisons use canonical equality, closing cross-file same-named-type confusion (a heap-OOB class of bug)
+  - Visibility is enforced at one `same_file` chokepoint: a non-entry file cannot reach another file's items — even `pub` ones — by bare name, only through `use` + `::`; entry items are reachable only via the reserved `use root;` handle
+  - Each resolved call records a `CallTarget { module_path, name, receiver_struct }` naming the callee's defining file, so codegen and analysis consume one authoritative identity instead of re-deriving it
+  - Cross-file definition-*value* cycles (`const` / type-alias initialisers) are detected by a new `definition_graph` and reported as `CircularDefinition`; file import cycles remain legal
 - Spec-inner functions whose bare name shadows a top-level function are now rejected (`SpecFunctionShadowsTopLevel`). Codegen's spec-aware call resolution and the type checker's nearest-binding rule disagreed silently on which callee was invoked from inside a spec; the rejection forces the user to rename one side
 - Same-named structs or enums across spec blocks are now rejected at registration time (previously silently used the first-registered layout). Cross-spec mangling of struct/enum identity would require carrying spec context through every type access (field projection, sret layouts, method dispatch); rejecting at registration avoids that blast radius and surfaces a clear `RegistrationFailed` diagnostic. Functions remain mangleable across specs (`"<Spec>.<fn>"`) as before
 - Spec blocks now open a real symbol-table scope via `enter_spec`, parallel to `enter_module`. Spec-inner functions, structs, enums, type aliases, and constants live in a dedicated scope keyed by spec name, so two specs may declare same-named members without colliding ([issue#18])
@@ -577,7 +614,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Invoked with no path, both commands discover the project's `Inference.toml` by walking up from the current directory (nearest ancestor wins; the start directory is canonicalized once for symlink stability), then compile `<root>/src/main.inf` with the compiler's working directory set to the project root so `out/` always lands at the root regardless of where the command was invoked
   - The existing single-file forms (`infs build path/to/file.inf`, `infs run path/to/file.inf`) are preserved unchanged
   - `infs new` / `infs init` "Next steps" hint updated from `infs build src/main.inf` to `infs build`
-  - Other `src/*.inf` files besides `main.inf` emit a warning (each named) and are excluded from the build — multi-file compilation is pending ([#63])
+  - `src/**/*.inf` files reachable from `main.inf` through `use` imports are compiled into the single output artifact; files reachable from no import chain emit a warning (each named) and are excluded from the build ([#63])
   - Project-mode `infs run` always builds in compile mode and invokes `main`; a non-`main` `--entry-point` is rejected with guidance to use single-file mode (proof-mode WASM embeds non-deterministic opcodes wasmtime cannot execute)
   - Discovery and entry-point failures produce remediation-style errors (suggesting `infs new`, `infs init`, or an explicit file path)
 - Add automatic PATH configuration on first install ([#96])

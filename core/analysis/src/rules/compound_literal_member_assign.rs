@@ -11,7 +11,10 @@
 
 use inference_ast::nodes::{Expr, Stmt};
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// Compound literals cannot be used as RHS in compound element assignments.
@@ -19,10 +22,11 @@ crate::rule! {
     #[name = "Compound literal in compound assignment"]
     #[severity = error]
     pub struct CompoundLiteralMemberAssign;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
+        walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
+            let module_path = walk_ctx.module_path.clone();
             if let Stmt::Assign { left, right } = &arena[stmt_id].kind
                 && matches!(arena[*left].kind, Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. })
                 && matches!(
@@ -30,9 +34,12 @@ crate::rule! {
                     Expr::StructLiteral { .. } | Expr::ArrayLiteral { .. }
                 )
             {
-                errors.push(AnalysisDiagnostic::CompoundLiteralInCompoundAssign {
-                    location: arena[*right].location,
-                });
+                errors.push(LabeledDiagnostic::new(
+                    module_path.clone(),
+                    AnalysisDiagnostic::CompoundLiteralInCompoundAssign {
+                        location: arena[*right].location,
+                    },
+                ));
             }
         });
         errors

@@ -17,7 +17,7 @@ mod codegen_validation_tests {
     };
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
-    // --- WASM content tests ---
+    // WASM content tests ---
 
     #[test]
     fn codegen_returns_nonempty_wasm() {
@@ -40,7 +40,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Proof mode tests ---
+    // Proof mode tests ---
 
     #[test]
     fn proof_mode_without_nondet_matches_compile_mode() {
@@ -57,7 +57,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Target validation tests ---
+    // Target validation tests ---
 
     #[test]
     fn codegen_rejects_proof_with_soroban() {
@@ -93,7 +93,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Compile mode non-det tests ---
+    // Compile mode non-det tests ---
 
     #[test]
     fn compile_mode_with_nondet_contains_uzumaki_opcode() {
@@ -120,7 +120,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Proof mode non-det tests ---
+    // Proof mode non-det tests ---
 
     #[test]
     fn proof_mode_wasm_contains_nondet_opcodes() {
@@ -142,7 +142,52 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- has_main detection tests ---
+    #[test]
+    fn proof_mode_spec_fn_calls_sibling_spec_fn_by_bare_name() {
+        // A spec function calling a sibling spec function by its bare name is the
+        // supported intra-spec call form. Proof mode emits the spec bodies, so this
+        // is where the call is actually lowered; it must produce a valid module and
+        // never miss its callee index. (The qualified `Spec::fn()` form is rejected
+        // at type-check, so it never reaches codegen.)
+        let source = r#"
+            spec Check {
+                fn inner() -> i32 { return 42; }
+                fn outer() -> i32 { return inner(); }
+            }
+            pub fn main() -> i32 { return 0; }
+        "#;
+        let output = codegen_output_with_mode(source, CompilationMode::Proof);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Proof-mode spec sibling-call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn proof_mode_qualified_spec_call_stops_at_type_check_not_codegen() {
+        // End-to-end regression guard for the original bug: a qualified call to a
+        // spec function from executable code used to type-check and then PANIC in
+        // codegen ("not found in func_name_to_idx") because spec functions get no
+        // executable index. Proof mode is the mode that actually lowers spec bodies,
+        // so it is the mode in which the panic could fire — the codegen guard alone
+        // is invisible unless the type checker is verified to stop the program first.
+        // Driving the real pipeline (type-check -> Proof codegen) confirms the
+        // failure now surfaces as a clean type error and codegen is never entered.
+        let source = "spec Check { fn verify_inner() -> i32 { return 42; } } \
+                      pub fn run() -> i32 { return Check::verify_inner(); }";
+        let arena = crate::utils::build_ast(source.to_string());
+        let tc = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena);
+        let err = tc
+            .err()
+            .expect("qualified spec call must fail type-check before codegen")
+            .to_string();
+        assert!(
+            err.contains("cannot call spec function `Check::verify_inner`")
+                && err.contains("proof-only"),
+            "expected the proof-only spec diagnostic, got: {err}"
+        );
+    }
+
+    // has_main detection tests ---
 
     #[test]
     fn has_main_true_for_public_main() {
@@ -174,7 +219,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- CodegenOutput metadata tests ---
+    // CodegenOutput metadata tests ---
 
     #[test]
     fn codegen_output_has_correct_metadata() {
@@ -218,7 +263,7 @@ mod codegen_validation_tests {
         assert!(!output.wasm().is_empty());
     }
 
-    // --- i64 and bool coverage tests ---
+    // i64 and bool coverage tests ---
 
     #[test]
     fn wasm_contains_i64_uzumaki_opcode() {
@@ -282,7 +327,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("i64 return WASM is invalid: {e}"));
     }
 
-    // --- Nested non-det block tests (Bug #3: Drop emission uses parent_blocks_stack.last()) ---
+    // Nested non-det block tests (Bug #3: Drop emission uses parent_blocks_stack.last()) ---
 
     #[test]
     fn nested_nondet_forall_inside_exists_produces_valid_wasm() {
@@ -333,7 +378,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- i64 literal tests (Bug #4: lower_literal dispatches I64Const for i64/u64) ---
+    // i64 literal tests (Bug #4: lower_literal dispatches I64Const for i64/u64) ---
 
     #[test]
     fn i64_literal_in_return_rejected_by_type_checker() {
@@ -385,7 +430,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Unsigned integer literal tests (lower_literal U8/U16/U32/U64 arms) ---
+    // Unsigned integer literal tests (lower_literal U8/U16/U32/U64 arms) ---
 
     #[test]
     fn u8_literal_emits_i32const() {
@@ -439,7 +484,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Variable definition codegen tests ---
+    // Variable definition codegen tests ---
 
     #[test]
     fn variable_definition_i32_literal_produces_valid_wasm() {
@@ -560,7 +605,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Variable definition u64 WASM is invalid: {e}"));
     }
 
-    // --- Function parameter tests ---
+    // Function parameter tests ---
 
     #[test]
     fn function_with_i32_param_produces_valid_wasm() {
@@ -612,7 +657,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Function param as local init WASM is invalid: {e}"));
     }
 
-    // --- Function call codegen tests ---
+    // Function call codegen tests ---
 
     #[test]
     fn function_call_no_args_produces_valid_wasm() {
@@ -850,7 +895,7 @@ mod codegen_validation_tests {
         });
     }
 
-    // --- Binary expression validation tests ---
+    // Binary expression validation tests ---
 
     #[test]
     fn binary_add_i32_produces_valid_wasm() {
@@ -987,7 +1032,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("add i64 WASM is invalid: {e}"));
     }
 
-    // --- Unary expression validation tests ---
+    // Unary expression validation tests ---
 
     #[test]
     fn unary_neg_i32_produces_valid_wasm() {
@@ -1019,7 +1064,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("bitnot i32 WASM is invalid: {e}"));
     }
 
-    // --- Parenthesized expression validation tests ---
+    // Parenthesized expression validation tests ---
 
     #[test]
     fn parenthesized_expr_produces_valid_wasm() {
@@ -1031,7 +1076,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("parenthesized expr WASM is invalid: {e}"));
     }
 
-    // --- Compound expression validation tests ---
+    // Compound expression validation tests ---
 
     #[test]
     fn compound_bitnot_shr_produces_valid_wasm() {
@@ -1045,7 +1090,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("compound bitnot+shr WASM is invalid: {e}"));
     }
 
-    // --- Variable definition with binary initializer validation tests ---
+    // Variable definition with binary initializer validation tests ---
 
     #[test]
     fn binary_as_let_init_produces_valid_wasm() {
@@ -1057,7 +1102,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("binary as let init WASM is invalid: {e}"));
     }
 
-    // --- Method codegen: name mangling and indexing tests ---
+    // Method codegen: name mangling and indexing tests ---
 
     #[test]
     fn method_associated_function_produces_mangled_name_in_wasm() {
@@ -1148,7 +1193,7 @@ mod codegen_validation_tests {
         );
     }
 
-    // --- Method codegen: self parameter handling tests (Phase 3) ---
+    // Method codegen: self parameter handling tests (Phase 3) ---
 
     #[test]
     fn method_immutable_self_compiles_and_validates() {
@@ -1233,7 +1278,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Self method with extra params WASM is invalid: {e}"));
     }
 
-    // --- Helper functions ---
+    // Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.
     fn wasm_contains_bytes(wasm: &[u8], needle: &[u8]) -> bool {

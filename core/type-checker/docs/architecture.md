@@ -28,15 +28,26 @@ This document provides an in-depth look at the type checker's internal architect
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Phase 3: resolve_imports()                           │  │
 │  │  - Bind import paths to symbols                       │  │
-│  │  - Handle glob imports (use path::*)                  │  │
-│  │  - Handle partial imports (use path::{A, B})          │  │
+│  │  - Handle file imports (use a::b)                     │  │
+│  │  - Handle item imports (use a::b::{A, B})             │  │
 │  │  - Validate visibility of imported symbols            │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Phase 4: collect_function_and_constant_definitions() │  │
 │  │  - Register function signatures                       │  │
 │  │  - Register methods on structs                        │  │
-│  │  - Register constants                                 │  │
+│  │  - Register constants (value type + scope variable)   │  │
+│  └───────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Phase 4b (after resolve_imports):                    │  │
+│  │  - renormalize_signatures(): re-resolve param/return  │  │
+│  │    types so an item-imported struct type becomes      │  │
+│  │    `Struct`, matching what call sites infer           │  │
+│  │  - check_definition_cycles() then                     │  │
+│  │    check_const_initializers(): const initializers are │  │
+│  │    type-checked here so a `const` may reference a      │  │
+│  │    cross-file `const`; a value cycle reports only      │  │
+│  │    CircularDefinition                                 │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Phase 5: infer_variables() [for each function]      │  │
@@ -44,6 +55,9 @@ This document provides an in-depth look at the type checker's internal architect
 │  │  - Infer expression types                             │  │
 │  │  - Validate assignments and returns                   │  │
 │  │  - Check visibility and access control                │  │
+│  │  - Bare-name lookups honor the file boundary: a       │  │
+│  │    non-entry file cannot see the entry file's         │  │
+│  │    private items by bare name                         │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
                             │
@@ -79,7 +93,7 @@ This document provides an in-depth look at the type checker's internal architect
 
 **Output**: Symbol table with raw import records
 
-**Why separate from resolution?** We need to know what imports exist before we can resolve circular import dependencies or handle glob imports that depend on module structure.
+**Why separate from resolution?** We need every file's symbols registered before binding imports, so an item import can resolve against a file that appears later in canonical order, and re-export (`pub use`) chains can be traversed across files.
 
 ```rust
 // Example AST
@@ -135,8 +149,8 @@ SymbolTable {
         "Point": Struct(StructInfo {
             name: "Point",
             fields: {
-                "x": StructFieldInfo { type_info: i32, visibility: Private },
-                "y": StructFieldInfo { type_info: i32, visibility: Private }
+                "x": StructFieldInfo { type_info: i32 },
+                "y": StructFieldInfo { type_info: i32 }
             },
             visibility: Private,
             ...
@@ -188,7 +202,12 @@ Import { path: ["std", "io"], kind: Glob }
 
 **Output**: Symbol table with function signatures
 
-**Why after imports?** Functions may reference imported types in their signatures.
+**Signature type validation** runs in its own pass *after* import resolution, not
+during registration. Registration keeps any unresolved `Custom` type name as-is;
+the later `validate_signatures` pass enters each file's scope and checks every
+parameter and return type against the symbol table, so an item-imported type
+(`use a::b::{T};`) is recognized in a signature position exactly as in a `let`
+binding. A type that still does not resolve is reported as an unknown type.
 
 ```rust
 // Example AST
@@ -440,10 +459,14 @@ When a type is declared using a custom name (like a struct or enum), the type ch
 pub fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
     match &ti.kind {
         TypeInfoKind::Custom(name) => {
-            if self.lookup_struct(name).is_some() {
-                ti.kind = TypeInfoKind::Struct(name.clone());
-            } else if self.lookup_enum(name).is_some() {
-                ti.kind = TypeInfoKind::Enum(name.clone());
+            // Resolve from the current scope, capturing the type's canonical key
+            // (its defining-file identity) so a same-named type from another file
+            // is a distinct type. The `Struct`/`Enum` kinds carry `(bare_name, key)`.
+            let from_scope = self.current_scope_id().unwrap_or(0);
+            if let Some((_, key)) = self.resolve_struct_in_scope(name, from_scope) {
+                ti.kind = TypeInfoKind::Struct(name.clone(), key);
+            } else if let Some((_, key)) = self.resolve_enum_in_scope(name, from_scope) {
+                ti.kind = TypeInfoKind::Enum(name.clone(), key);
             }
             // Falls through to Custom if not found (forward reference)
             ti

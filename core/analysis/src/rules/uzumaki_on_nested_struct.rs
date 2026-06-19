@@ -9,7 +9,7 @@ use inference_ast::ids::{ExprId, NodeId, StmtId};
 use inference_ast::nodes::{Def, Expr, Stmt};
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{errors::{AnalysisDiagnostic, LabeledDiagnostic}, walker};
 
 crate::rule! {
     /// Uzumaki (@) cannot be assigned to a struct with compound fields.
@@ -17,13 +17,14 @@ crate::rule! {
     #[name = "Uzumaki on nested struct"]
     #[severity = error]
     pub struct UzumakiOnNestedStruct;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             if walk_ctx.nondet_depth == 0 {
                 return;
             }
+            let module_path = walk_ctx.module_path.clone();
             let init_expr = match &arena[stmt_id].kind {
                 Stmt::VarDef { value: Some(expr_id), .. } => Some(*expr_id),
                 Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
@@ -33,7 +34,7 @@ crate::rule! {
                 _ => None,
             };
             if let Some(expr_id) = init_expr {
-                check_uzumaki_init(ctx, stmt_id, expr_id, &mut errors);
+                check_uzumaki_init(ctx, &module_path, stmt_id, expr_id, &mut errors);
             }
         });
         errors
@@ -42,19 +43,20 @@ crate::rule! {
 
 fn check_uzumaki_init(
     ctx: &TypedContext,
+    module_path: &[String],
     stmt_id: StmtId,
     expr_id: ExprId,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     let arena = ctx.arena();
     if matches!(arena[expr_id].kind, Expr::Uzumaki)
         && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id))
-        && let TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) = &type_info.kind
+        && let TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) = &type_info.kind
         && walker::has_compound_fields(ctx, &type_info.kind)
     {
-        errors.push(AnalysisDiagnostic::UzumakiOnNestedStruct {
+        errors.push(LabeledDiagnostic::new(module_path.to_vec(), AnalysisDiagnostic::UzumakiOnNestedStruct {
             name: name.clone(),
             location: arena[expr_id].location,
-        });
+        }));
     }
 }

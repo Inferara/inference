@@ -1,0 +1,6 @@
+use lib::geom::{Point, make};
+
+pub fn run() -> i32 {
+    let p: Point = make(3, 4);
+    return p.x;
+}

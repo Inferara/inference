@@ -36,16 +36,28 @@ pub(crate) struct Lowering<'s> {
     arena: AstArena,
     errors: Vec<ParseError>,
     src: &'s str,
+    module_path: Vec<String>,
 }
 
 impl<'s> Lowering<'s> {
     /// Creates a lowering over `src`, the original source string (needed to slice
     /// identifier/literal text and to store as `SourceFileData.source`).
+    ///
+    /// The lowered file is stamped as the **entry** (empty module path), matching
+    /// the single-file `parse` contract.
     pub(crate) fn new(src: &'s str) -> Self {
+        Self::into_arena(AstArena::default(), src, Vec::new())
+    }
+
+    /// Creates a lowering that appends a file with `module_path` into an existing
+    /// `arena`, for multi-file project parsing. Passing an empty `module_path`
+    /// stamps the file as the entry; non-empty segments name its namespace.
+    pub(crate) fn into_arena(arena: AstArena, src: &'s str, module_path: Vec<String>) -> Self {
         Self {
-            arena: AstArena::default(),
+            arena,
             errors: Vec::new(),
             src,
+            module_path,
         }
     }
 
@@ -79,11 +91,13 @@ impl<'s> Lowering<'s> {
             }
         }
 
+        let module_path = std::mem::take(&mut self.module_path);
         self.arena.source_files.alloc(SourceFileData {
             location,
             source,
             defs,
             directives,
+            module_path,
         });
     }
 
@@ -104,6 +118,10 @@ impl<'s> Lowering<'s> {
     fn lower_use_directive(&mut self, node: &SyntaxNode) -> UseDirective {
         use crate::syntax_tree::SyntaxElement;
         let location = node.loc;
+        // A `pub use` lowers a leading `Visibility` node child. It is not an
+        // `Identifier`, so the positional bucketing below ignores it and the
+        // segment/imported-type split is unaffected.
+        let vis = self.visibility(node);
 
         // Three identifier buckets, keyed by position relative to the `{ … }`
         // import list and the `from` keyword:
@@ -115,9 +133,13 @@ impl<'s> Lowering<'s> {
         let mut from_segments: Vec<&SyntaxNode> = Vec::new();
         let mut in_braces = false;
         let mut after_from = false;
+        let mut braced = false;
         for element in &node.children {
             match element {
-                SyntaxElement::Token(t) if t.kind == SyntaxKind::LBrace => in_braces = true,
+                SyntaxElement::Token(t) if t.kind == SyntaxKind::LBrace => {
+                    in_braces = true;
+                    braced = true;
+                }
                 SyntaxElement::Token(t) if t.kind == SyntaxKind::RBrace => in_braces = false,
                 SyntaxElement::Token(t) if t.kind == SyntaxKind::FromKw => after_from = true,
                 SyntaxElement::Node(n) if n.kind == SyntaxKind::Identifier => {
@@ -154,8 +176,10 @@ impl<'s> Lowering<'s> {
 
         UseDirective {
             location,
+            vis,
             imported_types,
             segments,
+            braced,
             from,
         }
     }
@@ -214,9 +238,14 @@ impl<'s> Lowering<'s> {
         let name = self.lower_name_or_error(self.first_identifier(node), node);
         let mut defs = Vec::new();
 
-        // The name is the first named child; nested definitions follow it
-        // (mirrors `builder.rs`'s `named_child(1..)`).
-        for child in node.node_children().skip(1) {
+        // Lower only the nested definitions. A spec node's non-definition node
+        // children are the name `Identifier` and, on the `pub spec` error path, a
+        // stray `Visibility` node; both are filtered out so an already-rejected
+        // `pub spec` does not cascade a second diagnostic from re-lowering the
+        // name as if it were a definition.
+        for child in node.node_children().filter(|child| {
+            !matches!(child.kind, SyntaxKind::Identifier | SyntaxKind::Visibility)
+        }) {
             let def_id = self.lower_definition(child);
             defs.push(def_id);
         }
@@ -1203,24 +1232,41 @@ impl<'s> Lowering<'s> {
                 })
             }
             SyntaxKind::TypeQualifiedName => {
-                let mut idents = node.children_of(SyntaxKind::Identifier);
-                // guaranteed: `name` parses the alias via `identifier`, which
-                // always completes an `Identifier` node before the `::`.
-                let alias_node = idents.next().expect("qualified name has an alias");
-                let alias = self.lower_identifier(alias_node);
-                // The name comes from `qualified_simple_name`, whose error path
+                // `name` emits one child per `::`-separated segment: every segment
+                // but the last is a namespace qualifier, the last is the leaf type.
+                // A valid path has at least two segments (a bare type lowers to
+                // `Custom`), so the leaf is the final segment and the qualifier is
+                // everything before it.
+                //
+                // The leaf is usually an `Identifier`, but the grammar also accepts
+                // a `generic_name` (`lib::geom::Point i32'`) in this position. Its
+                // base identifier is what names the leaf type; the type arguments
+                // are not a supported feature in a qualified type and are dropped,
+                // but the base must be kept so the path the user wrote is preserved
+                // rather than the qualifier being mis-reported as the whole path.
+                // Every node-child is walked in source order (not only the
+                // `Identifier` ones) so a `generic_name` leaf is not silently
+                // skipped.
+                let mut segments: Vec<IdentId> = node
+                    .node_children()
+                    .filter_map(|seg| self.qualified_segment_ident(seg))
+                    .collect();
+                // The leaf comes from `qualified_simple_name`, whose error path
                 // completes no node; synthesize an `<error>` ident so lowering
                 // stays total (design §8) without perturbing valid-input arenas.
-                let name = match idents.next() {
-                    Some(name_node) => self.lower_identifier(name_node),
-                    None => {
+                let name = match segments.pop() {
+                    Some(name) if !segments.is_empty() => name,
+                    _ => {
                         self.push_error(node, "Qualified name is missing a name".to_string());
                         self.error_ident(location)
                     }
                 };
                 self.arena.types.alloc(TypeData {
                     location,
-                    kind: TypeNode::Qualified { alias, name },
+                    kind: TypeNode::Qualified {
+                        qualifier: segments,
+                        name,
+                    },
                 })
             }
             SyntaxKind::TypeFn => {
@@ -1295,6 +1341,30 @@ impl<'s> Lowering<'s> {
         self.arena.idents.alloc(Ident { location, name })
     }
 
+    /// Lowers one `::`-separated segment of a `TypeQualifiedName` to its name
+    /// ident. A segment is normally an `Identifier`; the grammar also accepts a
+    /// `GenericName` (`lib::geom::Point i32'`) here. Generic type arguments are not
+    /// a supported feature in a qualified type, so a `GenericName` segment is
+    /// rejected with a clear diagnostic at its own span — but its base identifier
+    /// is still returned so the segment list reflects the leaf the user wrote
+    /// (`lib::geom::Point`) rather than dropping it and mis-reporting the qualifier
+    /// as the whole path. Returns `None` for any other child kind so the segment
+    /// list stays exactly the named segments.
+    fn qualified_segment_ident(&mut self, node: &SyntaxNode) -> Option<IdentId> {
+        match node.kind {
+            SyntaxKind::Identifier => Some(self.lower_identifier(node)),
+            SyntaxKind::GenericName => {
+                self.push_error(
+                    node,
+                    "generic type arguments are not supported in a qualified type"
+                        .to_string(),
+                );
+                Some(self.lower_name_or_error(self.first_identifier(node), node))
+            }
+            _ => None,
+        }
+    }
+
     /// The location spanning the whole source, matching tree-sitter's root node.
     ///
     /// Tree-sitter's `source_file` node always covers the entire input, including
@@ -1320,7 +1390,7 @@ impl<'s> Lowering<'s> {
         Location::new(0, len, 1, 1, line, column)
     }
 
-    // -- CST navigation helpers (replace tree-sitter field-name lookups) -------
+    // -- CST navigation helpers (replace tree-sitter field-name lookups)
 
     /// The first direct `Identifier` child of `node`, if any.
     ///
@@ -1705,7 +1775,7 @@ mod tests {
         &arena[ty].kind
     }
 
-    // -- Items ---------------------------------------------------------------
+    // -- Items
 
     #[test]
     fn lowers_function_without_return() {
@@ -1946,6 +2016,7 @@ mod tests {
         let directives = &files[0].directives;
         assert_eq!(directives.len(), 1);
         let Directive::Use(directive) = &directives[0];
+        assert_eq!(directive.vis, Visibility::Private);
         assert!(directive.from.is_none());
         let segments: Vec<&str> = directive
             .segments
@@ -1987,6 +2058,7 @@ mod tests {
         let arena = lower("use { hash } from crypto::sha256;");
         let files: Vec<_> = arena.source_files().collect();
         let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Private);
         let from = directive.from.as_ref().expect("from module reference");
         let from_segments: Vec<&str> = from
             .segments
@@ -2003,7 +2075,205 @@ mod tests {
         assert_eq!(imported, ["hash"]);
     }
 
-    // -- Statements ----------------------------------------------------------
+    #[test]
+    fn lowers_pub_use_path_form() {
+        let arena = lower("pub use lib::arith;");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        let segments: Vec<&str> = directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(segments, ["lib", "arith"]);
+        assert!(directive.imported_types.is_empty());
+    }
+
+    #[test]
+    fn lowers_pub_use_braced_items() {
+        let arena = lower("pub use a::b::{ X, Y };");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        let segments: Vec<&str> = directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(segments, ["a", "b"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y"]);
+    }
+
+    #[test]
+    fn lowers_pub_use_from_form() {
+        // The leading `pub` must not perturb the segment/imported-type buckets:
+        // the braced items are imports and the `from` clause carries the module
+        // reference, exactly as without `pub`.
+        let arena = lower("pub use { x } from M;");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["M"]);
+        assert!(directive.segments.is_empty());
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["x"]);
+    }
+
+    // -- Use directives: #63 lowering matrix
+    //
+    // The smoke tests above lower one happy case per form (path-form braced,
+    // from simple/path, and the three `pub` variants). This matrix adds the
+    // brace-free *file* import form (absent above), the non-`pub` `vis = Private`
+    // default across forms, and multi-/single-segment path lowering with the
+    // exact segment vectors. The CST-shape and diagnostic assertions live in
+    // `grammar.rs`.
+
+    /// The single source file's single `UseDirective`. Asserts exactly one file
+    /// with exactly one directive (the use forms under test never combine).
+    fn single_use(arena: &AstArena) -> &inference_ast::nodes::UseDirective {
+        let files: Vec<_> = arena.source_files().collect();
+        assert_eq!(files.len(), 1, "expected exactly one source file");
+        assert_eq!(
+            files[0].directives.len(),
+            1,
+            "expected exactly one use directive"
+        );
+        let Directive::Use(directive) = &files[0].directives[0];
+        directive
+    }
+
+    /// The `::`-joined segment names of a directive's path (file import path).
+    fn segment_names(arena: &AstArena, directive: &inference_ast::nodes::UseDirective) -> Vec<String> {
+        directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn lowers_bare_file_import_defaults_to_private() {
+        // The brace-free single-segment file import `use math;` is the form the
+        // path-form smoke test does not cover (it uses braces). `vis` defaults to
+        // `Private`, there is no `from`, no imported items, and one segment.
+        let arena = lower("use math;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.from.is_none());
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["math"]);
+    }
+
+    #[test]
+    fn lowers_pub_bare_file_import_is_public() {
+        // `pub use math;` — the re-exported file import. One public segment, no
+        // braces, no `from`.
+        let arena = lower("pub use math;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["math"]);
+    }
+
+    #[test]
+    fn lowers_multi_segment_file_import_path() {
+        // A 3-segment brace-free file import lowers all segments in order with no
+        // imported items — the namespace-binding shape the type checker resolves.
+        let arena = lower("use lib::math::arith;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["lib", "math", "arith"]);
+    }
+
+    #[test]
+    fn lowers_non_pub_braced_items_default_to_private() {
+        // The non-`pub` counterpart of `lowers_pub_use_braced_items`: same
+        // segment/imported-item split, but `vis = Private`.
+        let arena = lower("use a::b::{ X, Y };");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert_eq!(segment_names(&arena, directive), ["a", "b"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y"]);
+    }
+
+    #[test]
+    fn lowers_pub_deep_path_braced_items() {
+        // `pub use` + a 3-segment path + a 3-item brace list: the leading `pub`
+        // does not shift the positional segment/imported-item bucketing.
+        let arena = lower("pub use a::b::c::{ X, Y, Z };");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        assert_eq!(segment_names(&arena, directive), ["a", "b", "c"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y", "Z"]);
+    }
+
+    #[test]
+    fn lowers_non_pub_from_defaults_to_private() {
+        // The non-`pub` from-form already has happy-path coverage, but its `vis`
+        // default is not asserted there; pin `Private` explicitly so a future
+        // change to the visibility default is caught.
+        let arena = lower("use { x } from M;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.segments.is_empty());
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["M"]);
+    }
+
+    #[test]
+    fn use_directive_vis_default_is_private_in_ast() {
+        // Direct assertion of the AST-level default: any directive built without a
+        // leading `pub` carries `Visibility::Private`. Covers the bare file
+        // import, the braced item import, and the from-form in one sweep so the
+        // default holds uniformly across every form that lowers today.
+        for src in ["use a;", "use a::b::{ X };", "use { X } from M;"] {
+            let arena = lower(src);
+            let directive = single_use(&arena);
+            assert_eq!(
+                directive.vis,
+                Visibility::Private,
+                "default visibility must be Private for {src:?}"
+            );
+        }
+    }
+
+    // -- Statements
 
     #[test]
     fn lowers_let_with_and_without_value() {
@@ -2207,7 +2477,7 @@ mod tests {
         }
     }
 
-    // -- Expressions ---------------------------------------------------------
+    // -- Expressions
 
     #[test]
     fn lowers_binary_operators() {
@@ -2336,6 +2606,50 @@ mod tests {
     }
 
     #[test]
+    fn lowers_single_segment_qualified_struct_literal() {
+        // `geo::Point { .. }` lowers to a struct literal whose name carries the
+        // whole `::`-qualified head, which the type checker splits.
+        let arena = lower("fn f() { geo::Point { x: 1 }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "geo::Point");
+                assert_eq!(fields.len(), 1);
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_multi_segment_qualified_struct_literal() {
+        // The previously-failing case (#63): a deeper `::` chain before `{` must
+        // produce the same single-qualified-head struct literal as the
+        // single-segment form, so the type checker's `rsplit_once("::")` sees the
+        // whole path.
+        let arena = lower("fn f() { lib::geo::Point { x: 1, y: 2 }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "lib::geo::Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(arena.ident_name(fields[0].0), "x");
+                assert_eq!(arena.ident_name(fields[1].0), "y");
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_deep_qualified_struct_literal_empty_body() {
+        let arena = lower("fn f() { a::b::c::Point { }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "a::b::c::Point");
+                assert!(fields.is_empty());
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn lowers_identifier() {
         let arena = lower("fn f() { x; }");
         match single_expr(&arena) {
@@ -2427,7 +2741,7 @@ mod tests {
         }
     }
 
-    // -- Types ---------------------------------------------------------------
+    // -- Types
 
     /// The annotated type `kind` of `fn f() { let v: <ty> = x; }`.
     fn let_type(arena: &AstArena) -> &TypeNode {
@@ -2527,9 +2841,24 @@ mod tests {
     fn lowers_qualified_type() {
         let arena = lower("fn f() { let v: ns::Type = x; }");
         match let_type(&arena) {
-            TypeNode::Qualified { alias, name } => {
-                assert_eq!(arena.ident_name(*alias), "ns");
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 1);
+                assert_eq!(arena.ident_name(qualifier[0]), "ns");
                 assert_eq!(arena.ident_name(*name), "Type");
+            }
+            other => panic!("expected qualified type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_multi_segment_qualified_type() {
+        let arena = lower("fn f() { let v: lib::geom::Point = x; }");
+        match let_type(&arena) {
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 2);
+                assert_eq!(arena.ident_name(qualifier[0]), "lib");
+                assert_eq!(arena.ident_name(qualifier[1]), "geom");
+                assert_eq!(arena.ident_name(*name), "Point");
             }
             other => panic!("expected qualified type, got {other:?}"),
         }
@@ -2544,7 +2873,38 @@ mod tests {
         }
     }
 
-    // -- Location parity -----------------------------------------------------
+    #[test]
+    fn generic_leaf_in_qualified_type_reports_and_preserves_leaf() {
+        // A `generic_name` leaf in a qualified type (`lib::geom::Point i32'`) is
+        // not a supported feature, so it is rejected with a clear diagnostic. The
+        // leaf's base identifier is still kept as the qualified type's leaf so the
+        // written path (`lib::geom::Point`) is preserved rather than the qualifier
+        // being mis-reported as the whole path.
+        let result = parse("fn f() { let v: lib::geom::Point i32' = x; }");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("generic type arguments are not supported")),
+            "a generic leaf in a qualified type must be rejected, got: {:?}",
+            result.errors
+        );
+        match let_type(&result.arena) {
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 2, "qualifier keeps `lib::geom`");
+                assert_eq!(result.arena.ident_name(qualifier[0]), "lib");
+                assert_eq!(result.arena.ident_name(qualifier[1]), "geom");
+                assert_eq!(
+                    result.arena.ident_name(*name),
+                    "Point",
+                    "the generic base must be kept as the leaf"
+                );
+            }
+            other => panic!("expected qualified type, got {other:?}"),
+        }
+    }
+
+    // -- Location parity
 
     #[test]
     fn number_literal_location_is_sensible() {
@@ -2578,7 +2938,7 @@ mod tests {
         assert_eq!(loc.start_column, 1);
     }
 
-    // -- Resilience: error-recovery / fallback arms --------------------------
+    // -- Resilience: error-recovery / fallback arms
 
     #[test]
     fn parse_recovers_from_member_access_without_name() {

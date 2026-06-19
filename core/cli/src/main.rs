@@ -153,7 +153,7 @@ use clap::Parser;
 use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
 };
-use inference::{analyze, link, parse, type_check, wasm_to_v};
+use inference::{analyze, link, parse_project, type_check, wasm_to_v};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -336,6 +336,15 @@ fn eprint_translation_error(e: &anyhow::Error) {
                 );
                 return;
             }
+            WasmToVError::SpecNameReservesSeparator {
+                offender_kind,
+                offender,
+                joined,
+                fix_hint,
+            } => {
+                eprint_spec_join_boundary_error(offender_kind, offender, joined, fix_hint);
+                return;
+            }
             WasmToVError::WasmParse(msg) => {
                 eprintln!(
                     "error: malformed WebAssembly binary: {msg}\n\n  \
@@ -362,6 +371,59 @@ fn eprint_translation_error(e: &anyhow::Error) {
         }
     }
     eprintln!("WASM->V translation failed: {e}");
+}
+
+/// Renders the educational diagnostic for a spec/module name whose trailing `_`
+/// fabricates Rocq's reserved `__` separator when joined into the proof grammar.
+/// The fix differs by which component offended (rename the source file vs. the
+/// spec block); both are surfaced as a concrete rename.
+fn eprint_spec_join_boundary_error(
+    offender_kind: &str,
+    offender: &str,
+    joined: &str,
+    fix_hint: &str,
+) {
+    let rename = if offender_kind == "output module name" {
+        format!("Rename the source file: '{offender}.inf' -> '{fix_hint}.inf'.")
+    } else {
+        format!("Rename the spec: 'spec {offender}' -> 'spec {fix_hint}'.")
+    };
+    eprintln!(
+        "error: the {offender_kind} '{offender}' ends with '_', so it joins \
+         into the reserved '__' run in the Rocq proof name '{joined}'.\n\n  \
+         The emitted proof grammar is '<module>__<spec>_specs', where '__' \
+         separates the module from the spec; a trailing '_' on either side \
+         fabricates that separator. {rename}\n\n  \
+         Why not auto-encode: proof-mode names appear verbatim in your .v \
+         file, so they are kept readable rather than escaped into noise."
+    );
+}
+
+/// Removes any pre-existing output artifacts a prior build left, so a compile
+/// that is later rejected leaves no runnable stale file behind, and a plain
+/// compile does not leave a stale proof describing a since-changed program.
+///
+/// Both the `.wasm` and the `.v` are cleared together whenever the run will write
+/// *at least one* artifact, regardless of which one. A run that writes any output
+/// recompiles this source name and may be rejected at codegen or `wasm_to_v`; the
+/// would-be `.wasm` and `.v` for that name are stale the moment such a run starts,
+/// so a leftover from an earlier build must not survive — a `--codegen -v` run
+/// (which writes only `.v`) must still invalidate the `.wasm` an earlier
+/// `--codegen -o` or default build wrote, or a rejection would leave a runnable
+/// artifact describing the old program. The success path rewrites whichever
+/// artifacts this invocation requests, so clearing both up front costs nothing
+/// there. A no-output dry run (`--codegen` with neither `-o` nor `-v`) writes
+/// nothing, so its caller does not invoke this — a dry run leaves existing
+/// artifacts untouched.
+///
+/// A missing file is not an error (nothing to clear); a removal failure is
+/// ignored because the subsequent write would surface any genuine IO problem
+/// with a precise message, and a transient failure must not abort an
+/// otherwise-valid build. The directory itself is left untouched — it is created
+/// on the success path exactly as before.
+fn clear_stale_outputs(output_dir: &std::path::Path, source_fname: &str) {
+    let _ = fs::remove_file(output_dir.join(format!("{source_fname}.wasm")));
+    let _ = fs::remove_file(output_dir.join(format!("{source_fname}.v")));
 }
 
 /// Entry point for the Inference compiler CLI.
@@ -451,19 +513,42 @@ fn main() {
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
 
-    let source_code = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Error reading source file: {e}");
-            process::exit(1);
-        }
-    };
+    let source_fname = path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("module")
+        .to_string();
+
+    // Clear any artifact a previous build left in the output directory before
+    // this build runs, so a compile that is later rejected (by type check,
+    // analysis, external resolution, codegen, or `wasm_to_v`) never leaves a
+    // runnable stale `.wasm` (or its `.v`) on disk for `wasmtime` to execute.
+    // Both artifacts are cleared whenever this run will write at least one of
+    // them — independent of which one — because the run recompiles this source
+    // name and any leftover for it is already stale; a `--codegen -v` run that
+    // writes only `.v` must still drop an earlier build's `.wasm`. Clearing up
+    // front means every rejection path exits with no artifact without each
+    // `process::exit(1)` site having to clean up. A run that writes no output —
+    // a parse/analyze-only run, or a `--codegen` dry run with neither `-o` nor
+    // `-v` — must not disturb a previous build's artifacts, so clearing is gated
+    // on this run actually emitting something.
+    if need_codegen && (args.generate_wasm_output || args.generate_v_output) {
+        clear_stale_outputs(&output_path, &source_fname);
+    }
+
     let mut t_ast = None;
     if need_codegen || need_analyze || need_parse {
-        match parse(source_code.as_str()) {
-            Ok(ast) => {
+        // Drive the multi-file front end. A single file with no path-form `use`
+        // imports yields a one-file arena identical to the legacy single-file
+        // parse, so existing single-file behavior is preserved; reachable
+        // imported files are folded into the same arena.
+        match parse_project(&path) {
+            Ok(project) => {
                 println!("Parsed: {}", path.display());
-                t_ast = Some(ast);
+                for warning in &project.warnings {
+                    eprintln!("{warning}");
+                }
+                t_ast = Some(project.arena);
             }
             Err(e) => {
                 eprintln!("Parse error: {e}");
@@ -534,10 +619,7 @@ fn main() {
         let mode: inference_wasm_codegen::CompilationMode =
             args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
-        let source_fname = path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("module");
+        let source_fname = source_fname.as_str();
         let codegen_output =
             match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level, source_fname) {
                 Ok(o) => o,
@@ -569,19 +651,14 @@ fn main() {
         }
         let wasm_bytes = wasm_owned.as_slice();
 
-        if args.generate_wasm_output {
-            let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
-            if let Err(e) = fs::create_dir_all(&output_path) {
-                eprintln!("Failed to create output directory: {e}");
-                process::exit(1);
-            }
-            if let Err(e) = fs::write(&wasm_file_path, wasm_bytes) {
-                eprintln!("Failed to write WASM file: {e}");
-                process::exit(1);
-            }
-            println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
-        }
-        if args.generate_v_output {
+        // Run the Rocq translation *before* writing any file: a `wasm_to_v`
+        // rejection (e.g. a spec or file named after a Rocq stdlib type) must not
+        // leave a runnable `.wasm` on disk at a non-zero exit. The translation
+        // output is held in memory and the artifacts are written only once the
+        // whole requested pipeline has succeeded, so every rejection path exits
+        // with no partial artifact. When `-v` is not requested this is skipped and
+        // the `.wasm` write below is the first and only output step.
+        let v_output = if args.generate_v_output {
             // The spec-function indices codegen records are in the *pre-link*
             // space; the linker rewrote the embedded `inference.spec_funcs`
             // section into the post-link space. When externals were merged the
@@ -596,23 +673,39 @@ fn main() {
                 &empty_spec_funcs
             };
             match wasm_to_v(source_fname, wasm_bytes, explicit_spec_funcs) {
-                Ok(v_output) => {
-                    let v_file_path = output_path.join(format!("{source_fname}.v"));
-                    if let Err(e) = fs::create_dir_all(&output_path) {
-                        eprintln!("Failed to create output directory: {e}");
-                        process::exit(1);
-                    }
-                    if let Err(e) = fs::write(&v_file_path, v_output) {
-                        eprintln!("Failed to write V file: {e}");
-                        process::exit(1);
-                    }
-                    println!("V generated at: {}", v_file_path.to_string_lossy());
-                }
+                Ok(v) => Some(v),
                 Err(e) => {
                     eprint_translation_error(&e);
                     process::exit(1);
                 }
             }
+        } else {
+            None
+        };
+
+        if args.generate_wasm_output {
+            let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
+            if let Err(e) = fs::create_dir_all(&output_path) {
+                eprintln!("Failed to create output directory: {e}");
+                process::exit(1);
+            }
+            if let Err(e) = fs::write(&wasm_file_path, wasm_bytes) {
+                eprintln!("Failed to write WASM file: {e}");
+                process::exit(1);
+            }
+            println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
+        }
+        if let Some(v_output) = v_output {
+            let v_file_path = output_path.join(format!("{source_fname}.v"));
+            if let Err(e) = fs::create_dir_all(&output_path) {
+                eprintln!("Failed to create output directory: {e}");
+                process::exit(1);
+            }
+            if let Err(e) = fs::write(&v_file_path, v_output) {
+                eprintln!("Failed to write V file: {e}");
+                process::exit(1);
+            }
+            println!("V generated at: {}", v_file_path.to_string_lossy());
         }
     }
     process::exit(0);

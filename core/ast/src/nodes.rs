@@ -22,9 +22,7 @@ use std::fmt::{Display, Formatter};
 
 use crate::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 
-// ---------------------------------------------------------------------------
 // Location
-// ---------------------------------------------------------------------------
 
 /// Source location information for AST nodes.
 ///
@@ -67,9 +65,29 @@ impl Display for Location {
     }
 }
 
-// ---------------------------------------------------------------------------
+/// The diagnostic file label for a source file's module path, or `None` for the
+/// entry file (the one file with an empty module path).
+///
+/// In a multi-file program every diagnostic must name the file it belongs to,
+/// because source locations are per-file-local in the merged arena: a bare
+/// `line:col` from an imported file would otherwise be misread as the entry
+/// file the user invoked. The label is the `::`-joined module path (e.g.
+/// `lib::geom`), matching the spelling used elsewhere for the same file. The
+/// entry file returns `None`: it is the file the user named, so naming it adds
+/// only noise, and a single-file program's diagnostics stay a bare `line:col`.
+///
+/// This is the single source of truth for the spelling; every diagnostic channel
+/// renders file identity through it so the channels stay consistent.
+#[must_use]
+pub fn file_label(module_path: &[String]) -> Option<String> {
+    if module_path.is_empty() {
+        None
+    } else {
+        Some(module_path.join("::"))
+    }
+}
+
 // Shared enums (unchanged)
-// ---------------------------------------------------------------------------
 
 /// Visibility modifier for definitions.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -148,9 +166,7 @@ pub enum OperatorKind {
     Shr,
 }
 
-// ---------------------------------------------------------------------------
 // Wrapper structs (stored in arena Vecs)
-// ---------------------------------------------------------------------------
 
 /// Expression wrapper: `location` + `kind`.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -196,17 +212,39 @@ pub struct Ident {
 }
 
 /// Root AST node representing a parsed source file.
+///
+/// In a multi-file program every file carries a `module_path`: the segments of
+/// its location relative to the source root (the entry file's directory),
+/// e.g. `src/lib/arith.inf` ⇒ `["lib", "arith"]`. These segments are the file's
+/// canonical namespace name, used to qualify its symbols across the rest of the
+/// pipeline.
+///
+/// The **entry file is the one and only file with an empty `module_path`**.
+/// Identity is positional, never by filename: an imported file literally named
+/// `main.inf` still receives its real path segments, so the entry is unspoofable
+/// by name. Single-file programs (including the string-based `parse`) have one
+/// file, which is the entry, so its `module_path` is empty.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SourceFileData {
     pub location: Location,
     pub source: String,
     pub defs: Vec<DefId>,
     pub directives: Vec<Directive>,
+    /// Source-root-relative path segments naming this file's namespace; empty
+    /// for the entry file. See the type-level docs for the entry invariant.
+    pub module_path: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
+impl SourceFileData {
+    /// Whether this is the program entry file (the one file with no module
+    /// path). Exactly one file in an arena satisfies this.
+    #[must_use]
+    pub fn is_entry(&self) -> bool {
+        self.module_path.is_empty()
+    }
+}
+
 // Block kind
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
@@ -217,9 +255,7 @@ pub enum BlockKind {
     Unique,
 }
 
-// ---------------------------------------------------------------------------
 // Directives
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Directive {
@@ -240,16 +276,24 @@ pub struct ModuleRef {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UseDirective {
     pub location: Location,
+    /// Visibility of the import. `Public` (`pub use …`) re-exports the imported
+    /// namespace or items from the importing file; `Private` (the default) keeps
+    /// the import local to that file.
+    pub vis: Visibility,
     pub imported_types: Vec<IdentId>,
     pub segments: Vec<IdentId>,
+    /// Whether the directive carried a `{ … }` item list. An item import always
+    /// sets this; a brace-free file import (`use a::b;`) does not. It lets the
+    /// type checker tell an empty item list (`use a::b::{};`) — which is
+    /// parseable but meaningless — apart from a file import, since both leave
+    /// `imported_types` empty.
+    pub braced: bool,
     /// Logical module reference of a `from` clause, if present. The string-literal
     /// path form (`from "./sort.wasm"`) was removed in favour of this portable form.
     pub from: Option<ModuleRef>,
 }
 
-// ---------------------------------------------------------------------------
 // Definitions
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Def {
@@ -294,16 +338,9 @@ pub enum Def {
         vis: Visibility,
         ty: TypeId,
     },
-    Module {
-        name: IdentId,
-        vis: Visibility,
-        defs: Option<Vec<DefId>>,
-    },
 }
 
-// ---------------------------------------------------------------------------
 // Statements
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stmt {
@@ -342,9 +379,7 @@ pub enum Stmt {
     ConstDef(DefId),
 }
 
-// ---------------------------------------------------------------------------
 // Expressions
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
@@ -400,9 +435,7 @@ pub enum Expr {
     Type(TypeId),
 }
 
-// ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeNode {
@@ -423,16 +456,20 @@ pub enum TypeNode {
         qualifier: IdentId,
         name: IdentId,
     },
+    /// A `::`-qualified type reference such as `geo::Level` or
+    /// `lib::geom::Point`. `qualifier` holds the leading namespace segments in
+    /// source order (`["lib", "geom"]`); `name` is the leaf type. The qualifier
+    /// is always non-empty — a bare type lowers to [`TypeNode::Custom`] instead.
+    /// Carrying every segment (not just one) is what lets a multi-hop path
+    /// resolve through the file-namespace chain rather than dropping its prefix.
     Qualified {
-        alias: IdentId,
+        qualifier: Vec<IdentId>,
         name: IdentId,
     },
     Custom(IdentId),
 }
 
-// ---------------------------------------------------------------------------
 // Inline helper structs (not arena-allocated)
-// ---------------------------------------------------------------------------
 
 /// A function/method argument definition.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -465,15 +502,60 @@ pub struct Field {
     pub ty: TypeId,
 }
 
-// ---------------------------------------------------------------------------
 // Convenience impls
-// ---------------------------------------------------------------------------
 
 impl TypeNode {
     /// Returns `true` if this type is the unit type `()`.
     #[must_use]
     pub fn is_unit_type(&self) -> bool {
         matches!(self, TypeNode::Simple(SimpleTypeKind::Unit))
+    }
+
+    /// The `::`-joined source path of a qualified type reference
+    /// (`lib::geom::Point`), or `None` for any non-qualified type.
+    ///
+    /// Centralizes the segment ordering — leading namespace qualifiers, then the
+    /// leaf name — so every consumer (type-info construction, validation,
+    /// dependency collection, code generation) reads the same canonical string
+    /// rather than re-implementing the chain/join.
+    #[must_use = "the path is the return value"]
+    pub fn qualified_path(&self, arena: &crate::arena::AstArena) -> Option<String> {
+        match self {
+            TypeNode::Qualified { qualifier, name } => Some(
+                qualifier
+                    .iter()
+                    .chain(std::iter::once(name))
+                    .map(|id| arena[*id].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            ),
+            TypeNode::QualifiedName { qualifier, name } => {
+                Some(format!("{}::{}", arena[*qualifier].name, arena[*name].name))
+            }
+            _ => None,
+        }
+    }
+
+    /// The `::`-separated segments of a qualified type reference as owned strings
+    /// (`["lib", "geom", "Point"]`), or `None` for any non-qualified type.
+    ///
+    /// The sibling of [`Self::qualified_path`] for callers that resolve the path
+    /// segment by segment rather than as a single string.
+    #[must_use = "the segments are the return value"]
+    pub fn qualified_segments(&self, arena: &crate::arena::AstArena) -> Option<Vec<String>> {
+        match self {
+            TypeNode::Qualified { qualifier, name } => Some(
+                qualifier
+                    .iter()
+                    .chain(std::iter::once(name))
+                    .map(|id| arena[*id].name.clone())
+                    .collect(),
+            ),
+            TypeNode::QualifiedName { qualifier, name } => {
+                Some(vec![arena[*qualifier].name.clone(), arena[*name].name.clone()])
+            }
+            _ => None,
+        }
     }
 }
 
@@ -482,5 +564,81 @@ impl BlockKind {
     #[must_use]
     pub fn is_non_det(&self) -> bool {
         !matches!(self, BlockKind::Regular)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::AstArena;
+
+    fn ident(arena: &mut AstArena, name: &str) -> IdentId {
+        arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: name.to_string(),
+        })
+    }
+
+    #[test]
+    fn file_label_is_none_for_entry_file() {
+        assert_eq!(file_label(&[]), None);
+    }
+
+    #[test]
+    fn file_label_joins_module_path_with_double_colon() {
+        assert_eq!(
+            file_label(&["lib".to_string(), "geom".to_string()]),
+            Some("lib::geom".to_string())
+        );
+        assert_eq!(file_label(&["math".to_string()]), Some("math".to_string()));
+    }
+
+    #[test]
+    fn file_label_joins_deep_module_path() {
+        assert_eq!(
+            file_label(&["a".to_string(), "b".to_string(), "c".to_string()]),
+            Some("a::b::c".to_string())
+        );
+    }
+
+    #[test]
+    fn qualified_path_joins_all_segments() {
+        let mut arena = AstArena::default();
+        let lib = ident(&mut arena, "lib");
+        let geom = ident(&mut arena, "geom");
+        let point = ident(&mut arena, "Point");
+        let node = TypeNode::Qualified {
+            qualifier: vec![lib, geom],
+            name: point,
+        };
+        assert_eq!(node.qualified_path(&arena).as_deref(), Some("lib::geom::Point"));
+        assert_eq!(
+            node.qualified_segments(&arena),
+            Some(vec!["lib".to_string(), "geom".to_string(), "Point".to_string()])
+        );
+    }
+
+    #[test]
+    fn qualified_path_single_qualifier() {
+        let mut arena = AstArena::default();
+        let geo = ident(&mut arena, "geo");
+        let level = ident(&mut arena, "Level");
+        let node = TypeNode::Qualified {
+            qualifier: vec![geo],
+            name: level,
+        };
+        assert_eq!(node.qualified_path(&arena).as_deref(), Some("geo::Level"));
+    }
+
+    #[test]
+    fn qualified_path_none_for_non_qualified() {
+        let mut arena = AstArena::default();
+        let custom = ident(&mut arena, "Point");
+        assert!(TypeNode::Custom(custom).qualified_path(&arena).is_none());
+        assert!(
+            TypeNode::Simple(SimpleTypeKind::I32)
+                .qualified_segments(&arena)
+                .is_none()
+        );
     }
 }

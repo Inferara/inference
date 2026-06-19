@@ -76,6 +76,25 @@ pub fn parse(src: &str) -> Parse {
     Parse { arena, errors }
 }
 
+/// Parses `src` as one file of a multi-file program, lowering its nodes into the
+/// existing `arena` under the namespace named by `module_path`.
+///
+/// This is the seam a project front end uses to fold every reachable file into a
+/// single arena. The first file lowered should carry an empty `module_path` (the
+/// entry); each subsequent file carries its source-root-relative segments
+/// (e.g. `["lib", "arith"]`). The parser performs no filesystem access: the
+/// caller reads each file and decides its module path.
+///
+/// The arena is moved in and returned inside the [`Parse`] so the next file can
+/// be lowered into it, accumulating all files. Syntax errors for this file are
+/// returned in `errors`; the caller is responsible for aggregating them.
+pub fn parse_into(arena: AstArena, src: &str, module_path: Vec<String>) -> Parse {
+    let (tree, mut errors) = parse_to_cst(src);
+    let (arena, lower_errors) = lower::Lowering::into_arena(arena, src, module_path).lower(&tree);
+    errors.extend(lower_errors);
+    Parse { arena, errors }
+}
+
 /// Parses `src` into the owned concrete syntax tree plus structured syntax
 /// errors, for testing the grammar's CST shape and recovery directly.
 ///
@@ -234,6 +253,183 @@ mod tests {
             "parse() panicked on {} input(s): {:?}",
             panicked.len(),
             panicked
+        );
+    }
+}
+
+/// Parser-level (filesystem-free) tests for [`parse_into`]: folding several
+/// files into one arena, module-path stamping, per-file attribution of defs and
+/// directives, and node-id non-collision. These exercise the seam the
+/// `core/inference` project front end is built on without touching disk.
+#[cfg(test)]
+mod parse_into_tests {
+    use super::{parse, parse_into};
+    use inference_ast::arena::AstArena;
+    use inference_ast::nodes::Directive;
+
+    /// The `::`-joined segments of a path-form `use` directive.
+    fn use_path(arena: &AstArena, directive: &Directive) -> String {
+        let Directive::Use(use_dir) = directive;
+        use_dir
+            .segments
+            .iter()
+            .map(|&id| arena.ident_name(id))
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
+    #[test]
+    fn single_parse_stamps_entry_identity() {
+        // The string-based `parse` always yields a single entry file with an
+        // empty module path.
+        let parsed = parse("pub fn main() -> i32 { return 0; }");
+
+        assert!(parsed.errors.is_empty());
+        let files: Vec<_> = parsed.arena.source_files().collect();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_entry());
+        assert!(files[0].module_path.is_empty());
+    }
+
+    #[test]
+    fn two_files_fold_into_one_arena() {
+        // Lower an entry then an imported file into the SAME arena; both
+        // `SourceFileData` entries coexist with their own module paths.
+        let entry = parse_into(AstArena::default(), "pub fn main() {}", Vec::new());
+        assert!(entry.errors.is_empty());
+
+        let both = parse_into(
+            entry.arena,
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+            vec!["lib".to_string(), "arith".to_string()],
+        );
+        assert!(both.errors.is_empty());
+
+        let files: Vec<_> = both.arena.source_files().collect();
+        assert_eq!(files.len(), 2, "both files live in one arena");
+        assert!(files[0].is_entry(), "first file is the entry");
+        assert_eq!(
+            files[1].module_path,
+            vec!["lib".to_string(), "arith".to_string()],
+        );
+        assert!(!files[1].is_entry());
+    }
+
+    #[test]
+    fn defs_attributed_to_their_own_file() {
+        // Each file's definitions belong to that file's `SourceFileData.defs`,
+        // not the other's.
+        let entry = parse_into(
+            AstArena::default(),
+            "pub fn main() {}\nfn helper() {}",
+            Vec::new(),
+        );
+        let arena = parse_into(
+            entry.arena,
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+            vec!["lib".to_string(), "arith".to_string()],
+        )
+        .arena;
+
+        let files: Vec<_> = arena.source_files().collect();
+
+        let entry_names: Vec<&str> = files[0]
+            .defs
+            .iter()
+            .map(|&def_id| arena.def_name(def_id))
+            .collect();
+        assert_eq!(entry_names, vec!["main", "helper"]);
+
+        let lib_names: Vec<&str> = files[1]
+            .defs
+            .iter()
+            .map(|&def_id| arena.def_name(def_id))
+            .collect();
+        assert_eq!(lib_names, vec!["add"]);
+    }
+
+    #[test]
+    fn directives_attributed_to_their_own_file() {
+        // A `use` in the entry and a different `use` in the imported file each
+        // attach to the correct `SourceFileData.directives`.
+        let entry = parse_into(
+            AstArena::default(),
+            "use math;\npub fn main() {}",
+            Vec::new(),
+        );
+        let arena = parse_into(
+            entry.arena,
+            "use lib::arith;\npub fn foo() {}",
+            vec!["math".to_string()],
+        )
+        .arena;
+
+        let files: Vec<_> = arena.source_files().collect();
+
+        assert_eq!(files[0].directives.len(), 1);
+        assert_eq!(use_path(&arena, &files[0].directives[0]), "math");
+
+        assert_eq!(files[1].directives.len(), 1);
+        assert_eq!(use_path(&arena, &files[1].directives[0]), "lib::arith");
+    }
+
+    #[test]
+    fn node_ids_do_not_collide_across_files() {
+        // Two files each defining a function named `f` with identical bodies must
+        // still allocate DISTINCT def ids — folding into one arena must not
+        // alias nodes by name or shape.
+        let body = "pub fn f() -> i32 { return 7; }";
+        let entry = parse_into(AstArena::default(), body, Vec::new());
+        let arena = parse_into(entry.arena, body, vec!["other".to_string()]).arena;
+
+        let files: Vec<_> = arena.source_files().collect();
+        let id_a = files[0].defs[0];
+        let id_b = files[1].defs[0];
+
+        assert_ne!(
+            id_a, id_b,
+            "same-named, same-bodied functions in two files get distinct ids"
+        );
+        // Both ids index real, independent definitions in the shared arena.
+        assert_eq!(arena.def_name(id_a), "f");
+        assert_eq!(arena.def_name(id_b), "f");
+    }
+
+    #[test]
+    fn empty_module_path_into_arena_stamps_entry() {
+        // `parse_into` with an empty module path is the explicit entry form; it
+        // matches the implicit entry identity of `parse`.
+        let parsed = parse_into(AstArena::default(), "pub fn main() {}", Vec::new());
+        let files: Vec<_> = parsed.arena.source_files().collect();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_entry());
+    }
+
+    #[test]
+    fn three_files_preserve_insertion_order_and_paths() {
+        // `parse_into` stores files in call order (the project front end sorts
+        // before lowering; here we pin that the parser itself preserves the
+        // order it is handed and stamps each path verbatim).
+        let a = parse_into(AstArena::default(), "pub fn main() {}", Vec::new());
+        let b = parse_into(a.arena, "pub fn fa() {}", vec!["a".to_string()]);
+        let c = parse_into(
+            b.arena,
+            "pub fn fb() {}",
+            vec!["lib".to_string(), "b".to_string()],
+        );
+
+        let paths: Vec<Vec<String>> = c
+            .arena
+            .source_files()
+            .map(|sf| sf.module_path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                Vec::<String>::new(),
+                vec!["a".to_string()],
+                vec!["lib".to_string(), "b".to_string()],
+            ],
         );
     }
 }

@@ -136,9 +136,7 @@ fn path_without_tools() -> String {
     }
 }
 
-// =============================================================================
 // Error Path Tests
-// =============================================================================
 
 /// Verifies that the build command fails gracefully when the input file doesn't exist.
 ///
@@ -227,9 +225,7 @@ fn build_v_flag_alone_produces_both_outputs() {
     );
 }
 
-// =============================================================================
 // Success Path Tests
-// =============================================================================
 
 /// Verifies that the full pipeline with Rocq output works correctly.
 ///
@@ -271,9 +267,7 @@ fn build_full_pipeline_with_v_output() {
     );
 }
 
-// =============================================================================
 // Version and Help Tests
-// =============================================================================
 
 /// Verifies that the `--version` flag displays the correct version information.
 ///
@@ -303,9 +297,7 @@ fn help_shows_available_commands() {
         .stdout(predicate::str::contains("--headless"));
 }
 
-// =============================================================================
 // Headless Mode Tests
-// =============================================================================
 
 /// Verifies that headless mode without a command shows informational output.
 ///
@@ -339,9 +331,7 @@ fn tui_detects_infs_no_tui_environment() {
         .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
 }
 
-// =============================================================================
 // Byte-Identical Output Tests
-// =============================================================================
 
 /// Resolves the path to the `infc` binary in the workspace target directory.
 ///
@@ -437,9 +427,7 @@ fn build_produces_identical_wasm_as_infc() {
     );
 }
 
-// =============================================================================
 // Project-mode Build Tests
-// =============================================================================
 
 /// Source used as `src/main.inf` for project-mode tests. Must define a `main`
 /// entry point so it compiles cleanly and (for the run tests later) is
@@ -552,20 +540,50 @@ fn project_build_missing_entry_point_errors() {
     );
 }
 
-/// Extra `src/*.inf` files (besides `main.inf`) must be warned about by name,
-/// not silently dropped and not a hard error — the build still succeeds.
+// Project-mode Multi-file Build Tests (#63)
+
+/// The stale `infs`-side warning that predated multi-file support: it claimed
+/// project mode compiled only `src/main.inf`. `infc` now compiles the whole
+/// import-reachable closure, so this text must never appear again. Every
+/// multi-file test asserts its absence.
+const STALE_PENDING_WARNING_FRAGMENT: &str = "multi-file support is pending";
+
+/// Writes an extra source file at `relative` (a slash-separated path under
+/// `src/`, e.g. `"lib/util.inf"`), creating intermediate directories. The path
+/// is split on `/` and rejoined with `Path::join` so the on-disk layout is
+/// platform-correct.
+fn write_src_file(dir: &assert_fs::TempDir, relative: &str, src: &str) {
+    let mut path = dir.child("src").path().to_path_buf();
+    for segment in relative.split('/') {
+        path = path.join(segment);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, src).unwrap();
+}
+
+/// A valid multi-file project (`src/main.inf` importing `src/lib/util.inf`)
+/// builds successfully: exit 0 and a `<root>/out/main.wasm` artifact. The
+/// imported file is part of the build — `infc` follows the import closure — so
+/// no unreachable-file warning and no stale "pending" text appears.
 #[test]
-fn project_build_warns_about_extra_src_files() {
+fn project_build_multi_file_succeeds() {
     let Some(infc_path) = require_infc() else {
         return;
     };
 
     let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
-    temp.child("src")
-        .child("helper.inf")
-        .write_str("pub fn helper() -> i32 { return 1; }\n")
-        .unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::util;\n\npub fn main() -> i32 {\n    return util::add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
@@ -574,10 +592,131 @@ fn project_build_warns_about_extra_src_files() {
 
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("helper.inf"));
+        .stderr(predicate::str::contains(STALE_PENDING_WARNING_FRAGMENT).not())
+        .stderr(predicate::str::contains("not imported by any reachable file").not());
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "multi-file build must produce {:?}",
+        wasm.path()
+    );
+}
+
+/// A genuinely-unreachable extra `src/**/*.inf` file surfaces the compiler's
+/// unreachable-file warning (passed through `infc`'s inherited stderr), names
+/// the file, and still builds successfully — and the stale "pending" text is
+/// absent. This is the contradiction the old `infs`-side warning created: the
+/// build now lies neither about what is compiled nor double-warns.
+#[test]
+fn project_build_unreachable_file_warns_without_stale_text() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    // Not imported by main.inf -> genuinely unreachable.
+    write_src_file(
+        &temp,
+        "lib/orphan.inf",
+        "pub fn orphan() -> i32 {\n    return 9;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("orphan.inf"))
+        .stderr(predicate::str::contains("not imported by any reachable file"))
+        .stderr(predicate::str::contains(STALE_PENDING_WARNING_FRAGMENT).not());
 
     let wasm = temp.child("out").child("main.wasm");
     assert!(wasm.path().exists(), "build should still succeed");
+}
+
+/// A `use` of a file that does not exist fails with a non-zero exit and the
+/// compiler's missing-import-file error, which names the expected path and (for
+/// a near-miss sibling) offers a "did you mean" suggestion. The suggestion is
+/// produced by `infc` and reaches the user through inherited stderr.
+#[test]
+fn project_build_missing_import_errors_with_suggestion() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    // `utill` is a one-character typo of the sibling `util`.
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::utill;\n\npub fn main() -> i32 {\n    return 0;\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("imported file not found")
+            .and(predicate::str::contains("did you mean `util`")),
+    );
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a missing import must abort before any WASM is written"
+    );
+}
+
+/// `infs build -v` on a valid multi-file project produces both the `.wasm` and
+/// the `.v` proof output — confirming the proof flow is wired through `infs` for
+/// multi-file projects, not just single files.
+#[test]
+fn project_build_multi_file_v_flag_produces_proof_output() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::util;\n\npub fn main() -> i32 {\n    return util::add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "multi-file `-v` build must produce out/main.wasm"
+    );
+    assert!(
+        temp.child("out").child("main.v").path().exists(),
+        "multi-file `-v` build must produce out/main.v"
+    );
 }
 
 /// Single-file `infs build file.inf` must behave exactly as before the
@@ -657,9 +796,7 @@ fn project_build_wasm_byte_identical_to_infc() {
     );
 }
 
-// =============================================================================
 // Project-mode Run Tests
-// =============================================================================
 
 /// A `main` returning a nonzero constant, used to assert wasmtime surfaces the
 /// return value (printed to stdout by `--invoke`).
@@ -891,9 +1028,7 @@ fn project_run_propagates_compile_error() {
         .stdout(predicate::str::contains("Invoking 'main'").not());
 }
 
-// =============================================================================
 // Project-mode Manifest Semantics Tests
-// =============================================================================
 
 /// Scaffolds a project whose `Inference.toml` embeds the given `[build]` /
 /// `[verification]` body (appended after `[package]`). `manifest_extra` is raw
@@ -1219,13 +1354,9 @@ fn project_build_old_infc_with_output_dir_hard_errors() {
     );
 }
 
-// =============================================================================
 // Phase 2: Toolchain Management Command Tests
-// =============================================================================
 
-// -----------------------------------------------------------------------------
 // Install Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs install --help` displays the available options.
 ///
@@ -1261,9 +1392,7 @@ fn install_without_network_shows_error() {
         .stderr(predicate::str::contains("Error").or(predicate::str::contains("error")));
 }
 
-// -----------------------------------------------------------------------------
 // Uninstall Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs uninstall --help` displays the available options.
 ///
@@ -1298,9 +1427,7 @@ fn uninstall_nonexistent_shows_message() {
         .stderr(predicate::str::contains("not installed"));
 }
 
-// -----------------------------------------------------------------------------
 // List Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs list` runs successfully even with no toolchains installed.
 ///
@@ -1334,9 +1461,7 @@ fn list_shows_no_toolchains_message() {
         .stdout(predicate::str::contains("No toolchains installed"));
 }
 
-// -----------------------------------------------------------------------------
 // Versions Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs versions --help` displays the available options.
 ///
@@ -1416,9 +1541,7 @@ fn versions_json_flag_is_accepted() {
     cmd.assert().failure();
 }
 
-// -----------------------------------------------------------------------------
 // Default Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs default --help` displays the available options.
 ///
@@ -1467,9 +1590,7 @@ fn default_nonexistent_version_shows_error() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Doctor Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs doctor` runs successfully even with no toolchains installed.
 ///
@@ -1652,9 +1773,7 @@ fn doctor_shows_checking_message() {
         .stdout(predicate::str::contains("Checking Inference toolchain"));
 }
 
-// -----------------------------------------------------------------------------
 // Self Update Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs self --help` displays the available subcommands.
 ///
@@ -1738,13 +1857,9 @@ fn self_requires_subcommand() {
         .stderr(predicate::str::contains("subcommand").or(predicate::str::contains("required")));
 }
 
-// =============================================================================
 // Phase 3: Project Scaffolding Command Tests
-// =============================================================================
 
-// -----------------------------------------------------------------------------
 // New Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs new --help` displays the available options.
 ///
@@ -1930,9 +2045,7 @@ fn new_with_no_git_flag() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Init Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs init --help` displays the available options.
 ///
@@ -2060,9 +2173,7 @@ fn init_uses_directory_name_as_default() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // File Permission and Error Handling Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that file permissions are handled correctly for created project files.
 ///
@@ -2195,9 +2306,7 @@ fn init_handles_permission_denied() {
     std::fs::set_permissions(readonly_dir.path(), perms).expect("Failed to restore permissions");
 }
 
-// -----------------------------------------------------------------------------
 // Run Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs run --help` displays the available options.
 ///
@@ -2291,9 +2400,7 @@ fn run_accepts_trailing_args() {
         .stdout(predicate::str::contains("ARGS").or(predicate::str::contains("args")));
 }
 
-// =============================================================================
 // Conditional Tests: Full Workflow (Require External Tools)
-// =============================================================================
 
 /// Helper function to check if wasmtime is available in PATH.
 fn is_wasmtime_available() -> bool {
@@ -2384,9 +2491,7 @@ fn build_fails_gracefully_on_syntax_error() {
     );
 }
 
-// =============================================================================
 // Helper Functions for QA Test Files
-// =============================================================================
 
 /// Returns the path to `empty.inf` test file.
 fn empty_file() -> std::path::PathBuf {
@@ -2423,9 +2528,7 @@ fn unique_test_file() -> std::path::PathBuf {
     example_file("unique_test.inf")
 }
 
-// =============================================================================
 // QA Test Coverage: Migrated from docs/qa-test-suite.md
-// =============================================================================
 
 /// QA: TC-2.10 - Verify empty file is handled gracefully.
 ///

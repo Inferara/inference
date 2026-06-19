@@ -38,6 +38,37 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<AstArena> {
     }
 }
 
+/// Builds a multi-file arena from `(module_path, source)` pairs and type-checks
+/// it, returning the [`TypedContext`] on success or the aggregated type errors.
+///
+/// The first pair must be the entry file (empty `module_path`); each subsequent
+/// pair is an imported file named by its source-root-relative segments
+/// (`["lib", "arith"]`). Files are folded with
+/// [`inference_parser::parse_into`], so no filesystem access occurs — this is
+/// the unit-test seam mirroring what the project front end builds at runtime.
+///
+/// # Panics
+/// Panics if any file has a syntax error (tests should pass valid sources).
+pub(crate) fn try_type_check_multi_file(
+    files: &[(Vec<&str>, &str)],
+) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+    let mut arena = inference_ast::arena::AstArena::default();
+    for (module_path, source) in files {
+        let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+        let parsed = inference_parser::parse_into(arena, source, module_path);
+        assert!(
+            parsed.errors.is_empty(),
+            "multi-file test source has syntax errors: {:?}",
+            parsed.errors
+        );
+        arena = parsed.arena;
+    }
+    Ok(
+        inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?
+            .typed_context(),
+    )
+}
+
 /// Controls whether the analysis pass runs during codegen.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum AnalysisMode {
@@ -217,6 +248,198 @@ pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
 /// Use for codegen tests that exercise patterns the analysis pass would reject.
 pub(crate) fn wasm_codegen_no_analysis(source_code: &str) -> Vec<u8> {
     codegen_output_no_analysis(source_code).wasm().to_vec()
+}
+
+/// Builds a multi-file arena from `(module_path, source)` pairs, type-checks,
+/// analyzes, and generates WASM — the multi-file analogue of [`wasm_codegen`].
+///
+/// The first pair must be the entry file (empty `module_path`); each subsequent
+/// pair is an imported file named by its source-root-relative segments. Files
+/// are folded with [`inference_parser::parse_into`], so no filesystem access
+/// occurs — this is the unit-test seam mirroring what the project front end
+/// builds at runtime.
+///
+/// # Panics
+/// Panics if any file has a syntax error, type checking fails, analysis fails,
+/// or codegen fails.
+pub(crate) fn wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
+    wasm_codegen_multi_file_impl(files, AnalysisMode::Run)
+}
+
+/// Multi-file codegen that skips the analysis pass, for codegen-layout tests that
+/// exercise a shape analysis legitimately rejects (e.g. nesting past A026's one
+/// supported level). The codegen path itself is what is under test.
+pub(crate) fn wasm_codegen_multi_file_no_analysis(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
+    wasm_codegen_multi_file_impl(files, AnalysisMode::Skip)
+}
+
+fn wasm_codegen_multi_file_impl(files: &[(Vec<&str>, &str)], analysis: AnalysisMode) -> Vec<u8> {
+    codegen_output_multi_file_impl(files, analysis)
+        .wasm()
+        .to_vec()
+}
+
+/// Multi-file codegen that returns the full [`CodegenOutput`], skipping analysis.
+///
+/// The multi-file analogue of [`codegen_output_no_analysis`]: tests that need
+/// codegen metadata across files (e.g. per-function `frame_sizes()`) use this so
+/// the codegen invocation and its `"output"` module name live in one place.
+pub(crate) fn codegen_output_multi_file_no_analysis(
+    files: &[(Vec<&str>, &str)],
+) -> inference_wasm_codegen::CodegenOutput {
+    codegen_output_multi_file_impl(files, AnalysisMode::Skip)
+}
+
+fn codegen_output_multi_file_impl(
+    files: &[(Vec<&str>, &str)],
+    analysis: AnalysisMode,
+) -> inference_wasm_codegen::CodegenOutput {
+    let mut arena = inference_ast::arena::AstArena::default();
+    for (module_path, source) in files {
+        let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+        let parsed = inference_parser::parse_into(arena, source, module_path);
+        assert!(
+            parsed.errors.is_empty(),
+            "multi-file test source has syntax errors: {:?}",
+            parsed.errors
+        );
+        arena = parsed.arena;
+    }
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .expect("multi-file type check should succeed")
+        .typed_context();
+    if let AnalysisMode::Run = analysis {
+        inference_analysis::analyze(&typed_context).expect("multi-file analysis should succeed");
+    }
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level(), "output")
+        .expect("multi-file codegen should succeed")
+}
+
+/// Resolves the on-disk directory for a multi-file golden fixture.
+///
+/// Unlike single-file codegen fixtures (one `.inf` per `<test>/` directory), a
+/// multi-file fixture is a *file tree*: `<test>/src/main.inf` is the entry and
+/// every imported file lives at its source-root-relative path under `<test>/src/`
+/// (`<test>/src/lib/arith.inf`). The golden `.wasm`/`.wat` for the merged module
+/// sit directly in `<test>/`, beside `src/`. The directory name is derived from
+/// the test module path exactly as [`get_test_dir`] does for single-file tests.
+pub(crate) fn get_project_test_dir(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    get_test_dir(module_path, test_name)
+}
+
+/// The entry file of a multi-file golden fixture: `<test>/src/main.inf`.
+pub(crate) fn get_project_entry_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    get_project_test_dir(module_path, test_name)
+        .join("src")
+        .join("main.inf")
+}
+
+/// Compiles a multi-file golden fixture through the real project front end and
+/// returns the merged WASM bytes.
+///
+/// This drives [`inference::parse_project`] on `<test>/src/main.inf` — the exact
+/// closure walk and canonical file ordering the production pipeline uses — then
+/// type-checks, analyzes, and generates WASM. Output is byte-reproducible because
+/// the arena order is canonical (entry first, then lexicographic by module path),
+/// independent of filesystem walk order.
+///
+/// # Panics
+/// Panics if the entry is missing, any file has a syntax error, type checking,
+/// analysis, or codegen fails. Use [`try_codegen_project`] for negative cases.
+pub(crate) fn wasm_codegen_project(module_path: &str, test_name: &str) -> Vec<u8> {
+    let entry = get_project_entry_path(module_path, test_name);
+    let parse = inference::parse_project(&entry)
+        .unwrap_or_else(|e| panic!("parse_project failed for {}: {e}", entry.display()));
+    let typed_context = inference::type_check(parse.arena)
+        .unwrap_or_else(|e| panic!("multi-file project type check failed for {test_name}: {e}"));
+    inference::analyze(&typed_context)
+        .unwrap_or_else(|e| panic!("multi-file project analysis failed for {test_name}: {e:?}"));
+    inference::codegen(&typed_context, "output")
+        .unwrap_or_else(|e| panic!("multi-file project codegen failed for {test_name}: {e}"))
+        .wasm()
+        .to_vec()
+}
+
+/// Compiles a multi-file golden fixture in Proof mode (analysis skipped, so
+/// spec-only patterns are exercised) and returns the merged WASM bytes.
+///
+/// Proof-mode modules may carry non-deterministic / spec opcodes that
+/// `wasmprinter`/Wasmtime reject, so callers verify these with
+/// [`inf_wasmparser::validate`] and structural checks rather than WAT goldens.
+pub(crate) fn proof_wasm_codegen_project(module_path: &str, test_name: &str) -> Vec<u8> {
+    let entry = get_project_entry_path(module_path, test_name);
+    let parse = inference::parse_project(&entry)
+        .unwrap_or_else(|e| panic!("parse_project failed for {}: {e}", entry.display()));
+    let typed_context = inference::type_check(parse.arena)
+        .unwrap_or_else(|e| panic!("multi-file proof type check failed for {test_name}: {e}"));
+    let target = inference_wasm_codegen::Target::default();
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        target,
+        inference_wasm_codegen::CompilationMode::Proof,
+        target.default_opt_level(),
+        "output",
+    )
+    .unwrap_or_else(|e| panic!("multi-file proof codegen failed for {test_name}: {e}"))
+    .wasm()
+    .to_vec()
+}
+
+/// Like [`wasm_codegen_project`] but returns the error instead of panicking, for
+/// negative tests that assert a multi-file program is rejected.
+pub(crate) fn try_codegen_project(
+    module_path: &str,
+    test_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let entry = get_project_entry_path(module_path, test_name);
+    let parse = inference::parse_project(&entry)?;
+    let typed_context = inference::type_check(parse.arena)?;
+    inference::analyze(&typed_context).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    Ok(inference::codegen(&typed_context, "output")?.wasm().to_vec())
+}
+
+/// Reads the golden `.wasm` for a multi-file fixture (sits directly in `<test>/`).
+pub(crate) fn read_project_golden_wasm(module_path: &str, test_name: &str) -> Vec<u8> {
+    let path = get_project_test_dir(module_path, test_name).join(format!("{test_name}.wasm"));
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("Failed to read expected wasm: {}", path.display()))
+}
+
+/// Asserts WAT equivalence for a multi-file fixture if a golden `.wat` exists in
+/// `<test>/`. Skips silently when absent (proof / non-det modules).
+pub(crate) fn assert_project_wat_equivalence(
+    wasm_bytes: &[u8],
+    module_path: &str,
+    test_name: &str,
+) {
+    let wat_path = get_project_test_dir(module_path, test_name).join(format!("{test_name}.wat"));
+    if wat_path.exists() {
+        let expected = std::fs::read_to_string(&wat_path)
+            .unwrap_or_else(|_| panic!("Failed to read WAT file: {wat_path:?}"));
+        let actual = wasmprinter::print_bytes(wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to print WAT for {test_name}: {e}"));
+        let expected = expected.replace("\r\n", "\n");
+        let actual = actual.replace("\r\n", "\n");
+        assert_eq!(expected, actual, "WAT mismatch for {test_name}");
+    }
+}
+
+/// Regenerates the golden `.wasm` (and `.wat` when printable) for a multi-file
+/// fixture from current compiler output. Driven by the `#[ignore]`d
+/// `mod regenerate` block, mirroring the single-file regeneration helpers.
+pub(crate) fn regenerate_project_golden(wasm_bytes: &[u8], module_path: &str, test_name: &str) {
+    let dir = get_project_test_dir(module_path, test_name);
+    let wasm_path = dir.join(format!("{test_name}.wasm"));
+    std::fs::write(&wasm_path, wasm_bytes)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+    println!(
+        "Regenerated: {} ({} bytes)",
+        wasm_path.display(),
+        wasm_bytes.len()
+    );
+    regenerate_wat(wasm_bytes, &dir, test_name);
 }
 
 /// Build the test directory path. When the last module path component equals test_name,

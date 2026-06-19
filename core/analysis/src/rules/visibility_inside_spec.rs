@@ -8,7 +8,7 @@
 use inference_ast::ids::DefId;
 use inference_ast::nodes::{Def, Visibility};
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Visibility modifiers on definitions inside a `spec` body are
@@ -17,11 +17,11 @@ crate::rule! {
     #[name = "Visibility modifier inside spec body"]
     #[severity = warning]
     pub struct VisibilityInsideSpec;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut warnings = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
-            scan_for_specs(arena, &source_file.defs, &mut warnings);
+            scan_for_specs(arena, &source_file.module_path, &source_file.defs, &mut warnings);
         }
         warnings
     }
@@ -29,33 +29,29 @@ crate::rule! {
 
 fn scan_for_specs(
     arena: &inference_ast::arena::AstArena,
+    module_path: &[String],
     defs: &[DefId],
-    warnings: &mut Vec<AnalysisDiagnostic>,
+    warnings: &mut Vec<LabeledDiagnostic>,
 ) {
     for &def_id in defs {
-        match &arena[def_id].kind {
-            Def::Spec { name, defs: inner, .. } => {
-                let spec_name = arena[*name].name.clone();
-                for &inner_id in inner {
-                    check_inner_def(arena, inner_id, &spec_name, warnings);
-                }
-                // Defensively recurse so nested specs (should they ever
-                // become reachable) are still inspected.
-                scan_for_specs(arena, inner, warnings);
+        if let Def::Spec { name, defs: inner, .. } = &arena[def_id].kind {
+            let spec_name = arena[*name].name.clone();
+            for &inner_id in inner {
+                check_inner_def(arena, module_path, inner_id, &spec_name, warnings);
             }
-            Def::Module { defs: Some(inner), .. } => {
-                scan_for_specs(arena, inner, warnings);
-            }
-            _ => {}
+            // Defensively recurse so nested specs (should they ever become
+            // reachable) are still inspected.
+            scan_for_specs(arena, module_path, inner, warnings);
         }
     }
 }
 
 fn check_inner_def(
     arena: &inference_ast::arena::AstArena,
+    module_path: &[String],
     def_id: DefId,
     spec_name: &str,
-    warnings: &mut Vec<AnalysisDiagnostic>,
+    warnings: &mut Vec<LabeledDiagnostic>,
 ) {
     let (vis, name_id, kind): (&Visibility, _, &'static str) = match &arena[def_id].kind {
         Def::Function { vis, name, .. } => (vis, *name, "fn"),
@@ -64,17 +60,16 @@ fn check_inner_def(
         Def::Enum { vis, name, .. } => (vis, *name, "enum"),
         Def::Constant { vis, name, .. } => (vis, *name, "const"),
         Def::TypeAlias { vis, name, .. } => (vis, *name, "type"),
-        // Nested spec / module inside a spec body is not currently
-        // grammatically reachable; the outer scan_for_specs handles
-        // any future reachability.
-        Def::Spec { .. } | Def::Module { .. } => return,
+        // A nested spec inside a spec body is not currently grammatically
+        // reachable; the outer scan_for_specs handles any future reachability.
+        Def::Spec { .. } => return,
     };
     if matches!(vis, Visibility::Public) {
-        warnings.push(AnalysisDiagnostic::VisibilityInsideSpec {
+        warnings.push(LabeledDiagnostic::new(module_path.to_vec(), AnalysisDiagnostic::VisibilityInsideSpec {
             spec_name: spec_name.to_string(),
             def_name: arena[name_id].name.clone(),
             def_kind: kind,
             location: arena[def_id].location,
-        });
+        }));
     }
 }

@@ -1,0 +1,6 @@
+use lib::geo::{Point};
+
+pub fn run() -> i32 {
+    let p: Point = Point::at(8);
+    return p.dist();
+}

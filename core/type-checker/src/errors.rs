@@ -189,6 +189,9 @@ pub enum VisibilityContext {
     Import {
         path: String,
     },
+    Constant {
+        name: String,
+    },
 }
 
 impl Display for VisibilityContext {
@@ -206,6 +209,7 @@ impl Display for VisibilityContext {
                 method_name,
             } => write!(f, "method `{method_name}` on type `{type_name}`"),
             VisibilityContext::Import { path } => write!(f, "item `{path}`"),
+            VisibilityContext::Constant { name } => write!(f, "constant `{name}`"),
         }
     }
 }
@@ -225,6 +229,7 @@ pub(crate) enum DedupKind {
     UndefinedStruct,
     UndefinedEnum,
     SpecFunctionShadowsTopLevel,
+    ImportedItemNotFound,
 }
 
 /// Represents a type checking error with source location.
@@ -349,11 +354,130 @@ pub enum TypeCheckError {
     #[error("{location}: cannot resolve import path: {path}")]
     ImportResolutionFailed { path: String, location: Location },
 
-    #[error("{location}: circular glob import detected: {path}::*")]
-    CircularImport { path: String, location: Location },
+    /// A `::`-qualified path whose prefix names a known namespace (a file or an
+    /// imported namespace) but whose final segment does not name a value in it —
+    /// either nothing of that name exists, or it names a non-value item such as a
+    /// function. Replaces the misleading "enum `lib` is not defined" that the
+    /// enum-variant fallback would otherwise produce for a namespace path.
+    #[error("{location}: cannot resolve `{path}`{}", names.as_ref().map_or(String::new(), |n| format!(": `{path}` names {n}, not a value")))]
+    QualifiedPathNotAValue {
+        path: String,
+        /// What the final segment names instead of a value (`a function`), or
+        /// `None` when nothing of that name exists in the namespace.
+        names: Option<String>,
+        location: Location,
+    },
 
-    #[error("{location}: glob import path cannot be empty")]
-    EmptyGlobImport { location: Location },
+    /// A namespace-qualified call whose target function exists, but the path is
+    /// blocked because an intermediate file imported the next namespace with a
+    /// plain `use` rather than `pub use`. The function is reachable in principle
+    /// — only the missing re-export hides it — so the fix is to add `pub use`,
+    /// not to correct the path. Distinct from [`Self::UndefinedFunction`], which
+    /// fires when no such function exists.
+    #[error(
+        "{location}: call to `{path}` is blocked: an intermediate file imports the next namespace with a plain `use`; change it to `pub use` to re-export the path"
+    )]
+    QualifiedPathNotReexported { path: String, location: Location },
+
+    /// A path-form `use a::b;` was written without a project context (the
+    /// string-parse and REPL paths have only the entry file), so the named file
+    /// cannot exist. Distinct from a typo: the fix is to build the project, not
+    /// to correct the path.
+    #[error(
+        "{location}: file imports require a project context: `use {path};` names a source file, which is only resolvable when building a project (not a single string-parsed file)"
+    )]
+    FileImportWithoutProjectContext { path: String, location: Location },
+
+    /// A qualified call `ns::fn()` whose head `ns` names a file in the project but
+    /// was never bound by a `use` in the calling file. The head is a namespace, not
+    /// a type, so a "method not found on type `ns`" diagnostic would point at the
+    /// wrong fix; the fix is to import the namespace.
+    #[error(
+        "{location}: namespace `{namespace}` is not imported; add `use {namespace};` to call `{namespace}::{function}`"
+    )]
+    UnimportedNamespaceCall {
+        namespace: String,
+        function: String,
+        location: Location,
+    },
+
+    /// An absolute `dir::file::item` reference whose namespace prefix names a real
+    /// project file the accessing file never imported. The full namespace path is
+    /// known here, so the fix is exact (`use lib::geom;`). A file may only reach
+    /// another file's surface through a `use`; an absolute path — whether a call,
+    /// a type, or a const value — is not an exception to that, which is why this
+    /// is reported rather than silently resolved.
+    #[error(
+        "{location}: namespace `{namespace}` is not imported; add `use {namespace};` to reach `{namespace}::{item}`"
+    )]
+    UnimportedAbsoluteNamespacePath {
+        namespace: String,
+        item: String,
+        location: Location,
+    },
+
+    /// A `::`-qualified path whose namespace portion is not an imported namespace,
+    /// and whose target file is not in the compilation closure (no `mod_scopes`
+    /// key covers the namespace portion). Unlike
+    /// [`Self::UnimportedAbsoluteNamespacePath`], the namespace cannot be *proven*
+    /// to exist here, so the suggestion is hedged: if `{namespace}` does name a
+    /// source file, importing it is the fix; if it is a typo, the path is simply
+    /// wrong. The hedged wording keeps the confident variant's "the namespace
+    /// provably exists; this exact `use` resolves it" contract intact.
+    #[error(
+        "{location}: could not resolve `{path}`: `{namespace}` is not an imported namespace. if `{namespace}` names a source file, import it with `use {namespace};`"
+    )]
+    UnresolvedNamespacePath {
+        path: String,
+        namespace: String,
+        location: Location,
+    },
+
+    /// An item import `use a::b::{x};` named an item `x` that does not exist in
+    /// file `a::b`.
+    #[error("{location}: item `{item}` not found in file `{file}`")]
+    ImportedItemNotFound {
+        item: String,
+        file: String,
+        location: Location,
+    },
+
+    /// An item import named an item that exists in the target file but is not
+    /// `pub`, so it cannot cross the file boundary. Carries the definition site so
+    /// the fix (adding `pub`) can be pointed at directly.
+    #[error(
+        "{location}: item `{item}` in file `{file}` is private\nnote: `{item}` is defined at {definition_location} in file `{file}`; add `pub` to export it"
+    )]
+    ImportedItemPrivate {
+        item: String,
+        file: String,
+        location: Location,
+        definition_location: Location,
+    },
+
+    /// An imported name collides with a name already bound in the importing
+    /// file — either a local definition or an earlier import.
+    #[error("{location}: imported name `{name}` collides with {with} of the same name")]
+    ImportNameCollision {
+        name: String,
+        with: String,
+        location: Location,
+    },
+
+    /// `use a::b::{};` — a braced item import with no items. The braces say
+    /// "import items" but none are listed, so the directive does nothing.
+    #[error(
+        "{location}: empty import list in `use {path}::{{}};` — import the file (`use {path};`) or list the items to import (`use {path}::{{x, y}};`)"
+    )]
+    EmptyImportList { path: String, location: Location },
+
+    /// A cycle among definition *values* — consts whose initializers reference
+    /// each other, or mutually recursive type aliases — across one or more files.
+    /// `cycle` names the members in order (e.g. `A -> B -> A`). File-to-file
+    /// import cycles are allowed and never reach here; only value cycles, which
+    /// have no computable evaluation order, are rejected.
+    #[error("{location}: circular definition detected: {cycle}")]
+    CircularDefinition { cycle: String, location: Location },
 
     #[error("{location}: error registering {kind} `{name}`{}", reason.as_ref().map_or(String::new(), |r| format!(": {}", r)))]
     RegistrationFailed {
@@ -423,9 +547,37 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: cannot access private {context}")]
+    /// Access to a private item from outside its defining file.
+    ///
+    /// Carries both the use site (`location`) and the definition site
+    /// (`definition_location` in file `definition_file`) so the diagnostic points
+    /// the user at where to add `pub`. `definition_file` is the `::`-joined module
+    /// path of the defining file, empty for the entry file.
+    #[error(
+        "{location}: cannot access private {context}\nnote: {context} is defined at {definition_location}{}; add `pub` to export it",
+        if definition_file.is_empty() { String::new() } else { format!(" in file `{definition_file}`") }
+    )]
     PrivateAccessViolation {
         context: VisibilityContext,
+        location: Location,
+        definition_location: Location,
+        definition_file: String,
+    },
+
+    /// A `spec`-inner function reached through a qualified path (`Check::verify`,
+    /// `lib::Check::verify`). `spec` blocks are proof-only: their functions exist
+    /// for verification and are never assigned an executable index, so a qualified
+    /// call to one would type-check and then have no callee to lower. A spec
+    /// function is reached only by its bare name from within the same spec; this
+    /// rejects every qualified form so the proof-only boundary is explicit. The
+    /// message names the bare function so the fix (drop the qualifier, call from
+    /// within the spec) is concrete.
+    #[error(
+        "{location}: cannot call spec function `{path}` through a qualified path; spec functions are proof-only and are reached only by their bare name `{function_name}` within the spec"
+    )]
+    SpecFunctionNotCallable {
+        path: String,
+        function_name: String,
         location: Location,
     },
 
@@ -615,8 +767,17 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::ImportResolutionFailed { location, .. }
-            | TypeCheckError::CircularImport { location, .. }
-            | TypeCheckError::EmptyGlobImport { location }
+            | TypeCheckError::QualifiedPathNotAValue { location, .. }
+            | TypeCheckError::QualifiedPathNotReexported { location, .. }
+            | TypeCheckError::FileImportWithoutProjectContext { location, .. }
+            | TypeCheckError::UnimportedNamespaceCall { location, .. }
+            | TypeCheckError::UnimportedAbsoluteNamespacePath { location, .. }
+            | TypeCheckError::UnresolvedNamespacePath { location, .. }
+            | TypeCheckError::ImportedItemNotFound { location, .. }
+            | TypeCheckError::ImportedItemPrivate { location, .. }
+            | TypeCheckError::ImportNameCollision { location, .. }
+            | TypeCheckError::EmptyImportList { location, .. }
+            | TypeCheckError::CircularDefinition { location, .. }
             | TypeCheckError::RegistrationFailed { location, .. }
             | TypeCheckError::ExpectedArrayType { location, .. }
             | TypeCheckError::ExpectedStructType { location, .. }
@@ -627,6 +788,7 @@ impl TypeCheckError {
             | TypeCheckError::CannotInferTypeParameter { location, .. }
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
+            | TypeCheckError::SpecFunctionNotCallable { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
             | TypeCheckError::AssignToImmutable { location, .. }
@@ -677,6 +839,15 @@ impl TypeCheckError {
             } => Some((
                 DedupKind::SpecFunctionShadowsTopLevel,
                 format!("{spec_name}:{function_name}"),
+            )),
+            // A cyclic or transitive unresolvable item re-export is reported from
+            // every failing import site that names the same target file, producing
+            // identical "item X not found in file Y" text. Dedup by `(item, file)`
+            // — deliberately excluding the location — so each unresolved item is
+            // surfaced once regardless of how many import sites hit it.
+            TypeCheckError::ImportedItemNotFound { item, file, .. } => Some((
+                DedupKind::ImportedItemNotFound,
+                format!("{item}@{file}"),
             )),
             _ => None,
         }
@@ -996,23 +1167,15 @@ mod tests {
     }
 
     #[test]
-    fn display_circular_import() {
-        let err = TypeCheckError::CircularImport {
-            path: "mod_a::mod_b".to_string(),
+    fn display_circular_definition() {
+        let err = TypeCheckError::CircularDefinition {
+            cycle: "A -> B -> A".to_string(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: circular glob import detected: mod_a::mod_b::*"
+            "1:5: circular definition detected: A -> B -> A"
         );
-    }
-
-    #[test]
-    fn display_empty_glob_import() {
-        let err = TypeCheckError::EmptyGlobImport {
-            location: test_location(),
-        };
-        assert_eq!(err.to_string(), "1:5: glob import path cannot be empty");
     }
 
     #[test]
@@ -1196,10 +1359,13 @@ mod tests {
                 name: "helper".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::arith".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private function `helper`"
+            "1:5: cannot access private function `helper`\n\
+             note: function `helper` is defined at 1:5 in file `lib::arith`; add `pub` to export it"
         );
     }
 
@@ -1211,10 +1377,13 @@ mod tests {
                 field_name: "x".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::geo".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private field `x` of struct `Point`"
+            "1:5: cannot access private field `x` of struct `Point`\n\
+             note: field `x` of struct `Point` is defined at 1:5 in file `lib::geo`; add `pub` to export it"
         );
     }
 
@@ -1226,10 +1395,30 @@ mod tests {
                 method_name: "reset".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::counter".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private method `reset` on type `Counter`"
+            "1:5: cannot access private method `reset` on type `Counter`\n\
+             note: method `reset` on type `Counter` is defined at 1:5 in file `lib::counter`; add `pub` to export it"
+        );
+    }
+
+    #[test]
+    fn display_private_access_violation_entry_file_omits_file_note() {
+        let err = TypeCheckError::PrivateAccessViolation {
+            context: VisibilityContext::Function {
+                name: "helper".to_string(),
+            },
+            location: test_location(),
+            definition_location: test_location(),
+            definition_file: String::new(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot access private function `helper`\n\
+             note: function `helper` is defined at 1:5; add `pub` to export it"
         );
     }
 

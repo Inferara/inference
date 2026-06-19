@@ -1,0 +1,5 @@
+use math;
+
+pub fn run() -> i32 {
+    return math::arith::add(1, 2);
+}

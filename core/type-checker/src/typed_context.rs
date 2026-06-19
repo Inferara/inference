@@ -4,16 +4,53 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
-    symbol_table::{EnumInfo, ExternOrigin, StructInfo, SymbolTable},
+    symbol_table::{EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
 use inference_ast::{
     arena::AstArena,
-    ids::{DefId, NodeId},
+    ids::{DefId, ExprId, NodeId},
     nodes::{SourceFileData, Visibility},
 };
 use rustc_hash::FxHashMap;
+
+/// Builds the file-local canonical key for a bare type name in the file whose
+/// module path is `module_path`: the `::`-joined module path followed by the
+/// name, or the bare name for the entry file (empty module path). This mirrors
+/// how the symbol table keys a type by its enclosing file.
+fn file_local_key(bare_name: &str, module_path: &[String]) -> String {
+    if module_path.is_empty() {
+        bare_name.to_string()
+    } else {
+        format!("{}::{bare_name}", module_path.join("::"))
+    }
+}
+
+/// The defining-file identity of a resolved function/method call target.
+///
+/// Type checking resolves every call — including a cross-file path
+/// (`math::arith::add`) that crosses one or more `pub use` re-exports — to the
+/// function's actual defining file. Code generation needs that defining file to
+/// build the function's file-qualified flat WASM name, but the source-level call
+/// path can differ from the defining path because of re-export indirection, and
+/// the inferred node type only records the source path string. This struct
+/// carries the resolved identity forward so codegen reproduces the same
+/// file-qualified name the registration pass assigned, without re-walking the
+/// scope tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTarget {
+    /// Source-root-relative segments of the callee's defining file. Empty for a
+    /// callee defined in the entry file (its WASM name stays unqualified). For a
+    /// method this is the *struct's* defining file.
+    pub module_path: Vec<String>,
+    /// The callee's bare name (the final path segment), e.g. `add` or `new`.
+    pub name: String,
+    /// `Some(struct_name)` when the target is an associated function reached
+    /// through a namespace (`geo::Point::new`): the call lowers to the struct's
+    /// file-qualified method, not a free function. `None` for a free function.
+    pub receiver_struct: Option<String>,
+}
 
 /// Public metadata about a method defined on a type.
 ///
@@ -46,6 +83,26 @@ pub struct TypedContext {
     pub(crate) symbol_table: SymbolTable,
     node_types: FxHashMap<NodeId, TypeInfo>,
     arena: AstArena,
+    /// Structs indexed by canonical key (`<defining-file-path>::<name>`, bare
+    /// for the entry file). Built once after type checking; the single source of
+    /// truth for unambiguous struct-layout resolution in later phases when two
+    /// files define a same-named struct.
+    structs_by_key: FxHashMap<String, StructInfo>,
+    /// Enums indexed by canonical key. Mirrors [`Self::structs_by_key`].
+    enums_by_key: FxHashMap<String, EnumInfo>,
+    /// Topological order of top-level `const` and `type` alias definitions across
+    /// all files, dependencies first. Empty when there are no such definitions.
+    /// A later phase emits constant values in this order so a const that reads
+    /// another const sees a computed value; the order is well-defined because a
+    /// value cycle is rejected during type checking.
+    definition_order: Vec<DefId>,
+    /// The defining-file identity of each resolved function/method call,
+    /// keyed by the call's *function* expression id. Populated during type
+    /// checking for calls that resolve to a known function. Code generation
+    /// consumes it to file-qualify the WASM call target across re-export
+    /// indirection; calls absent from the map (e.g. higher-order, or to an
+    /// `external fn` import) fall back to the existing bare-name resolution.
+    resolved_call_targets: FxHashMap<ExprId, CallTarget>,
 }
 
 impl TypedContext {
@@ -54,7 +111,60 @@ impl TypedContext {
             symbol_table: SymbolTable::default(),
             node_types: FxHashMap::default(),
             arena,
+            structs_by_key: FxHashMap::default(),
+            enums_by_key: FxHashMap::default(),
+            definition_order: Vec::new(),
+            resolved_call_targets: FxHashMap::default(),
         }
+    }
+
+    /// Records the defining-file identity of a resolved call, keyed by its
+    /// function expression id. Called during type checking once a call resolves
+    /// to a known function or method.
+    pub(crate) fn set_call_target(&mut self, function_expr_id: ExprId, target: CallTarget) {
+        self.resolved_call_targets.insert(function_expr_id, target);
+    }
+
+    /// Returns the resolved defining-file identity of the call whose function
+    /// expression is `function_expr_id`, if type checking recorded one.
+    ///
+    /// Code generation uses this to build the callee's file-qualified WASM name,
+    /// reproducing the defining file the registration pass keyed it under even
+    /// when the source call path crossed a `pub use` re-export.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn call_target(&self, function_expr_id: ExprId) -> Option<&CallTarget> {
+        self.resolved_call_targets.get(&function_expr_id)
+    }
+
+    /// Records the topological order of `const`/`type` alias definitions
+    /// (dependencies first). Set during type checking once the value graph is
+    /// confirmed acyclic.
+    pub(crate) fn set_definition_order(&mut self, order: Vec<DefId>) {
+        self.definition_order = order;
+    }
+
+    /// Topological order of top-level `const` and `type` alias definitions across
+    /// all files, dependencies first. A later phase emits constants in this order
+    /// so cross-definition reads observe computed values.
+    #[must_use = "the ordering is the return value"]
+    pub fn definition_order(&self) -> &[DefId] {
+        &self.definition_order
+    }
+
+    /// Folds the symbol table's structs and enums into canonical-key-indexed
+    /// maps. Called once after type checking completes so later phases resolve a
+    /// type by its file-qualified canonical key.
+    pub(crate) fn build_type_indexes(&mut self) {
+        self.structs_by_key = self
+            .symbol_table
+            .structs_with_canonical_keys()
+            .into_iter()
+            .collect();
+        self.enums_by_key = self
+            .symbol_table
+            .enums_with_canonical_keys()
+            .into_iter()
+            .collect();
     }
 
     /// Returns a reference to the underlying AST arena.
@@ -96,32 +206,245 @@ impl TypedContext {
         self.node_types.get(&node_id).cloned()
     }
 
-    /// Looks up a struct by name across the root scope and every spec scope.
+    /// Looks up a struct by its canonical key.
     ///
-    /// Returns `None` if no struct with the given name exists. Fields in the
+    /// The canonical key is the struct's file-qualified name
+    /// (`lib::arith::Point`), or the bare name for a struct in the entry file
+    /// (`Point`). A single-file program defines every struct in the entry file,
+    /// so a bare name *is* its canonical key and existing callers keep working
+    /// unchanged. Cross-file callers must pass the file-qualified key (available
+    /// via [`Self::canonical_struct_key`]) to disambiguate same-named structs.
+    ///
+    /// Returns `None` if no struct with that canonical key exists. Fields in the
     /// returned [`StructInfo`] are in declaration order.
-    ///
-    /// Post-type-check consumers (analysis, codegen) walk the AST into spec
-    /// bodies independently of the symbol table's scope cursor, so this
-    /// lookup is scope-agnostic. `register_types` does not currently recurse
-    /// into `Def::Module.defs`, so module-nested definitions are absent from
-    /// the symbol table; this helper sees only root-scope and spec-scope items.
     #[must_use = "this is a pure lookup with no side effects"]
-    pub fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
-        self.symbol_table.lookup_struct_anywhere(name)
+    pub fn lookup_struct(&self, key: &str) -> Option<StructInfo> {
+        self.structs_by_key.get(key).cloned()
     }
 
-    /// Looks up an enum by name across the root scope and every spec scope.
+    /// Looks up an enum by its canonical key. Mirrors [`Self::lookup_struct`].
     ///
-    /// Returns `None` if no enum with the given name exists. Variants in the
-    /// returned [`EnumInfo`] are in declaration order, which determines their
-    /// zero-based integer tag for WASM codegen. `register_types` does not
-    /// currently recurse into `Def::Module.defs`, so module-nested definitions
-    /// are absent from the symbol table; this helper sees only root-scope and
-    /// spec-scope items.
+    /// Variants in the returned [`EnumInfo`] are in declaration order, which
+    /// determines their zero-based integer tag for WASM codegen.
     #[must_use = "this is a pure lookup with no side effects"]
-    pub fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
-        self.symbol_table.lookup_enum_anywhere(name)
+    pub fn lookup_enum(&self, key: &str) -> Option<EnumInfo> {
+        self.enums_by_key.get(key).cloned()
+    }
+
+    /// Looks up the struct named `bare_name` as referenced from the file whose
+    /// module path is `from_module_path`, resolving the bare name to its
+    /// file-qualified canonical key first.
+    ///
+    /// This is the multi-file-safe form of [`Self::lookup_struct`]: a bare type
+    /// name in a given file may name a different struct than the same bare name
+    /// in another file, so code generation passes the file it is emitting for.
+    /// For a single-file program the canonical key *is* the bare name, so this
+    /// is equivalent to `lookup_struct(bare_name)`.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_struct_in(
+        &self,
+        bare_name: &str,
+        from_module_path: &[String],
+    ) -> Option<StructInfo> {
+        if let Some(key) = self.canonical_struct_key(bare_name, from_module_path) {
+            return self.lookup_struct(&key);
+        }
+        // A type defined inside a `spec` block is keyed by its enclosing file
+        // but is not reachable by name resolution from the bare file scope, so
+        // `canonical_struct_key` cannot find it. Code generating that spec's
+        // body knows its file, so try the file-local canonical key directly.
+        self.lookup_struct(&file_local_key(bare_name, from_module_path))
+    }
+
+    /// Looks up the enum named `bare_name` as referenced from the file whose
+    /// module path is `from_module_path`. Mirrors [`Self::lookup_struct_in`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_enum_in(
+        &self,
+        bare_name: &str,
+        from_module_path: &[String],
+    ) -> Option<EnumInfo> {
+        if let Some(key) = self.canonical_enum_key(bare_name, from_module_path) {
+            return self.lookup_enum(&key);
+        }
+        self.lookup_enum(&file_local_key(bare_name, from_module_path))
+    }
+
+    /// Whether the `::`-qualified type path (`geo::Level`, `lib::geom::Point`)
+    /// names a struct or enum as referenced from the file whose module path is
+    /// `from_module_path`.
+    ///
+    /// A qualified type annotation that resolves to a nominal type is represented
+    /// in WASM as an `I32` pointer (like a bare struct/enum reference). Code
+    /// generation asks this to confirm a qualified parameter or return type is a
+    /// resolvable nominal type before treating it as a pointer, so a malformed
+    /// path fails at the codegen boundary rather than emitting plausible WASM.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn qualified_type_is_nominal(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> bool {
+        let Some(from_scope) = self.symbol_table.find_module_scope(from_module_path) else {
+            return false;
+        };
+        self.symbol_table
+            .resolve_qualified_type_path(path, from_scope)
+            .is_some()
+    }
+
+    /// Resolves the `::`-qualified type path (`lib::geom::Point`) to the
+    /// [`StructInfo`] it names, as referenced from the file whose module path is
+    /// `from_module_path`, or `None` if the path does not name a struct.
+    ///
+    /// A function returning a struct uses the sret calling convention, which code
+    /// generation decides from the declared return type. A `::`-qualified return
+    /// type carries the struct's path rather than a bare name, so codegen resolves
+    /// it here to recover the same [`StructInfo`] a bare return type would yield.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_struct_by_qualified_path(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> Option<StructInfo> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        match self.symbol_table.resolve_qualified_type_path(path, from_scope)? {
+            ResolvedNominalType::Struct(info, _) => Some(info),
+            ResolvedNominalType::Enum(..) => None,
+        }
+    }
+
+    /// Resolves the `::`-qualified type path (`lib::big::Big`) to the
+    /// [`StructInfo`] it names *and its canonical key*, as referenced from the
+    /// file whose module path is `from_module_path`, or `None` if the path does
+    /// not name a struct.
+    ///
+    /// A qualified type annotation reaches analysis as an unresolved path carrier
+    /// (the type checker canonicalizes it in a function's stored signature, but a
+    /// pass that re-derives a type from the raw AST sees the carrier). Sizing such
+    /// a type for the shadow-stack budget needs both the layout (`StructInfo`) and
+    /// the canonical key (to key a cyclic-definition visited set), so this returns
+    /// both — the key the same identity codegen lays the struct out under.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn resolve_struct_by_qualified_path(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> Option<(StructInfo, String)> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        match self.symbol_table.resolve_qualified_type_path(path, from_scope)? {
+            ResolvedNominalType::Struct(info, key) => Some((info, key)),
+            ResolvedNominalType::Enum(..) => None,
+        }
+    }
+
+    /// Whether the `::`-qualified type path names an enum as referenced from the
+    /// file whose module path is `from_module_path`. Mirrors
+    /// [`Self::resolve_struct_by_qualified_path`] for the enum case, used by the
+    /// stack-depth estimator to size a qualified-typed enum binding (a 4-byte tag,
+    /// no frame slot) rather than treating the unresolved carrier as zero.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn qualified_path_is_enum(&self, path: &[String], from_module_path: &[String]) -> bool {
+        let Some(from_scope) = self.symbol_table.find_module_scope(from_module_path) else {
+            return false;
+        };
+        matches!(
+            self.symbol_table.resolve_qualified_type_path(path, from_scope),
+            Some(ResolvedNominalType::Enum(..))
+        )
+    }
+
+    /// Returns the canonical key of the struct named `bare_name` as referenced
+    /// from the file whose module path is `from_module_path`.
+    ///
+    /// This is how a later phase translates a bare struct name appearing in a
+    /// given file into the unambiguous canonical key needed to fetch its layout:
+    /// the name resolves relative to the referencing file (own file first, then
+    /// the program root), so two files each defining a private `Buffer` map to
+    /// distinct keys. Returns `None` if the name does not resolve to a struct
+    /// visible from that file.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn canonical_struct_key(
+        &self,
+        bare_name: &str,
+        from_module_path: &[String],
+    ) -> Option<String> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        self.symbol_table
+            .resolve_struct_in_scope(bare_name, from_scope)
+            .map(|(_, key)| key)
+    }
+
+    /// Returns the canonical key of the enum named `bare_name` as referenced
+    /// from the file whose module path is `from_module_path`. Mirrors
+    /// [`Self::canonical_struct_key`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn canonical_enum_key(
+        &self,
+        bare_name: &str,
+        from_module_path: &[String],
+    ) -> Option<String> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        self.symbol_table
+            .resolve_enum_in_scope(bare_name, from_scope)
+            .map(|(_, key)| key)
+    }
+
+    /// Returns the defining-file module path of the struct named `bare_name` as
+    /// referenced from the file whose module path is `from_module_path`.
+    ///
+    /// A method's mangled WASM name is qualified by its **struct's** defining
+    /// file, not the call site's. Code generation resolves the receiver's struct
+    /// name and asks for that struct's defining file here. The result is empty
+    /// for a struct defined in the entry file (its methods stay unqualified) and
+    /// `["lib", "arith"]` for a struct in `lib/arith.inf`. Returns `None` if the
+    /// name does not resolve to a struct visible from that file.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn struct_module_path(
+        &self,
+        bare_name: &str,
+        from_module_path: &[String],
+    ) -> Option<Vec<String>> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        self.symbol_table
+            .resolve_struct_in_scope(bare_name, from_scope)
+            .map(|(info, _)| {
+                self.symbol_table
+                    .file_module_path_of_scope(info.definition_scope_id)
+            })
+    }
+
+    /// Returns the defining-file module path of the struct identified by its
+    /// `canonical_key` (`lib::geo::Inner`, or the bare name for an entry-file
+    /// struct), or `None` if no struct has that key.
+    ///
+    /// A method's mangled WASM name is qualified by its **struct's** defining
+    /// file. Dispatch must derive that file from the receiver's canonical identity
+    /// — never from a bare name re-resolved at the call site, which can name a
+    /// different same-named struct. This is the single mapping from a canonical key
+    /// to a defining module path that code generation uses to rebuild a method's
+    /// [`FnKey`](inference_wasm_codegen) key. The result is empty for an entry-file
+    /// struct (its methods stay unqualified), matching how methods are registered.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_path_of_struct_key(&self, canonical_key: &str) -> Option<Vec<String>> {
+        self.lookup_struct(canonical_key)
+            .map(|info| self.module_path_of_scope(info.definition_scope_id))
+    }
+
+    /// Returns the source-root-relative module path of the file that contains the
+    /// scope `scope_id`. The entry file yields an empty vector; an imported file
+    /// `lib/arith.inf` yields `["lib", "arith"]`.
+    ///
+    /// A type's layout depends only on its defining file, never the file that
+    /// accesses it: two files can each define a same-named struct with different
+    /// fields. Code generation derives a struct's own defining path from its
+    /// [`StructInfo::definition_scope_id`](crate::StructInfo::definition_scope_id)
+    /// and lays its fields out relative to that path, so a nested cross-file field
+    /// resolves to the layout of *its* defining file rather than the access site
+    /// (#63).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_path_of_scope(&self, scope_id: u32) -> Vec<String> {
+        self.symbol_table.file_module_path_of_scope(scope_id)
     }
 
     /// Registers a struct definition in the type context for testing.
@@ -133,10 +456,17 @@ impl TypedContext {
     pub fn register_test_struct(
         &mut self,
         name: &str,
-        fields: &[(String, TypeInfo, Visibility)],
+        fields: &[(String, TypeInfo)],
     ) -> anyhow::Result<()> {
-        self.symbol_table
-            .register_struct(name, fields, vec![], Visibility::Public)
+        self.symbol_table.register_struct(
+            name,
+            fields,
+            vec![],
+            Visibility::Public,
+            inference_ast::nodes::Location::default(),
+        )?;
+        self.build_type_indexes();
+        Ok(())
     }
 
     /// Registers an enum definition in the type context for testing.
@@ -150,8 +480,14 @@ impl TypedContext {
         name: &str,
         variants: &[&str],
     ) -> anyhow::Result<()> {
-        self.symbol_table
-            .register_enum(name, variants, Visibility::Public)
+        self.symbol_table.register_enum(
+            name,
+            variants,
+            Visibility::Public,
+            inference_ast::nodes::Location::default(),
+        )?;
+        self.build_type_indexes();
+        Ok(())
     }
 
     /// Looks up a method on the given type by name and returns its metadata.
@@ -263,6 +599,7 @@ mod tests {
             return_type,
             visibility: visibility.clone(),
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
             kind: FuncKind::Local,
         };
         ctx.symbol_table
@@ -375,6 +712,7 @@ mod tests {
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
             kind: FuncKind::Local,
         };
         ctx.symbol_table
@@ -391,6 +729,7 @@ mod tests {
             },
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
             kind: FuncKind::Local,
         };
         ctx.symbol_table
@@ -428,6 +767,7 @@ mod tests {
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
             kind: FuncKind::Local,
         };
         ctx.symbol_table
@@ -444,6 +784,7 @@ mod tests {
             },
             visibility: Visibility::Private,
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
             kind: FuncKind::Local,
         };
         ctx.symbol_table

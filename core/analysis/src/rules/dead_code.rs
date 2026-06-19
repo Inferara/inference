@@ -8,7 +8,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId};
 use inference_ast::nodes::{Def, Stmt};
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Unreachable code after `return`, `break`, or infinite loop.
@@ -16,47 +16,59 @@ crate::rule! {
     #[name = "Dead code"]
     #[severity = warning]
     pub struct DeadCode;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut warnings = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
-            check_defs(arena, &source_file.defs, &mut warnings);
+            check_defs(arena, &source_file.module_path, &source_file.defs, &mut warnings);
         }
         warnings
     }
 }
 
-fn check_defs(arena: &AstArena, def_ids: &[DefId], warnings: &mut Vec<AnalysisDiagnostic>) {
+fn check_defs(
+    arena: &AstArena,
+    module_path: &[String],
+    def_ids: &[DefId],
+    warnings: &mut Vec<LabeledDiagnostic>,
+) {
     for &def_id in def_ids {
         match &arena[def_id].kind {
-            Def::Function { body, .. } => check_block(arena, *body, warnings),
+            Def::Function { body, .. } => check_block(arena, module_path, *body, warnings),
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
                     if let Def::Function { body, .. } = &arena[method_id].kind {
-                        check_block(arena, *body, warnings);
+                        check_block(arena, module_path, *body, warnings);
                     }
                 }
             }
-            Def::Spec { defs, .. } => check_defs(arena, defs, warnings),
-            Def::Module { defs: Some(d), .. } => check_defs(arena, d, warnings),
+            Def::Spec { defs, .. } => check_defs(arena, module_path, defs, warnings),
             _ => {}
         }
     }
 }
 
-fn check_block(arena: &AstArena, block_id: BlockId, warnings: &mut Vec<AnalysisDiagnostic>) {
+fn check_block(
+    arena: &AstArena,
+    module_path: &[String],
+    block_id: BlockId,
+    warnings: &mut Vec<LabeledDiagnostic>,
+) {
     let block = &arena[block_id];
     let stmts = &block.stmts;
 
     for (i, &stmt_id) in stmts.iter().enumerate() {
-        recurse_into_sub_blocks(arena, stmt_id, warnings);
+        recurse_into_sub_blocks(arena, module_path, stmt_id, warnings);
 
         if let Some(terminator) = stmt_terminator_kind(arena, stmt_id) {
             for &dead_stmt_id in &stmts[i + 1..] {
-                warnings.push(AnalysisDiagnostic::DeadCode {
-                    terminator,
-                    location: arena[dead_stmt_id].location,
-                });
+                warnings.push(LabeledDiagnostic::new(
+                    module_path.to_vec(),
+                    AnalysisDiagnostic::DeadCode {
+                        terminator,
+                        location: arena[dead_stmt_id].location,
+                    },
+                ));
             }
             break;
         }
@@ -65,8 +77,9 @@ fn check_block(arena: &AstArena, block_id: BlockId, warnings: &mut Vec<AnalysisD
 
 fn recurse_into_sub_blocks(
     arena: &AstArena,
+    module_path: &[String],
     stmt_id: StmtId,
-    warnings: &mut Vec<AnalysisDiagnostic>,
+    warnings: &mut Vec<LabeledDiagnostic>,
 ) {
     match &arena[stmt_id].kind {
         Stmt::If {
@@ -74,16 +87,16 @@ fn recurse_into_sub_blocks(
             else_block,
             ..
         } => {
-            check_block(arena, *then_block, warnings);
+            check_block(arena, module_path, *then_block, warnings);
             if let Some(else_id) = else_block {
-                check_block(arena, *else_id, warnings);
+                check_block(arena, module_path, *else_id, warnings);
             }
         }
         Stmt::Loop { body, .. } => {
-            check_block(arena, *body, warnings);
+            check_block(arena, module_path, *body, warnings);
         }
         Stmt::Block(block_id) => {
-            check_block(arena, *block_id, warnings);
+            check_block(arena, module_path, *block_id, warnings);
         }
         _ => {}
     }

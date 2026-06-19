@@ -1,0 +1,15 @@
+use lib::shapes;
+
+pub struct Pair {
+    a: i32;
+    b: i32;
+}
+
+pub fn here_b() -> i32 {
+    let p: Pair = Pair { a: 10, b: 20 };
+    return p.b;
+}
+
+pub fn there_b() -> i32 {
+    return lib::shapes::there_b();
+}

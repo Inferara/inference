@@ -1,0 +1,12 @@
+[package]
+name = "inference-fn-key"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Canonical WASM function identity shared by the Inference codegen and analysis passes"
+keywords = ["compiler", "wasm", "codegen", "analysis"]
+categories = ["compilers"]
+
+[dependencies]

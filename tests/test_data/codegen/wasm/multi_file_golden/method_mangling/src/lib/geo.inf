@@ -1,0 +1,12 @@
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn dist(self) -> i32 {
+        return self.x;
+    }
+
+    pub fn at(v: i32) -> Point {
+        return Point { x: v, y: 0 };
+    }
+}

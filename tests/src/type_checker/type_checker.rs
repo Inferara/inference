@@ -1276,7 +1276,7 @@ mod type_inference_tests {
                     if field_name == "inner" {
                         assert_eq!(
                             field_type.unwrap().kind,
-                            TypeInfoKind::Struct("Inner".to_string()),
+                            TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string()),
                             "Field inner should have type Inner"
                         );
                     } else if field_name == "value" {
@@ -1465,7 +1465,7 @@ mod type_inference_tests {
                         "level2" => {
                             assert_eq!(
                                 field_type.unwrap().kind,
-                                TypeInfoKind::Struct("Level2".to_string()),
+                                TypeInfoKind::Struct("Level2".to_string(), "Level2".to_string()),
                                 "Field level2 should have type Level2"
                             );
                             found_level2 = true;
@@ -1473,7 +1473,7 @@ mod type_inference_tests {
                         "level3" => {
                             assert_eq!(
                                 field_type.unwrap().kind,
-                                TypeInfoKind::Struct("Level3".to_string()),
+                                TypeInfoKind::Struct("Level3".to_string(), "Level3".to_string()),
                                 "Field level3 should have type Level3"
                             );
                             found_level3 = true;
@@ -2754,11 +2754,6 @@ mod recursive_struct_tests {
         assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
-    // Module definitions are not yet supported in the grammar, so we cannot
-    // write a parser-level test for recursive structs inside modules. The fix
-    // handles Def::Module nonetheless to avoid a latent bug when module parsing
-    // is added.
-
     #[test]
     fn test_non_recursive_struct_inside_spec_is_accepted() {
         let source = r#"
@@ -3335,7 +3330,7 @@ mod extern_provenance_tests {
         }
     }
 
-    // --- Binding succeeds ---
+    // Binding succeeds ---
 
     #[test]
     fn binds_extern_to_single_module() {
@@ -3410,7 +3405,7 @@ mod extern_provenance_tests {
         );
     }
 
-    // --- Unbound extern stays valid ---
+    // Unbound extern stays valid ---
 
     #[test]
     fn bare_extern_without_use_is_unbound_but_valid() {
@@ -3437,7 +3432,7 @@ mod extern_provenance_tests {
         assert!(ctx.extern_origin("helper").is_none());
     }
 
-    // --- Ambiguity errors ---
+    // Ambiguity errors ---
 
     #[test]
     fn ambiguous_extern_from_two_modules_errors() {
@@ -3472,7 +3467,7 @@ mod extern_provenance_tests {
         assert!(result.is_err(), "ambiguous extern must be rejected");
     }
 
-    // --- Missing / dangling import errors ---
+    // Missing / dangling import errors ---
 
     #[test]
     fn use_from_naming_undeclared_extern_errors() {
@@ -3506,7 +3501,7 @@ mod extern_provenance_tests {
         );
     }
 
-    // --- Provenance inside spec and module bodies ---
+    // Provenance inside spec and module bodies ---
 
     #[test]
     fn top_level_use_does_not_bind_a_spec_inner_extern() {

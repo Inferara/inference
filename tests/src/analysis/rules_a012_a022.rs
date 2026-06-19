@@ -34,7 +34,7 @@ mod analysis_rules_tests {
             .to_vec()
     }
 
-    // --- A012: CompoundLiteralAsArgument ---
+    // A012: CompoundLiteralAsArgument ---
 
     #[test]
     fn a012_array_literal_as_argument_rejected() {
@@ -114,7 +114,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A014: ArrayUzumakiAsArgument ---
+    // A014: ArrayUzumakiAsArgument ---
 
     #[test]
     fn a014_array_uzumaki_as_argument_rejected() {
@@ -151,7 +151,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A015: CompoundLiteralInUnsupportedPosition ---
+    // A015: CompoundLiteralInUnsupportedPosition ---
 
     #[test]
     fn a015_struct_literal_as_standalone_expression_rejected() {
@@ -166,6 +166,32 @@ mod analysis_rules_tests {
         assert!(
             has_a015,
             "expected CompoundLiteralInUnsupportedPosition, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a015_struct_literal_as_method_receiver_rejected() {
+        // A struct literal used directly as a method receiver is an unsupported
+        // compound-literal position, so it defers to A015 rather than producing a
+        // spurious "method not found" — the method `sum` does exist. The supported
+        // form binds the literal to a local first (see
+        // `reexport_qualified_struct_literal_method_call_executes` in the codegen
+        // multi-file suite).
+        let source = r#"
+            struct Point {
+                x: i32;
+                y: i32;
+                pub fn sum(self) -> i32 { return self.x + self.y; }
+            }
+            fn test() -> i32 { return Point { x: 30, y: 12 }.sum(); }
+        "#;
+        let errors = expect_errors(source);
+        let has_a015 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. }));
+        assert!(
+            has_a015,
+            "a struct-literal method receiver must defer to A015, got: {errors:?}"
         );
     }
 
@@ -261,7 +287,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A016: CompoundReturnCallInExpressionPosition ---
+    // A016: CompoundReturnCallInExpressionPosition ---
 
     #[test]
     fn a016_array_returning_call_as_standalone_rejected() {
@@ -407,7 +433,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A017: CompoundReturnCallInAssignment ---
+    // A017: CompoundReturnCallInAssignment ---
 
     #[test]
     fn a017_compound_returning_call_in_assignment_rejected() {
@@ -497,7 +523,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- A018: MethodCallChainOnCompoundReturn ---
+    // A018: MethodCallChainOnCompoundReturn ---
 
     #[test]
     fn a018_method_chain_on_compound_return_rejected() {
@@ -546,7 +572,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- A019: ArrayIndex64Bit ---
+    // A019: ArrayIndex64Bit ---
 
     #[test]
     fn a019_i64_array_index_rejected() {
@@ -608,7 +634,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A022: LiteralOutOfRange ---
+    // A022: LiteralOutOfRange ---
 
     #[test]
     fn a022_i8_out_of_range() {
@@ -815,7 +841,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- Condition expression coverage tests ---
+    // Condition expression coverage tests ---
     // These tests verify that analysis rules scan expressions inside
     // loop conditions and if conditions (not just statement-level expressions).
 
@@ -1145,7 +1171,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- A016: CompoundReturnCallInExpressionPosition in const initializers ---
+    // A016: CompoundReturnCallInExpressionPosition in const initializers ---
 
     #[test]
     fn a016_compound_return_call_indexed_in_const_initializer_rejected() {
@@ -1214,7 +1240,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- A018: MethodCallChainOnCompoundReturn in const initializers ---
+    // A018: MethodCallChainOnCompoundReturn in const initializers ---
 
     #[test]
     fn a018_method_chain_on_compound_return_in_const_initializer_rejected() {
@@ -1336,7 +1362,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- A022: LiteralOutOfRange in const initializer inside function ---
+    // A022: LiteralOutOfRange in const initializer inside function ---
 
     #[test]
     fn a022_literal_out_of_range_in_const_inside_function() {

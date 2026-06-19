@@ -52,7 +52,7 @@ AstArena        inference_ast::arena::AstArena (unchanged public type)
 | `parser.rs` | `Parser` cursor; `Marker` / `CompletedMarker`; fuel counter; advance guard |
 | `syntax_tree.rs` | Owned immutable CST (`SyntaxNode`, `SyntaxElement`); `build_tree`; navigation helpers |
 | `grammar.rs` | Entry point `source_file`; top-level dispatch |
-| `grammar/items.rs` | Top-level definitions: `fn`, `spec`, `struct`, `enum`, `const`, `type`, `use`, `external fn` |
+| `grammar/items.rs` | Top-level definitions: `fn`, `spec`, `struct`, `enum`, `const`, `type`, `use` (including `pub use`), `external fn` |
 | `grammar/types.rs` | Type grammar: primitives, `[T; N]`, `fn(..)->T`, generic names, qualified names |
 | `grammar/params.rs` | Argument lists, `self`/ignore/typed args, type-parameter lists |
 | `grammar/stmt.rs` | Statements and blocks: `let`, assign, `return`, `loop`, `if`/`else`, non-det blocks, `assert`, `break` |
@@ -83,6 +83,35 @@ let (tree, errors) = inference_parser::parse_to_cst(src);
 ```
 
 `Parse` carries `#[must_use]` so callers cannot accidentally discard syntax errors.
+
+## `use` Directive and Module Visibility
+
+The parser handles four forms of `use`:
+
+| Form | Example | What it means |
+|------|---------|---------------|
+| File import | `use a::b;` | Import file `src/a/b.inf`, bind name `b` |
+| Item import | `use a::b::{x, y};` | Import items `x` and `y` from `src/a/b.inf` |
+| Re-export (file) | `pub use a::b;` | Same as file import, but the binding is public |
+| Re-export (items) | `pub use a::b::{x};` | Same as item import, but the binding is public |
+| External (unchanged) | `use {x} from M;` | External WASM import (#216); `from` keyword is the discriminator |
+
+The optional `pub` keyword before `use` is parsed as `Visibility::Public` and stored
+in the `vis` field of `UseDirective`. This required a fix in the top-level `item()`
+dispatch (`grammar.rs`): the parser now peeks past a leading `pub` token to detect
+`use` and routes it to `use_directive` rather than the general `definition` path.
+
+Three forms are rejected at the parser with educational messages and clean recovery:
+
+- `use a::b::*;` — glob imports are not supported; the error names the two supported
+  forms (`use a::b;` and `use a::b::{x, y};`).
+- `pub spec SpecName { … }` — specs take no visibility modifier; they are stripped
+  before codegen regardless of which file contains them.
+- `pub` on a struct field — fields inherit visibility from their struct; the error
+  directs the user to the struct's own visibility modifier.
+
+The `from`-form external WASM import (`use {x} from M;`) is unchanged and
+disambiguated from source imports by the presence of the `from` keyword.
 
 ## Design Notes
 

@@ -1,0 +1,5 @@
+spec LibSpec {
+    fn obligation() -> i32 {
+        return 2;
+    }
+}

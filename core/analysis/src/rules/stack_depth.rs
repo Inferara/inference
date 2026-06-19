@@ -45,10 +45,13 @@ use std::collections::HashSet;
 
 use inference_ast::ids::{BlockId, NodeId};
 use inference_ast::nodes::{ArgData, ArgKind, Def, Location, Stmt};
+use inference_fn_key::FnKey;
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
+use inference_type_checker::StructInfo;
+use rustc_hash::FxHashMap;
 
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 use crate::rule::TypedContext;
 
 /// The shadow-stack budget in bytes.
@@ -85,7 +88,7 @@ crate::rule! {
     #[name = "Stack depth exceeded"]
     #[severity = error]
     pub struct StackDepthExceeded;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let nodes = build_call_graph(ctx);
         check_stack_depth(ctx, &nodes)
     }
@@ -93,7 +96,10 @@ crate::rule! {
 
 /// Computes each node's frame weight and reports the deepest weighted path when
 /// it exceeds the budget.
-fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<AnalysisDiagnostic> {
+///
+/// The diagnostic is anchored at the chain's first function; that function's
+/// defining file names the finding.
+fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<LabeledDiagnostic> {
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -109,12 +115,15 @@ fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<AnalysisDiagno
     if depth_bytes <= STACK_BUDGET_BYTES {
         return Vec::new();
     }
-    vec![AnalysisDiagnostic::StackDepthExceeded {
-        chain: render_chain(nodes, &path),
-        depth_bytes,
-        budget_bytes: STACK_BUDGET_BYTES,
-        location: nodes[path[0]].location,
-    }]
+    vec![LabeledDiagnostic::new(
+        nodes[path[0]].module_path.clone(),
+        AnalysisDiagnostic::StackDepthExceeded {
+            chain: render_chain(nodes, &path),
+            depth_bytes,
+            budget_bytes: STACK_BUDGET_BYTES,
+            location: nodes[path[0]].location,
+        },
+    )]
 }
 
 /// Returns the maximum total weight over all root-to-leaf paths and the node
@@ -181,25 +190,27 @@ fn longest_from(
     color[u] = BLACK;
 }
 
-/// Renders a path as `a -> b -> c` using node display labels.
+/// Renders a path as `a -> b -> c` using each node's canonical key.
 fn render_chain(nodes: &[FnNode], path: &[usize]) -> String {
     path.iter()
-        .map(|&i| nodes[i].display.as_str())
+        .map(|&i| nodes[i].key.to_string())
         .collect::<Vec<_>>()
         .join(" -> ")
 }
 
-/// Returns each function's estimated stack-frame size in bytes, keyed by
-/// canonical function name.
+/// Returns each function's estimated stack-frame size in bytes, keyed by the
+/// structured [`FnKey`].
 ///
 /// Exposed so the codegen↔analysis frame-size soundness invariant
 /// (estimate ≥ real) can be checked cross-crate; see the parity test in
-/// `inference-tests`. Keys match codegen's [`FnKey`] display scheme
-/// (free `f`, spec-free `S.f`, method `T.m`, spec-method `S.T.m`).
-///
-/// [`FnKey`]: (codegen-internal; mirrored by `crate::call_graph::fn_key`)
-#[must_use]
-pub fn estimate_frame_sizes(ctx: &TypedContext) -> std::collections::BTreeMap<String, u32> {
+/// `inference-tests`. Keys are the structured [`FnKey`] from the shared
+/// [`inference_fn_key`] crate — the same key codegen records its frame-size map
+/// under, which is the interchange format the parity test compares. Keying on
+/// the structured `FnKey` rather than its lossy `Display` string keeps two
+/// functions whose keys render identically distinct, so the parity test cannot
+/// compare one function's estimate against another's real frame.
+#[must_use = "returns the estimated frame sizes"]
+pub fn estimate_frame_sizes(ctx: &TypedContext) -> FxHashMap<FnKey, u32> {
     build_call_graph(ctx)
         .iter()
         .map(|node| (node.key.clone(), estimate_frame_size(ctx, node)))
@@ -217,10 +228,15 @@ fn estimate_frame_size(ctx: &TypedContext, node: &FnNode) -> u32 {
     let mut bytes: u32 = 0;
 
     if let Def::Function { args, .. } = &arena[node.def_id].kind {
-        bytes = bytes.saturating_add(params_frame_bytes(ctx, args, node.struct_name.as_deref()));
+        bytes = bytes.saturating_add(params_frame_bytes(
+            ctx,
+            args,
+            &node.module_path,
+            node.struct_name.as_deref(),
+        ));
     }
 
-    bytes = bytes.saturating_add(body_frame_bytes(ctx, node.body));
+    bytes = bytes.saturating_add(body_frame_bytes(ctx, node.body, &node.module_path));
 
     if bytes == 0 {
         return 0;
@@ -229,19 +245,32 @@ fn estimate_frame_size(ctx: &TypedContext, node: &FnNode) -> u32 {
 }
 
 /// Accumulates the slot bytes for compound parameters and a mutable `self`.
-fn params_frame_bytes(ctx: &TypedContext, args: &[ArgData], struct_name: Option<&str>) -> u32 {
+///
+/// `module_path` is the function's defining file, used to resolve a bare
+/// parameter type name to its file-qualified struct: a parameter annotation
+/// carries only the bare name (`TypeInfo::from_type_id`), and the same bare name
+/// can name a different struct in another file.
+fn params_frame_bytes(
+    ctx: &TypedContext,
+    args: &[ArgData],
+    module_path: &[String],
+    struct_name: Option<&str>,
+) -> u32 {
     let arena = ctx.arena();
     let mut bytes: u32 = 0;
     for arg in args {
         match &arg.kind {
             ArgKind::Named { ty, .. } => {
                 let type_info = TypeInfo::from_type_id(arena, *ty);
-                bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind));
+                bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
             }
             ArgKind::SelfRef { is_mut: true } => {
                 if let Some(name) = struct_name {
-                    bytes = bytes
-                        .saturating_add(slot_bytes(ctx, &TypeInfoKind::Custom(name.to_string())));
+                    bytes = bytes.saturating_add(slot_bytes(
+                        ctx,
+                        &TypeInfoKind::Custom(name.to_string()),
+                        module_path,
+                    ));
                 }
             }
             _ => {}
@@ -253,30 +282,30 @@ fn params_frame_bytes(ctx: &TypedContext, args: &[ArgData], struct_name: Option<
 /// Walks a block accumulating slot bytes for compound bindings, mirroring
 /// codegen's `collect_compound_slots`: descends `Block`/`Loop`, and for an
 /// `If` with an `else` takes the per-branch maximum rather than the sum.
-fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId) -> u32 {
+fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId, module_path: &[String]) -> u32 {
     let arena = ctx.arena();
     let mut bytes: u32 = 0;
     for &stmt_id in &arena[block_id].stmts {
         match &arena[stmt_id].kind {
             Stmt::VarDef { .. } | Stmt::ConstDef(_) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id)) {
-                    bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind));
+                    bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
                 }
             }
             Stmt::Block(inner) => {
-                bytes = bytes.saturating_add(body_frame_bytes(ctx, *inner));
+                bytes = bytes.saturating_add(body_frame_bytes(ctx, *inner, module_path));
             }
             Stmt::Loop { body, .. } => {
-                bytes = bytes.saturating_add(body_frame_bytes(ctx, *body));
+                bytes = bytes.saturating_add(body_frame_bytes(ctx, *body, module_path));
             }
             Stmt::If {
                 then_block,
                 else_block,
                 ..
             } => {
-                let then_bytes = body_frame_bytes(ctx, *then_block);
+                let then_bytes = body_frame_bytes(ctx, *then_block, module_path);
                 let branch_bytes = match else_block {
-                    Some(else_id) => then_bytes.max(body_frame_bytes(ctx, *else_id)),
+                    Some(else_id) => then_bytes.max(body_frame_bytes(ctx, *else_id, module_path)),
                     None => then_bytes,
                 };
                 bytes = bytes.saturating_add(branch_bytes);
@@ -290,17 +319,86 @@ fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId) -> u32 {
 /// Returns the upper-bound slot contribution for a binding/parameter of the
 /// given type: `0` for scalars and enums (no frame slot), otherwise the exact
 /// compound byte size plus the worst-case per-slot leading alignment padding.
-fn slot_bytes(ctx: &TypedContext, kind: &TypeInfoKind) -> u32 {
+///
+/// `module_path` is the referencing file, used to resolve a bare `Custom` name
+/// to the struct it names from that file (see [`resolve_struct_size`]).
+fn slot_bytes(ctx: &TypedContext, kind: &TypeInfoKind, module_path: &[String]) -> u32 {
     match kind {
-        TypeInfoKind::Array(..) | TypeInfoKind::Struct(_) => {
-            exact_byte_size(ctx, kind).saturating_add(MAX_SLOT_PADDING)
+        TypeInfoKind::Array(..) | TypeInfoKind::Struct(_, _) => {
+            exact_byte_size(ctx, kind, module_path).saturating_add(MAX_SLOT_PADDING)
         }
-        // A `Custom` name gets a slot only when it resolves to a struct; enum
-        // and unresolved names are scalars (or invalid) and get none.
-        TypeInfoKind::Custom(name) if ctx.lookup_struct(name).is_some() => {
-            exact_byte_size(ctx, kind).saturating_add(MAX_SLOT_PADDING)
+        // A `Custom` name gets a slot only when it resolves to a struct from the
+        // referencing file; enum and unresolved names are scalars (or invalid)
+        // and get none.
+        TypeInfoKind::Custom(name) if ctx.lookup_struct_in(name, module_path).is_some() => {
+            exact_byte_size(ctx, kind, module_path).saturating_add(MAX_SLOT_PADDING)
+        }
+        // A `::`-qualified type annotation (`lib::big::Big`) reaches a parameter
+        // by-value the same as a bare struct does; it carries the path unresolved,
+        // so it gets a slot only when the path names a struct. Sizing it to zero
+        // would let an oversized cross-file struct frame slip past the budget.
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path)
+            if ctx
+                .resolve_struct_by_qualified_path(&split_path(path), module_path)
+                .is_some() =>
+        {
+            exact_byte_size(ctx, kind, module_path).saturating_add(MAX_SLOT_PADDING)
         }
         _ => 0,
+    }
+}
+
+/// Splits a `::`-joined type path (`lib::big::Big`) into its segments, the form
+/// [`TypedContext::resolve_struct_by_qualified_path`] expects. A
+/// [`TypeInfoKind::Qualified`]/[`TypeInfoKind::QualifiedName`] carries its path as
+/// a single joined string.
+fn split_path(path: &str) -> Vec<String> {
+    path.split("::").map(ToString::to_string).collect()
+}
+
+/// Resolves a struct/custom type to the [`StructInfo`] it names and the
+/// canonical key under which it (and its fields) should be re-keyed.
+///
+/// A `Struct(_, canonical_key)` already carries its file-qualified key, so it is
+/// looked up directly. A bare `Custom(name)` (a parameter or `mut self` slot)
+/// resolves through the referencing `module_path`, so the same bare name in two
+/// files maps to each file's own struct. Returns `None` when the name does not
+/// name a struct from that file (it may be an enum or a scalar).
+fn resolve_struct_size(
+    ctx: &TypedContext,
+    kind: &TypeInfoKind,
+    module_path: &[String],
+) -> Option<(StructInfo, String)> {
+    match kind {
+        TypeInfoKind::Struct(_, canonical_key) => ctx
+            .lookup_struct(canonical_key)
+            .map(|info| (info, canonical_key.clone())),
+        TypeInfoKind::Custom(name) => ctx.lookup_struct_in(name, module_path).map(|info| {
+            let key = ctx
+                .canonical_struct_key(name, module_path)
+                .unwrap_or_else(|| name.clone());
+            (info, key)
+        }),
+        // A qualified annotation carries an unresolved `::`-joined path; resolve it
+        // against the referencing file to the same struct and canonical key codegen
+        // lays it out under.
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+            ctx.resolve_struct_by_qualified_path(&split_path(path), module_path)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a struct/custom type names an enum (which has no frame slot but a
+/// known 4-byte tag size), resolved by canonical key or the referencing file.
+fn names_enum(ctx: &TypedContext, kind: &TypeInfoKind, module_path: &[String]) -> bool {
+    match kind {
+        TypeInfoKind::Enum(_, canonical_key) => ctx.lookup_enum(canonical_key).is_some(),
+        TypeInfoKind::Custom(name) => ctx.lookup_enum_in(name, module_path).is_some(),
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+            ctx.qualified_path_is_enum(&split_path(path), module_path)
+        }
+        _ => false,
     }
 }
 
@@ -313,22 +411,29 @@ fn slot_bytes(ctx: &TypedContext, kind: &TypeInfoKind) -> u32 {
 /// over-approximation here. Per-slot leading-padding margin is added separately
 /// by [`slot_bytes`].
 ///
+/// `module_path` is the referencing file, threaded so a bare cross-file `Custom`
+/// type resolves to the struct it names from that file. Field types stored in a
+/// resolved struct already carry their canonical keys, so the nested walk needs
+/// the path only for the (rare) bare entry point.
+///
 /// The inner [`NumberType`] match is exhaustive (no wildcard): a future numeric
 /// variant fails compilation here rather than being silently sized as zero,
 /// which would under-approximate the frame and make A036 unsound. The outer
 /// `_ => 0` arm covers only genuinely non-frame `TypeInfoKind` variants
 /// (`String`/`Unit`/`Generic`/etc.) that never reach a frame slot.
 ///
-/// A visited set guards against cyclic struct definitions (defense-in-depth;
-/// the type checker and A026 reject these first).
-fn exact_byte_size(ctx: &TypedContext, kind: &TypeInfoKind) -> u32 {
+/// A visited set keyed by canonical key guards against cyclic struct definitions
+/// (defense-in-depth; the type checker and A026 reject these first) and keeps
+/// same-named structs in different files distinct.
+fn exact_byte_size(ctx: &TypedContext, kind: &TypeInfoKind, module_path: &[String]) -> u32 {
     let mut visited = HashSet::new();
-    exact_byte_size_visited(ctx, kind, &mut visited)
+    exact_byte_size_visited(ctx, kind, module_path, &mut visited)
 }
 
 fn exact_byte_size_visited(
     ctx: &TypedContext,
     kind: &TypeInfoKind,
+    module_path: &[String],
     visited: &mut HashSet<String>,
 ) -> u32 {
     match kind {
@@ -339,35 +444,40 @@ fn exact_byte_size_visited(
             NumberType::I32 | NumberType::U32 => 4,
             NumberType::I64 | NumberType::U64 => 8,
         },
-        TypeInfoKind::Enum(_) => 4,
+        TypeInfoKind::Enum(_, _) => 4,
         TypeInfoKind::Array(elem, length) => {
-            let elem_sz = exact_byte_size_visited(ctx, &elem.kind, visited);
+            let elem_sz = exact_byte_size_visited(ctx, &elem.kind, module_path, visited);
             elem_sz.saturating_mul(*length)
         }
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            if !visited.insert(name.clone()) {
-                return 0;
-            }
-            let size = if let Some(struct_info) = ctx.lookup_struct(name) {
+        TypeInfoKind::Struct(_, _)
+        | TypeInfoKind::Custom(_)
+        | TypeInfoKind::Qualified(_)
+        | TypeInfoKind::QualifiedName(_) => {
+            if let Some((struct_info, key)) = resolve_struct_size(ctx, kind, module_path) {
+                if !visited.insert(key.clone()) {
+                    return 0;
+                }
                 // Mirror `compute_struct_field_layout`: place each field at its
                 // natural alignment against a running offset, then round the
-                // total up to the struct's maximum field alignment.
+                // total up to the struct's maximum field alignment. A field's
+                // own defining file is irrelevant once it carries a canonical
+                // key, so the path is threaded only for completeness.
                 let mut current: u32 = 0;
                 let mut max_align: u32 = 1;
                 for field in &struct_info.fields {
-                    let a = alignment_of(ctx, &field.type_info.kind, visited);
-                    let field_sz = exact_byte_size_visited(ctx, &field.type_info.kind, visited);
+                    let a = alignment_of(ctx, &field.type_info.kind, module_path, visited);
+                    let field_sz =
+                        exact_byte_size_visited(ctx, &field.type_info.kind, module_path, visited);
                     current = align_to(current, a).saturating_add(field_sz);
                     max_align = max_align.max(a);
                 }
+                visited.remove(&key);
                 align_to(current, max_align)
-            } else if ctx.lookup_enum(name).is_some() {
+            } else if names_enum(ctx, kind, module_path) {
                 4
             } else {
                 0
-            };
-            visited.remove(name);
-            size
+            }
         }
         // String/Unit/Generic/etc. never reach a frame slot in valid programs.
         _ => 0,
@@ -386,9 +496,14 @@ fn exact_byte_size_visited(
 /// non-frame `TypeInfoKind` variants (`String`/`Unit`/`Generic`/unresolved
 /// names) that never reach a frame slot.
 ///
-/// A visited set guards against cyclic struct definitions (defense-in-depth),
-/// matching the pattern in [`exact_byte_size_visited`].
-fn alignment_of(ctx: &TypedContext, kind: &TypeInfoKind, visited: &mut HashSet<String>) -> u32 {
+/// A visited set keyed by canonical key guards against cyclic struct definitions
+/// (defense-in-depth), matching the pattern in [`exact_byte_size_visited`].
+fn alignment_of(
+    ctx: &TypedContext,
+    kind: &TypeInfoKind,
+    module_path: &[String],
+    visited: &mut HashSet<String>,
+) -> u32 {
     match kind {
         TypeInfoKind::Number(nt) => match nt {
             NumberType::I8 | NumberType::U8 => 1,
@@ -396,25 +511,28 @@ fn alignment_of(ctx: &TypedContext, kind: &TypeInfoKind, visited: &mut HashSet<S
             NumberType::I32 | NumberType::U32 => 4,
             NumberType::I64 | NumberType::U64 => 8,
         },
-        TypeInfoKind::Enum(_) => 4,
-        TypeInfoKind::Array(elem, _) => alignment_of(ctx, &elem.kind, visited),
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            if !visited.insert(name.clone()) {
-                return 1;
-            }
-            let align = if let Some(struct_info) = ctx.lookup_struct(name) {
+        TypeInfoKind::Enum(_, _) => 4,
+        TypeInfoKind::Array(elem, _) => alignment_of(ctx, &elem.kind, module_path, visited),
+        TypeInfoKind::Struct(_, _)
+        | TypeInfoKind::Custom(_)
+        | TypeInfoKind::Qualified(_)
+        | TypeInfoKind::QualifiedName(_) => {
+            if let Some((struct_info, key)) = resolve_struct_size(ctx, kind, module_path) {
+                if !visited.insert(key.clone()) {
+                    return 1;
+                }
                 let mut max_align: u32 = 1;
                 for field in &struct_info.fields {
-                    max_align = max_align.max(alignment_of(ctx, &field.type_info.kind, visited));
+                    max_align =
+                        max_align.max(alignment_of(ctx, &field.type_info.kind, module_path, visited));
                 }
+                visited.remove(&key);
                 max_align
-            } else if ctx.lookup_enum(name).is_some() {
+            } else if names_enum(ctx, kind, module_path) {
                 4
             } else {
                 1
-            };
-            visited.remove(name);
-            align
+            }
         }
         // Bool and i8/u8 are byte-aligned; String/Unit/Generic and unresolved
         // names never reach a frame slot in valid programs and align to 1.
@@ -433,6 +551,10 @@ fn align_to(value: u32, alignment: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::call_graph::test_node;
+
+    /// The entry file's (empty) module path: every `register_test_struct` keys a
+    /// struct by its bare name, which is its canonical key in a single file.
+    const NO_PATH: &[String] = &[];
 
     /// Builds an adjacency list directly (bypassing key resolution) so the
     /// longest-path tests can use hand-built graphs without arena setup.
@@ -545,7 +667,6 @@ mod tests {
     /// Builds a `TypedContext` with the given structs registered, mirroring the
     /// `register_test_struct` pattern used by `core/wasm-codegen` unit tests.
     fn ctx_with_structs(structs: &[(&str, &[(&str, TypeInfoKind)])]) -> TypedContext {
-        use inference_ast::nodes::Visibility;
         let mut ctx = TypedContext::default();
         for (name, fields) in structs {
             let field_specs: Vec<_> = fields
@@ -557,7 +678,6 @@ mod tests {
                             kind: kind.clone(),
                             type_params: vec![],
                         },
-                        Visibility::Public,
                     )
                 })
                 .collect();
@@ -584,7 +704,7 @@ mod tests {
             ],
         )]);
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("S".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("S".to_string(), "S".to_string()), NO_PATH),
             24
         );
     }
@@ -596,16 +716,16 @@ mod tests {
     fn exact_byte_size_array_of_structs_is_not_inflated() {
         let ctx = ctx_with_structs(&[("P", &[("a", num(NumberType::I8)), ("b", num(NumberType::I8))])]);
         let elem = TypeInfo {
-            kind: TypeInfoKind::Struct("P".to_string()),
+            kind: TypeInfoKind::Struct("P".to_string(), "P".to_string()),
             type_params: vec![],
         };
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("P".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("P".to_string(), "P".to_string()), NO_PATH),
             2,
             "{{ i8, i8 }} packs to 2 bytes"
         );
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Array(Box::new(elem), 8000)),
+            exact_byte_size(&ctx, &TypeInfoKind::Array(Box::new(elem), 8000), NO_PATH),
             16_000,
             "[{{ i8, i8 }}; 8000] is exactly 2 * 8000, not per-field inflated"
         );
@@ -620,17 +740,25 @@ mod tests {
             (
                 "Outer",
                 &[
-                    ("inner", TypeInfoKind::Struct("Inner".to_string())),
+                    ("inner", TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string())),
                     ("val", num(NumberType::I32)),
                 ],
             ),
         ]);
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("Inner".to_string())),
+            exact_byte_size(
+                &ctx,
+                &TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string()),
+                NO_PATH
+            ),
             8
         );
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("Outer".to_string())),
+            exact_byte_size(
+                &ctx,
+                &TypeInfoKind::Struct("Outer".to_string(), "Outer".to_string()),
+                NO_PATH
+            ),
             12
         );
     }
@@ -644,12 +772,17 @@ mod tests {
             &[("a", num(NumberType::I8)), ("b", num(NumberType::I64))],
         )]);
         let mut v = HashSet::new();
-        assert_eq!(alignment_of(&ctx, &num(NumberType::I8), &mut v), 1);
-        assert_eq!(alignment_of(&ctx, &num(NumberType::I16), &mut v), 2);
-        assert_eq!(alignment_of(&ctx, &num(NumberType::I32), &mut v), 4);
-        assert_eq!(alignment_of(&ctx, &num(NumberType::I64), &mut v), 8);
+        assert_eq!(alignment_of(&ctx, &num(NumberType::I8), NO_PATH, &mut v), 1);
+        assert_eq!(alignment_of(&ctx, &num(NumberType::I16), NO_PATH, &mut v), 2);
+        assert_eq!(alignment_of(&ctx, &num(NumberType::I32), NO_PATH, &mut v), 4);
+        assert_eq!(alignment_of(&ctx, &num(NumberType::I64), NO_PATH, &mut v), 8);
         assert_eq!(
-            alignment_of(&ctx, &TypeInfoKind::Struct("S".to_string()), &mut v),
+            alignment_of(
+                &ctx,
+                &TypeInfoKind::Struct("S".to_string(), "S".to_string()),
+                NO_PATH,
+                &mut v
+            ),
             8,
             "struct alignment = widest field (i64) = 8"
         );
@@ -661,7 +794,7 @@ mod tests {
             10,
         );
         assert_eq!(
-            alignment_of(&ctx, &arr, &mut v),
+            alignment_of(&ctx, &arr, NO_PATH, &mut v),
             2,
             "array alignment = element alignment (i16) = 2"
         );

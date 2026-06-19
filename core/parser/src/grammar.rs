@@ -72,8 +72,19 @@ fn at_item_start(p: &Parser) -> bool {
 
 /// Dispatches a single top-level item: a use directive, a spec definition, or a
 /// plain definition (`source_file` choice arms).
+///
+/// Because `use`, `spec`, and `external` carry their own visibility rules, the
+/// dispatch peeks past an optional leading `pub` to the item keyword so that
+/// `pub use`/`pub spec` reach their dedicated handlers (which accept or report
+/// the modifier) rather than falling into `definition`, where a `pub` followed
+/// by a non-definition keyword would error generically.
 fn item(p: &mut Parser) {
-    match p.current() {
+    let keyword = if p.at(SyntaxKind::PubKw) {
+        p.nth(1)
+    } else {
+        p.current()
+    };
+    match keyword {
         SyntaxKind::UseKw => items::use_directive(p),
         SyntaxKind::SpecKw => items::spec_definition(p),
         _ => items::definition(p),
@@ -91,6 +102,22 @@ mod tests {
         let (tree, errors) = parse_to_cst(src);
         (tree, errors.len())
     }
+
+    /// Parses `src` and returns the rendered CST plus the parse-error messages,
+    /// in source order. Used by the diagnostic-matrix tests that assert the exact
+    /// message text and the exact error count (no cascade).
+    fn parse_messages(src: &str) -> (SyntaxNode, Vec<String>) {
+        let (tree, errors) = parse_to_cst(src);
+        (tree, errors.into_iter().map(|e| e.message).collect())
+    }
+
+    /// The verbatim glob-rejection diagnostic, kept in sync with
+    /// `items::GLOB_IMPORT_MESSAGE`. Duplicated here (rather than re-exported)
+    /// so the test pins the user-facing wording: a change to the production
+    /// message must be a deliberate edit here too.
+    const GLOB_MESSAGE: &str =
+        "glob imports are not supported; import the file (use a::b;) or list items \
+         explicitly (use a::b::{x, y};)";
 
     /// The indented S-expression of `src`'s CST, for shape assertions.
     fn tree(src: &str) -> String {
@@ -159,7 +186,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no {kind:?} node in:\n{}", root.debug_tree(src)))
     }
 
-    // ---- items ----
+    // items
 
     #[test]
     fn function_definition_shape() {
@@ -290,7 +317,54 @@ mod tests {
         assert_clean("spec some_spec {}");
     }
 
-    // ---- use directives ----
+    #[test]
+    fn pub_spec_is_rejected_and_recovers() {
+        // Specs take no visibility modifier. The stray `pub` is reported and
+        // consumed, but the spec body still parses.
+        let src = "pub spec S { const a: i32 = 10; }";
+        let (root, errors) = parse(src);
+        assert!(errors > 0, "expected a diagnostic for the stray `pub`");
+        let s = find(&root, SyntaxKind::SpecDefinition)
+            .expect("the spec should still be recognised");
+        assert!(
+            s.child(SyntaxKind::Visibility).is_some(),
+            "the stray `pub` is consumed as a Visibility node"
+        );
+        assert_eq!(count_kind(s, SyntaxKind::ConstantDefinition), 1);
+    }
+
+    #[test]
+    fn pub_struct_field_is_rejected_and_recovers() {
+        // A field has no individual visibility. The stray `pub` is reported and
+        // consumed, and the field itself still lands in the tree.
+        let src = "struct S { pub x : i32; }";
+        let (root, errors) = parse(src);
+        assert!(errors > 0, "expected a diagnostic for the stray `pub`");
+        let field = find(&root, SyntaxKind::StructField)
+            .expect("the field should still be recognised");
+        assert!(
+            field.child(SyntaxKind::Visibility).is_some(),
+            "the stray `pub` is consumed as a Visibility node"
+        );
+        assert_eq!(
+            field.child(SyntaxKind::Identifier).map(|n| n.text(src)),
+            Some("x")
+        );
+        assert!(field.child(SyntaxKind::TypeI32).is_some());
+    }
+
+    #[test]
+    fn pub_method_is_still_a_method_not_a_field() {
+        // `pub fn …` inside a struct is a method and must parse cleanly — the
+        // field-vs-method disambiguation keys off the token after `pub`.
+        let src = "struct S { pub fn g() { } }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructDefinition);
+        assert_eq!(count_kind(&s, SyntaxKind::FunctionDefinition), 1);
+        assert_eq!(count_kind(&s, SyntaxKind::StructField), 0);
+    }
+
+    // use directives
 
     #[test]
     fn use_path() {
@@ -330,7 +404,356 @@ mod tests {
         assert_eq!(count_kind(&u, SyntaxKind::Identifier), 3);
     }
 
-    // ---- types ----
+    #[test]
+    fn pub_use_path_parses_clean() {
+        let src = "pub use lib::arith;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(
+            u.child(SyntaxKind::Visibility).is_some(),
+            "the leading `pub` is a Visibility node"
+        );
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 2);
+    }
+
+    #[test]
+    fn pub_use_braced_parses_clean() {
+        let src = "pub use a::b::{ x, y };";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::Visibility).is_some());
+        // a + b segments, plus x + y imported items.
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 4);
+    }
+
+    #[test]
+    fn pub_use_from_parses_clean() {
+        let src = "pub use { x } from M;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::Visibility).is_some());
+    }
+
+    #[test]
+    fn glob_use_is_rejected_and_recovers() {
+        // `use a::b::*;` has no grammar support: the parser reports the glob and
+        // skips to the `;`, then the following item still parses cleanly.
+        let src = "use a::b::*; fn f() { }";
+        let (root, errors) = parse(src);
+        assert!(errors > 0, "expected a diagnostic for the glob import");
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+        assert!(
+            find(&root, SyntaxKind::FunctionDefinition).is_some(),
+            "the following item must still parse after glob recovery:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn pub_glob_use_is_rejected_and_recovers() {
+        let src = "pub use math::*; fn f() { }";
+        let (root, errors) = parse(src);
+        assert!(errors > 0);
+        assert!(find(&root, SyntaxKind::FunctionDefinition).is_some());
+    }
+
+    // use directives: #63 matrix (CST)
+    //
+    // The smoke tests above cover one happy case per `pub`/glob form. The
+    // matrix below broadens coverage across every path depth, every glob
+    // position, exact diagnostic wording, exact error counts (no cascade), and
+    // recovery quality (subsequent top-level items still parse).
+    // Lowering-level `vis`/segment assertions live in `lower.rs`.
+
+    #[test]
+    fn single_segment_use_parses_clean() {
+        // A brace-free single-segment `use math;` names a file. It must parse
+        // with exactly one path identifier.
+        let src = "use math;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::Visibility).is_none());
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 1);
+    }
+
+    #[test]
+    fn pub_single_segment_use_parses_clean() {
+        let src = "pub use math;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::Visibility).is_some());
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 1);
+    }
+
+    #[test]
+    fn deep_path_use_parses_clean() {
+        // A 5-segment path stresses the `::`-segment loop well past the 2/3
+        // segments the smoke tests use.
+        let src = "use a::b::c::d::e;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 5);
+    }
+
+    #[test]
+    fn pub_deep_path_braced_items_parse_clean() {
+        // `pub` + a multi-segment path + a multi-item brace list together: the
+        // leading `pub` must not perturb the segment/imported-item split.
+        let src = "pub use a::b::c::{ x, y, z };";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::Visibility).is_some());
+        // 3 path segments + 3 imported items.
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 6);
+    }
+
+    #[test]
+    fn use_single_braced_item_parses_clean() {
+        // The single-item import form `use a::{b};`: braces always name
+        // items, even when there is exactly one.
+        let src = "use a::{ b };";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 2);
+    }
+
+    #[test]
+    fn use_trailing_comma_in_braces_parses_clean() {
+        // A trailing comma in the import list is tolerated by `imported_type_list`
+        // (the loop breaks on `}` after a comma). Pin this as accepted behavior.
+        let src = "use a::{ x, y, };";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        // 1 segment + 2 imported items (the trailing comma adds no identifier).
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 3);
+    }
+
+    #[test]
+    fn use_empty_braces_parses_clean_with_no_items() {
+        // `use a::b::{};` — empty braces. Current behavior: parses cleanly with
+        // zero imported items (no diagnostic). Asserted as-is per the
+        // CONTRIBUTING rule on pinning current behavior; whether an empty
+        // import list is rejected is a type-checker concern, not the parser's.
+        let src = "use a::b::{};";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        // 2 path segments, no imported-item identifiers.
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 2);
+    }
+
+    // -- glob rejection at every depth; exact message; exact count; recovery --
+
+    #[test]
+    fn glob_use_bare_star_exact_message_single_error() {
+        // `use *;` — a glob with no path at all. Exactly one diagnostic with the
+        // educational wording; no cascade.
+        let (_root, msgs) = parse_messages("use *;");
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+    }
+
+    #[test]
+    fn glob_use_one_segment_exact_message_single_error() {
+        let (_root, msgs) = parse_messages("use a::*;");
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+    }
+
+    #[test]
+    fn glob_use_deep_path_exact_message_single_error() {
+        // Glob at depth 3 (`use a::b::c::*;`): the `::`-segment loop rejects the
+        // `*` after the final `::`, still a single error.
+        let (_root, msgs) = parse_messages("use a::b::c::*;");
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+    }
+
+    #[test]
+    fn pub_glob_use_consumes_pub_with_single_glob_error() {
+        // `pub use a::b::*;` — the leading `pub` is consumed cleanly as a
+        // Visibility node and only the glob is reported: exactly one error, not
+        // a `pub`-plus-glob cascade.
+        let (root, msgs) = parse_messages("pub use a::b::*;");
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+        let u = find(&root, SyntaxKind::UseDirective).expect("use directive node");
+        assert!(
+            u.child(SyntaxKind::Visibility).is_some(),
+            "the leading `pub` is still consumed as a Visibility node:\n{}",
+            tree("pub use a::b::*;")
+        );
+    }
+
+    #[test]
+    fn glob_use_without_semicolon_recovers_at_item_anchor() {
+        // `use a::b::*` with no trailing `;`: recovery must stop at the next
+        // ITEM_RECOVERY anchor (`fn`) rather than swallowing it, so the function
+        // still parses. Exactly one diagnostic (the glob); the missing `;` does
+        // not add a cascade because recovery short-circuits at the anchor.
+        let src = "use a::b::* fn f() { }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+        assert!(
+            find(&root, SyntaxKind::FunctionDefinition).is_some(),
+            "the following function must survive glob recovery:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn glob_use_at_eof_terminates_with_single_error() {
+        // `use a::b::*` truncated at EOF: recovery hits `at_eof()` immediately,
+        // still exactly one diagnostic, and the parser terminates (reaching this
+        // assertion proves it did) with a SourceFile root.
+        let (root, msgs) = parse_messages("use a::b::*");
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn glob_use_followed_by_struct_recovers_and_parses_struct() {
+        // Recovery quality with a richer following item than a bare `fn`: a
+        // struct definition after the glob must parse intact.
+        let src = "use a::*; struct P { x: i32; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+        let s = find(&root, SyntaxKind::StructDefinition).expect("struct survives recovery");
+        assert_eq!(count_kind(s, SyntaxKind::StructField), 1);
+    }
+
+    #[test]
+    fn glob_use_between_two_good_use_directives() {
+        // A glob wedged between two valid `use`s: the good directives on either
+        // side parse, and only the middle glob errors (one error total).
+        let src = "use first; use mid::*; use last;";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![GLOB_MESSAGE.to_string()]);
+        // Three UseDirective nodes survive (the two clean ones plus the rejected
+        // one, which still completes its node).
+        assert_eq!(count_kind(&root, SyntaxKind::UseDirective), 3);
+    }
+
+    #[test]
+    fn use_trailing_colon_colon_without_item_recovers() {
+        // `use a::b::` with nothing after the final `::`: not a glob, but a
+        // missing path/item. Current behavior is two diagnostics (a missing
+        // identifier and the missing `;`); pin that count and that the parser
+        // still terminates with a SourceFile root.
+        let (root, msgs) = parse_messages("use a::b::");
+        assert_eq!(
+            msgs,
+            vec!["expected an identifier".to_string(), "expected Semi".to_string()],
+            "trailing `::` without an item:\n{}",
+            tree("use a::b::")
+        );
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+    }
+
+    // -- pub spec rejection: exact message, body integrity, following items
+
+    #[test]
+    fn pub_spec_exact_message_single_error() {
+        // The `pub spec` diagnostic is reported exactly once at the CST level; the
+        // `pub` is then consumed and the spec body parses, so no parse cascade
+        // follows. This checks parsing only; the parse+lower variant below guards
+        // against a lowering cascade re-reporting the same invalid input.
+        let (_root, msgs) = parse_messages("pub spec S { const a: i32 = 10; type T = u32; }");
+        assert_eq!(
+            msgs,
+            vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
+        );
+    }
+
+    #[test]
+    fn pub_spec_single_error_through_lowering() {
+        // The full parse+lower pipeline must surface exactly one diagnostic for a
+        // `pub spec`. The stray `pub` is a `Visibility` node child of the spec; a
+        // naive "skip the first node child" loop over the spec body would re-lower
+        // the name `Identifier` as if it were a definition and emit a spurious
+        // second diagnostic. Drive the public `parse` (which runs lowering) so a
+        // CST-only check cannot mask that cascade.
+        let parsed = crate::parse("pub spec S { const a: i32 = 10; type T = u32; }");
+        assert_eq!(
+            parsed.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
+            vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
+        );
+    }
+
+    #[test]
+    fn pub_spec_body_items_survive_recovery() {
+        // After the stray `pub`, every item inside the spec body must still land
+        // in the tree: a const, a type alias and a function.
+        let src = "pub spec S { const a: i32 = 1; type T = u32; fn h() { } }";
+        let (root, _errors) = parse(src);
+        let s = find(&root, SyntaxKind::SpecDefinition).expect("spec survives the stray pub");
+        assert_eq!(count_kind(s, SyntaxKind::ConstantDefinition), 1);
+        assert_eq!(count_kind(s, SyntaxKind::TypeDefinitionStatement), 1);
+        assert_eq!(count_kind(s, SyntaxKind::FunctionDefinition), 1);
+    }
+
+    #[test]
+    fn pub_spec_followed_by_top_level_item_still_parses() {
+        // A top-level definition after a `pub spec` must parse: the spec error
+        // does not leak into the following item.
+        let src = "pub spec S { } fn after() { }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(
+            msgs,
+            vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
+        );
+        assert!(
+            find(&root, SyntaxKind::FunctionDefinition).is_some(),
+            "the item after the pub spec must parse:\n{}",
+            tree(src)
+        );
+    }
+
+    // -- pub field rejection: exact message, AST integrity, mixed members
+
+    #[test]
+    fn pub_field_exact_message_single_error() {
+        let (_root, msgs) = parse_messages("struct S { pub x : i32; }");
+        assert_eq!(msgs, vec!["fields inherit visibility from their struct".to_string()]);
+    }
+
+    #[test]
+    fn multiple_pub_fields_report_one_error_each() {
+        // Two `pub` fields produce exactly two diagnostics — one per field, no
+        // cascade — and both fields still land in the struct.
+        let src = "struct S { pub x : i32; pub y : i32; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(
+            msgs,
+            vec![
+                "fields inherit visibility from their struct".to_string(),
+                "fields inherit visibility from their struct".to_string(),
+            ]
+        );
+        let s = find(&root, SyntaxKind::StructDefinition).expect("struct node");
+        assert_eq!(count_kind(s, SyntaxKind::StructField), 2);
+    }
+
+    #[test]
+    fn struct_mixes_pub_field_normal_field_method_and_pub_method() {
+        // A single struct exercising every member-disambiguation branch: a `pub`
+        // field (rejected, kept), a normal field, a method, and a `pub` method
+        // (which stays a method). Exactly one diagnostic, for the `pub` field.
+        let src = "struct S { pub a : i32; b : i32; fn m(self) { } pub fn p(self) { } }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec!["fields inherit visibility from their struct".to_string()]);
+        let s = find(&root, SyntaxKind::StructDefinition).expect("struct node");
+        // Two fields (the pub one and the normal one).
+        assert_eq!(count_kind(s, SyntaxKind::StructField), 2);
+        // Two methods (the plain one and the pub one).
+        assert_eq!(count_kind(s, SyntaxKind::FunctionDefinition), 2);
+    }
+
+    #[test]
+    fn pub_field_struct_followed_by_top_level_item_parses() {
+        let src = "struct S { pub x : i32; } fn after() { }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec!["fields inherit visibility from their struct".to_string()]);
+        let fns = count_kind(&root, SyntaxKind::FunctionDefinition);
+        assert_eq!(fns, 1, "the trailing fn must parse:\n{}", tree(src));
+    }
+
+    // types
 
     #[test]
     fn primitive_types() {
@@ -421,7 +844,7 @@ mod tests {
         assert!(find(&args, SyntaxKind::Identifier).is_some());
     }
 
-    // ---- statements ----
+    // statements
 
     #[test]
     fn variable_definition_with_value() {
@@ -538,7 +961,7 @@ mod tests {
         }
     }
 
-    // ---- expressions: literals & atoms ----
+    // expressions: literals & atoms
 
     #[test]
     fn number_literal_atom() {
@@ -599,7 +1022,86 @@ mod tests {
         assert!(count_kind(&s, SyntaxKind::Identifier) >= 3);
     }
 
-    // ---- expressions: precedence & associativity ----
+    #[test]
+    fn single_segment_qualified_struct_literal() {
+        // `geo::Point { .. }` is a struct literal whose name is a
+        // `TypeQualifiedName` head.
+        let src = "fn f() { let p : Point = geo::Point { x: 1, y: 2 }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeQualifiedName);
+        assert_eq!(head.text(src), "geo::Point");
+    }
+
+    #[test]
+    fn multi_segment_qualified_struct_literal() {
+        // Previously-failing case (#63): `lib::geo::Point { .. }` now parses into
+        // a struct literal whose head is the whole `::` chain.
+        let src = "fn f() { let p : Point = lib::geo::Point { x: 1, y: 2 }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeMemberAccessExpression);
+        assert_eq!(head.text(src), "lib::geo::Point");
+    }
+
+    #[test]
+    fn deep_qualified_struct_literal_with_empty_body() {
+        let src = "fn f() { let p : Point = a::b::c::Point { }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeMemberAccessExpression);
+        assert_eq!(head.text(src), "a::b::c::Point");
+    }
+
+    #[test]
+    fn qualified_call_is_not_a_struct_literal() {
+        // `a::b::c(...)` is a call, not a struct literal: no `StructExpression`.
+        let src = "fn f() { x = a::b::c(); }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(find(&root, SyntaxKind::StructExpression).is_none());
+        assert!(find(&root, SyntaxKind::FunctionCallExpression).is_some());
+    }
+
+    #[test]
+    fn qualified_variant_access_is_not_a_struct_literal() {
+        // `a::b::C` (e.g. an enum variant) stays a type-member access chain.
+        let src = "fn f() { x = a::b::C; }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(find(&root, SyntaxKind::StructExpression).is_none());
+        assert_eq!(
+            count_kind(&root, SyntaxKind::TypeMemberAccessExpression),
+            1
+        );
+    }
+
+    #[test]
+    fn qualified_struct_literal_suppressed_in_if_head() {
+        // In an `if` head the `{` opens the body, even after a `::` chain: no
+        // struct literal is parsed (mirrors the bare/single-segment behaviour).
+        let src = "fn f() { if a::b::Point { } }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(
+            find(&root, SyntaxKind::StructExpression).is_none(),
+            "if head must not greedily parse a qualified struct literal:\n{}",
+            tree(src)
+        );
+        assert!(find(&root, SyntaxKind::IfStatement).is_some());
+    }
+
+    #[test]
+    fn qualified_struct_literal_suppressed_in_loop_head() {
+        let src = "fn f() { loop a::b::Cond { break; } }";
+        assert_clean(src);
+        assert!(find(&parse_to_cst(src).0, SyntaxKind::StructExpression).is_none());
+    }
+
+    // expressions: precedence & associativity
 
     #[test]
     fn add_binds_looser_than_mul() {
@@ -700,7 +1202,7 @@ mod tests {
         assert_eq!(left.kind, SyntaxKind::ParenthesizedExpression);
     }
 
-    // ---- disambiguations ----
+    // disambiguations
 
     #[test]
     fn negative_number_is_single_literal() {
@@ -806,7 +1308,7 @@ mod tests {
         assert!(find(&a, SyntaxKind::MemberAccessExpression).is_some());
     }
 
-    // ---- resilience: never panic, always reach EOF, produce errors ----
+    // resilience: never panic, always reach EOF, produce errors
 
     #[test]
     fn missing_semicolon_recovers() {
@@ -920,7 +1422,7 @@ mod tests {
         }
     }
 
-    // ---- corpus smoke ----
+    // corpus smoke
 
     // Real Inference programs, vendored under `core/parser/test_data/` and
     // embedded at compile time via `include_str!` so these tests run everywhere

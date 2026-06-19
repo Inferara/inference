@@ -1,0 +1,5 @@
+use lib::arith;
+
+pub fn run() -> i32 {
+    return lib::arith::add(2, 3);
+}

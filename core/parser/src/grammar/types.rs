@@ -155,14 +155,25 @@ fn bracketed_generic_name(p: &mut Parser) {
     p.expect(SyntaxKind::RParen);
 }
 
-/// Parses a `_name`: `type_qualified_name` (`ident :: simple_name`, the `::`
+/// Parses a `_name`: `type_qualified_name` (`ident (:: simple_name)+`, each `::`
 /// glued) or a `_simple_name` (`_name`). Hidden rule.
+///
+/// A qualified type may name a type reached through a chain of file namespaces
+/// (`lib::geom::Point`), so the `::` hops form a loop rather than a single step,
+/// mirroring the expression postfix chain (`grammar/expr.rs`). Every segment but
+/// the last is a namespace qualifier; the last is the leaf type name. The single
+/// `TypeQualifiedName` node therefore carries one `Identifier` child per segment,
+/// which lowering splits into a qualifier list plus the leaf.
 pub(crate) fn name(p: &mut Parser) {
     if at_ident_like(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
         let m = p.start();
         identifier(p);
         p.bump(SyntaxKind::ColonColon);
         qualified_simple_name(p);
+        while p.at(SyntaxKind::ColonColon) && p.prev_joint() {
+            p.bump(SyntaxKind::ColonColon);
+            qualified_simple_name(p);
+        }
         m.complete(p, SyntaxKind::TypeQualifiedName);
     } else {
         simple_name(p);

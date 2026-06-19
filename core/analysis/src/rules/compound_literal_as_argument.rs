@@ -5,7 +5,10 @@
 
 use inference_ast::nodes::Expr;
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// Compound literals cannot be passed directly as function arguments.
@@ -13,10 +16,11 @@ crate::rule! {
     #[name = "Compound literal as argument"]
     #[severity = error]
     pub struct CompoundLiteralAsArgument;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
+        walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
+            let module_path = walk_ctx.module_path.clone();
             walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     if let Expr::FunctionCall { args, .. } = &arena[sub_id].kind {
@@ -27,10 +31,13 @@ crate::rule! {
                                 _ => None,
                             };
                             if let Some(kind) = kind {
-                                errors.push(AnalysisDiagnostic::CompoundLiteralAsArgument {
-                                    kind,
-                                    location: arena[*arg_expr].location,
-                                });
+                                errors.push(LabeledDiagnostic::new(
+                                    module_path.clone(),
+                                    AnalysisDiagnostic::CompoundLiteralAsArgument {
+                                        kind,
+                                        location: arena[*arg_expr].location,
+                                    },
+                                ));
                             }
                         }
                     }

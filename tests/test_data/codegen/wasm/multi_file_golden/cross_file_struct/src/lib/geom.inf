@@ -1,0 +1,8 @@
+pub struct Point {
+    x: i32;
+    y: i32;
+}
+
+pub fn make(a: i32, b: i32) -> Point {
+    return Point { x: a, y: b };
+}

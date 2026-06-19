@@ -46,13 +46,22 @@ fn visibility(p: &mut Parser) {
     }
 }
 
-/// `use ( path [ :: { types } ] | { types } from module_ref ) ;`
-/// (`use_directive`). The two forms are distinguished by whether the body starts
-/// with `{`. In the `from` form, `module_ref` is a logical identifier path
-/// (`name` or `a::b`) — not a filesystem string — so source stays portable.
+/// The diagnostic for a glob use (`use a::b::*;`). Glob imports are rejected so a
+/// file's public surface stays explicit; the message points at the two supported
+/// alternatives.
+const GLOB_IMPORT_MESSAGE: &str =
+    "glob imports are not supported; import the file (use a::b;) or list items \
+     explicitly (use a::b::{x, y};)";
+
+/// `[pub] use ( path [ :: { types } ] | { types } from module_ref ) ;`
+/// (`use_directive`). An optional leading `pub` re-exports the import. The two
+/// forms are distinguished by whether the body starts with `{`. In the `from`
+/// form, `module_ref` is a logical identifier path (`name` or `a::b`) — not a
+/// filesystem string — so source stays portable.
 pub(crate) fn use_directive(p: &mut Parser) {
     let m = p.start();
-    p.bump(SyntaxKind::UseKw);
+    visibility(p);
+    p.expect(SyntaxKind::UseKw);
     if p.at(SyntaxKind::LBrace) {
         imported_type_list(p);
         p.expect(SyntaxKind::FromKw);
@@ -61,10 +70,24 @@ pub(crate) fn use_directive(p: &mut Parser) {
         } else {
             p.error("expected a module name");
         }
+    } else if p.at(SyntaxKind::Star) {
+        // A leading `*` (`use *;`) is a glob with no path: reject and recover.
+        p.error(GLOB_IMPORT_MESSAGE);
+        recover_to_semicolon(p);
+        m.complete(p, SyntaxKind::UseDirective);
+        return;
     } else {
         types::identifier(p);
         while p.at(SyntaxKind::ColonColon) && !p.nth_at(1, SyntaxKind::LBrace) {
             p.bump(SyntaxKind::ColonColon);
+            if p.at(SyntaxKind::Star) {
+                // `use a::b::*;` — reject the glob and skip to the terminating
+                // `;` so the following item still parses.
+                p.error(GLOB_IMPORT_MESSAGE);
+                recover_to_semicolon(p);
+                m.complete(p, SyntaxKind::UseDirective);
+                return;
+            }
             types::identifier(p);
         }
         if p.at(SyntaxKind::ColonColon) {
@@ -74,6 +97,23 @@ pub(crate) fn use_directive(p: &mut Parser) {
     }
     p.expect(SyntaxKind::Semi);
     m.complete(p, SyntaxKind::UseDirective);
+}
+
+/// Consumes tokens up to and including the next `;`, wrapping the skipped run in
+/// an `Error` node, so a malformed directive resynchronises on the next item.
+/// Stops early at EOF or an item-recovery anchor so it never eats a following
+/// definition.
+fn recover_to_semicolon(p: &mut Parser) {
+    if p.at(SyntaxKind::Semi) || p.at_eof() || p.at_ts(crate::grammar::ITEM_RECOVERY) {
+        p.eat(SyntaxKind::Semi);
+        return;
+    }
+    let err = p.start();
+    while !p.at(SyntaxKind::Semi) && !p.at_eof() && !p.at_ts(crate::grammar::ITEM_RECOVERY) {
+        p.bump_any();
+    }
+    err.complete(p, SyntaxKind::Error);
+    p.eat(SyntaxKind::Semi);
 }
 
 /// `ident ( :: ident )*` — the logical module reference of a `from` clause.
@@ -106,10 +146,16 @@ fn imported_type_list(p: &mut Parser) {
     p.expect(SyntaxKind::RBrace);
 }
 
-/// `spec ident { _definition* }` (`spec_definition`).
+/// `spec ident { _definition* }` (`spec_definition`). Specs take no visibility
+/// modifier, so a stray leading `pub` is reported and then consumed as a
+/// `Visibility` node for resilience; the spec body still parses.
 pub(crate) fn spec_definition(p: &mut Parser) {
     let m = p.start();
-    p.bump(SyntaxKind::SpecKw);
+    if p.at(SyntaxKind::PubKw) {
+        p.error("specs take no visibility modifier; they are stripped before codegen");
+        visibility(p);
+    }
+    p.expect(SyntaxKind::SpecKw);
     types::identifier(p);
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
@@ -211,7 +257,15 @@ pub(crate) fn struct_definition(p: &mut Parser) {
                 struct_field(p);
                 p.expect(SyntaxKind::Semi);
             }
-            SyntaxKind::FnKw | SyntaxKind::PubKw => function_definition(p),
+            SyntaxKind::FnKw => function_definition(p),
+            // `pub fn …` is a method; `pub field : T;` is a field with a stray
+            // visibility modifier — fields have no individual visibility, so the
+            // field handler reports it and recovers.
+            SyntaxKind::PubKw if p.nth_at(1, SyntaxKind::FnKw) => function_definition(p),
+            SyntaxKind::PubKw => {
+                struct_field(p);
+                p.expect(SyntaxKind::Semi);
+            }
             // The `}` terminating the struct body is the recovery anchor, so
             // consume the offending token to guarantee progress rather than
             // leaving it via a recovery set (which could spin the loop).
@@ -225,9 +279,16 @@ pub(crate) fn struct_definition(p: &mut Parser) {
     m.complete(p, SyntaxKind::StructDefinition);
 }
 
-/// `ident : _type` (`struct_field`).
+/// `ident : _type` (`struct_field`). A field has no individual visibility: it is
+/// accessible iff its struct is. A stray leading `pub` is reported and consumed
+/// as a `Visibility` node, then the field parses normally so it still lands in
+/// the tree.
 fn struct_field(p: &mut Parser) {
     let m = p.start();
+    if p.at(SyntaxKind::PubKw) {
+        p.error("fields inherit visibility from their struct");
+        visibility(p);
+    }
     types::identifier(p);
     p.expect(SyntaxKind::Colon);
     types::type_(p);

@@ -89,9 +89,10 @@ use crate::memory::{
 /// Distinguishes top-level definitions from those nested inside a `spec`
 /// block. Used to gate WASM `export` emission so that `pub fn` inside a spec
 /// does not become an exported entry point (no spec-inner export site is
-/// reachable from outside the module). `SpecInner` carries the owning spec
-/// name so call lowering can prefer the mangled `"<spec>.<callee>"` key for
-/// intra-spec resolution.
+/// reachable from outside the module). `SpecInner` carries the owning **bare**
+/// spec name (not file-folded); call lowering combines it with the spec's
+/// defining file (`current_module_path`) to build the injective spec [`FnKey`]
+/// for intra-spec resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FunctionOrigin {
     TopLevel,
@@ -100,75 +101,16 @@ pub(crate) enum FunctionOrigin {
 
 /// The triple yielded by [`Compiler::finish_and_take`]: the assembled WASM
 /// binary, the per-spec function indices, and the per-function shadow-stack
-/// frame sizes (canonical [`FnKey`] string → bytes).
-type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<String, u32>);
+/// frame sizes (canonical [`FnKey`] → bytes).
+type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<FnKey, u32>);
 
-/// Structured key for `func_name_to_idx`, `func_array_returns`, and
-/// `func_struct_returns` values.
+/// Structured key identifying every WASM function, shared with the analysis
+/// passes so codegen and the call-graph agree on identity by construction.
 ///
-/// The four variants partition the WASM function namespace so that
-/// `Method { struct_name: "Foo", name: "bar" }` cannot textually collide
-/// with `SpecFree { spec: "Foo", name: "bar" }` even though both would
-/// share the `"Foo.bar"` string under the old `FxHashMap<String, ..>`
-/// scheme. The collision class is eliminated by construction; the
-/// per-registration `assert!(!contains_key)` guards that previously
-/// caught it no longer have anything to detect.
-///
-/// `Display` reproduces the historical mangled-string form for use in
-/// diagnostic messages, `.wat` output, and panic descriptions.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum FnKey {
-    Free { name: String },
-    Method { struct_name: String, name: String },
-    SpecFree { spec: String, name: String },
-    SpecMethod { spec: String, struct_name: String, name: String },
-}
-
-impl FnKey {
-    fn free(name: impl Into<String>) -> Self {
-        Self::Free { name: name.into() }
-    }
-    fn method(struct_name: impl Into<String>, name: impl Into<String>) -> Self {
-        Self::Method {
-            struct_name: struct_name.into(),
-            name: name.into(),
-        }
-    }
-    fn spec_free(spec: impl Into<String>, name: impl Into<String>) -> Self {
-        Self::SpecFree {
-            spec: spec.into(),
-            name: name.into(),
-        }
-    }
-    fn spec_method(
-        spec: impl Into<String>,
-        struct_name: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::SpecMethod {
-            spec: spec.into(),
-            struct_name: struct_name.into(),
-            name: name.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for FnKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Free { name } => write!(f, "{name}"),
-            Self::Method { struct_name, name } => {
-                write!(f, "{struct_name}{METHOD_SEPARATOR}{name}")
-            }
-            Self::SpecFree { spec, name } => write!(f, "{spec}.{name}"),
-            Self::SpecMethod {
-                spec,
-                struct_name,
-                name,
-            } => write!(f, "{spec}.{struct_name}{METHOD_SEPARATOR}{name}"),
-        }
-    }
-}
+/// Re-exported from [`inference_fn_key`] for the in-crate references that use
+/// the bare `FnKey` name; see that crate for the variant and `Display`
+/// documentation.
+pub(crate) use inference_fn_key::FnKey;
 
 /// RAII guard that saves and restores `Compiler::current_spec`.
 ///
@@ -230,14 +172,6 @@ const END_OPCODE: u8 = 0x0b;
 /// elements = 327 680 instructions -- a reasonable upper bound before
 /// instruction explosion becomes a concern.
 const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
-
-/// Separator used in mangled method names: `"{StructName}.{method_name}"`.
-///
-/// Dot is used because it matches Zig's convention and is standard across
-/// the WASM ecosystem. Since `.` is a syntax token in Inference (member
-/// access), it cannot appear in user-defined identifiers, making collisions
-/// impossible without any additional validation.
-const METHOD_SEPARATOR: &str = ".";
 
 /// Recurses through `Array(elem, _)` until it finds the leaf (non-array) scalar type.
 fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
@@ -329,14 +263,19 @@ struct ResolvedField {
 /// site. For the method variants, the [`FnKey`] is already resolved by the
 /// method-name lookup helpers, which encode the spec-vs-top-level decision.
 enum ResolvedCallee {
-    /// Plain function call via `Expr::Identifier`.
+    /// Plain same-file (or spec-local) function call via `Expr::Identifier`.
+    /// Resolved with spec-aware preference against the current file's module
+    /// path at the lookup site.
     Function(String),
+    /// A call whose target the type checker resolved to a specific function in
+    /// a (possibly different) file — an item-imported bare call
+    /// (`use lib::arith::{add}; add()`) or a qualified path
+    /// (`math::arith::add(...)`). The [`FnKey`] is already file-qualified by the
+    /// callee's defining file, so it resolves directly with no spec preference
+    /// (the callee is a top-level function elsewhere).
+    QualifiedFunction(FnKey),
     /// Associated function call via `Expr::TypeMemberAccess` (e.g., `Point::new()`).
-    AssociatedFunction {
-        key: FnKey,
-        type_expr_id: ExprId,
-        method_name_id: IdentId,
-    },
+    AssociatedFunction { key: FnKey },
     /// Instance method call via `Expr::MemberAccess` (e.g., `p.translate()`).
     InstanceMethod {
         key: FnKey,
@@ -352,9 +291,9 @@ impl ResolvedCallee {
     fn display_name(&self) -> String {
         match self {
             Self::Function(name) => name.clone(),
-            Self::AssociatedFunction { key, .. } | Self::InstanceMethod { key, .. } => {
-                key.to_string()
-            }
+            Self::QualifiedFunction(key)
+            | Self::AssociatedFunction { key, .. }
+            | Self::InstanceMethod { key, .. } => key.to_string(),
         }
     }
 }
@@ -413,6 +352,12 @@ pub(crate) struct Compiler {
     /// methods so that intra-spec call resolution can prefer the mangled
     /// `"<spec>.<callee>"` key before falling back to the bare name.
     current_spec: Option<String>,
+    /// Source-root-relative module path of the file whose function is currently
+    /// being compiled (empty for the entry file). Set per function alongside
+    /// `current_fn_name`/`current_fn_key`. Lowering reads it to resolve a bare
+    /// struct/enum name in this file to its file-qualified canonical layout key
+    /// so two files defining a same-named type get distinct layouts.
+    current_module_path: Vec<String>,
     // Per-function state (set in visit_function_definition, used by lowering methods)
     func: Option<Function>,
     locals_map: FxHashMap<String, (u32, ValType)>,
@@ -436,7 +381,11 @@ pub(crate) struct Compiler {
     /// computed; frameless functions record 0. Moved out by
     /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
     /// invariant (A036's estimate ≥ this) can be checked cross-crate.
-    frame_sizes: FxHashMap<String, u32>,
+    ///
+    /// Keyed by the structured [`FnKey`] (not its lossy `Display` string) so the
+    /// cross-crate parity test cannot collapse two distinct functions whose keys
+    /// render to the same string into one slot.
+    frame_sizes: FxHashMap<FnKey, u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
     /// bounds-check guard (`index >= length → unreachable`). Derived in
     /// Set by [`crate::codegen`] for every Compile-mode build (the deployed
@@ -475,6 +424,7 @@ impl Compiler {
             current_fn_name: String::new(),
             current_fn_key: None,
             current_spec: None,
+            current_module_path: Vec::new(),
             func: None,
             locals_map: FxHashMap::default(),
             frame_layout: None,
@@ -555,11 +505,12 @@ impl Compiler {
         return_ty_id: TypeId,
         arena: &AstArena,
         ctx: &TypedContext,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
         match &return_type_info.kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                 self.func_array_returns.insert(
                     key,
                     ArrayReturnInfo {
@@ -570,14 +521,37 @@ impl Compiler {
                 );
             }
             TypeInfoKind::Custom(custom_name) => {
-                if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
+                if let Some(struct_info) = ctx.lookup_struct_in(custom_name, module_path) {
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
                     self.func_struct_returns.insert(
                         key,
                         StructReturnInfo {
                             total_size,
                             field_slots,
                             struct_name: custom_name.clone(),
+                        },
+                    );
+                }
+            }
+            // A `::`-qualified return type names a cross-file struct by its path
+            // rather than a bare name. Resolving it here recovers the same
+            // `StructInfo` a bare return would, so a function returning a qualified
+            // struct uses the sret convention instead of falling through to the
+            // non-sret path (which would panic on the returned struct literal).
+            TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+                let segments: Vec<String> = path.split("::").map(ToString::to_string).collect();
+                if let Some(struct_info) =
+                    ctx.lookup_struct_by_qualified_path(&segments, module_path)
+                {
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
+                    self.func_struct_returns.insert(
+                        key,
+                        StructReturnInfo {
+                            total_size,
+                            field_slots,
+                            struct_name: struct_info.name,
                         },
                     );
                 }
@@ -636,7 +610,7 @@ impl Compiler {
 
             let params = Self::import_param_types(arena, args, ctx)?;
             let results = match returns {
-                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx)?
+                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx, &[])?
                     .into_iter()
                     .collect::<Vec<_>>(),
                 None => Vec::new(),
@@ -679,7 +653,7 @@ impl Compiler {
                 // emits no receiver param for an import.
                 ArgKind::SelfRef { .. } => continue,
             };
-            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx)? {
+            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx, &[])? {
                 params.push(val);
             }
         }
@@ -725,27 +699,33 @@ impl Compiler {
     pub(crate) fn build_func_name_to_idx(
         &mut self,
         arena: &AstArena,
-        func_def_ids: &[DefId],
+        funcs: &[crate::EmittableFn],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
-        for (idx, &def_id) in func_def_ids.iter().enumerate() {
-            let fn_name = arena.def_name(def_id);
-            let key = FnKey::free(fn_name);
+        for (idx, entry) in funcs.iter().enumerate() {
+            let fn_name = arena.def_name(entry.def_id);
+            let key = FnKey::free_in(entry.module_path.clone(), fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Top-level function '{fn_name}' collides with an existing \
+                "Top-level function '{key}' collides with an existing \
                  top-level function. The type-checker should have rejected \
                  the duplicate at the source level."
             );
             self.func_name_to_idx
                 .insert(key.clone(), idx as u32 + base_idx);
 
-            if let Def::Function { returns, .. } = &arena[def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(())
@@ -761,18 +741,18 @@ impl Compiler {
     pub(crate) fn build_func_name_to_idx_with_spec_names(
         &mut self,
         arena: &AstArena,
-        spec_func_defs: &[(String, DefId)],
+        spec_funcs: &[crate::EmittableSpecFn],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<Vec<u32>, CodegenError> {
-        let mut assigned = Vec::with_capacity(spec_func_defs.len());
+        let mut assigned = Vec::with_capacity(spec_funcs.len());
         #[allow(clippy::cast_possible_truncation)]
-        for (idx, (spec_name, def_id)) in spec_func_defs.iter().enumerate() {
-            let fn_name = arena.def_name(*def_id);
-            let key = FnKey::spec_free(spec_name, fn_name);
+        for (idx, entry) in spec_funcs.iter().enumerate() {
+            let fn_name = arena.def_name(entry.def_id);
+            let key = FnKey::spec_free_folded(&entry.module_path, &entry.spec_name, fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Spec-inner function '{spec_name}::{fn_name}' collides with an \
+                "Spec-inner function '{key}' collides with an \
                  existing spec-inner function. The type-checker should have \
                  rejected the duplicate at the source level."
             );
@@ -780,10 +760,16 @@ impl Compiler {
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(assigned)
@@ -803,27 +789,37 @@ impl Compiler {
     pub(crate) fn build_method_name_to_idx(
         &mut self,
         arena: &AstArena,
-        method_defs: &[(String, DefId)],
+        methods: &[crate::EmittableMethod],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
-        for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
-            let method_name = arena.def_name(*def_id).to_string();
-            let key = FnKey::method(struct_name, &method_name);
+        for (i, entry) in methods.iter().enumerate() {
+            let method_name = arena.def_name(entry.def_id).to_string();
+            let key = FnKey::method_in(
+                entry.module_path.clone(),
+                &entry.struct_name,
+                &method_name,
+            );
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Method '{struct_name}::{method_name}' collides with an \
+                "Method '{key}' collides with an \
                  existing top-level method on the same struct."
             );
             self.func_name_to_idx
                 .insert(key.clone(), base_idx + i as u32);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(())
@@ -838,29 +834,40 @@ impl Compiler {
     pub(crate) fn build_method_name_to_idx_with_spec_names(
         &mut self,
         arena: &AstArena,
-        spec_method_defs: &[(String, String, DefId)],
+        spec_methods: &[crate::EmittableSpecMethod],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<Vec<u32>, CodegenError> {
-        let mut assigned = Vec::with_capacity(spec_method_defs.len());
+        let mut assigned = Vec::with_capacity(spec_methods.len());
         #[allow(clippy::cast_possible_truncation)]
-        for (i, (spec_name, struct_name, def_id)) in spec_method_defs.iter().enumerate() {
-            let method_name = arena.def_name(*def_id).to_string();
-            let key = FnKey::spec_method(spec_name, struct_name, &method_name);
+        for (i, entry) in spec_methods.iter().enumerate() {
+            let method_name = arena.def_name(entry.def_id).to_string();
+            let key = FnKey::spec_method_folded(
+                &entry.module_path,
+                &entry.spec_name,
+                &entry.struct_name,
+                &method_name,
+            );
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Spec-inner method '{spec_name}::{struct_name}::{method_name}' \
+                "Spec-inner method '{key}' \
                  collides with an existing spec-inner method on the same struct."
             );
             let assigned_idx = base_idx + i as u32;
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(assigned)
@@ -875,6 +882,7 @@ impl Compiler {
         arena: &AstArena,
         ty_id: TypeId,
         ctx: &TypedContext,
+        module_path: &[String],
     ) -> Result<Option<ValType>, CodegenError> {
         match &arena[ty_id].kind {
             TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
@@ -891,11 +899,32 @@ impl Compiler {
             TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(ValType::I64)),
             TypeNode::Generic { .. } => todo!(),
             TypeNode::Function { .. } => todo!(),
-            TypeNode::QualifiedName { .. } => todo!(),
-            TypeNode::Qualified { .. } => todo!(),
+            // `TypeQualifiedName` is the dead AST variant; the parser produces
+            // `Qualified` for every `::`-qualified type. It stays an error rather
+            // than a panic for defense-in-depth.
+            TypeNode::QualifiedName { .. } => Err(CodegenError::UnsupportedType {
+                rendered: arena[ty_id].kind.qualified_path(arena).unwrap_or_default(),
+            }),
+            TypeNode::Qualified { .. } => {
+                // A `::`-qualified type that resolves to a struct or enum is an I32
+                // pointer, like a bare struct/enum reference. The type-checker has
+                // already validated and bound the path; re-resolving here mirrors
+                // the `Custom` arm's defense-in-depth so a malformed path errors at
+                // the codegen boundary instead of emitting plausible WASM.
+                let path = arena[ty_id].kind.qualified_segments(arena).unwrap_or_default();
+                if ctx.qualified_type_is_nominal(&path, module_path) {
+                    Ok(Some(ValType::I32))
+                } else {
+                    Err(CodegenError::UnsupportedType {
+                        rendered: path.join("::"),
+                    })
+                }
+            }
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
-                if ctx.lookup_struct(name).is_some() || ctx.lookup_enum(name).is_some() {
+                if ctx.lookup_struct_in(name, module_path).is_some()
+                    || ctx.lookup_enum_in(name, module_path).is_some()
+                {
                     Ok(Some(ValType::I32))
                 } else {
                     // The type-checker rejects an unknown type before codegen, so
@@ -924,6 +953,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
+        module_path: &[String],
         origin: &FunctionOrigin,
     ) -> Result<(), CodegenError> {
         let spec = match origin {
@@ -931,7 +961,7 @@ impl Compiler {
             FunctionOrigin::TopLevel => None,
         };
         let mut guard = SpecScopeGuard::enter(self, spec);
-        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, origin)
+        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, module_path, origin)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -941,6 +971,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
+        module_path: &[String],
         origin: &FunctionOrigin,
     ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
@@ -956,21 +987,33 @@ impl Compiler {
         };
 
         let raw_name = arena[fn_name_id].name.clone();
+        // Record which file this function belongs to so struct/enum metadata
+        // lookups during lowering resolve bare type names relative to this file
+        // (two files may each define a same-named struct).
+        self.current_module_path = module_path.to_vec();
         // Compute the structured key for this function so sret lookups
         // and call-site resolution stay in lockstep with the registration
-        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`.
+        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`. Every key —
+        // including spec items — is qualified by its defining file: `current_spec`
+        // is the bare spec name, combined with the spec's defining file
+        // (`current_module_path`, set above) into the injective spec key.
         let current_spec = self.current_spec.clone();
         let current_fn_key = match (current_spec.as_deref(), method_struct_name) {
-            (Some(spec), Some(struct_name)) => FnKey::spec_method(spec, struct_name, &raw_name),
-            (Some(spec), None) => FnKey::spec_free(spec, &raw_name),
-            (None, Some(struct_name)) => FnKey::method(struct_name, &raw_name),
-            (None, None) => FnKey::free(&raw_name),
+            (Some(spec), Some(struct_name)) => {
+                FnKey::spec_method_folded(module_path, spec, struct_name, &raw_name)
+            }
+            (Some(spec), None) => FnKey::spec_free_folded(module_path, spec, &raw_name),
+            (None, Some(struct_name)) => {
+                FnKey::method_in(module_path.to_vec(), struct_name, &raw_name)
+            }
+            (None, None) => FnKey::free_in(module_path.to_vec(), &raw_name),
         };
         // For diagnostics and debug names we keep the mangled-string form
         // (`Struct.method` / bare name); spec-inner-ness is implicit via
-        // `current_spec` for any consumer that needs it.
+        // `current_spec` for any consumer that needs it. The `.` here is the
+        // method-name separator, the same one `FnKey::Display` uses.
         let fn_name = if let Some(struct_name) = method_struct_name {
-            format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
+            format!("{struct_name}.{raw_name}")
         } else {
             raw_name
         };
@@ -985,7 +1028,7 @@ impl Compiler {
             vec![]
         } else {
             match returns {
-                Some(ty_id) => Self::val_type_from_type_id(arena, ty_id, ctx)?
+                Some(ty_id) => Self::val_type_from_type_id(arena, ty_id, ctx, module_path)?
                     .into_iter()
                     .collect(),
                 None => vec![],
@@ -1009,7 +1052,7 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)?
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx, module_path)?
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
                     let arg_name = arena[*name].name.clone();
@@ -1060,17 +1103,21 @@ impl Compiler {
         let is_method = method_struct_name.is_some();
         let is_main = fn_name == "main";
         let is_top_level = matches!(*origin, FunctionOrigin::TopLevel);
-        // Methods are not exported as WASM exports. Spec-inner functions are
-        // implementation-level only and must never be exported. A future
-        // `export` keyword will control which functions are exported. For now,
-        // only top-level `pub` functions (except `main`, which gets special
-        // handling) become WASM exports.
-        let should_export = vis == Visibility::Public && !is_main && !is_method && is_top_level;
+        // The program's WASM ABI is the entry file's public surface: only an
+        // entry-file (empty module path) top-level `pub fn` is exported. A `pub
+        // fn` in an imported file is intra-project visibility, not an export, so
+        // imported internals don't leak into the export section. Methods and
+        // spec-inner functions are never exported. A future `export` keyword
+        // will control exports explicitly.
+        let is_entry_file = module_path.is_empty();
+        let is_exportable_position =
+            vis == Visibility::Public && !is_method && is_top_level && is_entry_file;
+        let should_export = is_exportable_position && !is_main;
         if should_export {
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if is_main && vis == Visibility::Public && !is_method && is_top_level {
+        if is_main && is_exportable_position {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
@@ -1078,18 +1125,28 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout =
-            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name)?;
+        self.frame_layout = Self::compute_frame_layout(
+            arena,
+            body_id,
+            ctx,
+            local_idx,
+            &args,
+            method_struct_name,
+            module_path,
+        )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
-        // canonical FnKey so A036's estimate can be checked against it. The key
-        // was set above and is always present here.
+        // structured `FnKey` itself, not its lossy `Display` rendering: two
+        // distinct keys can render to the same string, so keying on the string
+        // would let one function's frame overwrite another's. This map is the
+        // interchange format the cross-crate A036 frame-size parity test reads.
+        // The key was set above and is always present here.
         let frame_size = self.frame_layout.as_ref().map_or(0, |l| l.total_size);
         self.frame_sizes.insert(
             self.current_fn_key
                 .as_ref()
                 .expect("current_fn_key is set at the top of visit_function_definition")
-                .to_string(),
+                .clone(),
             frame_size,
         );
 
@@ -1164,8 +1221,16 @@ impl Compiler {
                                     &elem_type.kind,
                                 );
                             }
-                            // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                            TypeInfoKind::Custom(_) => {
+                            // A struct parameter (bare `Custom` name or a
+                            // `::`-qualified path) has a frame slot allocated in
+                            // `compute_frame_layout`; copy the caller's data into
+                            // it so the callee mutates its own copy (value
+                            // semantics). The slot is keyed by the parameter name,
+                            // so both forms share the same copy once the layout
+                            // pass gave the qualified form a slot.
+                            TypeInfoKind::Custom(_)
+                            | TypeInfoKind::Qualified(_)
+                            | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
                                     emit_struct_param_copy(func, layout, slot, param_local);
                                 }
@@ -1417,6 +1482,7 @@ impl Compiler {
         frame_ptr_local_idx: u32,
         args: &[inference_ast::nodes::ArgData],
         method_struct_name: Option<&str>,
+        module_path: &[String],
     ) -> Result<Option<FrameLayout>, CodegenError> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
@@ -1428,14 +1494,18 @@ impl Compiler {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
+                            let align =
+                                natural_alignment_for_type(&elem_type.kind, ctx, module_path)?;
                             let aligned_offset = align_to(current_offset, align);
-                            let element_layout =
-                                compute_element_layout_if_struct(&elem_type.kind, ctx)?;
+                            let element_layout = compute_element_layout_if_struct(
+                                &elem_type.kind,
+                                ctx,
+                                module_path,
+                            )?;
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -1448,14 +1518,28 @@ impl Compiler {
                                 "Frame offset overflow: total array allocation exceeds u32::MAX",
                             );
                         }
-                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                        TypeInfoKind::Custom(custom_name) => {
-                            if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                        // A struct parameter is passed by value, so it needs its
+                        // own frame slot to copy the caller's data into on entry.
+                        // `Custom` carries a bare name and `Qualified`/`QualifiedName`
+                        // a `::`-joined path; both name a struct that must be
+                        // resolved relative to the defining file (a same-named
+                        // struct in another file has a different layout), so the
+                        // shared resolver is used rather than a bare-name lookup.
+                        TypeInfoKind::Custom(_)
+                        | TypeInfoKind::Qualified(_)
+                        | TypeInfoKind::QualifiedName(_) => {
+                            if let Some((struct_info, _defining_path)) =
+                                memory::resolve_struct_with_defining_path(
+                                    &type_info.kind,
+                                    ctx,
+                                    module_path,
+                                )
+                            {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx)?;
+                                    compute_struct_field_layout(&struct_info, ctx, module_path)?;
                                 if total_size > 0 {
                                     let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx)?;
+                                        memory::max_struct_alignment(&field_slots);
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -1478,11 +1562,11 @@ impl Compiler {
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
                     );
-                    if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                    if let Some(struct_info) = ctx.lookup_struct_in(struct_name, module_path) {
                         let (total_size, field_slots) =
-                            compute_struct_field_layout(&struct_info, ctx)?;
+                            compute_struct_field_layout(&struct_info, ctx, module_path)?;
                         if total_size > 0 {
-                            let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
+                            let max_field_align = memory::max_struct_alignment(&field_slots);
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -1508,6 +1592,7 @@ impl Compiler {
             &mut array_offsets,
             &mut struct_offsets,
             &mut current_offset,
+            module_path,
         )?;
 
         if current_offset == 0 {
@@ -1534,6 +1619,7 @@ impl Compiler {
     /// Scalar bindings (including enum tags) produce no frame slot and are
     /// intentionally no-ops here — they are tracked by `pre_scan_locals` as
     /// WASM locals instead. Zero-sized structs also produce no slot.
+    #[allow(clippy::too_many_arguments)]
     fn collect_compound_slot_for_type(
         arena: &AstArena,
         name_id: IdentId,
@@ -1542,16 +1628,18 @@ impl Compiler {
         array_offsets: &mut FxHashMap<String, ArraySlot>,
         struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         match type_kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                 let byte_count = elem_sz.checked_mul(*length).expect(
                     "Array byte count overflow: element size * length exceeds u32::MAX",
                 );
-                let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
+                let align = natural_alignment_for_type(&elem_type.kind, ctx, module_path)?;
                 let aligned_offset = align_to(*current_offset, align);
-                let element_layout = compute_element_layout_if_struct(&elem_type.kind, ctx)?;
+                let element_layout =
+                    compute_element_layout_if_struct(&elem_type.kind, ctx, module_path)?;
                 let slot = ArraySlot {
                     offset: aligned_offset,
                     elem_size: elem_sz,
@@ -1564,20 +1652,31 @@ impl Compiler {
                     "Frame offset overflow: total array allocation exceeds u32::MAX",
                 );
             }
-            TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
-                let struct_info = ctx.lookup_struct(struct_name);
+            TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name) => {
+                // A `Struct` carries the defining-file canonical key; prefer it.
+                // The bare name alone is not enough when the binding's type was
+                // reached by a `::`-qualifier (`let p: lib::geom::Point`): the leaf
+                // `Point` is not bound by name in the accessing file, so resolving
+                // the bare name against `module_path` would miss the layout. The
+                // canonical key identifies the struct by its defining file (#63).
+                let struct_info = match type_kind {
+                    TypeInfoKind::Struct(_, key) => ctx
+                        .lookup_struct(key)
+                        .or_else(|| ctx.lookup_struct_in(struct_name, module_path)),
+                    _ => ctx.lookup_struct_in(struct_name, module_path),
+                };
                 debug_assert!(
                     struct_info.is_some()
                         || matches!(type_kind, TypeInfoKind::Custom(_))
-                            && ctx.lookup_enum(struct_name).is_some(),
+                            && ctx.lookup_enum_in(struct_name, module_path).is_some(),
                     "collect_compound_slot_for_type: unresolved Struct/Custom type '{struct_name}' — \
                      type checker should reject unresolved names before codegen",
                 );
                 if let Some(struct_info) = struct_info {
                     let (total_size, field_slots) =
-                        compute_struct_field_layout(&struct_info, ctx)?;
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
                     if total_size > 0 {
-                        let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
+                        let max_field_align = memory::max_struct_alignment(&field_slots);
                         let aligned_offset = align_to(*current_offset, max_field_align);
                         let slot = StructSlot {
                             offset: aligned_offset,
@@ -1609,6 +1708,7 @@ impl Compiler {
         array_offsets: &mut FxHashMap<String, ArraySlot>,
         struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         let block = &arena[block_id];
         for &stmt_id in &block.stmts {
@@ -1625,6 +1725,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 Stmt::ConstDef(const_def_id) => {
@@ -1640,6 +1741,7 @@ impl Compiler {
                             array_offsets,
                             struct_offsets,
                             current_offset,
+                            module_path,
                         )?;
                     }
                 }
@@ -1651,6 +1753,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 Stmt::If {
@@ -1666,6 +1769,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                     let then_end = *current_offset;
                     if let Some(else_id) = else_block {
@@ -1677,6 +1781,7 @@ impl Compiler {
                             array_offsets,
                             struct_offsets,
                             current_offset,
+                            module_path,
                         )?;
                         *current_offset = (*current_offset).max(then_end);
                     }
@@ -1689,6 +1794,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 _ => {}
@@ -1821,7 +1927,7 @@ impl Compiler {
         );
         let is_struct_type = matches!(
             type_info.as_ref().map(|ti| &ti.kind),
-            Some(TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
+            Some(TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_))
         ) && self
             .frame_layout
             .as_ref()
@@ -2107,11 +2213,23 @@ impl Compiler {
                 expr: type_expr,
                 name: variant_name_id,
             } => {
-                let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
-                    .expect("TypeMemberAccess: could not extract type name");
                 let variant_name = &arena[variant_name_id].name;
+                // The type checker keyed this node's enum type by the enum's
+                // defining file. For a namespace-qualified variant
+                // (`geo::Color::Blue`) the type expression is itself a `::` path the
+                // bare-name extractor cannot read, so resolve the enum by its
+                // canonical key first; fall back to the bare type name for a local
+                // `Enum::Variant`, keeping single-file output identical.
+                let enum_info = match ctx.get_node_typeinfo(NodeId::Expr(expr_id)).map(|t| t.kind) {
+                    Some(TypeInfoKind::Enum(_, key)) => ctx.lookup_enum(&key),
+                    _ => None,
+                }
+                .or_else(|| {
+                    let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)?;
+                    ctx.lookup_enum_in(&type_name, &self.current_module_path)
+                });
 
-                if let Some(enum_info) = ctx.lookup_enum(&type_name) {
+                if let Some(enum_info) = enum_info {
                     let tag = enum_info
                         .variant_index(variant_name)
                         .expect("TypeMemberAccess: unknown enum variant");
@@ -2119,6 +2237,8 @@ impl Compiler {
                     let tag_i32 = tag as i32;
                     self.func().instruction(&Instruction::I32Const(tag_i32));
                 } else {
+                    let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
+                        .unwrap_or_else(|| "<qualified>".to_string());
                     todo!(
                         "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
                          is not yet supported in wasm codegen"
@@ -2142,19 +2262,8 @@ impl Compiler {
                             None,
                         );
                     }
-                    Some(ResolvedCallee::AssociatedFunction {
-                        type_expr_id,
-                        method_name_id,
-                        ..
-                    }) => {
-                        self.lower_associated_function_call(
-                            arena,
-                            type_expr_id,
-                            method_name_id,
-                            &args,
-                            ctx,
-                            None,
-                        );
+                    Some(ResolvedCallee::AssociatedFunction { key, .. }) => {
+                        self.lower_associated_function_call(arena, &key, &args, ctx, None);
                     }
                     Some(ResolvedCallee::Function(ref name)) => {
                         match self.lower_function_call(arena, name, &args, ctx) {
@@ -2168,10 +2277,31 @@ impl Compiler {
                             Err(e) => panic!("function call lowering failed: {e}"),
                         }
                     }
+                    Some(ResolvedCallee::QualifiedFunction(ref key)) => {
+                        match self.lower_qualified_function_call(arena, key, &args, ctx) {
+                            Ok(()) => {}
+                            Err(CodegenError::UnknownFunction(key)) => {
+                                panic!(
+                                    "Function '{key}' not found in name-to-index map; \
+                                     the type-checker should have caught this — a qualified \
+                                     path to a proof-only spec function is rejected there"
+                                )
+                            }
+                            Err(e) => panic!("qualified function call lowering failed: {e}"),
+                        }
+                    }
                     None => {
-                        todo!(
-                            "Non-identifier function calls (higher-order) \
-                             are not yet implemented"
+                        // The callee did not resolve to any known call form. The
+                        // only way to reach here is a call the type-checker should
+                        // have rejected — notably a qualified path to a proof-only
+                        // `spec`-inner function or `spec`-inner-struct associated
+                        // function, which has no executable index. Higher-order
+                        // calls are not a language feature, so this is never valid
+                        // input; fail loudly rather than emit a malformed module.
+                        panic!(
+                            "function call callee did not resolve to a lowerable form; \
+                             the type-checker should have rejected this call (a qualified \
+                             path to a proof-only spec function is rejected there)"
                         )
                     }
                 }
@@ -2235,7 +2365,7 @@ impl Compiler {
                         | NumberType::I32
                         | NumberType::U32,
                     )
-                    | TypeInfoKind::Enum(_) => {
+                    | TypeInfoKind::Enum(_, _) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
                     }
@@ -2258,7 +2388,7 @@ impl Compiler {
                             panic!("array uzumaki lowering failed: {e}");
                         }
                     }
-                    TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                    TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                         cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
                         let name = name.clone();
                         let var_name = enclosing_var_name.unwrap_or_else(|| {
@@ -2288,6 +2418,73 @@ impl Compiler {
         function_expr_id: ExprId,
         ctx: &TypedContext,
     ) -> Option<ResolvedCallee> {
+        // The type checker resolved every cross-file call — including paths that
+        // cross `pub use` re-exports — to the callee's defining file. When the
+        // callee lives in a *different* file than the one being compiled, trust
+        // that recorded target: it names the file the registration pass keyed
+        // the function under, which the call site's own bare-name resolution
+        // cannot reach (an item import binds a name whose definition is
+        // elsewhere; a qualified path crosses re-exports). A same-file call is
+        // left to the normal resolution below so its lowering — and byte
+        // output — is identical to a single-file program. Trusting the recorded
+        // target for a `TypeMemberAccess` chain also distinguishes a qualified
+        // function path (`math::arith::add`) from a struct associated function
+        // (`Point::new`), which share that expression shape.
+        // A namespace-qualified associated call (`geo::Point::new(...)`) was
+        // resolved by the type checker to a struct method whose mangled name is
+        // keyed by the struct's defining file. Its `TypeMemberAccess` expression
+        // (`geo::Point::new`) is not a plain type the bare-name resolution can
+        // read, so the recorded target — carrying the struct name and defining
+        // file — is the source of truth.
+        // A cross-file associated call — a namespace-qualified `geo::Point::new`,
+        // an item-imported `A::make()` whose `A` is defined elsewhere, or an
+        // entry-file assoc reached via `root::Type::m()`. The recorded target
+        // names the struct's defining file, which the call site's bare-name
+        // resolution cannot reach. A *same-file* associated call (`module_path ==
+        // current`) is left to the `TypeMemberAccess` arm below so its spec-aware
+        // lookup still finds a spec-inner struct's associated function (registered
+        // as a `SpecMethod`, not a top-level `Method`); routing it by a plain
+        // `method_in` key here would miss that registration.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && let Some(struct_name) = &target.receiver_struct
+            && target.module_path != self.current_module_path
+            && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
+        {
+            let key = FnKey::method_in(
+                target.module_path.clone(),
+                struct_name.clone(),
+                target.name.clone(),
+            );
+            return Some(ResolvedCallee::AssociatedFunction { key });
+        }
+        // A cross-file *free* function reached by item import or bare path. An
+        // instance-method call (`recv.method()`) also records a cross-file target
+        // now that dispatch is canonical-key-driven, but it carries a receiver
+        // struct and must lower as a method (via the `MemberAccess` arm below),
+        // not a free function — so this free-function branch excludes it.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && target.receiver_struct.is_none()
+            && target.module_path != self.current_module_path
+        {
+            let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
+            return Some(ResolvedCallee::QualifiedFunction(key));
+        }
+        // A same-file free function reached through a `::` namespace path —
+        // `root::helper()` for an entry item imported via `use root;` (#63). The
+        // recorded target is a free function (no receiver struct) whose defining
+        // file is the one being compiled, so the cross-file branch above did not
+        // fire. Its `TypeMemberAccess` expression (`root::helper`) is not a struct
+        // associated function, so route it by key rather than letting the
+        // `TypeMemberAccess` arm below mis-resolve it as a method and return
+        // `None`. The key equals the one a bare `helper()` call resolves to, so
+        // the lowering is identical.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && target.receiver_struct.is_none()
+            && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
+        {
+            let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
+            return Some(ResolvedCallee::QualifiedFunction(key));
+        }
         match &arena[function_expr_id].kind {
             Expr::Identifier(ident_id) => {
                 Some(ResolvedCallee::Function(arena[*ident_id].name.clone()))
@@ -2296,12 +2493,8 @@ impl Compiler {
                 expr: type_expr,
                 name: method_name,
             } => {
-                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name)?;
-                Some(ResolvedCallee::AssociatedFunction {
-                    key,
-                    type_expr_id: *type_expr,
-                    method_name_id: *method_name,
-                })
+                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name, ctx)?;
+                Some(ResolvedCallee::AssociatedFunction { key })
             }
             Expr::MemberAccess {
                 expr: receiver,
@@ -2355,16 +2548,51 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lowers a call whose target was resolved by the type checker to a specific
+    /// (possibly cross-file) function, identified by its already file-qualified
+    /// [`FnKey`]. Used for item-imported bare calls and qualified paths.
+    ///
+    /// A missing index is an internal invariant violation: the type checker
+    /// rejects every call it cannot lower (a qualified path to a proof-only spec
+    /// function among them), so by the time codegen runs the key must be
+    /// registered. This returns [`CodegenError::UnknownFunction`] rather than
+    /// panicking on a miss, keeping codegen from crashing if a future change ever
+    /// reopens a path the type checker forgot to gate.
+    fn lower_qualified_function_call(
+        &mut self,
+        arena: &AstArena,
+        key: &FnKey,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) -> Result<(), CodegenError> {
+        cov_mark::hit!(wasm_codegen_emit_qualified_function_call);
+
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        let func_idx = self
+            .resolve_idx_by_key(key)
+            .ok_or_else(|| CodegenError::UnknownFunction(key.to_string()))?;
+
+        self.func().instruction(&Instruction::Call(func_idx));
+        Ok(())
+    }
+
     /// Resolves a free-function bare name to its WASM function index,
-    /// preferring the spec-mangled key when inside a spec scope.
+    /// preferring the spec-mangled key when inside a spec scope, then the
+    /// current file's qualified key. This is the fallback for a same-file call
+    /// the type checker did not record a target for; cross-file targets resolve
+    /// through [`ResolvedCallee::QualifiedFunction`].
     fn resolve_free_callee_idx(&self, callee_name: &str) -> Option<u32> {
         if let Some(spec) = self.current_spec.as_deref() {
-            let key = FnKey::spec_free(spec, callee_name);
+            let key = FnKey::spec_free_folded(&self.current_module_path, spec, callee_name);
             if let Some(idx) = self.func_name_to_idx.get(&key).copied() {
                 return Some(idx);
             }
         }
-        self.func_name_to_idx.get(&FnKey::free(callee_name)).copied()
+        let key = FnKey::free_in(self.current_module_path.clone(), callee_name);
+        self.func_name_to_idx.get(&key).copied()
     }
 
     /// Resolves a callee `FnKey` directly to its WASM function index. Used
@@ -2378,16 +2606,16 @@ impl Compiler {
     /// scope.
     fn is_sret_free(&self, callee_name: &str) -> bool {
         if let Some(spec) = self.current_spec.as_deref() {
-            let key = FnKey::spec_free(spec, callee_name);
+            let key = FnKey::spec_free_folded(&self.current_module_path, spec, callee_name);
             if self.func_array_returns.contains_key(&key)
                 || self.func_struct_returns.contains_key(&key)
             {
                 return true;
             }
         }
-        let bare = FnKey::free(callee_name);
-        self.func_array_returns.contains_key(&bare)
-            || self.func_struct_returns.contains_key(&bare)
+        let key = FnKey::free_in(self.current_module_path.clone(), callee_name);
+        self.func_array_returns.contains_key(&key)
+            || self.func_struct_returns.contains_key(&key)
     }
 
     /// Returns `true` if a [`FnKey`] resolves to a function with sret
@@ -2403,7 +2631,8 @@ impl Compiler {
     fn resolve_callee(&self, resolved: &ResolvedCallee) -> Option<u32> {
         match resolved {
             ResolvedCallee::Function(name) => self.resolve_free_callee_idx(name),
-            ResolvedCallee::AssociatedFunction { key, .. }
+            ResolvedCallee::QualifiedFunction(key)
+            | ResolvedCallee::AssociatedFunction { key, .. }
             | ResolvedCallee::InstanceMethod { key, .. } => self.resolve_idx_by_key(key),
         }
     }
@@ -2412,7 +2641,8 @@ impl Compiler {
     fn callee_is_sret(&self, resolved: &ResolvedCallee) -> bool {
         match resolved {
             ResolvedCallee::Function(name) => self.is_sret_free(name),
-            ResolvedCallee::AssociatedFunction { key, .. }
+            ResolvedCallee::QualifiedFunction(key)
+            | ResolvedCallee::AssociatedFunction { key, .. }
             | ResolvedCallee::InstanceMethod { key, .. } => self.is_sret_by_key(key),
         }
     }
@@ -2434,12 +2664,31 @@ impl Compiler {
     ) -> Option<FnKey> {
         let method_name = &arena[method_name_id].name;
         let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
-        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
-            &receiver_type.kind
-        else {
-            return None;
-        };
-        self.lookup_method_fn_key(struct_name, method_name)
+        // The receiver carries its struct's canonical identity (`Struct(bare, key)`).
+        // Resolving the method by the key — rather than the bare name from the call
+        // site's scope — keeps dispatch on the value's actual struct when a
+        // same-named struct exists in another file. A keyless `Custom` receiver
+        // (spec-inner or forward reference) has no canonical key, so it falls back to
+        // the call-site bare-name path.
+        match &receiver_type.kind {
+            TypeInfoKind::Struct(struct_name, canonical_key) => {
+                self.lookup_method_fn_key_by_key(struct_name, canonical_key, method_name, ctx)
+            }
+            TypeInfoKind::Custom(struct_name) => {
+                self.lookup_method_fn_key(struct_name, method_name, ctx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the defining-file module path of the struct named `struct_name`
+    /// as seen from the file currently being compiled. A method's mangled name
+    /// is qualified by the struct's defining file; if the struct can't be
+    /// resolved (it should always resolve post-type-check) the current file is
+    /// assumed so single-file behavior is unaffected.
+    fn struct_defining_module_path(&self, struct_name: &str, ctx: &TypedContext) -> Vec<String> {
+        ctx.struct_module_path(struct_name, &self.current_module_path)
+            .unwrap_or_else(|| self.current_module_path.clone())
     }
 
     /// Spec-aware method lookup. Constructs the candidate [`FnKey`] directly
@@ -2448,25 +2697,82 @@ impl Compiler {
     /// probes [`Self::func_name_to_idx`] for it. When a spec is active, the
     /// `SpecMethod` candidate is tried first so an intra-spec method call
     /// resolves to the spec-inner registration; otherwise — or on miss — the
-    /// top-level `Method` candidate is tried.
-    fn lookup_method_fn_key(&self, struct_name: &str, method_name: &str) -> Option<FnKey> {
+    /// top-level `Method` candidate is tried. The top-level `Method` key is
+    /// qualified by the struct's defining file so a method on a struct in an
+    /// imported file resolves to that file's registration.
+    fn lookup_method_fn_key(
+        &self,
+        struct_name: &str,
+        method_name: &str,
+        ctx: &TypedContext,
+    ) -> Option<FnKey> {
         if let Some(spec) = self.current_spec.as_deref() {
-            let candidate = FnKey::SpecMethod {
-                spec: spec.to_string(),
-                struct_name: struct_name.to_string(),
-                name: method_name.to_string(),
-            };
+            let candidate =
+                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
             if self.func_name_to_idx.contains_key(&candidate) {
                 return Some(candidate);
             }
         }
-        let candidate = FnKey::Method {
-            struct_name: struct_name.to_string(),
-            name: method_name.to_string(),
-        };
+        let module_path = self.struct_defining_module_path(struct_name, ctx);
+        let candidate = FnKey::method_in(module_path, struct_name, method_name);
         self.func_name_to_idx
             .contains_key(&candidate)
             .then_some(candidate)
+    }
+
+    /// Spec-aware method lookup keyed by the receiver's **canonical struct key**.
+    ///
+    /// Unlike [`Self::lookup_method_fn_key`], the file-qualified `Method`
+    /// candidate is tried *before* the active spec's `SpecMethod` candidate. The
+    /// receiver's canonical key (`lib::ext::Helper`) names the exact struct the
+    /// value has, so the method registered under that struct's own defining file
+    /// is the authoritative target — even inside a spec that happens to define its
+    /// own same-named struct. Probing the spec first would resolve a cross-file
+    /// `lib::ext::Helper.tag` to the spec's own `Helper.tag` (a wrong callee, and
+    /// an out-of-bounds field load when the layouts differ), since the spec probe
+    /// keys only by the bare name.
+    ///
+    /// The spec probe is reached only as a fallback, when no file-qualified
+    /// `Method` candidate exists for the receiver's struct: that is exactly the
+    /// case of a spec-inner struct (whose methods register as `SpecMethod`, never
+    /// as a top-level `Method`), so the spec's own inner-struct method still
+    /// dispatches to itself with no over-correction.
+    ///
+    /// A key that does not resolve to a defining file (defensive: it always should
+    /// post-type-check) falls back to the bare-name path so behavior is never
+    /// worse than before.
+    fn lookup_method_fn_key_by_key(
+        &self,
+        struct_name: &str,
+        canonical_key: &str,
+        method_name: &str,
+        ctx: &TypedContext,
+    ) -> Option<FnKey> {
+        let Some(module_path) = ctx.module_path_of_struct_key(canonical_key) else {
+            // A struct receiver always carries a key that resolves post-type-check;
+            // a miss means an upstream invariant broke. The bare-name path is the
+            // safe degrade, but surface the violation in test/debug builds.
+            debug_assert!(
+                false,
+                "struct receiver `{struct_name}` has canonical key `{canonical_key}` \
+                 with no resolvable defining struct after type-checking"
+            );
+            return self.lookup_method_fn_key(struct_name, method_name, ctx);
+        };
+        let method_candidate = FnKey::method_in(module_path, struct_name, method_name);
+        if self.func_name_to_idx.contains_key(&method_candidate) {
+            return Some(method_candidate);
+        }
+        // No top-level method for this struct identity: the receiver is the active
+        // spec's own inner struct (its methods register only as `SpecMethod`).
+        if let Some(spec) = self.current_spec.as_deref() {
+            let candidate =
+                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
+            if self.func_name_to_idx.contains_key(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     /// Lowers an instance method call (`receiver.method(args)`) to WASM instructions.
@@ -2558,10 +2864,11 @@ impl Compiler {
         arena: &AstArena,
         type_expr_id: ExprId,
         method_name_id: IdentId,
+        ctx: &TypedContext,
     ) -> Option<FnKey> {
         let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
         let method_name = &arena[method_name_id].name;
-        self.lookup_method_fn_key(&type_name, method_name)
+        self.lookup_method_fn_key(&type_name, method_name, ctx)
     }
 
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
@@ -2579,27 +2886,16 @@ impl Compiler {
     fn lower_associated_function_call(
         &mut self,
         arena: &AstArena,
-        type_expr_id: ExprId,
-        method_name_id: IdentId,
+        fn_key: &FnKey,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
         sret_local: Option<u32>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_associated_function_call);
 
-        let fn_key = self
-            .resolve_associated_fn_key(arena, type_expr_id, method_name_id)
-            .unwrap_or_else(|| {
-                let method_name = &arena[method_name_id].name;
-                panic!(
-                    "Associated function call: could not resolve mangled name for \
-                     method '{method_name}' (type expression has no resolvable type name)"
-                )
-            });
+        let is_sret = self.is_sret_by_key(fn_key);
 
-        let is_sret = self.is_sret_by_key(&fn_key);
-
-        let func_idx = self.resolve_idx_by_key(&fn_key).unwrap_or_else(|| {
+        let func_idx = self.resolve_idx_by_key(fn_key).unwrap_or_else(|| {
             panic!("Method '{fn_key}' not found in func_name_to_idx")
         });
 
@@ -2746,7 +3042,7 @@ impl Compiler {
             .expect("sret return: array byte size overflow");
         let is_struct_element = matches!(
             &return_info.elem_kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)
         );
 
         match &arena[return_expr_id].kind {
@@ -2762,9 +3058,13 @@ impl Compiler {
             Expr::ArrayLiteral { elements } => {
                 let elements = elements.clone();
                 if is_struct_element {
-                    let field_slots = compute_element_layout_if_struct(&return_info.elem_kind, ctx)
-                        .expect("sret return: struct layout computation failed")
-                        .expect("Struct element must have field layout");
+                    let field_slots = compute_element_layout_if_struct(
+                        &return_info.elem_kind,
+                        ctx,
+                        &self.current_module_path,
+                    )
+                    .expect("sret return: struct layout computation failed")
+                    .expect("Struct element must have field layout");
                     self.lower_array_literal_struct_elements(
                         arena,
                         &elements,
@@ -2916,13 +3216,13 @@ impl Compiler {
 
         let is_compound_element = matches!(
             &elem_type_info.kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
         let array_len = Self::array_length(array_expr_id, ctx);
 
         if is_compound_element {
-            let elem_sz = type_byte_size(&elem_type_info.kind, ctx)
+            let elem_sz = type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
                 .expect("array index write: type_byte_size failed for compound element");
 
             // dest: array_base + index * struct_size
@@ -3081,11 +3381,11 @@ impl Compiler {
 
         let is_compound_element = matches!(
             &elem_type_info.kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
         let elem_sz = if is_compound_element {
-            type_byte_size(&elem_type_info.kind, ctx)
+            type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
                 .expect("array index access: type_byte_size failed for compound element")
         } else {
             memory::element_size(&elem_type_info.kind)
@@ -3359,10 +3659,11 @@ impl Compiler {
 
         if field_slots.is_empty() {
             let struct_info = ctx
-                .lookup_struct(struct_name)
+                .lookup_struct_in(struct_name, &self.current_module_path)
                 .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
             if !struct_info.fields.is_empty() {
-                let (_, computed_fields) = compute_struct_field_layout(&struct_info, ctx)?;
+                let (_, computed_fields) =
+                    compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
                 for field in &computed_fields {
                     self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
                 }
@@ -3876,20 +4177,29 @@ impl Compiler {
         ctx: &TypedContext,
         skip_zero_stores: bool,
     ) {
-        let stride = type_byte_size(elem_kind, ctx)
+        let stride = type_byte_size(elem_kind, ctx, &self.current_module_path)
             .expect("element byte size must be computable for array literal leaves");
 
         // For a struct leaf (reached only via the `Array` arm's recursion on a
         // nested array-of-structs literal), the field layout is constant for this
         // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
+        //
+        // The leaf is resolved by its canonical key, not by bare name: a
+        // `::`-qualified element type (`[[lib::geom::Pt; 2]; 1]`) carries a
+        // `Struct(name, key)` whose leaf name is not bound in the accessing file,
+        // so a bare-name lookup against `current_module_path` would miss it (or, with
+        // a same-named local struct in scope, find the wrong layout and store the
+        // literal's fields at the wrong offsets — a silent miscompile). Laying out
+        // by the element's defining file keeps stores and member reads in agreement.
         let struct_leaf_layout = match elem_kind {
-            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-                ctx.lookup_struct(name).map(|struct_info| {
-                    let (total_size, field_slots) =
-                        memory::compute_struct_field_layout(&struct_info, ctx)
-                            .expect("struct field layout must be computable for array literal leaves");
-                    (name.clone(), total_size, field_slots)
-                })
+            TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+                memory::resolve_struct_with_defining_path(elem_kind, ctx, &self.current_module_path)
+                    .map(|(struct_info, defining_path)| {
+                        let (total_size, field_slots) =
+                            memory::compute_struct_field_layout(&struct_info, ctx, &defining_path)
+                                .expect("struct field layout must be computable for array literal leaves");
+                        (name.clone(), total_size, field_slots)
+                    })
             }
             _ => None,
         };
@@ -4153,7 +4463,7 @@ impl Compiler {
                     } = &arena[field_value_expr_id].kind
                     {
                         let nested_name = match &field_slot.type_kind {
-                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                            TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                                 name.as_str()
                             }
                             _ => "<nested struct>",
@@ -4185,7 +4495,7 @@ impl Compiler {
                 } => {
                     if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
                         assert!(
-                            !matches!(elem_kind, TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)),
+                            !matches!(elem_kind, TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)),
                             "Array literal element-wise store requires scalar element type, \
                              got {elem_kind:?}"
                         );
@@ -4369,7 +4679,7 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(struct_expr_id))
             .expect("MemberAccess: struct expression must have type info");
 
-        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+        let (TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name)) =
             &struct_type.kind
         else {
             panic!(
@@ -4378,12 +4688,23 @@ impl Compiler {
             )
         };
 
-        let struct_info = ctx
-            .lookup_struct(struct_name)
-            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+        // The receiver's type carries the file-qualified canonical key of its
+        // struct. A chained access (`o.mid.a`) reaches a struct whose bare name
+        // may name a *different* struct in the file being emitted, so resolving
+        // the bare name against `current_module_path` would pick the wrong
+        // layout. Prefer the canonical key, which identifies the struct by its
+        // defining file (#63).
+        let struct_info = match &struct_type.kind {
+            TypeInfoKind::Struct(_, key) => ctx
+                .lookup_struct(key)
+                .or_else(|| ctx.lookup_struct_in(struct_name, &self.current_module_path)),
+            _ => ctx.lookup_struct_in(struct_name, &self.current_module_path),
+        }
+        .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
-        let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)
-            .expect("resolve field offset: struct layout computation failed");
+        let (_, field_slots) =
+            compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
+                .expect("resolve field offset: struct layout computation failed");
         let field_slot = field_slots
             .iter()
             .find(|fs| fs.name == *field_name)
@@ -4436,7 +4757,7 @@ impl Compiler {
     /// Consumes `self` so the recorded maps are moved out exactly once; there is
     /// no separate drain step and no flag to track. The custom
     /// `inference.spec_funcs` section is emitted from `self.spec_func_indices_by_spec`
-    /// before the move. The `frame_sizes` map (canonical [`FnKey`] string →
+    /// before the move. The `frame_sizes` map (canonical [`FnKey`] →
     /// real shadow-stack frame bytes) is surfaced for the cross-crate A036
     /// frame-size soundness check.
     pub(crate) fn finish_and_take(self) -> FinishedModule {
@@ -4564,13 +4885,24 @@ impl Compiler {
 fn compute_element_layout_if_struct(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
+    module_path: &[String],
 ) -> Result<Option<Vec<memory::StructFieldSlot>>, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            let Some(struct_info) = ctx.lookup_struct(name) else {
+        TypeInfoKind::Struct(..) | TypeInfoKind::Custom(_) => {
+            // Resolve the element struct by its canonical key, not by bare name.
+            // A `::`-qualified element type (`[lib::geom::Point; 2]`) carries a
+            // `Struct(_, key)` whose leaf name is not bound in the accessing file,
+            // so a bare-name lookup against `module_path` would miss it and the
+            // struct-element path would be skipped. Mirrors the scalar-struct field
+            // resolution so an array-of-struct local lays out by the element's
+            // defining file regardless of how its type was named (#63).
+            let Some((struct_info, defining_path)) =
+                memory::resolve_struct_with_defining_path(kind, ctx, module_path)
+            else {
                 return Ok(None);
             };
-            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
+            let (_, field_slots) =
+                compute_struct_field_layout(&struct_info, ctx, &defining_path)?;
             Ok(Some(field_slots))
         }
         _ => Ok(None),

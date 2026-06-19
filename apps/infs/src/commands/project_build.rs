@@ -2,11 +2,17 @@
 //!
 //! Both `infs build` (project mode) and `infs run` (project mode) need to
 //! perform the *same* project compilation: resolve the conventional
-//! `src/main.inf` entry point, warn about other `src/*.inf` files, run the
-//! `infc` compatibility handshake, and spawn `infc` with its working directory
-//! set to the project root so `out/` lands at the root. This module owns that
-//! shared logic so the two command modules do not duplicate it (and so `run`
-//! inherits the handshake "for free").
+//! `src/main.inf` entry point, run the `infc` compatibility handshake, and spawn
+//! `infc` with its working directory set to the project root so `out/` lands at
+//! the root. This module owns that shared logic so the two command modules do
+//! not duplicate it (and so `run` inherits the handshake "for free").
+//!
+//! `infc` compiles the whole import-reachable closure starting at
+//! `src/main.inf` and is the sole authority on which files are part of the
+//! build: it warns about genuinely-unreachable `src/**/*.inf` files itself.
+//! Because `infc` is spawned with inherited stdio, those warnings (and any
+//! errors) reach the user directly. `infs` therefore adds no file-discovery or
+//! warning logic of its own.
 //!
 //! It lives under `commands/` rather than `project/` because it is
 //! command-execution logic (subprocess spawning, exit-code propagation, the
@@ -32,11 +38,12 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// Compiles the entry point of a discovered project (project mode).
 ///
 /// Shared by `infs build` and `infs run`. Resolves the conventional
-/// `src/main.inf` entry point, warns about any other `src/*.inf` files
-/// (multi-file compilation is gated on #63), runs the `infc` compatibility
-/// handshake, then spawns `infc` with its working directory set to the project
-/// root so that `out/` lands at the root regardless of where the command was
-/// invoked.
+/// `src/main.inf` entry point, runs the `infc` compatibility handshake, then
+/// spawns `infc` with its working directory set to the project root so that
+/// `out/` lands at the root regardless of where the command was invoked. `infc`
+/// follows the import-reachable closure from `src/main.inf` and reports
+/// unreachable files itself; those messages reach the user through inherited
+/// stdio.
 ///
 /// The entry-point source is passed *relative to the root* (`src/main.inf`),
 /// matching the CWD-relativity contract between `infs` and `infc`: `infc`
@@ -79,8 +86,6 @@ pub(crate) fn run_project_build(
         );
     }
 
-    warn_extra_src_files(ctx);
-
     let infc_path = find_infc()?;
     let compat = probe_compiler_compatibility(&infc_path)?;
 
@@ -122,44 +127,6 @@ pub(crate) fn run_project_build(
     } else {
         let code = status.code().unwrap_or(1);
         Err(InfsError::process_exit_code(code).into())
-    }
-}
-
-/// Emits a stderr warning for each `src/*.inf` file other than `main.inf`.
-///
-/// Project mode compiles only `src/main.inf` until multi-file support lands
-/// (#63). Silently dropping helper files would be a debugging footgun, so each
-/// excluded file is named. A missing or unreadable `src/` directory is not an
-/// error here — the missing-entry-point check in [`run_project_build`] already
-/// reports the meaningful failure.
-fn warn_extra_src_files(ctx: &ProjectContext) {
-    let src_dir = ctx.root.join("src");
-    let Ok(entries) = std::fs::read_dir(&src_dir) else {
-        return;
-    };
-
-    let mut extras: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "inf")
-                && path.file_name().is_some_and(|name| name != "main.inf")
-            {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(String::from)
-            } else {
-                None
-            }
-        })
-        .collect();
-    extras.sort();
-
-    for name in extras {
-        eprintln!(
-            "warning: `src/{name}` is not part of the build; project mode \
-             compiles only `src/main.inf` (multi-file support is pending)."
-        );
     }
 }
 
@@ -301,18 +268,41 @@ pub(crate) fn probe_compiler_compatibility(infc_path: &Path) -> Result<CompilerC
     })
 }
 
+/// Spawn attempts for [`probe_flag`] when exec reports `ETXTBSY`. Five tries
+/// with linear backoff (10–50 ms) comfortably outlast the sub-millisecond
+/// fork/exec window that triggers the race.
+const PROBE_BUSY_RETRIES: u32 = 5;
+
 /// Runs `<infc_path> <flag>` with stdin/stderr suppressed and returns the
 /// trimmed stdout on success. Returns `None` for any failure mode that an old
-/// `infc` lacking the flag would produce: spawn error, non-zero exit, empty
-/// stdout, or the literal `unknown`.
+/// `infc` lacking the flag would produce: an unspawnable binary, non-zero exit,
+/// empty stdout, or the literal `unknown`.
+///
+/// A freshly built `infc` can transiently fail to exec with `ETXTBSY` ("text
+/// file busy") while another process still holds a writable handle to it across
+/// that process's fork/exec window. The condition clears within milliseconds, so
+/// the spawn is retried a few times rather than misread as a missing flag.
 fn probe_flag(infc_path: &Path, flag: &str) -> Option<String> {
-    let output = Command::new(infc_path)
-        .arg(flag)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
+    let mut attempt = 0;
+    let output = loop {
+        match Command::new(infc_path)
+            .arg(flag)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) => break output,
+            Err(err)
+                if err.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < PROBE_BUSY_RETRIES =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * u64::from(attempt)));
+            }
+            Err(_) => return None,
+        }
+    };
     if !output.status.success() {
         return None;
     }

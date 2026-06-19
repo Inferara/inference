@@ -94,7 +94,20 @@ impl std::str::FromStr for NumberType {
 }
 
 /// Discriminates the semantic category of a [`TypeInfo`] value.
-#[derive(Debug, Eq, PartialEq, Clone, Hash)]
+///
+/// ## Struct and enum identity
+///
+/// The [`Struct`](Self::Struct) and [`Enum`](Self::Enum) variants carry two
+/// strings: the bare type name and the type's *canonical key*. The bare name is
+/// what name resolution and code generation read (codegen re-qualifies it by the
+/// referencing file's module path); the canonical key is the type's defining-file
+/// identity (`a::alpha::Inner` for a non-entry file, the bare name for the entry
+/// file). Type identity — `PartialEq`, `Eq`, and `Hash` — is the canonical key
+/// alone, so two same-named structs from different files are distinct types while
+/// a single-file program's bare name *is* its key and behaves exactly as before.
+/// This is what stops a value of one file's `Inner` being accepted where another
+/// file's same-named `Inner` is expected.
+#[derive(Debug, Clone)]
 pub enum TypeInfoKind {
     Unit,
     Bool,
@@ -106,9 +119,61 @@ pub enum TypeInfoKind {
     QualifiedName(String),
     Qualified(String),
     Function(String),
-    Struct(String),
-    Enum(String),
+    /// A struct type: `(bare_name, canonical_key)`. Identity is the canonical key.
+    Struct(String, String),
+    /// An enum type: `(bare_name, canonical_key)`. Identity is the canonical key.
+    Enum(String, String),
     Spec(String),
+}
+
+/// Equality and hashing key the [`Struct`](TypeInfoKind::Struct) and
+/// [`Enum`](TypeInfoKind::Enum) variants on their canonical key alone (the second
+/// field), so a same-named type from a different file is a distinct type. Every
+/// other variant compares and hashes exactly as a derive would. For a single-file
+/// program the canonical key equals the bare name, so this is byte-identical to
+/// the previous derived behavior.
+impl PartialEq for TypeInfoKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TypeInfoKind::Unit, TypeInfoKind::Unit)
+            | (TypeInfoKind::Bool, TypeInfoKind::Bool)
+            | (TypeInfoKind::String, TypeInfoKind::String) => true,
+            (TypeInfoKind::Number(a), TypeInfoKind::Number(b)) => a == b,
+            (TypeInfoKind::Custom(a), TypeInfoKind::Custom(b))
+            | (TypeInfoKind::Generic(a), TypeInfoKind::Generic(b))
+            | (TypeInfoKind::QualifiedName(a), TypeInfoKind::QualifiedName(b))
+            | (TypeInfoKind::Qualified(a), TypeInfoKind::Qualified(b))
+            | (TypeInfoKind::Function(a), TypeInfoKind::Function(b))
+            | (TypeInfoKind::Spec(a), TypeInfoKind::Spec(b)) => a == b,
+            (TypeInfoKind::Array(a, an), TypeInfoKind::Array(b, bn)) => a == b && an == bn,
+            (TypeInfoKind::Struct(_, a_key), TypeInfoKind::Struct(_, b_key))
+            | (TypeInfoKind::Enum(_, a_key), TypeInfoKind::Enum(_, b_key)) => a_key == b_key,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TypeInfoKind {}
+
+impl std::hash::Hash for TypeInfoKind {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            TypeInfoKind::Unit | TypeInfoKind::Bool | TypeInfoKind::String => {}
+            TypeInfoKind::Number(n) => n.hash(state),
+            TypeInfoKind::Custom(s)
+            | TypeInfoKind::Generic(s)
+            | TypeInfoKind::QualifiedName(s)
+            | TypeInfoKind::Qualified(s)
+            | TypeInfoKind::Function(s)
+            | TypeInfoKind::Spec(s) => s.hash(state),
+            TypeInfoKind::Array(elem, len) => {
+                elem.hash(state);
+                len.hash(state);
+            }
+            TypeInfoKind::Struct(_, key) | TypeInfoKind::Enum(_, key) => key.hash(state),
+        }
+    }
 }
 
 impl Display for TypeInfoKind {
@@ -119,10 +184,13 @@ impl Display for TypeInfoKind {
             TypeInfoKind::String => write!(f, "String"),
             TypeInfoKind::Number(number_type) => write!(f, "{}", number_type.as_str()),
             TypeInfoKind::Array(ty, length) => write!(f, "[{ty}; {length}]"),
+            // Render structs and enums by their canonical key so a cross-file type
+            // mismatch reads `a::alpha::Inner` vs `b::beta::Inner` rather than a
+            // confusing `Inner` vs `Inner`. The key equals the bare name in a
+            // single-file program, so single-file diagnostics are unchanged.
+            TypeInfoKind::Struct(_, key) | TypeInfoKind::Enum(_, key) => write!(f, "{key}"),
             TypeInfoKind::Custom(ty)
             | TypeInfoKind::Spec(ty)
-            | TypeInfoKind::Struct(ty)
-            | TypeInfoKind::Enum(ty)
             | TypeInfoKind::QualifiedName(ty)
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
@@ -246,10 +314,19 @@ impl TypeInfo {
                 )),
                 type_params: vec![],
             },
-            TypeNode::Qualified { alias: _, name } => Self {
-                kind: TypeInfoKind::Qualified(arena[*name].name.clone()),
-                type_params: vec![],
-            },
+            TypeNode::Qualified { .. } => {
+                // Carry the full `::`-joined path (`lib::geom::Point`), not just
+                // the leaf: the qualifier names the file-namespace chain the type
+                // is reached through, and resolution needs every segment to walk
+                // it. The string is a pre-resolution carrier; `resolve_custom_type`
+                // rewrites it to a canonical `Struct`/`Enum` once the path is bound.
+                Self {
+                    kind: TypeInfoKind::Qualified(
+                        type_data.kind.qualified_path(arena).unwrap_or_default(),
+                    ),
+                    type_params: vec![],
+                }
+            }
             TypeNode::Array { element, size } => {
                 let array_size = extract_array_size_from_arena(arena, *size);
                 Self {
@@ -314,7 +391,7 @@ impl TypeInfo {
 
     #[must_use]
     pub fn is_struct(&self) -> bool {
-        matches!(self.kind, TypeInfoKind::Struct(_))
+        matches!(self.kind, TypeInfoKind::Struct(_, _))
     }
 
     #[must_use]
@@ -356,8 +433,8 @@ impl TypeInfo {
             | TypeInfoKind::QualifiedName(_)
             | TypeInfoKind::Qualified(_)
             | TypeInfoKind::Function(_)
-            | TypeInfoKind::Struct(_)
-            | TypeInfoKind::Enum(_)
+            | TypeInfoKind::Struct(_, _)
+            | TypeInfoKind::Enum(_, _)
             | TypeInfoKind::Spec(_) => self.clone(),
         }
     }
@@ -375,8 +452,8 @@ impl TypeInfo {
             | TypeInfoKind::QualifiedName(_)
             | TypeInfoKind::Qualified(_)
             | TypeInfoKind::Function(_)
-            | TypeInfoKind::Struct(_)
-            | TypeInfoKind::Enum(_)
+            | TypeInfoKind::Struct(_, _)
+            | TypeInfoKind::Enum(_, _)
             | TypeInfoKind::Spec(_) => false,
         }
     }

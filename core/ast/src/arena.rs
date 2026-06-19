@@ -38,9 +38,7 @@ const _: () = {
     assert_sync::<AstArena>();
 };
 
-// ---------------------------------------------------------------------------
 // Index impls — forward to inner Arena<T>
-// ---------------------------------------------------------------------------
 
 impl std::ops::Index<SourceFileId> for AstArena {
     type Output = SourceFileData;
@@ -91,9 +89,7 @@ impl std::ops::Index<IdentId> for AstArena {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Source text retrieval
-// ---------------------------------------------------------------------------
 
 impl AstArena {
     /// Returns the source location of any node.
@@ -133,10 +129,7 @@ impl AstArena {
                 Def::Struct { methods, .. } if self.def_in_list(target, methods) => {
                     return true;
                 }
-                Def::Spec { defs, .. }
-                | Def::Module {
-                    defs: Some(defs), ..
-                } if self.def_in_list(target, defs) => {
+                Def::Spec { defs, .. } if self.def_in_list(target, defs) => {
                     return true;
                 }
                 _ => {}
@@ -145,59 +138,111 @@ impl AstArena {
         false
     }
 
-    /// Finds which source file a node belongs to.
+    /// Finds which source file a node belongs to, when this can be determined
+    /// unambiguously.
     ///
-    /// For `SourceFile` nodes this is trivial. For `Def` nodes it delegates to
-    /// `find_source_file_for_def`. For other nodes it falls back to byte-offset
-    /// matching.
+    /// `Location` byte offsets are **per file**: every file's offsets start at
+    /// zero, so in a multi-file arena an offset alone does not name a file. This
+    /// method therefore resolves only by file-membership facts that are exact:
+    ///
+    /// - `SourceFile` nodes are their own file.
+    /// - `Def` nodes are looked up structurally via each file's `defs` list (see
+    ///   [`find_source_file_for_def`](Self::find_source_file_for_def)).
+    /// - Any other node is owned by the single file in a one-file arena; in a
+    ///   multi-file arena its owner is ambiguous and this returns `None`. Such
+    ///   callers must supply the owning file explicitly and use
+    ///   [`node_source_in_file`](Self::node_source_in_file).
+    ///
+    /// Single-file arenas (including the string-based `parse`) always resolve.
     #[must_use = "returns the source file containing the given node"]
     pub fn find_source_file_for_node(&self, node_id: NodeId) -> Option<SourceFileId> {
         match node_id {
             NodeId::SourceFile(id) => Some(id),
             NodeId::Def(def_id) => self.find_source_file_for_def(def_id),
-            _ => {
-                let location = self.node_location(node_id);
-                self.find_source_file_by_offset(location)
-            }
+            _ => self.sole_source_file_id(),
         }
     }
 
-    fn find_source_file_by_offset(&self, location: Location) -> Option<SourceFileId> {
-        let end = location.offset_end as usize;
-        for (sf_id, sf) in self.source_files.iter() {
-            if end <= sf.source.len() {
-                return Some(sf_id);
-            }
-        }
-        None
+    /// Returns the only file's id when the arena holds exactly one file,
+    /// otherwise `None`.
+    fn sole_source_file_id(&self) -> Option<SourceFileId> {
+        let mut ids = self.source_files.iter();
+        let (id, _) = ids.next()?;
+        ids.next().is_none().then_some(id)
     }
 
-    /// Returns the source text of a node by slicing its source file.
+    /// Returns the source text spanned by `location` within the named file.
     ///
-    /// Returns `None` if the source file cannot be determined or the byte
-    /// offsets fall outside the source text.
+    /// This is the file-aware primitive for diagnostics: the caller already knows
+    /// which file the location came from (traversal visits files one at a time),
+    /// so resolution is exact regardless of how many files share the arena.
+    /// Returns `None` if `start > end` or the offsets fall outside the file's
+    /// source.
     #[must_use]
-    pub fn get_node_source(&self, node_id: NodeId) -> Option<&str> {
-        let location = self.node_location(node_id);
+    pub fn node_source_in_file(&self, sf_id: SourceFileId, location: Location) -> Option<&str> {
         let start = location.offset_start as usize;
         let end = location.offset_end as usize;
         if start > end {
             return None;
         }
+        self.source_files
+            .iter()
+            .find(|(id, _)| *id == sf_id)
+            .and_then(|(_, sf)| sf.source.get(start..end))
+    }
+
+    /// Returns the source text of a node by slicing its owning file.
+    ///
+    /// The owning file is resolved with
+    /// [`find_source_file_for_node`](Self::find_source_file_for_node), so this
+    /// succeeds for `SourceFile` and `Def` nodes in any arena and for every node
+    /// in a single-file arena. For an offset-only node whose owner is ambiguous
+    /// (a non-`Def` node in a multi-file arena) it returns `None` rather than
+    /// guessing a file; use [`node_source_in_file`](Self::node_source_in_file)
+    /// with the known file instead.
+    #[must_use]
+    pub fn get_node_source(&self, node_id: NodeId) -> Option<&str> {
         let sf_id = self.find_source_file_for_node(node_id)?;
-        self[sf_id].source.get(start..end)
+        self.node_source_in_file(sf_id, self.node_location(node_id))
+    }
+
+    /// Returns the module path of the file owning `node_id`, when the owner is
+    /// resolvable (see [`find_source_file_for_node`](Self::find_source_file_for_node)).
+    ///
+    /// An empty slice identifies the entry file. This is the consumer-facing
+    /// piece for file-named diagnostics: given a node, name its namespace.
+    #[must_use]
+    pub fn node_module_path(&self, node_id: NodeId) -> Option<&[String]> {
+        let sf_id = self.find_source_file_for_node(node_id)?;
+        self.source_file_module_path(sf_id)
     }
 }
 
-// ---------------------------------------------------------------------------
 // Query methods
-// ---------------------------------------------------------------------------
 
 impl AstArena {
-    /// Returns all source file data entries.
+    /// Returns all source file data entries in **canonical order**.
+    ///
+    /// Source files are stored entry-first, then imported files sorted
+    /// lexicographically by their `module_path` (the project front end allocates
+    /// them in this order). This order is the single source of truth that later
+    /// pipeline phases consume for scope-id assignment, codegen emission, and
+    /// Rocq output, so artifacts are reproducible regardless of import-discovery
+    /// order. A single-file arena trivially satisfies the invariant.
     #[must_use]
     pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
         self.source_files.values()
+    }
+
+    /// Returns a source file's module path, or `None` if the id is out of range.
+    ///
+    /// An empty slice identifies the entry file (see [`SourceFileData`]).
+    #[must_use]
+    pub fn source_file_module_path(&self, id: SourceFileId) -> Option<&[String]> {
+        self.source_files
+            .iter()
+            .find(|(sf_id, _)| *sf_id == id)
+            .map(|(_, sf)| sf.module_path.as_slice())
     }
 
     /// Iterates over all source file IDs.
@@ -229,8 +274,7 @@ impl AstArena {
             | Def::Enum { name, .. }
             | Def::Spec { name, .. }
             | Def::Constant { name, .. }
-            | Def::TypeAlias { name, .. }
-            | Def::Module { name, .. } => *name,
+            | Def::TypeAlias { name, .. } => *name,
         };
         &self[name_id].name
     }
@@ -317,6 +361,7 @@ mod tests {
             source: String::new(),
             defs: vec![def_id],
             directives: vec![],
+            module_path: vec![],
         });
         assert_eq!(arena.find_source_file_for_def(def_id), Some(sf_id));
     }
@@ -362,6 +407,7 @@ mod tests {
             source: String::new(),
             defs: vec![struct_def],
             directives: vec![],
+            module_path: vec![],
         });
         assert_eq!(arena.find_source_file_for_def(method), Some(sf_id));
     }
@@ -396,6 +442,7 @@ mod tests {
             source,
             defs: vec![def_id],
             directives: vec![],
+            module_path: vec![],
         });
         assert_eq!(
             arena.get_node_source(NodeId::Def(def_id)),
@@ -432,6 +479,7 @@ mod tests {
             source: "short".to_string(),
             defs: vec![def_id],
             directives: vec![],
+            module_path: vec![],
         });
         assert_eq!(arena.get_node_source(NodeId::Def(def_id)), None);
     }
@@ -479,8 +527,213 @@ mod tests {
             source,
             defs: vec![def_id],
             directives: vec![],
+            module_path: vec![],
         });
 
         assert_eq!(arena.get_node_source(NodeId::Expr(lit)), Some("42"));
+    }
+
+    /// Appends a one-function file to `arena`: the function's body holds a single
+    /// `return <expr>` whose literal location is `lit_loc`. Returns the new file's
+    /// id and the literal's `ExprId`, so tests can probe a non-`Def` node.
+    fn push_function_file(
+        arena: &mut AstArena,
+        source: &str,
+        lit_loc: Location,
+        module_path: Vec<String>,
+    ) -> (SourceFileId, ExprId) {
+        #[allow(clippy::cast_possible_truncation)]
+        let sf_loc = Location::new(0, source.len() as u32, 1, 0, 1, source.len() as u32);
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: "foo".to_string(),
+        });
+        let lit = arena.exprs.alloc(ExprData {
+            location: lit_loc,
+            kind: Expr::NumberLiteral {
+                value: "0".to_string(),
+            },
+        });
+        let ret_stmt = arena.stmts.alloc(StmtData {
+            location: Location::default(),
+            kind: Stmt::Return { expr: lit },
+        });
+        let block = arena.blocks.alloc(BlockData {
+            location: Location::default(),
+            block_kind: BlockKind::Regular,
+            stmts: vec![ret_stmt],
+        });
+        let def_id = arena.defs.alloc(DefData {
+            location: sf_loc,
+            kind: Def::Function {
+                name,
+                vis: Visibility::default(),
+                type_params: vec![],
+                args: vec![],
+                returns: None,
+                body: block,
+            },
+        });
+        let sf_id = arena.source_files.alloc(SourceFileData {
+            location: sf_loc,
+            source: source.to_string(),
+            defs: vec![def_id],
+            directives: vec![],
+            module_path,
+        });
+        (sf_id, lit)
+    }
+
+    #[test]
+    fn source_file_module_path_distinguishes_entry_and_imports() {
+        let mut arena = AstArena::default();
+        let (entry, _) =
+            push_function_file(&mut arena, "fn a() { return 0; }", Location::default(), vec![]);
+        let (imported, _) = push_function_file(
+            &mut arena,
+            "fn b() { return 1; }",
+            Location::default(),
+            vec!["lib".to_string(), "arith".to_string()],
+        );
+
+        assert_eq!(arena.source_file_module_path(entry), Some(&[][..]));
+        assert_eq!(
+            arena.source_file_module_path(imported),
+            Some(&["lib".to_string(), "arith".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn node_source_in_file_resolves_overlapping_offsets_per_file() {
+        // Two files whose literals occupy the same byte range. An offset alone is
+        // ambiguous; naming the file makes resolution exact. The shared range
+        // 3..4 spells the function name letter, which differs between files.
+        let mut arena = AstArena::default();
+        let lit_loc = Location::new(3, 4, 1, 3, 1, 4);
+        let (entry, entry_lit) =
+            push_function_file(&mut arena, "fn a() { 7 }", lit_loc, vec![]);
+        let (imported, imported_lit) =
+            push_function_file(&mut arena, "fn b() { 9 }", lit_loc, vec!["m".to_string()]);
+
+        assert_eq!(
+            arena.node_source_in_file(entry, arena.node_location(NodeId::Expr(entry_lit))),
+            Some("a")
+        );
+        assert_eq!(
+            arena.node_source_in_file(imported, arena.node_location(NodeId::Expr(imported_lit))),
+            Some("b")
+        );
+        // Wrong-file lookups still slice the named file, never the other one.
+        assert_eq!(
+            arena.node_source_in_file(imported, arena.node_location(NodeId::Expr(entry_lit))),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn get_node_source_returns_none_for_ambiguous_node_in_multi_file_arena() {
+        // A non-`Def` node cannot be attributed to a file by offset once the arena
+        // holds more than one file, so `get_node_source` declines rather than
+        // guessing. Callers must use `node_source_in_file` with the known file.
+        let mut arena = AstArena::default();
+        let lit_loc = Location::new(9, 10, 1, 9, 1, 10);
+        let (_, lit) = push_function_file(&mut arena, "fn a() { 7 }", lit_loc, vec![]);
+        push_function_file(&mut arena, "fn b() { 9 }", lit_loc, vec!["m".to_string()]);
+
+        assert_eq!(arena.get_node_source(NodeId::Expr(lit)), None);
+    }
+
+    #[test]
+    fn get_node_source_resolves_def_node_in_multi_file_arena() {
+        // `Def` nodes resolve structurally via each file's `defs` list, so they
+        // stay attributable even with multiple files present.
+        let mut arena = AstArena::default();
+        let def_source = "fn a() { return 0; }";
+        let def_loc = Location::new(0, 4, 1, 0, 1, 4);
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: "a".to_string(),
+        });
+        let body = arena.blocks.alloc(BlockData {
+            location: Location::default(),
+            block_kind: BlockKind::Regular,
+            stmts: vec![],
+        });
+        let def_id = arena.defs.alloc(DefData {
+            location: def_loc,
+            kind: Def::Function {
+                name,
+                vis: Visibility::default(),
+                type_params: vec![],
+                args: vec![],
+                returns: None,
+                body,
+            },
+        });
+        let def_end = def_source.len().try_into().expect("source fits in u32");
+        arena.source_files.alloc(SourceFileData {
+            location: Location::new(0, def_end, 1, 0, 1, def_end),
+            source: def_source.to_string(),
+            defs: vec![def_id],
+            directives: vec![],
+            module_path: vec![],
+        });
+        push_function_file(
+            &mut arena,
+            "fn b() { return 1; }",
+            Location::default(),
+            vec!["m".to_string()],
+        );
+
+        assert_eq!(arena.get_node_source(NodeId::Def(def_id)), Some("fn a"));
+    }
+
+    #[test]
+    fn node_module_path_names_owning_file_for_def_nodes() {
+        let mut arena = AstArena::default();
+        push_function_file(&mut arena, "fn a() { return 0; }", Location::default(), vec![]);
+
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: "b".to_string(),
+        });
+        let body = arena.blocks.alloc(BlockData {
+            location: Location::default(),
+            block_kind: BlockKind::Regular,
+            stmts: vec![],
+        });
+        let def_id = arena.defs.alloc(DefData {
+            location: Location::default(),
+            kind: Def::Function {
+                name,
+                vis: Visibility::default(),
+                type_params: vec![],
+                args: vec![],
+                returns: None,
+                body,
+            },
+        });
+        arena.source_files.alloc(SourceFileData {
+            location: Location::default(),
+            source: "fn b() { return 1; }".to_string(),
+            defs: vec![def_id],
+            directives: vec![],
+            module_path: vec!["lib".to_string()],
+        });
+
+        assert_eq!(
+            arena.node_module_path(NodeId::Def(def_id)),
+            Some(&["lib".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn node_module_path_for_ambiguous_node_in_multi_file_arena_is_none() {
+        let mut arena = AstArena::default();
+        let lit_loc = Location::new(9, 10, 1, 9, 1, 10);
+        let (_, lit) = push_function_file(&mut arena, "fn a() { 7 }", lit_loc, vec![]);
+        push_function_file(&mut arena, "fn b() { 9 }", lit_loc, vec!["m".to_string()]);
+
+        assert_eq!(arena.node_module_path(NodeId::Expr(lit)), None);
     }
 }

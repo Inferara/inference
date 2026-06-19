@@ -4,7 +4,7 @@
 #[doc(hidden)]
 pub use inference_type_checker::typed_context::TypedContext;
 
-use crate::errors::{AnalysisDiagnostic, Severity};
+use crate::errors::{LabeledDiagnostic, Severity};
 
 /// A single analysis rule that checks a semantic invariant.
 ///
@@ -18,11 +18,16 @@ pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
     /// Severity level for findings produced by this rule.
     fn severity(&self) -> Severity;
-    /// Run the check against the typed context and return errors found.
-    fn check(&self, ctx: &TypedContext) -> Vec<AnalysisDiagnostic>;
+    /// Runs the check against the typed context and returns the findings, each
+    /// paired with the file it belongs to so the report can name the file.
+    fn check(&self, ctx: &TypedContext) -> Vec<LabeledDiagnostic>;
 }
 
 /// Declares an analysis rule struct and implements the `Rule` trait.
+///
+/// Each rule's `check` returns findings paired with the file they belong to (a
+/// [`LabeledDiagnostic`]), so a multi-file report can name the file an imported
+/// finding came from.
 ///
 /// # Example
 /// ```ignore
@@ -32,11 +37,13 @@ pub trait Rule: Send + Sync {
 ///     #[name = "Break outside loop"]
 ///     #[severity = error]
 ///     pub struct BreakOutsideLoop;
-///     fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+///     fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
 ///         // implementation
 ///     }
 /// }
 /// ```
+///
+/// [`LabeledDiagnostic`]: crate::errors::LabeledDiagnostic
 #[macro_export]
 macro_rules! rule {
     (
@@ -45,7 +52,7 @@ macro_rules! rule {
         #[name = $name:literal]
         #[severity = $severity:ident]
         pub struct $tname:ident;
-        fn check($ctx:ident : &TypedContext) -> Vec<AnalysisDiagnostic> $body:block
+        fn check($ctx:ident : &TypedContext) -> Vec<LabeledDiagnostic> $body:block
     ) => {
         $(#[doc = $doc])*
         pub struct $tname;
@@ -55,7 +62,7 @@ macro_rules! rule {
             fn severity(&self) -> $crate::errors::Severity {
                 $crate::__severity!($severity)
             }
-            fn check(&self, $ctx: &$crate::rule::TypedContext) -> Vec<$crate::errors::AnalysisDiagnostic> $body
+            fn check(&self, $ctx: &$crate::rule::TypedContext) -> Vec<$crate::errors::LabeledDiagnostic> $body
         }
     };
 }

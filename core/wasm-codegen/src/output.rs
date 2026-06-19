@@ -13,6 +13,7 @@
 use std::io;
 use std::path::Path;
 
+use inference_fn_key::FnKey;
 use rustc_hash::FxHashMap;
 
 use crate::target::{CompilationMode, OptLevel, Target};
@@ -86,12 +87,16 @@ pub struct CodegenOutput {
     /// by the corresponding `ValidModule` theorems.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
 
-    /// Per-function shadow-stack frame sizes in bytes, keyed by canonical
-    /// function name (matching `FnKey`/analysis key scheme).
+    /// Per-function shadow-stack frame sizes in bytes, keyed by the structured
+    /// [`FnKey`] shared with the analysis passes.
+    ///
+    /// Keyed by the structured key (not its lossy `Display` string) so the
+    /// cross-crate A036 parity test compares each function's estimate against its
+    /// own real frame rather than collapsing keys that render identically.
     ///
     /// Exposed for testing and diagnostics; empty unless populated by the
     /// codegen entry point.
-    frame_sizes: FxHashMap<String, u32>,
+    frame_sizes: FxHashMap<FnKey, u32>,
 }
 
 impl CodegenOutput {
@@ -121,21 +126,21 @@ impl CodegenOutput {
     /// Attaches per-function shadow-stack frame sizes to this output.
     ///
     /// Builder-style setter so the public [`Self::new`] signature stays
-    /// non-breaking. The map is keyed by canonical function name (matching the
-    /// `FnKey`/analysis key scheme) with the value in bytes.
+    /// non-breaking. The map is keyed by the structured [`FnKey`] (matching the
+    /// analysis key scheme) with the value in bytes.
     #[must_use]
-    pub fn with_frame_sizes(mut self, frame_sizes: FxHashMap<String, u32>) -> Self {
+    pub fn with_frame_sizes(mut self, frame_sizes: FxHashMap<FnKey, u32>) -> Self {
         self.frame_sizes = frame_sizes;
         self
     }
 
-    /// Returns the per-function shadow-stack frame sizes in bytes, keyed by
-    /// canonical function name (matching the `FnKey`/analysis key scheme).
+    /// Returns the per-function shadow-stack frame sizes in bytes, keyed by the
+    /// structured [`FnKey`] (matching the analysis key scheme).
     ///
     /// Exposed for testing and diagnostics; empty unless populated by the
     /// codegen entry point.
     #[must_use]
-    pub fn frame_sizes(&self) -> &FxHashMap<String, u32> {
+    pub fn frame_sizes(&self) -> &FxHashMap<FnKey, u32> {
         &self.frame_sizes
     }
 

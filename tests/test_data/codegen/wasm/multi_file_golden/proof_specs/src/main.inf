@@ -1,0 +1,9 @@
+use lib::checks;
+
+spec EntrySpec {
+    fn obligation() -> i32 {
+        return 1;
+    }
+}
+
+pub fn main() {}

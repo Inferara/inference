@@ -7,7 +7,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, ExprId, StmtId};
 use inference_ast::nodes::{ArgKind, Def, Expr, Stmt};
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Methods that declare `self` should actually reference it.
@@ -15,19 +15,24 @@ crate::rule! {
     #[name = "Method never accesses self"]
     #[severity = warning]
     pub struct MethodNeverAccessesSelf;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut warnings = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
             for &def_id in &source_file.defs {
-                check_def(arena, def_id, &mut warnings);
+                check_def(arena, &source_file.module_path, def_id, &mut warnings);
             }
         }
         warnings
     }
 }
 
-fn check_def(arena: &AstArena, def_id: inference_ast::ids::DefId, warnings: &mut Vec<AnalysisDiagnostic>) {
+fn check_def(
+    arena: &AstArena,
+    module_path: &[String],
+    def_id: inference_ast::ids::DefId,
+    warnings: &mut Vec<LabeledDiagnostic>,
+) {
     match &arena[def_id].kind {
         Def::Struct { name, methods, .. } => {
             let struct_name = arena[*name].name.clone();
@@ -43,25 +48,21 @@ fn check_def(arena: &AstArena, def_id: inference_ast::ids::DefId, warnings: &mut
                         .iter()
                         .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
                     if has_self && !body_references_self(arena, *body) {
-                        warnings.push(AnalysisDiagnostic::MethodNeverAccessesSelf {
-                            struct_name: struct_name.clone(),
-                            method_name: arena[*method_name].name.clone(),
-                            location: arena[method_id].location,
-                        });
+                        warnings.push(LabeledDiagnostic::new(
+                            module_path.to_vec(),
+                            AnalysisDiagnostic::MethodNeverAccessesSelf {
+                                struct_name: struct_name.clone(),
+                                method_name: arena[*method_name].name.clone(),
+                                location: arena[method_id].location,
+                            },
+                        ));
                     }
                 }
             }
         }
         Def::Spec { defs, .. } => {
             for &inner_def_id in defs {
-                check_def(arena, inner_def_id, warnings);
-            }
-        }
-        Def::Module {
-            defs: Some(inner), ..
-        } => {
-            for &inner_def_id in inner {
-                check_def(arena, inner_def_id, warnings);
+                check_def(arena, module_path, inner_def_id, warnings);
             }
         }
         _ => {}

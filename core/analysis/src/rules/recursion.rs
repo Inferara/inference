@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use inference_ast::nodes::Location;
 
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Direct and mutual recursion is forbidden (Power of 10, Rule 1).
@@ -24,14 +24,17 @@ crate::rule! {
     #[name = "Recursion detected"]
     #[severity = error]
     pub struct RecursionDetected;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let nodes = build_call_graph(ctx);
         detect_cycles(&nodes)
     }
 }
 
 /// Detects every call cycle in the graph and emits one diagnostic per cycle.
-fn detect_cycles(nodes: &[FnNode]) -> Vec<AnalysisDiagnostic> {
+///
+/// The diagnostic points at the call site that closes the cycle, which lives in
+/// the body of node `u`; that node's defining file names the finding.
+fn detect_cycles(nodes: &[FnNode]) -> Vec<LabeledDiagnostic> {
     let adj = resolve_adjacency(nodes);
 
     let mut color = vec![WHITE; nodes.len()];
@@ -61,7 +64,7 @@ fn dfs(
     color: &mut [u8],
     stack: &mut Vec<usize>,
     reported: &mut HashSet<Vec<usize>>,
-    diags: &mut Vec<AnalysisDiagnostic>,
+    diags: &mut Vec<LabeledDiagnostic>,
 ) {
     color[u] = GRAY;
     stack.push(u);
@@ -71,10 +74,13 @@ fn dfs(
                 if let Some(canon) = cycle_from_back_edge(stack, v)
                     && reported.insert(canon.clone())
                 {
-                    diags.push(AnalysisDiagnostic::RecursionDetected {
-                        cycle: render_cycle(nodes, &canon),
-                        location: call_loc,
-                    });
+                    diags.push(LabeledDiagnostic::new(
+                        nodes[u].module_path.clone(),
+                        AnalysisDiagnostic::RecursionDetected {
+                            cycle: render_cycle(nodes, &canon),
+                            location: call_loc,
+                        },
+                    ));
                 }
             }
             WHITE => dfs(v, adj, nodes, color, stack, reported, diags),
@@ -105,14 +111,14 @@ fn cycle_from_back_edge(stack: &[usize], v: usize) -> Option<Vec<usize>> {
     Some(canon)
 }
 
-/// Renders a cycle as `a -> b -> ... -> a` using node display labels.
+/// Renders a cycle as `a -> b -> ... -> a` using each node's canonical key.
 fn render_cycle(nodes: &[FnNode], cycle: &[usize]) -> String {
     let mut chain = String::new();
     for &i in cycle {
-        chain.push_str(&nodes[i].display);
+        chain.push_str(&nodes[i].key.to_string());
         chain.push_str(" -> ");
     }
-    chain.push_str(&nodes[cycle[0]].display);
+    chain.push_str(&nodes[cycle[0]].key.to_string());
     chain
 }
 
@@ -122,15 +128,30 @@ mod tests {
     use crate::call_graph::{test_node, CallEdge, FnNode};
     use inference_ast::ids::idx_from_u32;
     use inference_ast::nodes::Location;
+    use inference_fn_key::FnKey;
 
     fn loc() -> Location {
         Location::default()
     }
 
-    fn cycles(diags: &[AnalysisDiagnostic]) -> Vec<String> {
+    /// Builds a node with an explicit structured key and edges; placeholder
+    /// def/body metadata since these tests exercise graph shape only.
+    fn node(key: FnKey, edges: Vec<CallEdge>) -> FnNode {
+        FnNode {
+            key,
+            edges,
+            def_id: idx_from_u32(0),
+            body: idx_from_u32(0),
+            location: loc(),
+            module_path: Vec::new(),
+            struct_name: None,
+        }
+    }
+
+    fn cycles(diags: &[LabeledDiagnostic]) -> Vec<String> {
         diags
             .iter()
-            .map(|d| match d {
+            .map(|d| match &d.diagnostic {
                 AnalysisDiagnostic::RecursionDetected { cycle, .. } => cycle.clone(),
                 other => panic!("unexpected diagnostic: {other:?}"),
             })
@@ -209,19 +230,16 @@ mod tests {
     fn spec_first_resolution_prefers_spec_inner_callee() {
         // Inside spec `S`, bare `f` resolves to `S.f` when both exist.
         let nodes = vec![
-            FnNode {
-                key: "S.f".to_string(),
-                display: "S.f".to_string(),
-                edges: vec![CallEdge {
-                    callee_raw: "f".to_string(),
+            node(
+                FnKey::spec_free_folded(&[], "S", "f"),
+                vec![CallEdge {
+                    name: "f".to_string(),
+                    receiver_struct: None,
+                    module_path: Vec::new(),
                     spec: Some("S".to_string()),
                     location: loc(),
                 }],
-                def_id: idx_from_u32(0),
-                body: idx_from_u32(0),
-                location: loc(),
-                struct_name: None,
-            },
+            ),
             test_node("f", &[]),
         ];
         let diags = detect_cycles(&nodes);
@@ -231,20 +249,18 @@ mod tests {
 
     #[test]
     fn method_self_cycle_reported() {
-        // A method `T.m` resolved by call-site resolution to raw `T.m`.
-        let nodes = vec![FnNode {
-            key: "T.m".to_string(),
-            display: "T.m".to_string(),
-            edges: vec![CallEdge {
-                callee_raw: "T.m".to_string(),
+        // A method `T.m` whose body calls itself (`recv.m()` -> receiver struct
+        // `T`, name `m`).
+        let nodes = vec![node(
+            FnKey::method_in(Vec::new(), "T", "m"),
+            vec![CallEdge {
+                name: "m".to_string(),
+                receiver_struct: Some("T".to_string()),
+                module_path: Vec::new(),
                 spec: None,
                 location: loc(),
             }],
-            def_id: idx_from_u32(0),
-            body: idx_from_u32(0),
-            location: loc(),
-            struct_name: None,
-        }];
+        )];
         let diags = detect_cycles(&nodes);
         assert_eq!(diags.len(), 1);
         assert_eq!(cycles(&diags), vec!["T.m -> T.m"]);
