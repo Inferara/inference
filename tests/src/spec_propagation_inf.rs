@@ -360,5 +360,75 @@ mod fixture_with_spec_smoke {
             v.contains("Definition withspec__MySpec_specs"),
             "MySpec per-spec definition must appear:\n{v}"
         );
+
+        // The `forall` wrapping `prop`'s body must lower to the verifier
+        // library's 1-ary `BI_forall : list basic_instruction -> _`. The
+        // renderer appends the body as the sole `( … )` argument, so a correct
+        // emission reads `BI_forall (` immediately followed by the body — it
+        // must NOT carry a `block_type` argument (`BI_forall (BT_…`), which
+        // would apply the 1-ary constructor to two arguments and break the
+        // `coqc` type-check against the essence library.
+        assert!(
+            v.contains("BI_forall (\n"),
+            "forall body must lower to the bare 1-ary `BI_forall ( <body> )`:\n{v}"
+        );
+        assert!(
+            !v.contains("BI_forall (BT"),
+            "BI_forall must NOT carry a block_type argument (it is 1-ary):\n{v}"
+        );
+        // The quantified `let i = @` lowers to the nondeterministic-value
+        // instruction, which must sit INSIDE the forall body.
+        assert!(
+            v.contains("BI_uzumaki_num T_i32"),
+            "the `@` value must lower to BI_uzumaki_num:\n{v}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture 6: nondet_blocks.inf — Rocq arity of forall / exists / assume
+// ============================================================================
+#[cfg(test)]
+mod fixture_nondet_block_arity {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// The three non-deterministic quantifier blocks must lower to verifier
+    /// constructors with the exact arity the WasmCert-Coq-Essence library
+    /// declares in `theories/datatypes.v`:
+    ///   - `BI_forall : list basic_instruction -> _`            (NO block_type)
+    ///   - `BI_exists : list basic_instruction -> _`            (NO block_type)
+    ///   - `BI_assume : block_type -> list basic_instruction -> _` (keeps it)
+    ///
+    /// This is a regression guard for the codegen bug where `forall`/`exists`
+    /// were emitted as `BI_forall (BT_…) ( <body> )` — two arguments to a
+    /// 1-ary constructor — so every real compiled spec produced a `.v` that
+    /// could not be `coqc`-checked against the essence library.
+    #[test]
+    fn forall_exists_drop_blocktype_assume_keeps_it() {
+        let output = compile_inf("nondet_blocks.inf", CompilationMode::Proof, "nondet");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+
+        // forall: 1-ary, body is the sole argument.
+        assert!(
+            v.contains("BI_forall (\n") && !v.contains("BI_forall (BT"),
+            "BI_forall must be emitted 1-ary (no block_type):\n{v}"
+        );
+        // exists: 1-ary, body is the sole argument.
+        assert!(
+            v.contains("BI_exists (\n") && !v.contains("BI_exists (BT"),
+            "BI_exists must be emitted 1-ary (no block_type):\n{v}"
+        );
+        // assume: 2-ary, the leading block_type is preserved (matches the
+        // library's `BI_assume : block_type -> list basic_instruction -> _`).
+        assert!(
+            v.contains("BI_assume (BT"),
+            "BI_assume must keep its leading block_type argument:\n{v}"
+        );
     }
 }

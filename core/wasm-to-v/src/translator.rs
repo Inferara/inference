@@ -1184,18 +1184,36 @@ fn translate_basic_operator(
             let blockty = translate_block_type(blockty)?;
             format!("BI_if ({blockty})")
         }
-        Operator::Forall { blockty } => {
-            let blockty = translate_block_type(blockty)?;
-            format!("BI_forall ({blockty})")
-        }
-        Operator::Exists { blockty } => {
-            let blockty = translate_block_type(blockty)?;
-            format!("BI_exists ({blockty})")
-        }
+        // `forall`/`exists` lower to the verifier library's quantifier
+        // constructors, which take ONLY the body block — `BI_forall,
+        // BI_exists : list basic_instruction -> basic_instruction` (see
+        // WasmCert-Coq-Essence `theories/datatypes.v`). Unlike `BI_block`/
+        // `BI_loop`/`BI_if`/`BI_assume`, they carry no `block_type`: a
+        // quantifier block produces no value, so there is no result type to
+        // model. `print_with_offset` appends the body as the sole `( … )`
+        // argument, so we must emit the bare constructor here; emitting a
+        // `block_type` argument would make the generated `.v` apply the
+        // 1-ary constructor to two arguments and fail to type-check. The
+        // WASM encoding always carries an empty (`0x40`) blocktype for these
+        // (see `inference-wasm-codegen`), so dropping it loses nothing.
+        Operator::Forall { .. } => String::from("BI_forall"),
+        Operator::Exists { .. } => String::from("BI_exists"),
         Operator::Assume { blockty } => {
+            // `BI_assume : block_type -> list basic_instruction -> _` does
+            // take a leading block_type, so this one keeps it (matching the
+            // 2-ary `BI_block` shape).
             let blockty = translate_block_type(blockty)?;
             format!("BI_assume ({blockty})")
         }
+        // NOTE: the verifier library currently has no `BI_unique` constructor
+        // (it is commented out in `theories/datatypes.v`), so this lowering
+        // emits a reference that does not type-check in proof mode. It is left
+        // as-is here because `unique` is an allow-listed *proof-only* family in
+        // `core/wasm-linker/src/safety.rs` whose linker↔translator agreement is
+        // pinned by `core/wasm-linker/tests/v_alignment.rs` (every allow-listed
+        // family must translate without error). Honestly rejecting `unique`
+        // belongs with that allow-list/contract, not with this arity fix —
+        // tracked as separate follow-up.
         Operator::Unique { blockty } => {
             let blockty = translate_block_type(blockty)?;
             format!("BI_unique ({blockty})")

@@ -1,0 +1,28 @@
+// Exercises the Rocq lowering of the non-deterministic quantifier blocks
+// (`forall`, `exists`, `assume`). Each lowers to a verifier-library
+// constructor with a specific arity:
+//   BI_forall : list basic_instruction -> _          (no block_type)
+//   BI_exists : list basic_instruction -> _          (no block_type)
+//   BI_assume : block_type -> list basic_instruction -> _  (keeps block_type)
+// Proof-mode codegen emits every function body, so the lowered constructors
+// appear in the generated `.v` regardless of spec membership.
+pub fn forall_fn() {
+    forall {
+        let x: i32 = @;
+        assert(x == x);
+    }
+}
+
+pub fn exists_fn() {
+    exists {
+        let y: i32 = @;
+        assert(y == y);
+    }
+}
+
+pub fn assume_fn() {
+    assume {
+        let z: i32 = @;
+        assert(z == z);
+    }
+}
