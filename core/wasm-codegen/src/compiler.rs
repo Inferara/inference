@@ -1264,7 +1264,8 @@ impl Compiler {
         // cannot be proven `cannot_trap`, whereas a `BI_forall`-wrapped body is
         // discharged by the verifier's `C_forall` + `instance_elem` machinery.
         let block = &arena[body_id];
-        let body_nondet_op = match block.block_kind {
+        let body_kind = block.block_kind;
+        let body_nondet_op = match body_kind {
             BlockKind::Forall => Some(FORALL_OPCODE),
             BlockKind::Exists => Some(EXISTS_OPCODE),
             BlockKind::Assume => Some(ASSUME_OPCODE),
@@ -1273,6 +1274,17 @@ impl Compiler {
         };
         let body_stmts: Vec<StmtId> = block.stmts.clone();
         if let Some(op) = body_nondet_op {
+            // Mirror `lower_block`: fire the same per-kind cov_mark so the
+            // body-modifier path is observable to the test harness exactly like
+            // the inline-block path (the mark means "this nondet wrapper was
+            // emitted", regardless of which surface syntax produced it).
+            match body_kind {
+                BlockKind::Forall => cov_mark::hit!(wasm_codegen_emit_forall_block),
+                BlockKind::Exists => cov_mark::hit!(wasm_codegen_emit_exists_block),
+                BlockKind::Assume => cov_mark::hit!(wasm_codegen_emit_assume_block),
+                BlockKind::Unique => cov_mark::hit!(wasm_codegen_emit_unique_block),
+                BlockKind::Regular => unreachable!(),
+            }
             self.emit_nondet_block_start(op);
             self.loop_ctx.wasm_block_depth += 1;
         }

@@ -432,3 +432,53 @@ mod fixture_nondet_block_arity {
         );
     }
 }
+
+// ============================================================================
+// Fixture 7: nondet_body_modifiers.inf — function-body MODIFIER lowering path
+// ============================================================================
+#[cfg(test)]
+mod fixture_nondet_body_modifier {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// A function-body modifier (`fn f() forall { … }`) records its kind on the
+    /// function's body block, which `wasm-codegen` lowers via
+    /// `visit_function_definition_body` — a *different* path than the inline
+    /// `forall { … }` statement (which flows through `lower_block`, covered by
+    /// `fixture_nondet_block_arity`). Fixture 6 only reaches the inline path,
+    /// and `with_spec.inf` only exercises the `forall` modifier, so this test
+    /// pins the modifier path for `exists`/`assume` too — a typo in the new
+    /// `EXISTS_OPCODE`/`ASSUME_OPCODE` arm would otherwise go undetected.
+    ///
+    /// `cov_mark::check_count!` confirms the body-modifier branch fires the same
+    /// per-kind marks as `lower_block` (so the new path is observable), and the
+    /// `.v` assertions confirm each modifier emits its wrapper with the correct
+    /// arity (`BI_forall`/`BI_exists` 1-ary, `BI_assume` keeping its block_type).
+    #[test]
+    fn body_modifiers_emit_wrappers_with_correct_arity() {
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_exists_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_assume_block, 1);
+
+        let output = compile_inf("nondet_body_modifiers.inf", CompilationMode::Proof, "nbm");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+
+        assert!(
+            v.contains("BI_forall (\n") && !v.contains("BI_forall (BT"),
+            "forall modifier must lower to a 1-ary BI_forall wrapper:\n{v}"
+        );
+        assert!(
+            v.contains("BI_exists (\n") && !v.contains("BI_exists (BT"),
+            "exists modifier must lower to a 1-ary BI_exists wrapper:\n{v}"
+        );
+        assert!(
+            v.contains("BI_assume (BT"),
+            "assume modifier must lower to a BI_assume wrapper keeping its block_type:\n{v}"
+        );
+    }
+}
