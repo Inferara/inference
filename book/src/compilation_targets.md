@@ -25,6 +25,8 @@ The contract between the generated `.wasm` binary, the per-spec function index m
 
 Pass `--mode {compile,proof}` to either CLI: `infs build path/to/file.inf --mode proof` or `infc path/to/file.inf --mode proof`. Equivalently, `infc -v` (emit Rocq) implies `--mode proof` unless `--mode compile` is also passed; mirror-rule: `--mode proof` implies `-v`. Without either flag, the default is compile mode.
 
+For project-aware builds — `Inference.toml`, project discovery, and the `infs build`/`run` workflow that resolves a mode from the manifest — see [Projects and the infs Toolchain](projects-and-the-infs-toolchain.md).
+
 | Property | Value | Rationale |
 |----------|-------|-----------|
 | Spec function optimization | `-O0` + `optnone` + `noinline` | 1:1 structural correspondence for Rocq translation |
@@ -52,6 +54,8 @@ In the linking scenario, a user:
 6. The user writes Rocq proofs establishing properties about the external function's behavior
 
 The external artifact remains as-is (potentially fully optimized). The `spec` code requires structural identity for Rocq readability. Execution code — whether from Inference source or external modules — is compiled at the target's default release optimization so that Rocq proofs cover the actual deployed artifact. Only spec functions receive `optnone`+`noinline` barriers; execution functions are optimized normally.
+
+The language-level constructs that import external functions (`external fn`, `use … from`) are documented in [External Functions and WASM Linking](external-functions-and-wasm-linking.md); the static merge that folds them into the verified artifact — feasibility tiers and the Tier-B provenance proof — in [The WASM Linker](the-wasm-linker.md).
 
 ## Targets
 
