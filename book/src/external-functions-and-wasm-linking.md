@@ -124,6 +124,10 @@ After linking:
 - The unified module passes validation and flows into `wasm-to-v` as an ordinary
   module whose merged functions translate to Rocq `Definition`s.
 
+For the merge algorithm itself — transitive-closure computation, index re-encoding,
+the Tier-B provenance proof, and the full link-error taxonomy — see
+[The WASM Linker](the-wasm-linker.md).
+
 ## Memory-Merge Feasibility
 
 Not all external functions can be merged. The linker classifies each closure:
@@ -176,6 +180,8 @@ of each export, and merges the bodies into a single output module.
 
 ## Related Resources
 
+- [The WASM Linker](the-wasm-linker.md) — the subsystem deep-dive: merge algorithm, feasibility tiers, the Tier-B provenance proof, and the link-error taxonomy
+- [Projects and the infs Toolchain](projects-and-the-infs-toolchain.md) — declaring external `.wasm` modules in `Inference.toml` under `[wasm-dependencies]`
 - `core/wasm-linker/README.md` — the merge algorithm, tier classification, and entry point API
 - `core/wasm-codegen/docs/function-calls-lowering.md` — three-stage index pre-scan and import section emission
 - `core/type-checker` — `ExternOrigin`, `extern_origins()`, and the `A024 ExternFunctionCall` analysis rule

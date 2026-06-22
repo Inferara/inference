@@ -35,6 +35,20 @@ The chapters follow that order:
 - **[Compilation Targets](compilation_targets.md)** — compile vs. proof modes and
   the supported backends.
 
+A second group of chapters covers how programs are organised and built beyond a
+single source file:
+
+- **[Module Hierarchy & Multi-File Compilation](module-hierarchy-and-multi-file-compilation.md)**
+  — the file-as-module system, the `use` directive, and how a multi-file program
+  flattens into one WASM module and one proof.
+- **[Projects & the infs Toolchain](projects-and-the-infs-toolchain.md)** — the
+  `Inference.toml` manifest, project discovery, and the `infs build`/`run` workflow
+  that drives the compiler.
+- **[External Functions and WASM Linking](external-functions-and-wasm-linking.md)**
+  — declaring `external fn`s and binding them to pre-compiled `.wasm` modules.
+- **[The WASM Linker](the-wasm-linker.md)** — the static merge that folds external
+  function bodies into a single self-contained module.
+
 The appendix preserves historical notes from the project's earlier LLVM-based
 backend, retained for reference.
 

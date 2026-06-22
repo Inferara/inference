@@ -10,7 +10,13 @@
 - [Arithmetic Overflow in WASM Codegen](arithmetic-overflow-in-wasm-codegen.md)
 - [Unreachable Emission in Codegen](unreachable-emission-in-codegen.md)
 - [Compilation Targets](compilation_targets.md)
+
+# Projects & Tooling
+
+- [Module Hierarchy & Multi-File Compilation](module-hierarchy-and-multi-file-compilation.md)
+- [Projects & the infs Toolchain](projects-and-the-infs-toolchain.md)
 - [External Functions and WASM Linking](external-functions-and-wasm-linking.md)
+- [The WASM Linker](the-wasm-linker.md)
 
 # Appendix
 
