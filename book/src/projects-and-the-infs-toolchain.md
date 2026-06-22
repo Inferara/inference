@@ -300,7 +300,8 @@ infs build
 | `--wasm-dep <name>=<path>` | Bind a logical module name directly to a `.wasm` file; takes precedence over `-L` |
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
-| `--abi-version` output | Currently `1.1` |
+
+> **Note:** The current ABI version is `1.1`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.

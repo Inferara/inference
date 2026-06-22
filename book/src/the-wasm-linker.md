@@ -32,9 +32,9 @@ binaries and produces the self-contained module that flows into `wasm-to-v`:
     │
     ▼
   parse ──▶ type-check ──▶ analyze
-    │
-    ▼
- codegen (wasm-codegen)
+                                  │
+                                  ▼
+                            codegen (wasm-codegen)
     │
     ▼  main.wasm (import-bearing)
     │                               arith.wasm ──┐
