@@ -134,6 +134,7 @@
 //! From Wasm Require Import bytes.
 //! From Wasm Require Import numerics.
 //! From Wasm Require Import datatypes.
+//! From WasmVerifier Require Import Verifier.
 //!
 //! (* Helper definitions *)
 //! Definition Vi32 i := ...
@@ -338,7 +339,8 @@ impl WasmParseData<'_> {
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import bytes.\n");
         res.push_str("From Wasm Require Import numerics.\n");
-        res.push_str("From Wasm Require Import datatypes verifier.\n");
+        res.push_str("From Wasm Require Import datatypes.\n");
+        res.push_str("From WasmVerifier Require Import Verifier.\n");
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
@@ -571,11 +573,24 @@ impl WasmParseData<'_> {
         res.push_str("Section Host.\n");
         res.push_str("Context `{ho: host}.\n");
         res.push('\n');
+        // Structural well-formedness obligation. Always emitted (even for a module with
+        // zero specs): `ValidModule` is the 1-argument predicate fixed by ROCQ_CONTRACT.md
+        // and asserts the module type-checks (WasmCert's `module_typing`), independent of
+        // any spec indices.
+        res.push('\n');
+        res.push_str(
+            format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str(),
+        );
+        res.push_str("Proof.\n");
+        res.push_str("  (* TODO: fill the proof *)\n");
+        res.push_str("Qed.\n");
+        // Per-spec verification obligations. `ValidSpec` is the 2-argument predicate (module
+        // and the list of WASM function indices for this spec); it entails `ValidModule`.
         for (spec_name, _) in &spec_entries {
             res.push('\n');
             res.push_str(
                 format!(
-                    "Theorem valid_{module_name}__{spec_name} : ValidModule {module_name} {module_name}__{spec_name}_specs.\n"
+                    "Theorem valid_{module_name}__{spec_name} : ValidSpec {module_name} {module_name}__{spec_name}_specs.\n"
                 )
                 .as_str(),
             );

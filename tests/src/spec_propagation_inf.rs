@@ -132,8 +132,8 @@ mod fixture_spec_method {
             "per-spec definition for Geometry must be emitted:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_specmethod__Geometry : ValidModule specmethod specmethod__Geometry_specs."),
-            "per-spec ValidModule theorem missing:\n{v}"
+            v.contains("Theorem valid_specmethod__Geometry : ValidSpec specmethod specmethod__Geometry_specs."),
+            "per-spec ValidSpec theorem missing:\n{v}"
         );
     }
 }
@@ -255,10 +255,15 @@ mod fixture_three_specs {
             "empty spec must emit `(@nil N)`:\n{v}"
         );
 
-        // Each spec also gets its `valid_<mod>__<Spec>` theorem.
+        // The structural well-formedness theorem is emitted once.
+        assert!(
+            v.contains("Theorem valid_threespecs : ValidModule threespecs."),
+            "missing structural ValidModule theorem in:\n{v}"
+        );
+        // Each spec also gets its `valid_<mod>__<Spec> : ValidSpec` theorem.
         for spec in &["Alpha", "Beta", "Gamma"] {
             let needle = format!(
-                "Theorem valid_threespecs__{spec} : ValidModule threespecs threespecs__{spec}_specs."
+                "Theorem valid_threespecs__{spec} : ValidSpec threespecs threespecs__{spec}_specs."
             );
             assert!(
                 v.contains(&needle),
@@ -359,6 +364,66 @@ mod fixture_with_spec_smoke {
         assert!(
             v.contains("Definition withspec__MySpec_specs"),
             "MySpec per-spec definition must appear:\n{v}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture 6: spec_const.inf — the end-to-end WasmVerifier contract artifact
+// ============================================================================
+#[cfg(test)]
+mod fixture_spec_const_e2e {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// `spec_const.inf` is the fixture whose generated `.v` is discharged end to
+    /// end against the WasmVerifier Rocq library (see
+    /// `wasm-verifier/theories/examples/E2EGenerated.v`, which completes the two
+    /// `(* TODO *)` proofs with real `Qed`s). This test pins the *generated*
+    /// shape the downstream proof depends on: the `WasmVerifier.Verifier` import,
+    /// the spec function `p` returning the constant 42, the per-spec index list,
+    /// and the post-#21 contract theorems (1-arg `ValidModule` + 2-arg
+    /// `ValidSpec`). If any of these drift, the downstream `.v` stops compiling.
+    #[test]
+    fn spec_const_inf_emits_wasmverifier_contract() {
+        let output = compile_inf("spec_const.inf", CompilationMode::Proof, "spec_const");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        let by_spec = output.spec_func_indices_by_spec();
+        assert!(
+            by_spec.contains_key("Answer"),
+            "spec Answer must appear in the per-spec map; got {by_spec:?}"
+        );
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("spec_const", wasm, &empty).expect("translate ok");
+
+        // Downstream contract namespace.
+        assert!(
+            v.contains("From WasmVerifier Require Import Verifier."),
+            "generated .v must import the WasmVerifier contract:\n{v}"
+        );
+        // The spec function `p` (WASM index 1) returns the constant 42.
+        assert!(
+            v.contains("BI_const_num (Vi32 42)"),
+            "spec function body must push the constant 42:\n{v}"
+        );
+        assert!(
+            v.contains("Definition spec_const__Answer_specs : list N := (1 :: nil)%N."),
+            "per-spec index list must be [1]:\n{v}"
+        );
+        // Post-#21 contract: 1-arg ValidModule + 2-arg ValidSpec.
+        assert!(
+            v.contains("Theorem valid_spec_const : ValidModule spec_const."),
+            "structural ValidModule theorem missing:\n{v}"
+        );
+        assert!(
+            v.contains(
+                "Theorem valid_spec_const__Answer : ValidSpec spec_const spec_const__Answer_specs."
+            ),
+            "per-spec ValidSpec theorem missing:\n{v}"
         );
     }
 }

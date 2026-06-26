@@ -342,8 +342,8 @@ mod scenario_4_per_spec_emission {
     use rustc_hash::FxHashMap;
 
     /// Two specs `A` and `B` produce per-spec definitions and theorems sorted
-    /// alphabetically. Each spec yields a `ValidModule <mod> <mod>__<Spec>_specs`
-    /// theorem.
+    /// alphabetically. Each spec yields a `ValidSpec <mod> <mod>__<Spec>_specs`
+    /// theorem (alongside the single structural `ValidModule <mod>`).
     ///
     /// Note: the codegen always embeds module name `"output"` into the WASM
     /// name section, which the translator's custom-name-section handling uses
@@ -367,11 +367,15 @@ mod scenario_4_per_spec_emission {
             "specs should be emitted alphabetically (A before B):\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__A : ValidModule output output__A_specs."),
+            v.contains("Theorem valid_output : ValidModule output."),
+            "structural ValidModule theorem missing:\n{v}"
+        );
+        assert!(
+            v.contains("Theorem valid_output__A : ValidSpec output output__A_specs."),
             "per-spec theorem for A missing:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__B : ValidModule output output__B_specs."),
+            v.contains("Theorem valid_output__B : ValidSpec output output__B_specs."),
             "per-spec theorem for B missing:\n{v}"
         );
     }
@@ -574,8 +578,8 @@ mod scenario_5_empty_list {
     ///
     /// The codegen embeds module name `"output"` into the WASM name section,
     /// so even though we pass `"Empty"`, the module definition is named
-    /// `output`. With no specs, the translator emits no theorems at all
-    /// (each `ValidModule <mod> <mod>__<Spec>_specs` theorem is per-spec).
+    /// `output`. With no specs, the translator emits no per-spec `ValidSpec`
+    /// theorems, but it still emits the structural `valid_<mod> : ValidModule <mod>`.
     #[test]
     fn empty_map_yields_no_spec_definition() {
         let source = r#"pub fn main() -> i32 { return 0; }"#;
@@ -587,8 +591,12 @@ mod scenario_5_empty_list {
             "no per-spec definitions expected when map is empty:\n{v}"
         );
         assert!(
-            !v.contains("Theorem valid_"),
-            "no theorems expected when the spec map is empty:\n{v}"
+            !v.contains("ValidSpec"),
+            "no per-spec ValidSpec theorems expected when the spec map is empty:\n{v}"
+        );
+        assert!(
+            v.contains("Theorem valid_output : ValidModule output."),
+            "the structural ValidModule theorem should still be emitted:\n{v}"
         );
     }
 
@@ -1241,7 +1249,7 @@ mod scenario_7_empty_spec {
     /// A user-authored empty `spec MySpec { }` must surface a per-spec entry
     /// with an empty index list, so the Rocq translator still emits both a
     /// `Definition output__MySpec_specs : list N := (@nil N).` line and a
-    /// `Theorem valid_output__MySpec : ValidModule output output__MySpec_specs.`
+    /// `Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs.`
     /// theorem. Without `ensure_spec_registered`, the spec vanished silently
     /// from the proof artifact because the bucket iteration only recorded
     /// entries for non-empty inner defs.
@@ -1268,7 +1276,7 @@ mod scenario_7_empty_spec {
             "empty spec must emit the `(@nil N)` definition line:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__MySpec : ValidModule output output__MySpec_specs."),
+            v.contains("Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs."),
             "empty spec must emit the per-spec theorem:\n{v}"
         );
     }
@@ -1493,8 +1501,8 @@ mod scenario_10_wasm_to_v_compile_mode {
 
     /// Compile a spec-bearing source in compile mode and feed the bytes to
     /// `wasm_to_v` with an empty explicit map. Result: NO per-spec definitions
-    /// and NO theorems at all (the `ValidModule <mod> <mod>__<Spec>_specs`
-    /// theorems are strictly per-spec, so a specless translation emits none).
+    /// and NO per-spec `ValidSpec` theorems (specs are stripped in compile mode),
+    /// but the structural `valid_<mod> : ValidModule <mod>` is still emitted.
     ///
     /// The WASM-embedded module name `"output"` overrides `mod_name`.
     #[test]
@@ -1504,16 +1512,22 @@ mod scenario_10_wasm_to_v_compile_mode {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
 
-        // No per-spec definition or theorem lines.
+        // No per-spec definition or ValidSpec lines.
         assert_eq!(
             v.matches("_specs : list N").count(),
             0,
             "no per-spec definitions expected:\n{v}"
         );
         assert_eq!(
-            v.matches("Theorem valid_").count(),
+            v.matches("ValidSpec").count(),
             0,
-            "no theorems expected for a specless translation:\n{v}"
+            "no per-spec ValidSpec theorems expected for a specless translation:\n{v}"
+        );
+        // The structural ValidModule theorem is still emitted.
+        assert_eq!(
+            v.matches("Theorem valid_output : ValidModule output.").count(),
+            1,
+            "exactly one structural ValidModule theorem expected:\n{v}"
         );
     }
 }

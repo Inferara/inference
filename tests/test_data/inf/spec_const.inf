@@ -1,0 +1,9 @@
+fn dummy() -> i32 {
+  return 0;
+}
+
+spec Answer {
+  fn p() -> i32 {
+    return 42;
+  }
+}

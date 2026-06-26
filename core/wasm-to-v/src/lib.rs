@@ -293,9 +293,20 @@ mod tests {
             output.contains("Definition Fac__Spec1_specs : list N := (3 :: 4 :: 7 :: nil)%N."),
             "output should contain Fac__Spec1_specs definition; got:\n{output}",
         );
+        // Structural well-formedness theorem (1-arg ValidModule), always emitted.
         assert!(
-            output.contains("Theorem valid_Fac__Spec1 : ValidModule Fac Fac__Spec1_specs."),
-            "output should contain per-spec ValidModule theorem; got:\n{output}",
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should contain the structural ValidModule theorem; got:\n{output}",
+        );
+        // Per-spec verification theorem uses the 2-arg ValidSpec predicate (post-#21).
+        assert!(
+            output.contains("Theorem valid_Fac__Spec1 : ValidSpec Fac Fac__Spec1_specs."),
+            "output should contain per-spec ValidSpec theorem; got:\n{output}",
+        );
+        // The downstream library namespace is WasmVerifier, not Wasm.
+        assert!(
+            output.contains("From WasmVerifier Require Import Verifier."),
+            "output should import the WasmVerifier contract; got:\n{output}",
         );
     }
 
@@ -312,9 +323,16 @@ mod tests {
             !output.contains("_specs : list N"),
             "output should contain no per-spec definitions when the map is empty; got:\n{output}",
         );
+        // No per-spec ValidSpec theorems when there are no specs.
         assert!(
-            !output.contains("Theorem valid_"),
-            "output should contain no theorems when the spec map is empty; got:\n{output}",
+            !output.contains("ValidSpec"),
+            "output should contain no ValidSpec theorems when the spec map is empty; got:\n{output}",
+        );
+        // The structural ValidModule theorem is still emitted (contract: a zero-spec module
+        // emits only the module record and `Theorem valid_<mod> : ValidModule <mod>`).
+        assert!(
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should still contain the structural ValidModule theorem; got:\n{output}",
         );
     }
 }
