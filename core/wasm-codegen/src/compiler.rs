@@ -56,6 +56,19 @@
 //!
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
+//!
+//! # Spec functions: `@` → parameter (proof mode)
+//!
+//! Inside a `spec` block, a scalar `@` (uzumaki) denotes a *universally-quantified* value,
+//! not runtime non-determinism. Rather than emit the non-vanilla `0xfc` opcode (which the
+//! downstream Rocq library built on vanilla WasmCert-Coq cannot parse), each scalar `@` in a
+//! spec function is lowered to a synthetic **function parameter** (read back with `local.get`):
+//! see [`Compiler::collect_spec_uzumaki_params`] / [`Compiler::uzumaki_param_map`] and the
+//! `Expr::Uzumaki` arm of [`Compiler::lower_expression`]. The `forall` then collapses into the
+//! ∀ the downstream `ValidSpec`/`sem_triple` already quantifies over, so a `forall`-spec body
+//! becomes ordinary WASM (a function-level `fn f() forall { .. }` body never emits the `forall`
+//! *wrapper* opcode — codegen lowers the body block's statements directly). Non-spec functions
+//! and array/struct `@` keep the opcode path above unchanged.
 
 use crate::errors::CodegenError;
 use rustc_hash::FxHashMap;
@@ -369,6 +382,14 @@ pub(crate) struct Compiler {
     /// zero. Set only during variable initialization (`Stmt::VarDef`), never
     /// during assignment where slots may hold non-zero data.
     init_zero_elision: bool,
+    /// Per-function map from a scalar `@` (uzumaki) expression to the WASM local
+    /// index of the synthetic function parameter it was lowered to. Populated only
+    /// for functions inside a `spec` block (proof mode): there each `@` denotes a
+    /// universally-quantified value, which we model as an extra function parameter
+    /// (the `forall` becomes the ∀ the downstream `ValidSpec`/`sem_triple` already
+    /// quantifies over) rather than the non-vanilla `0xfc` uzumaki opcode. An empty
+    /// map (every non-spec function) leaves `@` lowering byte-identical to before.
+    uzumaki_param_map: FxHashMap<ExprId, u32>,
     /// WASM function indices for functions that originated in `spec` blocks,
     /// keyed by spec name. Populated during Stage 1 registration in proof mode;
     /// consumed (moved out) by [`Self::finish_and_take`] so the Rocq translator
@@ -431,6 +452,7 @@ impl Compiler {
             loop_ctx: LoopContext::default(),
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
+            uzumaki_param_map: FxHashMap::default(),
             spec_func_indices_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
             emit_bounds_checks: false,
@@ -1037,6 +1059,7 @@ impl Compiler {
 
         let mut params: Vec<ValType> = vec![];
         self.locals_map.clear();
+        self.uzumaki_param_map.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         let mut local_idx: u32 = 0;
@@ -1085,6 +1108,29 @@ impl Compiler {
                 ArgKind::TypeOnly(_) => {
                     todo!("Type arguments are not yet supported in WASM codegen")
                 }
+            }
+        }
+
+        // Spec-mode `@` (uzumaki) lowering: inside a `spec` block each scalar `@`
+        // denotes a universally-quantified value. Rather than emit the non-vanilla
+        // `0xfc` uzumaki opcode (which vanilla WasmCert-Coq cannot parse), we append
+        // one synthetic function parameter per `@`, so the `forall` collapses into the
+        // ∀ that the downstream `ValidSpec`/`sem_triple` already quantifies over and the
+        // whole spec body becomes plain WASM. Synthetic params follow the declared
+        // params/locals in index order, sorted by source position for determinism.
+        // Non-spec functions never enter this branch, so their `@` stays byte-identical.
+        if self.current_spec.is_some() {
+            let mut uzumaki_exprs: Vec<(ExprId, ValType)> = Vec::new();
+            Self::collect_spec_uzumaki_params(arena, body_id, ctx, &mut uzumaki_exprs);
+            for (expr_id, vt) in uzumaki_exprs {
+                cov_mark::hit!(wasm_codegen_assign_uzumaki_param);
+                params.push(vt);
+                let prev = self.uzumaki_param_map.insert(expr_id, local_idx);
+                debug_assert!(
+                    prev.is_none(),
+                    "each `@` expression id is visited once by the uzumaki pre-scan",
+                );
+                local_idx += 1;
             }
         }
 
@@ -1373,6 +1419,136 @@ impl Compiler {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Pre-scans a `spec`-function body collecting every scalar `@` (uzumaki)
+    /// expression together with the WASM value type it lowers to, in source order.
+    /// Each becomes a synthetic function parameter (see the call site in
+    /// [`Self::visit_function_definition_body`]). Array/struct uzumaki are excluded:
+    /// they lower to element-wise memory stores rather than a single scalar value,
+    /// so they keep the existing opcode path and are out of scope for the
+    /// `@`→parameter spec lowering. The block descent mirrors
+    /// [`Self::pre_scan_locals`].
+    fn collect_spec_uzumaki_params(
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+        out: &mut Vec<(ExprId, ValType)>,
+    ) {
+        for &stmt_id in &arena[block_id].stmts {
+            match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::collect_uzumaki_in_expr(arena, *e, ctx, out);
+                }
+                Stmt::Assign { left, right } => {
+                    Self::collect_uzumaki_in_expr(arena, *left, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *right, ctx, out);
+                }
+                Stmt::VarDef { value, .. } => {
+                    if let Some(v) = value {
+                        Self::collect_uzumaki_in_expr(arena, *v, ctx, out);
+                    }
+                }
+                Stmt::Block(inner) => {
+                    Self::collect_spec_uzumaki_params(arena, *inner, ctx, out);
+                }
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    Self::collect_uzumaki_in_expr(arena, *condition, ctx, out);
+                    Self::collect_spec_uzumaki_params(arena, *then_block, ctx, out);
+                    if let Some(else_id) = else_block {
+                        Self::collect_spec_uzumaki_params(arena, *else_id, ctx, out);
+                    }
+                }
+                Stmt::Loop { condition, body } => {
+                    if let Some(c) = condition {
+                        Self::collect_uzumaki_in_expr(arena, *c, ctx, out);
+                    }
+                    Self::collect_spec_uzumaki_params(arena, *body, ctx, out);
+                }
+                Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => {}
+            }
+        }
+    }
+
+    /// Recursively collects scalar `@` (uzumaki) expressions in `expr_id` and its
+    /// sub-expressions. Supporting helper for [`Self::collect_spec_uzumaki_params`];
+    /// the expression descent mirrors [`Self::expr_has_dynamic_array_index`].
+    fn collect_uzumaki_in_expr(
+        arena: &AstArena,
+        expr_id: ExprId,
+        ctx: &TypedContext,
+        out: &mut Vec<(ExprId, ValType)>,
+    ) {
+        match &arena[expr_id].kind {
+            Expr::Uzumaki => {
+                if let Some(vt) = ctx
+                    .get_node_typeinfo(NodeId::Expr(expr_id))
+                    .and_then(|ti| Self::scalar_uzumaki_valtype(&ti.kind))
+                {
+                    out.push((expr_id, vt));
+                }
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::collect_uzumaki_in_expr(arena, *array, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *index, ctx, out);
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_uzumaki_in_expr(arena, *left, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *right, ctx, out);
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::collect_uzumaki_in_expr(arena, *expr, ctx, out);
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                Self::collect_uzumaki_in_expr(arena, *function, ctx, out);
+                for (_, arg) in args {
+                    Self::collect_uzumaki_in_expr(arena, *arg, ctx, out);
+                }
+            }
+            Expr::StructLiteral { fields, .. } => {
+                for (_, value) in fields {
+                    Self::collect_uzumaki_in_expr(arena, *value, ctx, out);
+                }
+            }
+            Expr::ArrayLiteral { elements } => {
+                for &e in elements {
+                    Self::collect_uzumaki_in_expr(arena, e, ctx, out);
+                }
+            }
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Type(_) => {}
+        }
+    }
+
+    /// Returns the WASM value type for a scalar uzumaki of the given type kind, or
+    /// `None` for non-scalar (array/struct) uzumaki. Mirrors the scalar arms of the
+    /// `Expr::Uzumaki` case in [`Self::lower_expression`].
+    fn scalar_uzumaki_valtype(kind: &TypeInfoKind) -> Option<ValType> {
+        match kind {
+            TypeInfoKind::Bool
+            | TypeInfoKind::Number(
+                NumberType::I8
+                | NumberType::U8
+                | NumberType::I16
+                | NumberType::U16
+                | NumberType::I32
+                | NumberType::U32,
+            )
+            | TypeInfoKind::Enum(_, _) => Some(ValType::I32),
+            TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Some(ValType::I64),
+            _ => None,
         }
     }
 
@@ -2351,6 +2527,16 @@ impl Compiler {
             }
             Expr::Type(_) => todo!(),
             Expr::Uzumaki => {
+                // Spec-mode lowering: a scalar `@` inside a `spec` block was assigned
+                // a synthetic function parameter (see `visit_function_definition_body`).
+                // Read it back as a plain `local.get` instead of emitting the non-vanilla
+                // `0xfc` uzumaki opcode, so the spec body is ordinary WASM. The map is
+                // empty for every non-spec function, so this branch is never taken there.
+                if let Some(&param_idx) = self.uzumaki_param_map.get(&expr_id) {
+                    cov_mark::hit!(wasm_codegen_emit_uzumaki_param);
+                    self.func().instruction(&Instruction::LocalGet(param_idx));
+                    return;
+                }
                 let node_id = NodeId::Expr(expr_id);
                 let type_info = ctx
                     .get_node_typeinfo(node_id)

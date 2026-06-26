@@ -1,0 +1,10 @@
+fn dummy() -> i32 {
+    return 0;
+}
+
+spec ReflSpec {
+    fn refl() forall {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}

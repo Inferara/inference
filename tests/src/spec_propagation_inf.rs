@@ -427,3 +427,76 @@ mod fixture_spec_const_e2e {
         );
     }
 }
+
+// ============================================================================
+// Fixture 7: refl_spec.inf — the SPEC ESSENCE e2e (forall + @ + assert)
+// ============================================================================
+#[cfg(test)]
+mod fixture_refl_spec_e2e {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// `refl_spec.inf` exercises the spec constructs the earlier `spec_const`
+    /// fixture dodged — a `forall`-block introducing a `@` (uzumaki) value and an
+    /// `assert`. The codegen `@`→parameter lowering turns the whole spec body into
+    /// *vanilla* WASM (no `0xfc` opcode), so it both validates and is dischargeable
+    /// downstream (`wasm-verifier/theories/examples/E2EReflSpec.v` completes the two
+    /// generated proofs with real `Qed`s). This test pins the lowered shape:
+    /// the `@` became function parameter 0 (`refl : (i32) -> ()`), the body is
+    /// `local.get; local.set; local.get; local.get; i32.eq; i32.eqz; if`, and no
+    /// custom uzumaki/nondet opcode survives.
+    #[test]
+    fn refl_spec_inf_lowers_uzumaki_to_param() {
+        let output = compile_inf("refl_spec.inf", CompilationMode::Proof, "refl_spec");
+        let wasm = output.wasm();
+        // A `0xfc`-prefixed uzumaki opcode would make this fail to validate under
+        // vanilla rules; that it validates is the proof the body is plain WASM.
+        inf_wasmparser::validate(wasm).expect("WASM must validate (no custom opcodes)");
+
+        let by_spec = output.spec_func_indices_by_spec();
+        assert_eq!(
+            by_spec.get("ReflSpec").map(Vec::as_slice),
+            Some([1u32].as_slice()),
+            "spec ReflSpec's function must be WASM index 1; got {by_spec:?}"
+        );
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("refl_spec", wasm, &empty).expect("translate ok");
+
+        // The `@` was lowered to a parameter: the spec function's type is (i32) -> ().
+        assert!(
+            v.contains("Tf (T_num T_i32 :: nil) (nil)"),
+            "refl's type must take the @-introduced value as an i32 param:\n{v}"
+        );
+        // The lowered assert body is vanilla WASM.
+        for needle in [
+            "BI_local_get 0%N",
+            "BI_local_set 1%N",
+            "BI_relop T_i32 (Relop_i ROI_eq)",
+            "BI_testop T_i32 TO_eqz",
+            "BI_if (BT_valtype None)",
+        ] {
+            assert!(v.contains(needle), "generated body missing `{needle}`:\n{v}");
+        }
+        // No custom uzumaki/nondet opcode leaks into the generated Rocq.
+        for forbidden in ["uzumaki", "BI_uzumaki", "forall", "nondet"] {
+            assert!(
+                !v.contains(forbidden),
+                "generated .v must not mention `{forbidden}`:\n{v}"
+            );
+        }
+        // Post-#21 contract theorems present.
+        assert!(
+            v.contains("Theorem valid_refl_spec : ValidModule refl_spec."),
+            "structural ValidModule theorem missing:\n{v}"
+        );
+        assert!(
+            v.contains(
+                "Theorem valid_refl_spec__ReflSpec : \
+                 ValidSpec refl_spec refl_spec__ReflSpec_specs."
+            ),
+            "per-spec ValidSpec theorem missing:\n{v}"
+        );
+    }
+}
