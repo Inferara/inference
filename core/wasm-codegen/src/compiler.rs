@@ -57,18 +57,30 @@
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
 //!
-//! # Spec functions: `@` → parameter (proof mode)
+//! # Spec functions: `@` → parameter, vanilla quantifier blocks (proof mode)
 //!
-//! Inside a `spec` block, a scalar `@` (uzumaki) denotes a *universally-quantified* value,
-//! not runtime non-determinism. Rather than emit the non-vanilla `0xfc` opcode (which the
-//! downstream Rocq library built on vanilla WasmCert-Coq cannot parse), each scalar `@` in a
-//! spec function is lowered to a synthetic **function parameter** (read back with `local.get`):
-//! see [`Compiler::collect_spec_uzumaki_params`] / [`Compiler::uzumaki_param_map`] and the
-//! `Expr::Uzumaki` arm of [`Compiler::lower_expression`]. The `forall` then collapses into the
-//! ∀ the downstream `ValidSpec`/`sem_triple` already quantifies over, so a `forall`-spec body
-//! becomes ordinary WASM (a function-level `fn f() forall { .. }` body never emits the `forall`
-//! *wrapper* opcode — codegen lowers the body block's statements directly). Non-spec functions
-//! and array/struct `@` keep the opcode path above unchanged.
+//! Inside a `spec` block, `@` (uzumaki) and the `forall`/`exists`/`unique`/`assume` blocks
+//! denote *logical* quantification/assumption, not runtime non-determinism. Rather than emit
+//! the non-vanilla `0xfc` opcodes (which the downstream Rocq library built on vanilla
+//! WasmCert-Coq cannot parse), a spec function is lowered to **ordinary WASM** and the meaning
+//! is carried by the downstream Rocq *contract predicate*
+//! (`ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec`):
+//!
+//! - **`@`→parameter.** A *scalar* `@` becomes one synthetic **function parameter** (read back
+//!   with `local.get`); an *aggregate* (`array`/`struct`) `@` becomes one parameter per scalar
+//!   *leaf*, written into the aggregate's frame memory by `local.get; i32.store`. See
+//!   [`Compiler::collect_spec_uzumaki_params`] / [`Compiler::uzumaki_leaf_valtypes`] /
+//!   [`Compiler::uzumaki_param_map`] (which records each `@`'s *base* parameter index) and the
+//!   `Expr::Uzumaki` arm of [`Compiler::lower_expression`], with the leaf cursor
+//!   [`Compiler::uzumaki_leaf_cursor`] / [`Compiler::emit_uzumaki_or_param`].
+//! - **Vanilla quantifier blocks.** [`Compiler::lower_block`] suppresses the custom `0xfc`
+//!   nondet *wrapper* for any non-`Regular` block inside a spec function, emitting only the
+//!   block's statements. (A function-level quantifier body is iterated directly anyway, so this
+//!   matters for *nested* `assume`/`exists`/`unique` blocks.)
+//!
+//! The `forall` then collapses into the ∀ the downstream `ValidSpec`/`sem_triple` already
+//! quantifies over; `exists`/`unique` map to existential-reachability predicates. Non-spec
+//! functions keep the `0xfc` opcode path above unchanged.
 
 use crate::errors::CodegenError;
 use rustc_hash::FxHashMap;
@@ -390,6 +402,13 @@ pub(crate) struct Compiler {
     /// quantifies over) rather than the non-vanilla `0xfc` uzumaki opcode. An empty
     /// map (every non-spec function) leaves `@` lowering byte-identical to before.
     uzumaki_param_map: FxHashMap<ExprId, u32>,
+    /// While lowering an *aggregate* (`array`/`struct`) spec-mode `@` to parameters, holds
+    /// the next synthetic-parameter index to consume for the next scalar *leaf*.  `None`
+    /// outside such lowering (and always `None` for non-spec functions, which keep the
+    /// custom `0xfc` uzumaki opcode).  Set from [`Self::uzumaki_param_map`] (the aggregate's
+    /// base index) around `lower_array_uzumaki`/`lower_struct_uzumaki`; each leaf consumes
+    /// one index in the same order [`Self::uzumaki_leaf_valtypes`] reserved them.
+    uzumaki_leaf_cursor: Option<u32>,
     /// WASM function indices for functions that originated in `spec` blocks,
     /// keyed by spec name. Populated during Stage 1 registration in proof mode;
     /// consumed (moved out) by [`Self::finish_and_take`] so the Rocq translator
@@ -453,6 +472,7 @@ impl Compiler {
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
             uzumaki_param_map: FxHashMap::default(),
+            uzumaki_leaf_cursor: None,
             spec_func_indices_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
             emit_bounds_checks: false,
@@ -1120,17 +1140,28 @@ impl Compiler {
         // params/locals in index order, sorted by source position for determinism.
         // Non-spec functions never enter this branch, so their `@` stays byte-identical.
         if self.current_spec.is_some() {
-            let mut uzumaki_exprs: Vec<(ExprId, ValType)> = Vec::new();
-            Self::collect_spec_uzumaki_params(arena, body_id, ctx, &mut uzumaki_exprs);
-            for (expr_id, vt) in uzumaki_exprs {
+            // Each `@` reserves one synthetic parameter per scalar *leaf* (one for a scalar,
+            // `total_leaf_count` for an aggregate), recorded by its *base* index; the leaves
+            // consume base, base+1, ... in the same order the body lowers them.
+            let mut uzumaki_exprs: Vec<(ExprId, Vec<ValType>)> = Vec::new();
+            Self::collect_spec_uzumaki_params(
+                arena,
+                body_id,
+                ctx,
+                &self.current_module_path,
+                &mut uzumaki_exprs,
+            );
+            for (expr_id, vts) in uzumaki_exprs {
                 cov_mark::hit!(wasm_codegen_assign_uzumaki_param);
-                params.push(vt);
                 let prev = self.uzumaki_param_map.insert(expr_id, local_idx);
                 debug_assert!(
                     prev.is_none(),
                     "each `@` expression id is visited once by the uzumaki pre-scan",
                 );
-                local_idx += 1;
+                for vt in vts {
+                    params.push(vt);
+                    local_idx += 1;
+                }
             }
         }
 
@@ -1434,41 +1465,42 @@ impl Compiler {
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
-        out: &mut Vec<(ExprId, ValType)>,
+        module_path: &[String],
+        out: &mut Vec<(ExprId, Vec<ValType>)>,
     ) {
         for &stmt_id in &arena[block_id].stmts {
             match &arena[stmt_id].kind {
                 Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::collect_uzumaki_in_expr(arena, *e, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *e, ctx, module_path, out);
                 }
                 Stmt::Assign { left, right } => {
-                    Self::collect_uzumaki_in_expr(arena, *left, ctx, out);
-                    Self::collect_uzumaki_in_expr(arena, *right, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *left, ctx, module_path, out);
+                    Self::collect_uzumaki_in_expr(arena, *right, ctx, module_path, out);
                 }
                 Stmt::VarDef { value, .. } => {
                     if let Some(v) = value {
-                        Self::collect_uzumaki_in_expr(arena, *v, ctx, out);
+                        Self::collect_uzumaki_in_expr(arena, *v, ctx, module_path, out);
                     }
                 }
                 Stmt::Block(inner) => {
-                    Self::collect_spec_uzumaki_params(arena, *inner, ctx, out);
+                    Self::collect_spec_uzumaki_params(arena, *inner, ctx, module_path, out);
                 }
                 Stmt::If {
                     condition,
                     then_block,
                     else_block,
                 } => {
-                    Self::collect_uzumaki_in_expr(arena, *condition, ctx, out);
-                    Self::collect_spec_uzumaki_params(arena, *then_block, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *condition, ctx, module_path, out);
+                    Self::collect_spec_uzumaki_params(arena, *then_block, ctx, module_path, out);
                     if let Some(else_id) = else_block {
-                        Self::collect_spec_uzumaki_params(arena, *else_id, ctx, out);
+                        Self::collect_spec_uzumaki_params(arena, *else_id, ctx, module_path, out);
                     }
                 }
                 Stmt::Loop { condition, body } => {
                     if let Some(c) = condition {
-                        Self::collect_uzumaki_in_expr(arena, *c, ctx, out);
+                        Self::collect_uzumaki_in_expr(arena, *c, ctx, module_path, out);
                     }
-                    Self::collect_spec_uzumaki_params(arena, *body, ctx, out);
+                    Self::collect_spec_uzumaki_params(arena, *body, ctx, module_path, out);
                 }
                 Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => {}
             }
@@ -1482,45 +1514,45 @@ impl Compiler {
         arena: &AstArena,
         expr_id: ExprId,
         ctx: &TypedContext,
-        out: &mut Vec<(ExprId, ValType)>,
+        module_path: &[String],
+        out: &mut Vec<(ExprId, Vec<ValType>)>,
     ) {
         match &arena[expr_id].kind {
             Expr::Uzumaki => {
-                if let Some(vt) = ctx
-                    .get_node_typeinfo(NodeId::Expr(expr_id))
-                    .and_then(|ti| Self::scalar_uzumaki_valtype(&ti.kind))
+                if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id))
+                    && let Some(vts) = Self::uzumaki_leaf_valtypes(&ti.kind, ctx, module_path)
                 {
-                    out.push((expr_id, vt));
+                    out.push((expr_id, vts));
                 }
             }
             Expr::ArrayIndexAccess { array, index } => {
-                Self::collect_uzumaki_in_expr(arena, *array, ctx, out);
-                Self::collect_uzumaki_in_expr(arena, *index, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *array, ctx, module_path, out);
+                Self::collect_uzumaki_in_expr(arena, *index, ctx, module_path, out);
             }
             Expr::Binary { left, right, .. } => {
-                Self::collect_uzumaki_in_expr(arena, *left, ctx, out);
-                Self::collect_uzumaki_in_expr(arena, *right, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *left, ctx, module_path, out);
+                Self::collect_uzumaki_in_expr(arena, *right, ctx, module_path, out);
             }
             Expr::PrefixUnary { expr, .. }
             | Expr::Parenthesized { expr }
             | Expr::MemberAccess { expr, .. }
             | Expr::TypeMemberAccess { expr, .. } => {
-                Self::collect_uzumaki_in_expr(arena, *expr, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *expr, ctx, module_path, out);
             }
             Expr::FunctionCall { function, args, .. } => {
-                Self::collect_uzumaki_in_expr(arena, *function, ctx, out);
+                Self::collect_uzumaki_in_expr(arena, *function, ctx, module_path, out);
                 for (_, arg) in args {
-                    Self::collect_uzumaki_in_expr(arena, *arg, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *arg, ctx, module_path, out);
                 }
             }
             Expr::StructLiteral { fields, .. } => {
                 for (_, value) in fields {
-                    Self::collect_uzumaki_in_expr(arena, *value, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, *value, ctx, module_path, out);
                 }
             }
             Expr::ArrayLiteral { elements } => {
                 for &e in elements {
-                    Self::collect_uzumaki_in_expr(arena, e, ctx, out);
+                    Self::collect_uzumaki_in_expr(arena, e, ctx, module_path, out);
                 }
             }
             Expr::Identifier(_)
@@ -1529,6 +1561,40 @@ impl Compiler {
             | Expr::StringLiteral { .. }
             | Expr::UnitLiteral
             | Expr::Type(_) => {}
+        }
+    }
+
+    /// The ordered scalar-leaf WASM value types a spec-mode `@` of type `kind` reserves as
+    /// synthetic parameters: `[vt]` for a scalar, and, for an *aggregate*, one entry per
+    /// scalar leaf **in the exact order the body lowers them** ([`Self::lower_array_uzumaki`]
+    /// / [`Self::lower_struct_uzumaki`]) — arrays row-major, structs in field-layout order
+    /// (recursing into array fields). `None` for kinds with no scalar leaves.
+    fn uzumaki_leaf_valtypes(
+        kind: &TypeInfoKind,
+        ctx: &TypedContext,
+        module_path: &[String],
+    ) -> Option<Vec<ValType>> {
+        match kind {
+            TypeInfoKind::Array(elem, length) => {
+                let elem_vts = Self::uzumaki_leaf_valtypes(&elem.kind, ctx, module_path)?;
+                let mut out = Vec::with_capacity(elem_vts.len() * (*length as usize));
+                for _ in 0..*length {
+                    out.extend_from_slice(&elem_vts);
+                }
+                Some(out)
+            }
+            TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+                let struct_info = ctx.lookup_struct_in(name, module_path)?;
+                let (_, fields) =
+                    compute_struct_field_layout(&struct_info, ctx, module_path).ok()?;
+                let mut out = Vec::new();
+                for field in &fields {
+                    let fvts = Self::uzumaki_leaf_valtypes(&field.type_kind, ctx, module_path)?;
+                    out.extend(fvts);
+                }
+                Some(out)
+            }
+            other => Self::scalar_uzumaki_valtype(other).map(|vt| vec![vt]),
         }
     }
 
@@ -2332,14 +2398,32 @@ impl Compiler {
     }
 
     /// Lowers a block (regular or non-det) to WASM instructions.
+    ///
+    /// In **proof mode**, a *spec function*'s quantifier/assumption blocks
+    /// (`forall`/`exists`/`unique`/`assume`) lower to **vanilla** WASM — the custom `0xfc`
+    /// nondet wrapper is *not* emitted, only the block's statements are.  The quantifier /
+    /// assumption semantics live downstream in the Rocq **contract predicate**
+    /// (`ValidSpec` for `forall`, `ValidExistsSpec`/`ValidUniqueSpec` for `exists`/`unique`,
+    /// and an `assume` is a precondition conjunct) — not in the bytecode.  Combined with the
+    /// `@`→parameter lowering and the vanilla `assert`, an entire spec body becomes ordinary
+    /// WASM that the downstream `wasm-verifier` library can type-check and discharge.
+    ///
+    /// (A function-level quantifier body is already iterated directly by
+    /// `visit_function_definition_body`, so this only affects *nested* such blocks; non-spec
+    /// code keeps the opcode path unchanged.)
     fn lower_block(&mut self, arena: &AstArena, block_id: BlockId, ctx: &TypedContext) {
         let block = &arena[block_id];
-        let opcode = match block.block_kind {
-            BlockKind::Forall => Some(FORALL_OPCODE),
-            BlockKind::Exists => Some(EXISTS_OPCODE),
-            BlockKind::Assume => Some(ASSUME_OPCODE),
-            BlockKind::Unique => Some(UNIQUE_OPCODE),
-            BlockKind::Regular => None,
+        let in_spec = self.current_spec.is_some();
+        let opcode = if in_spec {
+            None
+        } else {
+            match block.block_kind {
+                BlockKind::Forall => Some(FORALL_OPCODE),
+                BlockKind::Exists => Some(EXISTS_OPCODE),
+                BlockKind::Assume => Some(ASSUME_OPCODE),
+                BlockKind::Unique => Some(UNIQUE_OPCODE),
+                BlockKind::Regular => None,
+            }
         };
 
         if let Some(op) = opcode {
@@ -2352,6 +2436,8 @@ impl Compiler {
             }
             self.emit_nondet_block_start(op);
             self.loop_ctx.wasm_block_depth += 1;
+        } else if in_spec && block.block_kind != BlockKind::Regular {
+            cov_mark::hit!(wasm_codegen_spec_block_vanilla);
         }
 
         let stmts = block.stmts.clone();
@@ -2527,16 +2613,13 @@ impl Compiler {
             }
             Expr::Type(_) => todo!(),
             Expr::Uzumaki => {
-                // Spec-mode lowering: a scalar `@` inside a `spec` block was assigned
-                // a synthetic function parameter (see `visit_function_definition_body`).
-                // Read it back as a plain `local.get` instead of emitting the non-vanilla
-                // `0xfc` uzumaki opcode, so the spec body is ordinary WASM. The map is
-                // empty for every non-spec function, so this branch is never taken there.
-                if let Some(&param_idx) = self.uzumaki_param_map.get(&expr_id) {
-                    cov_mark::hit!(wasm_codegen_emit_uzumaki_param);
-                    self.func().instruction(&Instruction::LocalGet(param_idx));
-                    return;
-                }
+                // Spec-mode lowering: inside a `spec` block each `@` was assigned synthetic
+                // function parameter(s) (see `visit_function_definition_body`) — one for a
+                // scalar, one per scalar *leaf* for an aggregate. We read them back as plain
+                // `local.get`s instead of emitting the non-vanilla `0xfc` uzumaki opcode, so
+                // the whole spec body is ordinary WASM. The map is empty for every non-spec
+                // function, so `param_base` is `None` there and the opcode path is unchanged.
+                let param_base = self.uzumaki_param_map.get(&expr_id).copied();
                 let node_id = NodeId::Expr(expr_id);
                 let type_info = ctx
                     .get_node_typeinfo(node_id)
@@ -2552,15 +2635,29 @@ impl Compiler {
                         | NumberType::U32,
                     )
                     | TypeInfoKind::Enum(_, _) => {
-                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
-                        self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                        if let Some(idx) = param_base {
+                            cov_mark::hit!(wasm_codegen_emit_uzumaki_param);
+                            self.func().instruction(&Instruction::LocalGet(idx));
+                        } else {
+                            cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
+                            self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                        }
                     }
                     TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
-                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
-                        self.emit_uzumaki(UZUMAKI_I64_OPCODE);
+                        if let Some(idx) = param_base {
+                            cov_mark::hit!(wasm_codegen_emit_uzumaki_param);
+                            self.func().instruction(&Instruction::LocalGet(idx));
+                        } else {
+                            cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
+                            self.emit_uzumaki(UZUMAKI_I64_OPCODE);
+                        }
                     }
                     TypeInfoKind::Array(elem_type, length) => {
-                        cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                        if param_base.is_some() {
+                            cov_mark::hit!(wasm_codegen_array_uzumaki_param);
+                        } else {
+                            cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                        }
                         let length = *length;
                         let elem_type = elem_type.clone();
                         let var_name = enclosing_var_name.unwrap_or_else(|| {
@@ -2568,21 +2665,32 @@ impl Compiler {
                                 "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        if let Err(e) =
-                            self.lower_array_uzumaki(arena, &elem_type, length, var_name)
-                        {
+                        // In spec mode the leaves consume synthetic params [base..); else 0xfc.
+                        let saved = self.uzumaki_leaf_cursor;
+                        self.uzumaki_leaf_cursor = param_base;
+                        let r = self.lower_array_uzumaki(arena, &elem_type, length, var_name);
+                        self.uzumaki_leaf_cursor = saved;
+                        if let Err(e) = r {
                             panic!("array uzumaki lowering failed: {e}");
                         }
                     }
                     TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
-                        cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
+                        if param_base.is_some() {
+                            cov_mark::hit!(wasm_codegen_struct_uzumaki_param);
+                        } else {
+                            cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
+                        }
                         let name = name.clone();
                         let var_name = enclosing_var_name.unwrap_or_else(|| {
                             panic!(
                                 "Struct uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        if let Err(e) = self.lower_struct_uzumaki(ctx, &name, var_name) {
+                        let saved = self.uzumaki_leaf_cursor;
+                        self.uzumaki_leaf_cursor = param_base;
+                        let r = self.lower_struct_uzumaki(ctx, &name, var_name);
+                        self.uzumaki_leaf_cursor = saved;
+                        if let Err(e) = r {
                             panic!("struct uzumaki lowering failed: {e}");
                         }
                     }
@@ -3807,7 +3915,7 @@ impl Compiler {
                         .instruction(&Instruction::LocalGet(frame_ptr_local));
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
-                    self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_uzumaki_or_param(uzumaki_opcode);
                     self.func().instruction(store_instr);
                 }
             }
@@ -3911,7 +4019,7 @@ impl Compiler {
                     .instruction(&Instruction::LocalGet(frame_ptr_local));
                 self.func().instruction(&Instruction::I32Const(byte_offset));
                 self.func().instruction(&Instruction::I32Add);
-                self.emit_uzumaki(uzumaki_opcode);
+                self.emit_uzumaki_or_param(uzumaki_opcode);
                 self.func().instruction(&store_instr);
             }
             CompoundFieldLayout::NestedArray {
@@ -3937,7 +4045,7 @@ impl Compiler {
                         .instruction(&Instruction::LocalGet(frame_ptr_local));
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
-                    self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_uzumaki_or_param(uzumaki_opcode);
                     self.func().instruction(&store_instr);
                 }
             }
@@ -4983,6 +5091,23 @@ impl Compiler {
 
     fn emit_uzumaki(&mut self, opcode: u8) {
         self.func().raw([OPCODE_PREFIX, opcode]);
+    }
+
+    /// Emits a single non-deterministic scalar *leaf* value onto the operand stack.
+    ///
+    /// In spec mode for an aggregate `@` ([`Self::uzumaki_leaf_cursor`] is `Some`), the leaf
+    /// reads back a synthetic function parameter (`local.get`) and advances the cursor — the
+    /// `array`/`struct` `@` becomes plain WASM whose leaves are universally/existentially
+    /// quantified parameters.  Otherwise it emits the custom `0xfc` uzumaki opcode (the
+    /// unchanged non-spec path).
+    fn emit_uzumaki_or_param(&mut self, opcode: u8) {
+        if let Some(idx) = self.uzumaki_leaf_cursor {
+            cov_mark::hit!(wasm_codegen_emit_uzumaki_leaf_param);
+            self.func().instruction(&Instruction::LocalGet(idx));
+            self.uzumaki_leaf_cursor = Some(idx + 1);
+        } else {
+            self.emit_uzumaki(opcode);
+        }
     }
 
     fn emit_memory_copy(&mut self, byte_size: u32) {

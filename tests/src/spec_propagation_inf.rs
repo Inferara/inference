@@ -500,3 +500,101 @@ mod fixture_refl_spec_e2e {
         );
     }
 }
+
+// ============================================================================
+// Fixture: nested_quant.inf — NESTED assume/exists blocks in a spec function
+// ============================================================================
+#[cfg(test)]
+mod fixture_nested_quant_e2e {
+    use super::helpers::{compile_inf, wasm_contains};
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// `nested_quant.inf`'s spec function `demo` has a `forall` body containing a *nested*
+    /// `assume { precond(x); }` block and a *nested* `exists { let y = @; assert(y == y); }`
+    /// block. In proof mode these nested quantifier/assumption blocks lower to **vanilla**
+    /// WASM — no custom `0xfc` nondet wrapper — because the quantifier/assumption meaning
+    /// lives downstream in the Rocq contract predicate (`ValidSpec`/`ValidExistsSpec`/
+    /// `ValidUniqueSpec`), not in the bytecode. The `@` inside the nested `exists` still
+    /// becomes a function parameter, and the `assert` is its plain lowered shape.
+    ///
+    /// That the module validates under vanilla rules is the proof that no custom opcode
+    /// (which would be a `0xfc 0x3a..0x3d`/`0x31..0x32` byte pair) survives.
+    #[test]
+    fn nested_quant_inf_lowers_blocks_to_vanilla() {
+        let output = compile_inf("nested_quant.inf", CompilationMode::Proof, "nested_quant");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .expect("WASM must validate (nested assume/exists lowered to vanilla)");
+
+        // No custom nondet/uzumaki opcode byte-pair survives in the module.
+        for op in [0x3au8, 0x3b, 0x3c, 0x3d, 0x31, 0x32] {
+            assert!(
+                !wasm_contains(wasm, &[0xfc, op]),
+                "custom 0xfc {op:#x} nondet/uzumaki opcode leaked into vanilla WASM"
+            );
+        }
+
+        let by_spec = output.spec_func_indices_by_spec();
+        assert!(
+            by_spec.contains_key("NestedQuant"),
+            "spec NestedQuant must be present; got {by_spec:?}"
+        );
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("nested_quant", wasm, &empty).expect("translate ok");
+        // The body lowered to vanilla WASM (the @-introduced value is a param; the assert is
+        // the `i32.eqz; if` shape).
+        for needle in ["BI_local_get", "BI_if (BT_valtype None)"] {
+            assert!(v.contains(needle), "generated body missing `{needle}`:\n{v}");
+        }
+        // No custom uzumaki/nondet opcode leaks into the generated Rocq.
+        for forbidden in ["uzumaki", "BI_uzumaki", "nondet"] {
+            assert!(
+                !v.contains(forbidden),
+                "generated .v must not mention `{forbidden}`:\n{v}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Fixture: agg_quant.inf — ARRAY/STRUCT `@` lowered to (multiple) parameters
+// ============================================================================
+#[cfg(test)]
+mod fixture_agg_quant_e2e {
+    use super::helpers::{compile_inf, wasm_contains};
+    use inference_wasm_codegen::CompilationMode;
+
+    /// `agg_quant.inf` has two spec functions whose `forall` bodies bind an *aggregate* `@`:
+    /// `let a: [i32; 3] = @` (an array) and `let p: Point = @` (a 2-field struct). In proof
+    /// mode each aggregate `@` is lowered to **one synthetic parameter per scalar leaf** (3
+    /// params for the array, 2 for the struct), written into the aggregate's frame memory by
+    /// plain `local.get; i32.store` — no custom `0xfc` uzumaki opcode. The downstream
+    /// quantification is over those leaf parameters (which the `wasm-verifier` library reads
+    /// back with its memory rules), exactly as the scalar `@`→parameter rule does for one
+    /// value.
+    ///
+    /// That the module validates under vanilla rules is the proof no custom opcode survives.
+    #[test]
+    fn agg_quant_inf_lowers_aggregate_uzumaki_to_params() {
+        let output = compile_inf("agg_quant.inf", CompilationMode::Proof, "agg_quant");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .expect("WASM must validate (aggregate @ lowered to leaf parameters)");
+
+        // No custom uzumaki opcode byte-pair survives.
+        for op in [0x31u8, 0x32, 0x3a, 0x3b, 0x3c, 0x3d] {
+            assert!(
+                !wasm_contains(wasm, &[0xfc, op]),
+                "custom 0xfc {op:#x} uzumaki/nondet opcode leaked into vanilla WASM"
+            );
+        }
+
+        let by_spec = output.spec_func_indices_by_spec();
+        assert!(
+            by_spec.contains_key("AggQuant"),
+            "spec AggQuant must be present; got {by_spec:?}"
+        );
+    }
+}

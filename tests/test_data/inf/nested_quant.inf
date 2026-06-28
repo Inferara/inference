@@ -1,0 +1,15 @@
+fn precond(x: i32) -> i32 {
+    return x;
+}
+
+spec NestedQuant {
+    fn demo(x: i32) -> () forall {
+        assume {
+            precond(x);
+        }
+        exists {
+            let y: i32 = @;
+            assert(y == y);
+        }
+    }
+}
