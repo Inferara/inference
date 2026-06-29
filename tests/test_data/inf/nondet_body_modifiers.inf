@@ -1,0 +1,21 @@
+// Function-body non-deterministic *modifiers* (`fn f() forall { … }`), as
+// opposed to inline `forall { … }` statement blocks (see nondet_blocks.inf).
+// A modifier records its kind on the function's body block, which is lowered
+// by a separate path in wasm-codegen (`visit_function_definition_body`) than
+// `lower_block`. This fixture exercises that path for all three lowerable
+// kinds so the wrapper (and its arity in the generated Rocq) is covered for
+// `exists`/`assume`, not just `forall`.
+fn forall_fn() forall {
+    let x: i32 = @;
+    assert(x == x);
+}
+
+fn exists_fn() exists {
+    let y: i32 = @;
+    assert(y == y);
+}
+
+fn assume_fn() assume {
+    let z: i32 = @;
+    assert(z == z);
+}
