@@ -1,0 +1,12 @@
+// A spec function whose body iterates. The forall obligation is trap-freedom for
+// every input: from k = 0, `loop k < n { k = k + 1; }` either runs zero times
+// (n <= 0) or counts up to n; it never traps. Exercises the loop lowering
+// (block { loop { cond; eqz; br_if 1; body; br 0 } }) downstream.
+spec LoopSpec {
+    fn lp(n: i32) forall {
+        let mut k: i32 = 0;
+        loop k < n {
+            k = k + 1;
+        }
+    }
+}

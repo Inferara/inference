@@ -1,0 +1,14 @@
+// A spec function that calls another (non-spec) function. Recursion is forbidden
+// by analysis (A035), so this is a non-recursive inter-function call: `caller`
+// invokes `idfn`. The forall obligation is trap-freedom for every input.
+// Exercises the BI_call lowering downstream.
+fn idfn(x: i32) -> i32 {
+    return x;
+}
+
+spec CallSpec {
+    fn caller(i: i32) forall {
+        let r: i32 = idfn(i);
+        assert(r == r);
+    }
+}

@@ -598,3 +598,161 @@ mod fixture_agg_quant_e2e {
         );
     }
 }
+
+// ============================================================================
+// Fixture: quant_kinds.inf — exists/unique specs select the right predicate
+// ============================================================================
+#[cfg(test)]
+mod fixture_quant_kinds_e2e {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// `quant_kinds.inf` has one spec per quantifier kind — a `forall` spec, an
+    /// `exists` spec, a `unique` spec — plus a `MixedSpec` carrying both a
+    /// `forall` and an `exists` function. Each function-level quantifier is the
+    /// function body's `BlockKind`, which codegen records as a
+    /// `SpecObligationKind` in the `inference.spec_funcs` section (version 2,
+    /// with kind bytes). The translator reads those kinds back and selects the
+    /// downstream predicate per group: `forall`/regular → `ValidSpec`, `exists`
+    /// → `ValidExistsSpec`, `unique` → `ValidUniqueSpec` (the existential
+    /// predicates assert reachability, strictly more than universal
+    /// trap-freedom). This is the wiring that lets `exists`/`unique` specs reach
+    /// the `wasm-verifier` predicates `examples/ExistsExample.v` discharges.
+    #[test]
+    fn quant_kinds_inf_selects_exists_unique_predicates() {
+        let output = compile_inf("quant_kinds.inf", CompilationMode::Proof, "quant_kinds");
+        let wasm = output.wasm();
+        // Vanilla validation also proves the quantifier bodies carry no custom
+        // `0xfc` opcode — the quantifier lives in the contract predicate, not
+        // the bytecode.
+        inf_wasmparser::validate(wasm).expect("WASM must validate (vanilla quantifier bodies)");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("quant_kinds", wasm, &empty).expect("translate ok");
+
+        // The header pulls in `Exists` (home of ValidExistsSpec/ValidUniqueSpec)
+        // because the module has exists/unique specs; `Verifier` is always present.
+        assert!(
+            v.contains("From WasmVerifier Require Import Verifier."),
+            "Verifier import missing:\n{v}"
+        );
+        assert!(
+            v.contains("From WasmVerifier Require Import Exists."),
+            "Exists import must be emitted when exists/unique specs are present:\n{v}"
+        );
+
+        // A pure-`forall` spec keeps exactly the legacy `ValidSpec` shape.
+        assert!(
+            v.contains(
+                "Theorem valid_quant_kinds__ForallSpec : \
+                 ValidSpec quant_kinds quant_kinds__ForallSpec_specs."
+            ),
+            "forall spec must stay ValidSpec:\n{v}"
+        );
+
+        // The `exists` spec selects `ValidExistsSpec` over its `__exists_specs`
+        // list (kind joined with the reserved `__` separator), and does NOT emit
+        // a bare `ValidSpec` (it has no universal funcs).
+        assert!(
+            v.contains(
+                "Theorem valid_quant_kinds__ExistsSpec__exists : \
+                 ValidExistsSpec quant_kinds quant_kinds__ExistsSpec__exists_specs."
+            ),
+            "exists spec must select ValidExistsSpec:\n{v}"
+        );
+        assert!(
+            v.contains("Definition quant_kinds__ExistsSpec__exists_specs : list N :="),
+            "exists spec must emit its __exists_specs list:\n{v}"
+        );
+        assert!(
+            !v.contains("Theorem valid_quant_kinds__ExistsSpec :"),
+            "a pure-exists spec must not emit a bare ValidSpec theorem:\n{v}"
+        );
+
+        // The `unique` spec selects `ValidUniqueSpec`.
+        assert!(
+            v.contains(
+                "Theorem valid_quant_kinds__UniqueSpec__unique : \
+                 ValidUniqueSpec quant_kinds quant_kinds__UniqueSpec__unique_specs."
+            ),
+            "unique spec must select ValidUniqueSpec:\n{v}"
+        );
+
+        // A mixed spec partitions: a `ValidSpec` for its forall function AND a
+        // `ValidExistsSpec` for its exists function, over distinct lists.
+        assert!(
+            v.contains(
+                "Theorem valid_quant_kinds__MixedSpec : \
+                 ValidSpec quant_kinds quant_kinds__MixedSpec_specs."
+            ),
+            "mixed spec must keep a ValidSpec for its forall function:\n{v}"
+        );
+        assert!(
+            v.contains(
+                "Theorem valid_quant_kinds__MixedSpec__exists : \
+                 ValidExistsSpec quant_kinds quant_kinds__MixedSpec__exists_specs."
+            ),
+            "mixed spec must add a ValidExistsSpec for its exists function:\n{v}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture: spec_name_collision.inf — kind suffix must not alias a spec name
+// ============================================================================
+#[cfg(test)]
+mod fixture_spec_name_collision_e2e {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// Adversarial naming: spec `Foo` has an `exists` function (so it emits a
+    /// kind-suffixed `Foo__exists_specs` / `valid_Foo__exists`), and a *separate*
+    /// spec is literally named `Foo_exists` (so it emits `Foo_exists_specs` /
+    /// `valid_Foo_exists`). Were the kind joined with a single `_`
+    /// (`Foo_exists_specs`), the two would produce the *same* `Definition` and
+    /// `Theorem` names — a Rocq duplicate-definition error that breaks the whole
+    /// artifact. Joining the kind with the reserved `__` separator keeps them
+    /// distinct (`Foo__exists_specs` ≠ `Foo_exists_specs`), because no spec name
+    /// may contain `__`. This pins that the generated names never collide.
+    #[test]
+    fn kind_suffix_does_not_alias_a_spec_named_like_the_suffix() {
+        let output = compile_inf(
+            "spec_name_collision.inf",
+            CompilationMode::Proof,
+            "collide",
+        );
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("collide", wasm, &empty).expect("translate ok");
+
+        // Both the kind-suffixed name (spec Foo's exists group) and the
+        // similarly-named spec's plain name are present and DISTINCT.
+        assert!(
+            v.contains("Definition collide__Foo__exists_specs : list N :="),
+            "spec Foo's exists group uses the __ separator:\n{v}"
+        );
+        assert!(
+            v.contains("Definition collide__Foo_exists_specs : list N :="),
+            "spec Foo_exists's plain spec list is unaffected:\n{v}"
+        );
+
+        // No emitted Definition or Theorem name appears twice (the bug this
+        // guards: a single-`_` join would make these two collide).
+        for dup in [
+            "Definition collide__Foo__exists_specs",
+            "Definition collide__Foo_exists_specs",
+            "Theorem valid_collide__Foo__exists ",
+            "Theorem valid_collide__Foo_exists ",
+        ] {
+            assert_eq!(
+                v.matches(dup).count(),
+                1,
+                "`{dup}` must be emitted exactly once (no duplicate definition):\n{v}"
+            );
+        }
+    }
+}

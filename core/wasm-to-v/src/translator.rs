@@ -169,6 +169,7 @@ use inf_wasmparser::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::SpecObligationKind;
 use crate::errors::WasmToVError;
 
 const LCB: &str = "{|\n";
@@ -234,8 +235,80 @@ pub(crate) struct WasmParseData<'a> {
     /// Rocq definition consumed by the corresponding `ValidModule` theorem.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
 
+    /// Per-index proof obligations, parallel to [`Self::spec_funcs_by_spec`]
+    /// (same key, same order). Recovered from the `inference.spec_funcs`
+    /// section's version-2 kind bytes; empty (or short) entries default to
+    /// [`SpecObligationKind::Spec`]. Drives the choice of emitted predicate:
+    /// `Spec` → `ValidSpec`, `Exists` → `ValidExistsSpec`, `Unique` →
+    /// `ValidUniqueSpec`.
+    pub(crate) spec_func_kinds_by_spec: FxHashMap<String, Vec<SpecObligationKind>>,
+
     translated_function_names: Vec<String>,
     translated_functions_string: String,
+}
+
+/// One spec's WASM function indices, partitioned by the downstream proof
+/// obligation their quantifier implies. Each group is emitted as its own
+/// `_specs` list + `Valid*Spec` theorem; empty groups are skipped (except the
+/// legacy zero-function shape — see [`WasmParseData::spec_obligation_groups`]).
+struct SpecKindGroups {
+    /// File-qualified spec name (the `<SpecName>` in `<mod>__<SpecName>`).
+    name: String,
+    /// Universal trap-freedom obligations (`forall`/regular/`assume`) →
+    /// `ValidSpec`.
+    spec: Vec<u32>,
+    /// Existential-reachability obligations (`exists`) → `ValidExistsSpec`.
+    exists: Vec<u32>,
+    /// Unique-witness obligations (`unique`) → `ValidUniqueSpec`.
+    unique: Vec<u32>,
+}
+
+impl SpecKindGroups {
+    /// True when the spec contributed no function indices at all — the legacy
+    /// empty-`spec {}` case, which still emits a single `ValidSpec` over `@nil`.
+    fn is_empty(&self) -> bool {
+        self.spec.is_empty() && self.exists.is_empty() && self.unique.is_empty()
+    }
+}
+
+/// Emits a `Definition <def_name> : list N := …` for a group's indices.
+///
+/// Empty lists use `(@nil N)` (not `[]%N`) so the definition type-checks
+/// regardless of whether `Open Scope N_scope` is in effect at the consumer's
+/// `Require` site; non-empty lists use the `(… :: nil)%N` cons form.
+fn push_specs_definition(res: &mut String, def_name: &str, indices: &[u32]) {
+    res.push('\n');
+    if indices.is_empty() {
+        res.push_str(format!("Definition {def_name} : list N := (@nil N).\n").as_str());
+    } else {
+        let indices_str = indices
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" :: ");
+        res.push_str(
+            format!("Definition {def_name} : list N := ({indices_str} :: nil)%N.\n").as_str(),
+        );
+    }
+}
+
+/// Emits a `Theorem <thm_name> : <predicate> <module> <specs>.` with the
+/// standard `(* TODO: fill the proof *)` skeleton the downstream Rocq library
+/// completes.
+fn push_valid_theorem(
+    res: &mut String,
+    thm_name: &str,
+    predicate: &str,
+    module_name: &str,
+    specs_name: &str,
+) {
+    res.push('\n');
+    res.push_str(
+        format!("Theorem {thm_name} : {predicate} {module_name} {specs_name}.\n").as_str(),
+    );
+    res.push_str("Proof.\n");
+    res.push_str("  (* TODO: fill the proof *)\n");
+    res.push_str("Qed.\n");
 }
 
 impl WasmParseData<'_> {
@@ -268,10 +341,51 @@ impl WasmParseData<'_> {
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
             spec_funcs_by_spec,
+            spec_func_kinds_by_spec: FxHashMap::default(),
 
             translated_function_names: Vec::new(),
             translated_functions_string: String::new(),
         }
+    }
+
+    /// Partitions every spec's recorded indices by obligation kind, returning
+    /// one [`SpecKindGroups`] per spec, sorted by spec name for deterministic
+    /// output.
+    ///
+    /// Each index's kind comes from the parallel
+    /// [`Self::spec_func_kinds_by_spec`] map (populated from the
+    /// `inference.spec_funcs` section); a missing or short entry — e.g. a legacy
+    /// v1 section, or an explicit caller map with no embedded kinds — defaults
+    /// every such index to [`SpecObligationKind::Spec`], so the output reduces
+    /// to the historical all-`ValidSpec` shape.
+    fn spec_obligation_groups(&self) -> Vec<SpecKindGroups> {
+        let mut out: Vec<SpecKindGroups> = self
+            .spec_funcs_by_spec
+            .iter()
+            .map(|(name, indices)| {
+                let kinds = self.spec_func_kinds_by_spec.get(name);
+                let mut groups = SpecKindGroups {
+                    name: name.clone(),
+                    spec: Vec::new(),
+                    exists: Vec::new(),
+                    unique: Vec::new(),
+                };
+                for (i, &idx) in indices.iter().enumerate() {
+                    let kind = kinds
+                        .and_then(|ks| ks.get(i))
+                        .copied()
+                        .unwrap_or(SpecObligationKind::Spec);
+                    match kind {
+                        SpecObligationKind::Spec => groups.spec.push(idx),
+                        SpecObligationKind::Exists => groups.exists.push(idx),
+                        SpecObligationKind::Unique => groups.unique.push(idx),
+                    }
+                }
+                groups
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     /// Translates the parsed WASM data into complete Rocq code.
@@ -332,6 +446,16 @@ impl WasmParseData<'_> {
         for spec_name in self.spec_funcs_by_spec.keys() {
             crate::rocq_names::validate_spec_join_boundary(&self.mod_name, spec_name)?;
         }
+        // Partition every spec's indices by obligation kind up front: it both
+        // drives the per-group definitions/theorems below and decides whether
+        // the header must pull in the `Exists` module (which defines
+        // `ValidExistsSpec`/`ValidUniqueSpec`). `Verifier` alone suffices for an
+        // all-`forall`/regular program, keeping its output byte-identical.
+        let spec_groups = self.spec_obligation_groups();
+        let needs_exists_import = spec_groups
+            .iter()
+            .any(|g| !g.exists.is_empty() || !g.unique.is_empty());
+
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");
@@ -341,6 +465,13 @@ impl WasmParseData<'_> {
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
         res.push_str("From WasmVerifier Require Import Verifier.\n");
+        if needs_exists_import {
+            // `ValidExistsSpec` / `ValidUniqueSpec` live in `Exists` (which
+            // itself re-requires `Verifier`); emit it only when an
+            // `exists`/`unique` spec is present so existing artifacts are
+            // unchanged.
+            res.push_str("From WasmVerifier Require Import Exists.\n");
+        }
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
@@ -533,37 +664,57 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
-        // Emit per-spec lists of WASM function indices, sorted by spec name
-        // for deterministic output. Spec names were validated against the
-        // Rocq identifier rules at the top of `translate()` so that
-        // `<mod>__<SpecName>_specs` is always a syntactically legal Rocq
-        // identifier.
-        let mut spec_entries: Vec<(&String, &Vec<u32>)> =
-            self.spec_funcs_by_spec.iter().collect();
-        spec_entries.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (spec_name, indices) in &spec_entries {
-            res.push('\n');
-            if indices.is_empty() {
-                // (@nil N): no literals to disambiguate, and works regardless
-                // of scope state at the Require site.
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := (@nil N).\n"
-                    )
-                    .as_str(),
+        // Emit per-spec lists of WASM function indices, sorted by spec name for
+        // deterministic output and split by obligation kind. Spec names were
+        // validated against the Rocq identifier rules at the top of `translate()`
+        // so that `<mod>__<SpecName>_specs` (and the `__exists_specs` /
+        // `__unique_specs` siblings) are always syntactically legal Rocq
+        // identifiers.
+        //
+        // A spec function's quantifier picks its predicate: `forall`/regular →
+        // `ValidSpec`, `exists` → `ValidExistsSpec`, `unique` → `ValidUniqueSpec`
+        // (the existential predicates assert *reachability*, strictly more than
+        // the universal trap-freedom `ValidSpec` asserts). A spec with no
+        // functions keeps the legacy single `_specs := (@nil N)` / `ValidSpec`
+        // shape, and an all-`forall`/regular spec keeps exactly its prior
+        // `_specs` / `ValidSpec` output — only `exists`/`unique` functions add
+        // the new sibling definitions and theorems.
+        //
+        // The kind is joined with the reserved `__` separator
+        // (`<mod>__<SpecName>__exists_specs`), not a plain `_`. Because
+        // `validate_rocq_identifier` forbids `__` inside any module or spec name,
+        // a kind-suffixed name can never alias another spec's `_specs` list: the
+        // single-`_` form (`<mod>__<S>_exists_specs`) would collide with a spec
+        // literally named `<S>_exists`, but `<mod>__<S>__exists_specs` cannot,
+        // since no spec name contains the `__` run.
+        for g in &spec_groups {
+            if g.is_empty() {
+                push_specs_definition(
+                    &mut res,
+                    &format!("{module_name}__{}_specs", g.name),
+                    &[],
                 );
-            } else {
-                let indices_str = indices
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" :: ");
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := ({indices_str} :: nil)%N.\n"
-                    )
-                    .as_str(),
+                continue;
+            }
+            if !g.spec.is_empty() {
+                push_specs_definition(
+                    &mut res,
+                    &format!("{module_name}__{}_specs", g.name),
+                    &g.spec,
+                );
+            }
+            if !g.exists.is_empty() {
+                push_specs_definition(
+                    &mut res,
+                    &format!("{module_name}__{}__exists_specs", g.name),
+                    &g.exists,
+                );
+            }
+            if !g.unique.is_empty() {
+                push_specs_definition(
+                    &mut res,
+                    &format!("{module_name}__{}__unique_specs", g.name),
+                    &g.unique,
                 );
             }
         }
@@ -584,19 +735,48 @@ impl WasmParseData<'_> {
         res.push_str("Proof.\n");
         res.push_str("  (* TODO: fill the proof *)\n");
         res.push_str("Qed.\n");
-        // Per-spec verification obligations. `ValidSpec` is the 2-argument predicate (module
-        // and the list of WASM function indices for this spec); it entails `ValidModule`.
-        for (spec_name, _) in &spec_entries {
-            res.push('\n');
-            res.push_str(
-                format!(
-                    "Theorem valid_{module_name}__{spec_name} : ValidSpec {module_name} {module_name}__{spec_name}_specs.\n"
-                )
-                .as_str(),
-            );
-            res.push_str("Proof.\n");
-            res.push_str("  (* TODO: fill the proof *)\n");
-            res.push_str("Qed.\n");
+        // Per-spec verification obligations, one theorem per non-empty kind group.
+        // `ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec` are all 2-argument
+        // predicates (module, list of WASM function indices) and each entails
+        // `ValidModule`.
+        for g in &spec_groups {
+            if g.is_empty() {
+                push_valid_theorem(
+                    &mut res,
+                    &format!("valid_{module_name}__{}", g.name),
+                    "ValidSpec",
+                    module_name,
+                    &format!("{module_name}__{}_specs", g.name),
+                );
+                continue;
+            }
+            if !g.spec.is_empty() {
+                push_valid_theorem(
+                    &mut res,
+                    &format!("valid_{module_name}__{}", g.name),
+                    "ValidSpec",
+                    module_name,
+                    &format!("{module_name}__{}_specs", g.name),
+                );
+            }
+            if !g.exists.is_empty() {
+                push_valid_theorem(
+                    &mut res,
+                    &format!("valid_{module_name}__{}__exists", g.name),
+                    "ValidExistsSpec",
+                    module_name,
+                    &format!("{module_name}__{}__exists_specs", g.name),
+                );
+            }
+            if !g.unique.is_empty() {
+                push_valid_theorem(
+                    &mut res,
+                    &format!("valid_{module_name}__{}__unique", g.name),
+                    "ValidUniqueSpec",
+                    module_name,
+                    &format!("{module_name}__{}__unique_specs", g.name),
+                );
+            }
         }
         res.push('\n');
         res.push_str("End Host.\n");

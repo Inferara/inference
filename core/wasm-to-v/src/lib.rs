@@ -178,6 +178,16 @@ pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME;
 /// expected leading varuint32.
 pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION;
 
+/// Wire-format version that additionally carries one [`SpecObligationKind`]
+/// byte per index (see `inference_wasm_codegen::spec_section`). The decoder
+/// accepts this alongside [`SPEC_FUNCS_SECTION_VERSION`].
+pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION_WITH_KINDS;
+
+/// The downstream proof obligation a spec function carries (`Spec` / `Exists` /
+/// `Unique`). Recovered from the `inference.spec_funcs` section to choose the
+/// emitted predicate (`ValidSpec` / `ValidExistsSpec` / `ValidUniqueSpec`).
+pub use inference_wasm_codegen::SpecObligationKind;
+
 #[cfg(test)]
 mod tests {
     use super::wasm_parser::translate_bytes;

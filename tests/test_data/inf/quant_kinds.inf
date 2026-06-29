@@ -1,0 +1,35 @@
+fn helper(x: i32) -> i32 {
+    return x;
+}
+
+spec ForallSpec {
+    fn fa() forall {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}
+
+spec ExistsSpec {
+    fn ex() exists {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}
+
+spec UniqueSpec {
+    fn uq() unique {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}
+
+spec MixedSpec {
+    fn m_fa() forall {
+        let i: i32 = @;
+        assert(i == i);
+    }
+    fn m_ex() exists {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}

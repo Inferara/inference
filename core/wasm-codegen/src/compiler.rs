@@ -81,8 +81,17 @@
 //! The `forall` then collapses into the ∀ the downstream `ValidSpec`/`sem_triple` already
 //! quantifies over; `exists`/`unique` map to existential-reachability predicates. Non-spec
 //! functions keep the `0xfc` opcode path above unchanged.
+//!
+//! Because the lowered body is vanilla, it no longer records *which* quantifier the function
+//! carried — yet the translator must pick `ValidSpec` vs `ValidExistsSpec` vs `ValidUniqueSpec`
+//! from exactly that. So the obligation kind travels as metadata: `crate::spec_obligation_kind`
+//! reads the spec function's body [`inference_ast::nodes::BlockKind`] (the function-level
+//! quantifier *is* the body block) into a [`SpecObligationKind`], threaded per index into the
+//! `inference.spec_funcs` section (`crate::spec_section`, wire-format v2). See that module for the
+//! encoding and `core/wasm-to-v` for the predicate selection.
 
 use crate::errors::CodegenError;
+use crate::spec_section::{SpecObligationKind, SpecObligations};
 use rustc_hash::FxHashMap;
 
 use inference_ast::arena::AstArena;
@@ -415,6 +424,14 @@ pub(crate) struct Compiler {
     /// can emit per-spec `Definition <mod>__<SpecName>_specs : list N`
     /// definitions.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
+    /// Per-spec proof-obligation kinds, parallel to
+    /// [`Self::spec_func_indices_by_spec`] (same key, same order): the i-th kind
+    /// describes the i-th recorded function index. Carried into the
+    /// `inference.spec_funcs` section so the Rocq translator can emit
+    /// `ValidExistsSpec`/`ValidUniqueSpec` (not just `ValidSpec`) for
+    /// `exists`/`unique` spec functions. Kept separate from the index map so the
+    /// public [`crate::CodegenOutput`] surface (indices only) is unchanged.
+    spec_func_kinds_by_spec: FxHashMap<String, Vec<SpecObligationKind>>,
     /// Real shadow-stack frame size in bytes for each function, keyed by its
     /// canonical [`FnKey`] display string. Recorded in
     /// [`Self::visit_function_definition`] right after the frame layout is
@@ -474,6 +491,7 @@ impl Compiler {
             uzumaki_param_map: FxHashMap::default(),
             uzumaki_leaf_cursor: None,
             spec_func_indices_by_spec: FxHashMap::default(),
+            spec_func_kinds_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
@@ -490,21 +508,35 @@ impl Compiler {
         self.emit_bounds_checks = enabled;
     }
 
-    /// Records a single WASM function index as belonging to `spec_name`.
-    pub(crate) fn record_spec_index(&mut self, spec_name: &str, idx: u32) {
+    /// Records a single WASM function index as belonging to `spec_name`, tagged
+    /// with the proof obligation (`Spec`/`Exists`/`Unique`) its quantifier
+    /// implies. The index and kind are appended in lockstep so the parallel
+    /// maps stay aligned by position.
+    pub(crate) fn record_spec_index(
+        &mut self,
+        spec_name: &str,
+        idx: u32,
+        kind: SpecObligationKind,
+    ) {
         self.spec_func_indices_by_spec
             .entry(spec_name.to_string())
             .or_default()
             .push(idx);
+        self.spec_func_kinds_by_spec
+            .entry(spec_name.to_string())
+            .or_default()
+            .push(kind);
     }
 
-    /// Ensures `spec_name` has an entry in `spec_func_indices_by_spec`,
-    /// inserting an empty index list if absent. Called for every visited
-    /// `spec` block in proof mode so user-authored `spec MySpec { }` (with
-    /// zero inner emittable defs) still produces a per-spec `.v` definition
-    /// and theorem downstream.
+    /// Ensures `spec_name` has an entry in the spec maps, inserting empty lists
+    /// if absent. Called for every visited `spec` block in proof mode so
+    /// user-authored `spec MySpec { }` (with zero inner emittable defs) still
+    /// produces a per-spec `.v` definition and theorem downstream.
     pub(crate) fn ensure_spec_registered(&mut self, spec_name: &str) {
         self.spec_func_indices_by_spec
+            .entry(spec_name.to_string())
+            .or_default();
+        self.spec_func_kinds_by_spec
             .entry(spec_name.to_string())
             .or_default();
     }
@@ -514,6 +546,33 @@ impl Compiler {
     /// emits the `inference.spec_funcs` section.
     pub(crate) fn spec_func_indices(&self) -> &FxHashMap<String, Vec<u32>> {
         &self.spec_func_indices_by_spec
+    }
+
+    /// Zips the parallel index and kind maps into the `(func_idx, kind)` shape
+    /// the `inference.spec_funcs` encoder consumes. A spec missing a kinds entry
+    /// (or with fewer kinds than indices — neither happens via
+    /// [`Self::record_spec_index`]/[`Self::ensure_spec_registered`], which write
+    /// both in lockstep) defaults its surplus indices to
+    /// [`SpecObligationKind::Spec`], so the section is always well-formed.
+    fn spec_obligations(&self) -> SpecObligations {
+        self.spec_func_indices_by_spec
+            .iter()
+            .map(|(name, indices)| {
+                let kinds = self.spec_func_kinds_by_spec.get(name);
+                let items = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &idx)| {
+                        let kind = kinds
+                            .and_then(|ks| ks.get(i))
+                            .copied()
+                            .unwrap_or_default();
+                        (idx, kind)
+                    })
+                    .collect();
+                (name.clone(), items)
+            })
+            .collect()
     }
 
     fn func(&mut self) -> &mut Function {
@@ -5244,7 +5303,7 @@ impl Compiler {
 
         if !self.spec_func_indices_by_spec.is_empty() {
             let spec_section =
-                crate::spec_section::SpecFuncSection::new(&self.spec_func_indices_by_spec);
+                crate::spec_section::SpecFuncSection::new(&self.spec_obligations());
             module.section(&spec_section);
         }
 

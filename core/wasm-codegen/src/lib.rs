@@ -48,7 +48,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::Def;
+use inference_ast::nodes::{BlockKind, Def};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
@@ -71,10 +71,20 @@ pub use target::{CompilationMode, OptLevel, Target};
 /// place.
 pub use crate::spec_section::SECTION_NAME as SPEC_FUNCS_SECTION_NAME;
 
-/// Wire-format version of the `inference.spec_funcs` custom section payload.
-/// Decoders must reject payloads whose leading varuint32 does not equal this
-/// constant; bumping the value is a breaking change to the section format.
+/// Legacy wire-format version of the `inference.spec_funcs` payload (function
+/// indices only). Decoders accept this alongside
+/// [`SPEC_FUNCS_SECTION_VERSION_WITH_KINDS`]; the encoder emits it whenever
+/// every obligation is the default [`SpecObligationKind::Spec`].
 pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
+
+/// Wire-format version that additionally carries one [`SpecObligationKind`]
+/// byte per index. Emitted only when an `exists`/`unique` obligation is present.
+pub use crate::spec_section::SECTION_VERSION_WITH_KINDS as SPEC_FUNCS_SECTION_VERSION_WITH_KINDS;
+
+/// The downstream proof obligation a spec function carries (`Spec` / `Exists` /
+/// `Unique`), threaded through the `inference.spec_funcs` section so the Rocq
+/// translator can pick `ValidSpec` / `ValidExistsSpec` / `ValidUniqueSpec`.
+pub use crate::spec_section::SpecObligationKind;
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
@@ -533,6 +543,7 @@ fn register_function_indices(
         compiler.record_spec_index(
             &qualified_spec_name(&entry.module_path, &entry.spec_name),
             *assigned_idx,
+            spec_obligation_kind(arena, entry.def_id),
         );
     }
 
@@ -556,6 +567,7 @@ fn register_function_indices(
         compiler.record_spec_index(
             &qualified_spec_name(&entry.module_path, &entry.spec_name),
             *assigned_idx,
+            spec_obligation_kind(arena, entry.def_id),
         );
     }
 
@@ -576,6 +588,33 @@ fn register_function_indices(
         buckets.spec_methods.len(),
     );
     Ok(())
+}
+
+/// Recovers the downstream proof obligation a spec function carries from the
+/// quantifier on its body.
+///
+/// Inference's function-level quantifier convention (`fn f() forall { … }`,
+/// `fn f() exists { … }`, `fn f() unique { … }`) lowers the quantifier block
+/// *as* the function body, so the obligation kind is exactly the body block's
+/// [`BlockKind`]: `Exists` → [`SpecObligationKind::Exists`], `Unique` →
+/// [`SpecObligationKind::Unique`]. A `forall`, regular, or `assume` body — and
+/// any non-function def — is a universal safety obligation
+/// ([`SpecObligationKind::Spec`], the default), which the downstream contract
+/// discharges as `ValidSpec`. A quantifier written as a *nested* statement
+/// inside a regular body (`fn f() { exists { … } }`) leaves the body `Regular`
+/// and is treated as `Spec`; the established spec convention uses the
+/// function-level form.
+fn spec_obligation_kind(arena: &AstArena, def_id: DefId) -> SpecObligationKind {
+    match &arena[def_id].kind {
+        Def::Function { body, .. } => match arena[*body].block_kind {
+            BlockKind::Exists => SpecObligationKind::Exists,
+            BlockKind::Unique => SpecObligationKind::Unique,
+            BlockKind::Forall | BlockKind::Assume | BlockKind::Regular => {
+                SpecObligationKind::Spec
+            }
+        },
+        _ => SpecObligationKind::Spec,
+    }
 }
 
 /// A top-level free function to emit, tagged with its defining file's module

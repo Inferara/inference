@@ -144,11 +144,12 @@ pub(crate) struct ParsedModule {
     /// function do not. Retained so the proof artifact keeps local debug names.
     pub local_names: BTreeMap<u32, Vec<(u32, String)>>,
     /// The decoded `inference.spec_funcs` custom section: `spec_name ->
-    /// [func_idx]` in the *pre-link* index space. The merge rewrites each index
-    /// into the output space and re-emits the section, so a bare linked `.wasm`
-    /// still names the correct spec functions (the input to formal verification).
-    /// Only the main module carries one; externals never do.
-    pub spec_funcs: Option<Vec<(String, Vec<u32>)>>,
+    /// [(func_idx, kind_byte)]` in the *pre-link* index space. The merge
+    /// rewrites each index into the output space (carrying the obligation-kind
+    /// byte through verbatim) and re-emits the section, so a bare linked `.wasm`
+    /// still names the correct spec functions with their kinds (the input to
+    /// formal verification). Only the main module carries one; externals never do.
+    pub spec_funcs: Option<Vec<crate::spec_funcs::SpecEntry>>,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.
     /// The merge matches each main-module import's recorded `(module, field)`
@@ -674,7 +675,8 @@ mod tests {
         let main = ParsedModule::parse(&bytes).expect("main parse");
         assert_eq!(
             main.spec_funcs,
-            Some(vec![("S".to_string(), vec![0])]),
+            // A v1 payload decodes with a default kind byte of 0 per index.
+            Some(vec![("S".to_string(), vec![(0u32, 0u8)])]),
             "the main module must decode its spec section"
         );
 

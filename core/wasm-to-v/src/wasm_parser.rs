@@ -95,6 +95,7 @@ use inf_wasmparser::{
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
+use crate::SpecObligationKind;
 use crate::errors::WasmToVError;
 use crate::rocq_names::{sanitize_rocq_identifier, validate_rocq_identifier};
 use crate::translator::WasmParseData;
@@ -232,6 +233,7 @@ fn parse(
     let explicit_non_empty = !spec_funcs_by_spec.is_empty();
     let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec);
     let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
+    let mut embedded_spec_kinds: Option<FxHashMap<String, Vec<SpecObligationKind>>> = None;
     let mut seen_name_section = false;
 
     for payload in parser.parse_all(data) {
@@ -323,7 +325,10 @@ fn parse(
                             crate::SPEC_FUNCS_SECTION_NAME
                         ))));
                     }
-                    embedded_spec_funcs = Some(decode_spec_funcs_section(custom_section.data())?);
+                    let (idx_map, kind_map) =
+                        decode_spec_funcs_section(custom_section.data())?;
+                    embedded_spec_funcs = Some(idx_map);
+                    embedded_spec_kinds = Some(kind_map);
                 } else if let inf_wasmparser::KnownCustom::Name(name_section) =
                     custom_section.as_known()
                 {
@@ -419,26 +424,50 @@ fn parse(
         }
     }
 
+    // Obligation kinds are carried *only* by the embedded section (the explicit
+    // caller map is indices-only). When present they align with whichever index
+    // map won above — on agreement the two are equal, so the embedded kinds are
+    // correctly keyed. When absent (no embedded section, or a v1 payload), every
+    // spec function defaults to a universal `Spec` obligation, recovered lazily
+    // per-index by the translator.
+    if let Some(kinds) = embedded_spec_kinds {
+        wasm_parse_data.spec_func_kinds_by_spec = kinds;
+    }
+
     Ok(wasm_parse_data)
 }
 
-/// Decodes the `inference.spec_funcs` custom section payload.
+/// Decodes the `inference.spec_funcs` custom section payload into its per-spec
+/// function indices and the parallel per-index obligation kinds.
 ///
-/// Schema (LEB128 u32 throughout):
+/// Schema (LEB128 u32 throughout, except the kind bytes):
 /// ```text
 /// version
 /// count
 /// repeat count times:
 ///   spec_name_len   spec_name_bytes (utf-8)
 ///   indices_count   repeat indices_count times: func_idx
+///   -- version 2 only: one kind byte per index, in the same order:
+///   repeat indices_count times (v2 only): kind_byte (u8)
 /// ```
+///
+/// Accepts both [`crate::SPEC_FUNCS_SECTION_VERSION`] (legacy, indices only —
+/// every kind defaults to [`SpecObligationKind::Spec`]) and
+/// [`crate::SPEC_FUNCS_SECTION_VERSION_WITH_KINDS`] (with the trailing kind
+/// bytes). The returned kinds map is keyed identically to the indices map, with
+/// each kind vector positionally aligned to its indices.
 ///
 /// LEB128 reads and the length-prefixed UTF-8 spec-name read are delegated to
 /// `inf_wasmparser::BinaryReader`, which already enforces canonical LEB128
 /// encoding (overlong rejection, integer-too-large rejection) and UTF-8
 /// validation. Errors are mapped to `WasmToVError::WasmParse` so the existing
 /// downcast points in the CLI keep working.
-fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Vec<u32>>> {
+type DecodedSpecFuncs = (
+    FxHashMap<String, Vec<u32>>,
+    FxHashMap<String, Vec<SpecObligationKind>>,
+);
+
+fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<DecodedSpecFuncs> {
     use inf_wasmparser::BinaryReader;
 
     let mut reader = BinaryReader::new(data, 0);
@@ -448,12 +477,17 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
         .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
             "spec_funcs section: truncated LEB128 in version: {e}"
         ))))?;
-    if version != crate::SPEC_FUNCS_SECTION_VERSION {
+    let has_kinds = if version == crate::SPEC_FUNCS_SECTION_VERSION {
+        false
+    } else if version == crate::SPEC_FUNCS_SECTION_VERSION_WITH_KINDS {
+        true
+    } else {
         return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
-            "unsupported inference.spec_funcs version {version} (expected {})",
-            crate::SPEC_FUNCS_SECTION_VERSION
+            "unsupported inference.spec_funcs version {version} (expected {} or {})",
+            crate::SPEC_FUNCS_SECTION_VERSION,
+            crate::SPEC_FUNCS_SECTION_VERSION_WITH_KINDS
         ))));
-    }
+    };
 
     let count = reader
         .read_var_u32()
@@ -472,6 +506,7 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
     }
 
     let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    let mut kinds_out: FxHashMap<String, Vec<SpecObligationKind>> = FxHashMap::default();
     for _ in 0..count {
         let name = reader
             .read_string()
@@ -510,6 +545,8 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
             ))))?;
         // Same defense as for `count` above: each index consumes at least one
         // payload byte, so `idx_count` cannot legitimately exceed what's left.
+        // (In v2 each index also has a trailing kind byte; the per-byte reads
+        // below still fail closed if those are truncated.)
         if idx_count as usize > reader.bytes_remaining() {
             return Err(anyhow::anyhow!(WasmToVError::WasmParse(
                 "spec_funcs section: declared index count exceeds remaining payload".into(),
@@ -525,19 +562,41 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
                     ))))?,
             );
         }
-        out.insert(name, indices);
+        // Version 2 carries one kind byte per index, after all indices for this
+        // spec; version 1 implies the default `Spec` kind for every index.
+        let kinds = if has_kinds {
+            let mut ks = Vec::with_capacity(idx_count as usize);
+            for _ in 0..idx_count {
+                let b = reader.read_u8().map_err(|e| {
+                    anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                        "spec_funcs section: truncated kind byte: {e}"
+                    )))
+                })?;
+                let kind = SpecObligationKind::from_byte(b).ok_or_else(|| {
+                    anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                        "spec_funcs section: unknown obligation kind byte {b}"
+                    )))
+                })?;
+                ks.push(kind);
+            }
+            ks
+        } else {
+            vec![SpecObligationKind::Spec; idx_count as usize]
+        };
+        out.insert(name.clone(), indices);
+        kinds_out.insert(name, kinds);
     }
     // Reject trailing bytes: every byte of the payload must be accounted for
-    // by the (version, count, repeated (name, indices)) schema. A malformed
-    // binary with extra bytes after the last entry is silently accepted
-    // otherwise, weakening the canonical-encoding guarantee.
+    // by the (version, count, repeated (name, indices[, kinds])) schema. A
+    // malformed binary with extra bytes after the last entry is silently
+    // accepted otherwise, weakening the canonical-encoding guarantee.
     if reader.bytes_remaining() != 0 {
         return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
             "spec_funcs section: {} trailing byte(s) after last entry",
             reader.bytes_remaining()
         ))));
     }
-    Ok(out)
+    Ok((out, kinds_out))
 }
 
 /// Cap on the declared length of any single spec name embedded in the

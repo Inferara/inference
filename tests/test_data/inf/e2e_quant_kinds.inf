@@ -1,0 +1,29 @@
+// End-to-end fixture for the wasm-verifier downstream proof: one module
+// exercising all three spec-obligation kinds, each with a *satisfiable* body so
+// the generated obligation is dischargeable to Qed downstream.
+//
+//   forall : assert(i == i)  — trap-free for every i32  -> ValidSpec
+//   exists : assert(i == 5)  — there IS an input (5)     -> ValidExistsSpec
+//   unique : assert(i == 5)  — 5 is the ONLY such input  -> ValidUniqueSpec
+//
+// The quantified value is the function's first parameter (local 0); the bodies
+// lower to the direct compiler shape with no scratch local, matching the proven
+// rules sem_refl_assert / sem_assert_const / sem_assert_const_traps over pin0.
+
+spec QForall {
+    fn fa(i: i32) forall {
+        assert(i == i);
+    }
+}
+
+spec QExists {
+    fn ex(i: i32) exists {
+        assert(i == 5);
+    }
+}
+
+spec QUnique {
+    fn uq(i: i32) unique {
+        assert(i == 5);
+    }
+}

@@ -31,7 +31,30 @@ The translator assumes a Rocq context that supplies the following:
   this document fixes the arity (`module → list N → Prop`) and the call
   shape (`Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs`);
   the downstream library defines what the per-spec invariant actually
-  says about each indexed function.
+  says about each indexed function. `ValidSpec` is the obligation for
+  `forall`-quantified and regular spec functions: a **universal** safety
+  property (the function is trap-free for every input).
+- A predicate `ValidExistsSpec : module -> list N -> Prop`, the obligation
+  for `exists`-quantified spec functions. Same arity and call shape as
+  `ValidSpec` (`Theorem valid_<mod>__<SpecName>_exists : ValidExistsSpec
+  <mod> <mod>__<SpecName>_exists_specs`), but a strictly stronger
+  property: **existential reachability** — there is an input from which
+  the function runs to completion without trapping. This is *more than
+  trap-freedom*; a universal `ValidSpec` does not imply it.
+- A predicate `ValidUniqueSpec : module -> list N -> Prop`, the obligation
+  for `unique`-quantified spec functions (`Theorem
+  valid_<mod>__<SpecName>_unique : ValidUniqueSpec <mod>
+  <mod>__<SpecName>_unique_specs`): existential reachability **plus** that
+  the witness input is the only non-trapping one.
+
+`ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec` all share the
+`module → list N → Prop` arity. `ValidModule` and `ValidSpec` are defined
+in the downstream library's `Verifier` module; `ValidExistsSpec` and
+`ValidUniqueSpec` in its `Exists` module. The generated file always
+`Require Import Verifier`, and additionally `Require Import Exists` when
+(and only when) it emits an `exists`/`unique` obligation — so an
+all-`forall`/regular program's output is byte-identical to before these
+predicates existed.
 
 The pre-#21 form `ValidModule : module -> list N -> Prop` is no longer
 emitted. Downstream proofs that consumed the old 2-argument shape must
@@ -73,11 +96,41 @@ Qed.
 End Host.
 ```
 
+### Quantified specs: `exists` / `unique`
+
+When a spec function is `exists`- or `unique`-quantified, its obligation
+is `ValidExistsSpec` / `ValidUniqueSpec` instead of `ValidSpec`, over a
+kind-suffixed list. A spec's functions are partitioned by kind and each
+non-empty group emits its own `_specs` list and theorem:
+
+```coq
+(* spec Q with a forall fn at index 3 and an exists fn at index 4 *)
+Definition Foo__Q_specs : list N := [3]%N.
+Definition Foo__Q__exists_specs : list N := [4]%N.
+
+Theorem valid_Foo__Q : ValidSpec Foo Foo__Q_specs.
+Theorem valid_Foo__Q__exists : ValidExistsSpec Foo Foo__Q__exists_specs.
+```
+
+The kind-suffixed list/theorem names join the kind with the reserved
+`__` separator: `<mod>__<Spec>__exists_specs` / `valid_<mod>__<Spec>__exists`
+and `<mod>__<Spec>__unique_specs` / `valid_<mod>__<Spec>__unique`. The `__`
+(not a plain `_`) is deliberate: since `validate_rocq_identifier` forbids
+`__` inside any module or spec name, a kind-suffixed name can never alias
+another spec's `_specs` list (a plain-`_` form would let a spec literally
+named `<Spec>_exists` collide with spec `<Spec>`'s exists list). A spec
+with only `forall`/regular functions emits exactly its prior single
+`_specs`/`ValidSpec` pair (byte-identical to pre-quantifier output); a
+spec with no functions at all keeps the legacy `_specs := (@nil N)` +
+`ValidSpec` shape. The obligation kind is recovered from the
+`inference.spec_funcs` section (see below) — the vanilla WASM body no
+longer carries the quantifier.
+
 Notes:
 
-- Per-spec lists and per-spec `ValidSpec` theorems are emitted **only
-  when** there is at least one spec block. A module with zero specs
-  emits only `Foo` and `Theorem valid_Foo`.
+- Per-spec lists and per-spec theorems are emitted **only when** there is
+  at least one spec block. A module with zero specs emits only `Foo` and
+  `Theorem valid_Foo`.
 - The separator between the module name and the spec name is `__`
   (two underscores). Single `_` would be ambiguous when the user's spec
   names contain underscores: a module `foo_foo` with a spec `bar` and a
@@ -120,10 +173,11 @@ the same map in the WASM binary as a custom section named
 
 ### Wire format of the `inference.spec_funcs` payload
 
-The payload uses LEB128 unsigned varints throughout:
+The payload uses LEB128 unsigned varints throughout (except the v2 kind
+bytes, which are raw `u8`):
 
 ```text
-version            : varuint32   -- currently 1; bump on breaking change
+version            : varuint32   -- 1 = legacy (indices only), 2 = with kinds
 count              : varuint32   -- number of (spec_name, indices) pairs
 repeated `count` times:
   spec_name_len    : varuint32
@@ -131,6 +185,9 @@ repeated `count` times:
   indices_count    : varuint32
   repeated `indices_count` times:
     func_idx       : varuint32
+  -- version 2 only: one obligation-kind byte per index, same order:
+  repeated `indices_count` times (v2 only):
+    kind_byte      : u8          -- 0 = Spec, 1 = Exists, 2 = Unique
 ```
 
 Entries are emitted sorted by spec name for deterministic, byte-stable
@@ -138,11 +195,22 @@ output. The decoder validates each spec name against the Rocq identifier
 rules at the decode boundary, rejecting `WasmToVError::InvalidRocqIdentifier`
 before any Rocq emission runs.
 
-The leading `version` varuint32 is the contract's escape hatch. The current
-decoder rejects unsupported versions with `WasmToVError::WasmParse` carrying
-the literal string "version" — see
-`inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION` for the constant. A
-future revision that bumps the version will trip this branch on today's
+The obligation kind selects the downstream predicate (`Spec` →
+`ValidSpec`, `Exists` → `ValidExistsSpec`, `Unique` → `ValidUniqueSpec`).
+A `forall`/regular/`assume` spec function maps to `Spec`, so the encoder
+emits **version 1** (no kind bytes) whenever every obligation is `Spec` —
+keeping all pre-quantifier modules byte-identical — and **version 2** (the
+trailing kind bytes) only when an `exists`/`unique` obligation is present.
+Both decoders (the Rocq translator and the linker, which remaps each index
+on link while carrying the kind byte through verbatim) accept either
+version; a v1 payload decodes with every kind defaulting to `Spec`.
+
+The leading `version` varuint32 is the contract's escape hatch. The
+decoder rejects *unrecognised* versions (neither 1 nor 2) with
+`WasmToVError::WasmParse` carrying the literal string "version" — see
+`inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION` and
+`…SPEC_FUNCS_SECTION_VERSION_WITH_KINDS` for the constants. A future
+revision that bumps the version further will trip this branch on today's
 parsers instead of silently misparsing the rest of the payload.
 
 `wasm_to_v` / `translate_bytes` accept the map as an explicit argument and

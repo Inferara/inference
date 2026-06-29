@@ -677,15 +677,18 @@ impl Plan {
     fn remap_spec_funcs(
         &self,
         main: &ParsedModule,
-        spec_funcs: &[(String, Vec<u32>)],
-    ) -> Result<Vec<(String, Vec<u32>)>, LinkError> {
+        spec_funcs: &[crate::spec_funcs::SpecEntry],
+    ) -> Result<Vec<crate::spec_funcs::SpecEntry>, LinkError> {
         spec_funcs
             .iter()
             .map(|(name, indices)| {
+                // Remap the function index into the post-link space; carry the
+                // obligation-kind byte through unchanged (it is metadata about
+                // the spec, not a position in the function space).
                 let mapped = indices
                     .iter()
-                    .map(|&idx| self.map_main_func(main, idx))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|&(idx, kind)| Ok((self.map_main_func(main, idx)?, kind)))
+                    .collect::<Result<Vec<_>, LinkError>>()?;
                 Ok((name.clone(), mapped))
             })
             .collect()

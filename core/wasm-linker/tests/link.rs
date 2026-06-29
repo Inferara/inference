@@ -155,6 +155,31 @@ fn decode_spec_funcs(data: &[u8]) -> Vec<(String, Vec<u32>)> {
     out
 }
 
+/// Decodes the v2 (`with kinds`) `inference.spec_funcs` payload into
+/// `(spec_name, [(idx, kind_byte)])` pairs, for asserting that the obligation
+/// kind survives the decode/remap/re-encode link path alongside the remapped
+/// index.
+fn decode_spec_funcs_v2(data: &[u8]) -> Vec<(String, Vec<(u32, u8)>)> {
+    let mut reader = inf_wasmparser::BinaryReader::new(data, 0);
+    let version = reader.read_var_u32().unwrap();
+    assert_eq!(version, 2, "spec_funcs version (with kinds)");
+    let count = reader.read_var_u32().unwrap();
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let name = reader.read_string().unwrap().to_string();
+        let idx_count = reader.read_var_u32().unwrap();
+        let mut indices: Vec<(u32, u8)> = Vec::new();
+        for _ in 0..idx_count {
+            indices.push((reader.read_var_u32().unwrap(), 0));
+        }
+        for slot in &mut indices {
+            slot.1 = reader.read_u8().unwrap();
+        }
+        out.push((name, indices));
+    }
+    out
+}
+
 /// Whether the body of the function at `func_idx` contains an `i32.add`.
 fn body_has_i32_add(bytes: &[u8], func_idx: usize) -> bool {
     let mut idx = 0;
@@ -1990,6 +2015,50 @@ fn spec_funcs_section_survives_and_is_reindexed() {
         decoded,
         vec![("S".to_string(), vec![0])],
         "pre-link index 1 (import + 1 local) must rewrite to post-link index 0 (C1)"
+    );
+}
+
+/// Same H25 + C1 reindexing as above, but for a **version-2** spec section that
+/// carries an obligation-kind byte per index (here `Exists` = 1). The link must
+/// remap the index from the pre-link space (1) to the post-link space (0) while
+/// preserving the kind byte verbatim, and re-emit a v2 section (the kind is
+/// non-zero, so it cannot normalize back to v1). This pins the kind-preserving
+/// remap path that drives downstream `ValidExistsSpec`/`ValidUniqueSpec`
+/// selection.
+#[test]
+fn spec_funcs_v2_section_survives_reindexed_and_keeps_kind() {
+    // version=2, count=1, name_len=1 'S', idx_count=1, index=1, kind=1 (Exists)
+    let spec_payload = [2u8, 1, 1, b'S', 1, 1, 1];
+    let main_wat = r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#;
+    let mut main = wasm(main_wat);
+    use wasm_encoder::Section as _;
+    wasm_encoder::CustomSection {
+        name: "inference.spec_funcs".into(),
+        data: (&spec_payload[..]).into(),
+    }
+    .append_to(&mut main);
+
+    let lib = mathlib_pure();
+    let linked = link(&main, &[&lib]).expect("link must preserve the v2 spec section");
+    assert_valid(&linked);
+
+    let data = custom_section_data(&linked, "inference.spec_funcs")
+        .expect("the linked module must still carry the spec_funcs section (H25)");
+    let decoded = decode_spec_funcs_v2(&data);
+    assert_eq!(
+        decoded,
+        vec![("S".to_string(), vec![(0u32, 1u8)])],
+        "pre-link index 1 must rewrite to post-link index 0 (C1) while the \
+         Exists kind byte (1) is preserved verbatim"
     );
 }
 

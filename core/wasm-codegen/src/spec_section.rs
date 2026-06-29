@@ -12,7 +12,7 @@
 //! ## Payload format
 //!
 //! ```text
-//! version              : LEB128 u32  -- format version (currently 1)
+//! version              : LEB128 u32  -- format version (1 = legacy, 2 = with kinds)
 //! count                : LEB128 u32  -- number of (spec_name, indices) pairs
 //! repeated `count` times:
 //!   spec_name_len      : LEB128 u32
@@ -20,6 +20,9 @@
 //!   indices_count      : LEB128 u32
 //!   repeated `indices_count` times:
 //!     func_idx         : LEB128 u32
+//!   -- version 2 only: one obligation-kind byte per index, same order:
+//!   repeated `indices_count` times (v2 only):
+//!     kind_byte        : u8          -- 0 = Spec, 1 = Exists, 2 = Unique
 //! ```
 //!
 //! Entries are emitted sorted by spec name for deterministic, byte-stable
@@ -30,6 +33,24 @@
 //! not recognise must refuse to translate, rather than treating the next
 //! varuint32 as a spec count and silently misparsing the rest of the
 //! payload.
+//!
+//! ## Obligation kinds (version 2)
+//!
+//! Version 1 carried only the function index, implying a single universal
+//! ("for-all") proof obligation per spec function (`ValidSpec` downstream).
+//! Inference also has `exists`- and `unique`-quantified spec functions, whose
+//! downstream obligation is `ValidExistsSpec` / `ValidUniqueSpec` — predicates
+//! that assert existential reachability, *strictly more* than the trap-freedom
+//! a universal `ValidSpec` asserts. The vanilla WASM body no longer carries the
+//! quantifier (the `0xfc` wrapper opcode is suppressed for spec functions), so
+//! the obligation kind must travel as metadata here for the translator to pick
+//! the right predicate.
+//!
+//! The encoder emits **version 1** whenever every obligation is the default
+//! [`SpecObligationKind::Spec`], so all pre-existing `forall`/regular modules
+//! stay byte-identical; it emits **version 2** (with the trailing kind bytes)
+//! only when at least one `exists`/`unique` obligation must be carried. Both
+//! decoders (the linker and the Rocq translator) accept either version.
 
 use rustc_hash::FxHashMap;
 use wasm_encoder::{CustomSection, Encode, Section, SectionId};
@@ -38,11 +59,64 @@ use wasm_encoder::{CustomSection, Encode, Section, SectionId};
 /// map. Re-exported from the crate root as `SPEC_FUNCS_SECTION_NAME`.
 pub const SECTION_NAME: &str = "inference.spec_funcs";
 
-/// Wire-format version emitted into the head of the `inference.spec_funcs`
-/// payload. Consumers must reject unrecognised values. Re-exported from the
-/// crate root as `SPEC_FUNCS_SECTION_VERSION` and consumed verbatim by the
-/// `wasm-to-v` decoder so encoder and decoder share a single source of truth.
+/// Legacy wire-format version of the `inference.spec_funcs` payload: function
+/// indices only, no obligation-kind bytes. Re-exported from the crate root as
+/// `SPEC_FUNCS_SECTION_VERSION`. The encoder still emits this version whenever
+/// every obligation is the default [`SpecObligationKind::Spec`], so modules
+/// without `exists`/`unique` specs stay byte-identical to pre-kinds output.
 pub const SECTION_VERSION: u32 = 1;
+
+/// Wire-format version that additionally carries one [`SpecObligationKind`]
+/// byte per function index (see the module docs). Emitted only when at least
+/// one obligation is not the default `Spec` kind. Both decoders accept it
+/// alongside [`SECTION_VERSION`].
+pub const SECTION_VERSION_WITH_KINDS: u32 = 2;
+
+/// The downstream proof obligation a spec function carries, recovered from the
+/// quantifier on its (now-vanilla) body.
+///
+/// Selects which Rocq predicate the translator emits: `Spec` → `ValidSpec`
+/// (universal trap-freedom), `Exists` → `ValidExistsSpec` (existential
+/// reachability), `Unique` → `ValidUniqueSpec` (a unique witness). A `forall`,
+/// regular, or `assume` body maps to `Spec`; only `exists`/`unique` bodies need
+/// a distinct kind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SpecObligationKind {
+    /// Universal safety obligation — `forall`, regular, or `assume` bodies.
+    #[default]
+    Spec,
+    /// Existential-reachability obligation — an `exists`-quantified body.
+    Exists,
+    /// Unique-witness obligation — a `unique`-quantified body.
+    Unique,
+}
+
+impl SpecObligationKind {
+    /// Wire encoding of this kind (a single payload byte in version 2).
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
+        match self {
+            SpecObligationKind::Spec => 0,
+            SpecObligationKind::Exists => 1,
+            SpecObligationKind::Unique => 2,
+        }
+    }
+
+    /// Decodes a wire byte, or `None` for an unrecognised value.
+    #[must_use]
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(SpecObligationKind::Spec),
+            1 => Some(SpecObligationKind::Exists),
+            2 => Some(SpecObligationKind::Unique),
+            _ => None,
+        }
+    }
+}
+
+/// Per-spec function obligations: each spec name maps to its `(func_idx, kind)`
+/// pairs, in registration order. The payload codec's in-memory shape.
+pub(crate) type SpecObligations = FxHashMap<String, Vec<(u32, SpecObligationKind)>>;
 
 /// Upper bound, in bytes, on a single spec name embedded in the
 /// `inference.spec_funcs` payload.
@@ -128,46 +202,67 @@ pub(crate) fn spec_name_rocq_invalidity_reason(qualified: &str) -> Option<String
     None
 }
 
-/// Encodes the spec map into the canonical payload bytes.
-pub(crate) fn encode_payload(map: &FxHashMap<String, Vec<u32>>) -> Vec<u8> {
-    let mut entries: Vec<(&str, &[u32])> = map
+/// Encodes the spec obligations into the canonical payload bytes.
+///
+/// Emits the legacy [`SECTION_VERSION`] layout (indices only) when every
+/// obligation is the default [`SpecObligationKind::Spec`], so modules without
+/// `exists`/`unique` specs stay byte-identical to pre-kinds output; emits
+/// [`SECTION_VERSION_WITH_KINDS`] (a trailing kind byte per index) otherwise.
+pub(crate) fn encode_payload(map: &SpecObligations) -> Vec<u8> {
+    let mut entries: Vec<(&str, &[(u32, SpecObligationKind)])> = map
         .iter()
-        .map(|(name, indices)| (name.as_str(), indices.as_slice()))
+        .map(|(name, items)| (name.as_str(), items.as_slice()))
         .collect();
     entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+    let has_kinds = entries
+        .iter()
+        .any(|(_, items)| items.iter().any(|(_, k)| *k != SpecObligationKind::Spec));
+    let version = if has_kinds {
+        SECTION_VERSION_WITH_KINDS
+    } else {
+        SECTION_VERSION
+    };
 
     let count = u32::try_from(entries.len())
         .expect("more than u32::MAX specs cannot fit in a WASM custom section");
 
     let mut payload = Vec::new();
-    SECTION_VERSION.encode(&mut payload);
+    version.encode(&mut payload);
     count.encode(&mut payload);
 
-    for (spec_name, indices) in entries {
+    for (spec_name, items) in entries {
         let name_bytes = spec_name.as_bytes();
         let name_len = u32::try_from(name_bytes.len())
             .expect("spec name longer than u32::MAX bytes");
-        let idx_count = u32::try_from(indices.len())
+        let idx_count = u32::try_from(items.len())
             .expect("more than u32::MAX function indices per spec");
 
         name_len.encode(&mut payload);
         payload.extend_from_slice(name_bytes);
         idx_count.encode(&mut payload);
-        for idx in indices {
+        for (idx, _) in items {
             idx.encode(&mut payload);
+        }
+        // Version 2 appends the kind bytes after all indices for this spec, in
+        // the same order; version 1 omits them entirely.
+        if has_kinds {
+            for (_, kind) in items {
+                payload.push(kind.to_byte());
+            }
         }
     }
 
     payload
 }
 
-/// A `wasm_encoder::Section` carrying the encoded spec-name → indices map.
+/// A `wasm_encoder::Section` carrying the encoded spec-name → obligations map.
 pub(crate) struct SpecFuncSection {
     payload: Vec<u8>,
 }
 
 impl SpecFuncSection {
-    pub(crate) fn new(map: &FxHashMap<String, Vec<u32>>) -> Self {
+    pub(crate) fn new(map: &SpecObligations) -> Self {
         Self {
             payload: encode_payload(map),
         }
@@ -194,31 +289,98 @@ impl Section for SpecFuncSection {
 mod tests {
     use super::*;
 
+    /// Builds a [`SpecObligations`] map from `(name, [(idx, kind)])` literals.
+    fn obligations(
+        entries: &[(&str, &[(u32, SpecObligationKind)])],
+    ) -> SpecObligations {
+        entries
+            .iter()
+            .map(|(name, items)| ((*name).to_string(), items.to_vec()))
+            .collect()
+    }
+
+    /// All-`Spec` sugar: `(name, [idx])` pairs with the default obligation kind.
+    fn spec_only(entries: &[(&str, &[u32])]) -> SpecObligations {
+        entries
+            .iter()
+            .map(|(name, indices)| {
+                let items = indices
+                    .iter()
+                    .map(|&idx| (idx, SpecObligationKind::Spec))
+                    .collect();
+                ((*name).to_string(), items)
+            })
+            .collect()
+    }
+
     #[test]
     fn empty_map_encodes_zero_count() {
-        let map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let payload = encode_payload(&map);
+        let payload = encode_payload(&SpecObligations::default());
         // version=1, count=0
         assert_eq!(payload, vec![1, 0]);
     }
 
     #[test]
     fn single_spec_round_trip_bytes() {
-        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        map.insert("S".into(), vec![3, 4]);
-        let payload = encode_payload(&map);
+        let payload = encode_payload(&spec_only(&[("S", &[3, 4])]));
         // version=1, count=1, name_len=1, 'S', idx_count=2, 3, 4
         assert_eq!(payload, vec![1, 1, 1, b'S', 2, 3, 4]);
     }
 
     #[test]
     fn sorted_by_spec_name() {
-        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        map.insert("B".into(), vec![5]);
-        map.insert("A".into(), vec![2]);
-        let payload = encode_payload(&map);
+        let payload = encode_payload(&spec_only(&[("B", &[5]), ("A", &[2])]));
         // version=1, count=2, name_len=1, 'A', idx_count=1, 2, name_len=1, 'B', idx_count=1, 5
         assert_eq!(payload, vec![1, 2, 1, b'A', 1, 2, 1, b'B', 1, 5]);
+    }
+
+    #[test]
+    fn all_spec_kinds_stay_version_one_byte_identical() {
+        // An all-`Spec` obligations map must encode identically to the legacy
+        // index-only payload, so existing modules are byte-stable.
+        let with_kinds = encode_payload(&obligations(&[(
+            "S",
+            &[(3, SpecObligationKind::Spec), (4, SpecObligationKind::Spec)],
+        )]));
+        let legacy = encode_payload(&spec_only(&[("S", &[3, 4])]));
+        assert_eq!(with_kinds, legacy);
+        assert_eq!(with_kinds, vec![1, 1, 1, b'S', 2, 3, 4]);
+    }
+
+    #[test]
+    fn exists_kind_promotes_to_version_two_with_kind_bytes() {
+        let payload = encode_payload(&obligations(&[(
+            "S",
+            &[(3, SpecObligationKind::Exists)],
+        )]));
+        // version=2, count=1, name_len=1, 'S', idx_count=1, idx=3, kind=1 (Exists)
+        assert_eq!(payload, vec![2, 1, 1, b'S', 1, 3, 1]);
+    }
+
+    #[test]
+    fn mixed_kinds_emit_kinds_for_every_spec_in_version_two() {
+        // One non-`Spec` kind anywhere promotes the whole payload to v2, so even
+        // the all-`Spec` spec must carry its (zero) kind bytes.
+        let payload = encode_payload(&obligations(&[
+            ("A", &[(0, SpecObligationKind::Spec)]),
+            ("B", &[(1, SpecObligationKind::Unique)]),
+        ]));
+        // v2, count=2,
+        //   'A': name_len=1 'A', idx_count=1, idx=0, kind=0 (Spec)
+        //   'B': name_len=1 'B', idx_count=1, idx=1, kind=2 (Unique)
+        assert_eq!(payload, vec![2, 2, 1, b'A', 1, 0, 0, 1, b'B', 1, 1, 2]);
+    }
+
+    #[test]
+    fn obligation_kind_byte_round_trip() {
+        for kind in [
+            SpecObligationKind::Spec,
+            SpecObligationKind::Exists,
+            SpecObligationKind::Unique,
+        ] {
+            assert_eq!(SpecObligationKind::from_byte(kind.to_byte()), Some(kind));
+        }
+        assert_eq!(SpecObligationKind::from_byte(3), None);
     }
 
     #[test]
@@ -263,8 +425,7 @@ mod tests {
 
     #[test]
     fn payload_starts_with_version_byte() {
-        let map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let payload = encode_payload(&map);
+        let payload = encode_payload(&SpecObligations::default());
         let expected = u8::try_from(SECTION_VERSION).expect("version fits in a byte");
         assert_eq!(
             payload.first().copied(),

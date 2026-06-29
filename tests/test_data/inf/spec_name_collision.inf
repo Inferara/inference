@@ -1,0 +1,13 @@
+spec Foo {
+    fn f() exists {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}
+
+spec Foo_exists {
+    fn g() forall {
+        let i: i32 = @;
+        assert(i == i);
+    }
+}
