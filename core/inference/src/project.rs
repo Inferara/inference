@@ -142,6 +142,10 @@ fn parse_reachable_files(entry: &Path, src_root: &Path) -> anyhow::Result<AstAre
         let file = arena
             .last_source_file()
             .expect("parse_into stores the file it just lowered");
+        debug_assert_eq!(
+            file.module_path, module_path,
+            "parse_into must store the just-lowered file last"
+        );
 
         for segments in path_form_imports(&arena, file)? {
             if visited.contains(&segments) {
