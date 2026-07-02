@@ -698,6 +698,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
+- compiler: the multi-file project front end parses each reachable file exactly once — the import walk now lowers files directly into the shared arena and reorders them into canonical order afterward via the new `AstArena::canonicalize_source_file_order`; previously discovery parsed every file into a throwaway arena just to read its `use` directives and lowering re-parsed it ([#227])
 
 ### Fixed
 
@@ -859,3 +860,4 @@ Initial tagged release.
 [#223]: https://github.com/Inferara/inference/pull/223
 [#224]: https://github.com/Inferara/inference/issues/224
 [#225]: https://github.com/Inferara/inference/issues/225
+[#227]: https://github.com/Inferara/inference/issues/227

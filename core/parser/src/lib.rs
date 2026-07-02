@@ -432,4 +432,45 @@ mod parse_into_tests {
             ],
         );
     }
+
+    /// The project front end builds its arena incrementally: after each
+    /// `parse_into` it reads the file it just parsed via
+    /// `arena.last_source_file()`, relying on lowering allocating a file's
+    /// `SourceFileData` AFTER all of that file's defs and directives — so the
+    /// newest file is always the last in allocation order. This test pins that
+    /// alloc'd-last invariant at the seam that produces it, so a future lowering
+    /// reshuffle fails here, with a named test, instead of surfacing as a
+    /// mysterious mis-walk in the incremental consumer.
+    #[test]
+    fn parse_into_allocates_the_new_file_last() {
+        fn assert_newest(arena: &AstArena, module_path: &[&str], fn_name: &str) {
+            let last = arena
+                .last_source_file()
+                .expect("parse_into just lowered a file");
+            let expected: Vec<String> = module_path.iter().map(|s| s.to_string()).collect();
+            assert_eq!(last.module_path, expected);
+            let names: Vec<&str> = last
+                .defs
+                .iter()
+                .map(|&def_id| arena.def_name(def_id))
+                .collect();
+            assert!(
+                names.contains(&fn_name),
+                "newest file should carry its own def `{fn_name}`, got {names:?}",
+            );
+        }
+
+        let entry = parse_into(AstArena::default(), "pub fn main() {}", Vec::new());
+        assert_newest(&entry.arena, &[], "main");
+
+        let a = parse_into(
+            entry.arena,
+            "pub fn alpha() {}",
+            vec!["lib".to_string(), "a".to_string()],
+        );
+        assert_newest(&a.arena, &["lib", "a"], "alpha");
+
+        let b = parse_into(a.arena, "pub fn util_fn() {}", vec!["util".to_string()]);
+        assert_newest(&b.arena, &["util"], "util_fn");
+    }
 }
