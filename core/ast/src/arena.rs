@@ -225,13 +225,57 @@ impl AstArena {
     ///
     /// Source files are stored entry-first, then imported files sorted
     /// lexicographically by their `module_path` (the project front end allocates
-    /// them in this order). This order is the single source of truth that later
-    /// pipeline phases consume for scope-id assignment, codegen emission, and
-    /// Rocq output, so artifacts are reproducible regardless of import-discovery
-    /// order. A single-file arena trivially satisfies the invariant.
+    /// them in import-discovery order, then reorders them into this order with
+    /// [`canonicalize_source_file_order`](Self::canonicalize_source_file_order)
+    /// before handing the arena to later phases). This order is the single
+    /// source of truth that later pipeline phases consume for scope-id
+    /// assignment, codegen emission, and Rocq output, so artifacts are
+    /// reproducible regardless of import-discovery order. A single-file arena
+    /// trivially satisfies the invariant.
     #[must_use]
     pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
         self.source_files.values()
+    }
+
+    /// Reorders the stored source files into the **canonical order** documented
+    /// on [`source_files`](Self::source_files): the entry file (empty
+    /// `module_path`) first, then imported files sorted lexicographically by
+    /// `module_path`. The empty path already compares less than any non-empty
+    /// one, so a plain lexicographic sort places the entry first without any
+    /// special case. The sort is stable, so files sharing a `module_path` keep
+    /// their relative order.
+    ///
+    /// Files accumulate in allocation (import-discovery) order during
+    /// incremental construction; this call rewrites that ordering into the
+    /// canonical one that later pipeline phases rely on.
+    ///
+    /// # Id invalidation
+    ///
+    /// A [`SourceFileId`] is a positional index into `source_files`, so
+    /// reordering renumbers the files: any `SourceFileId` obtained before this
+    /// call must not be used afterwards. Every other id (`DefId`, `ExprId`,
+    /// `BlockId`, …) is unaffected, because only the file order changes and
+    /// [`SourceFileData`] stores no `SourceFileId`.
+    pub fn canonicalize_source_file_order(&mut self) {
+        let mut files: Vec<SourceFileData> = std::mem::take(&mut self.source_files)
+            .into_iter()
+            .map(|(_, file)| file)
+            .collect();
+        files.sort_by(|a, b| a.module_path.cmp(&b.module_path));
+        self.source_files = files.into_iter().collect();
+    }
+
+    /// Returns the most recently allocated source file, if any.
+    ///
+    /// Files sit in allocation order until
+    /// [`canonicalize_source_file_order`](Self::canonicalize_source_file_order)
+    /// reorders them, so during incremental construction — one `parse_into` per
+    /// file, whose lowering allocates the file's [`SourceFileData`] after all of
+    /// that file's defs and directives — this is the file just lowered. After a
+    /// reorder it is the canonically-last file instead.
+    #[must_use = "returns the most recently allocated source file"]
+    pub fn last_source_file(&self) -> Option<&SourceFileData> {
+        self.source_files.values().next_back()
     }
 
     /// Returns a source file's module path, or `None` if the id is out of range.
@@ -735,5 +779,331 @@ mod tests {
         push_function_file(&mut arena, "fn b() { 9 }", lit_loc, vec!["m".to_string()]);
 
         assert_eq!(arena.node_module_path(NodeId::Expr(lit)), None);
+    }
+
+    /// Appends a one-function file named `fn_name` to `arena` and returns the new
+    /// file's id. Distinct names let tests tell reordered files apart by the
+    /// names their `defs` resolve to, which a fixed name (as in
+    /// [`push_function_file`]) cannot.
+    fn push_named_file(
+        arena: &mut AstArena,
+        fn_name: &str,
+        module_path: Vec<String>,
+    ) -> SourceFileId {
+        let name = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: fn_name.to_string(),
+        });
+        let body = arena.blocks.alloc(BlockData {
+            location: Location::default(),
+            block_kind: BlockKind::Regular,
+            stmts: vec![],
+        });
+        let def_id = arena.defs.alloc(DefData {
+            location: Location::default(),
+            kind: Def::Function {
+                name,
+                vis: Visibility::default(),
+                type_params: vec![],
+                args: vec![],
+                returns: None,
+                body,
+            },
+        });
+        arena.source_files.alloc(SourceFileData {
+            location: Location::default(),
+            source: String::new(),
+            defs: vec![def_id],
+            directives: vec![],
+            module_path,
+        })
+    }
+
+    /// Collects the stored files' module paths in their current order.
+    fn module_paths(arena: &AstArena) -> Vec<Vec<String>> {
+        arena
+            .source_files()
+            .map(|f| f.module_path.clone())
+            .collect()
+    }
+
+    /// Collects each stored file's def names in the files' current order, so a
+    /// reorder that cross-wired files to the wrong defs would be visible.
+    fn def_names_by_file(arena: &AstArena) -> Vec<Vec<&str>> {
+        arena
+            .source_files()
+            .map(|f| f.defs.iter().map(|&d| arena.def_name(d)).collect())
+            .collect()
+    }
+
+    #[test]
+    fn canonicalize_empty_arena_is_a_no_op() {
+        let mut arena = AstArena::default();
+        arena.canonicalize_source_file_order();
+        assert_eq!(arena.source_files().count(), 0);
+    }
+
+    #[test]
+    fn canonicalize_single_entry_file_is_unchanged() {
+        let mut arena = AstArena::default();
+        push_function_file(
+            &mut arena,
+            "fn a() { return 0; }",
+            Location::default(),
+            vec![],
+        );
+
+        arena.canonicalize_source_file_order();
+
+        let expected: Vec<Vec<String>> = vec![vec![]];
+        assert_eq!(module_paths(&arena), expected);
+    }
+
+    #[test]
+    fn canonicalize_preserves_already_canonical_order_and_is_idempotent() {
+        let mut arena = AstArena::default();
+        push_function_file(
+            &mut arena,
+            "fn a() { return 0; }",
+            Location::default(),
+            vec![],
+        );
+        push_function_file(
+            &mut arena,
+            "fn b() { return 1; }",
+            Location::default(),
+            vec!["lib".to_string(), "a".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn c() { return 2; }",
+            Location::default(),
+            vec!["lib".to_string(), "b".to_string()],
+        );
+
+        let expected: Vec<Vec<String>> = vec![
+            vec![],
+            vec!["lib".to_string(), "a".to_string()],
+            vec!["lib".to_string(), "b".to_string()],
+        ];
+
+        arena.canonicalize_source_file_order();
+        assert_eq!(module_paths(&arena), expected);
+
+        // A second call over already-canonical files is a no-op.
+        arena.canonicalize_source_file_order();
+        assert_eq!(module_paths(&arena), expected);
+    }
+
+    #[test]
+    fn canonicalize_sorts_reverse_lexicographic_insertion_ascending() {
+        let mut arena = AstArena::default();
+        push_function_file(
+            &mut arena,
+            "fn z() { return 0; }",
+            Location::default(),
+            vec!["zed".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn m() { return 1; }",
+            Location::default(),
+            vec!["mid".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn a() { return 2; }",
+            Location::default(),
+            vec!["abc".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn e() { return 3; }",
+            Location::default(),
+            vec![],
+        );
+
+        arena.canonicalize_source_file_order();
+
+        let expected: Vec<Vec<String>> = vec![
+            vec![],
+            vec!["abc".to_string()],
+            vec!["mid".to_string()],
+            vec!["zed".to_string()],
+        ];
+        assert_eq!(module_paths(&arena), expected);
+    }
+
+    #[test]
+    fn canonicalize_moves_entry_allocated_last_to_the_front() {
+        let mut arena = AstArena::default();
+        push_function_file(
+            &mut arena,
+            "fn b() { return 0; }",
+            Location::default(),
+            vec!["lib".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn c() { return 1; }",
+            Location::default(),
+            vec!["zed".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn a() { return 2; }",
+            Location::default(),
+            vec![],
+        );
+
+        arena.canonicalize_source_file_order();
+
+        let files: Vec<&SourceFileData> = arena.source_files().collect();
+        assert!(files[0].is_entry());
+        let expected: Vec<Vec<String>> =
+            vec![vec![], vec!["lib".to_string()], vec!["zed".to_string()]];
+        assert_eq!(module_paths(&arena), expected);
+    }
+
+    #[test]
+    fn canonicalize_interleaves_nested_paths_correctly() {
+        let mut arena = AstArena::default();
+        // Insert scrambled so the sort has to do real work.
+        push_function_file(
+            &mut arena,
+            "fn z() { return 0; }",
+            Location::default(),
+            vec!["zed".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn lb() { return 1; }",
+            Location::default(),
+            vec!["lib".to_string(), "b".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn a() { return 2; }",
+            Location::default(),
+            vec![],
+        );
+        push_function_file(
+            &mut arena,
+            "fn la() { return 3; }",
+            Location::default(),
+            vec!["lib".to_string(), "a".to_string()],
+        );
+
+        arena.canonicalize_source_file_order();
+
+        let expected: Vec<Vec<String>> = vec![
+            vec![],
+            vec!["lib".to_string(), "a".to_string()],
+            vec!["lib".to_string(), "b".to_string()],
+            vec!["zed".to_string()],
+        ];
+        assert_eq!(module_paths(&arena), expected);
+    }
+
+    #[test]
+    fn defs_stay_attached_to_their_files_across_a_reorder() {
+        let mut arena = AstArena::default();
+        // Insert non-canonically so the reorder actually moves both files.
+        push_named_file(&mut arena, "lib_fn", vec!["lib".to_string()]);
+        push_named_file(&mut arena, "entry_fn", vec![]);
+
+        arena.canonicalize_source_file_order();
+
+        assert_eq!(
+            def_names_by_file(&arena),
+            vec![vec!["entry_fn"], vec!["lib_fn"]]
+        );
+    }
+
+    #[test]
+    fn find_source_file_for_def_returns_the_new_id_after_reorder() {
+        let mut arena = AstArena::default();
+        let (lib_file, _) = push_function_file(
+            &mut arena,
+            "fn b() { return 0; }",
+            Location::default(),
+            vec!["lib".to_string()],
+        );
+        push_function_file(
+            &mut arena,
+            "fn a() { return 1; }",
+            Location::default(),
+            vec![],
+        );
+        let lib_def = arena[lib_file].defs[0];
+
+        arena.canonicalize_source_file_order();
+
+        let new_id = arena
+            .find_source_file_for_def(lib_def)
+            .expect("def is still owned by some file");
+        assert_eq!(
+            arena.source_file_module_path(new_id),
+            Some(&["lib".to_string()][..])
+        );
+        // The pre-reorder id is now a stale index: it names the entry file that
+        // took slot 0, not the lib file it named before.
+        assert_eq!(arena.source_file_module_path(lib_file), Some(&[][..]));
+    }
+
+    #[test]
+    fn canonicalize_keeps_duplicate_module_paths_in_stable_order() {
+        let mut arena = AstArena::default();
+        push_named_file(&mut arena, "entry_fn", vec![]);
+        // Two files share a module path; a stable sort must preserve their
+        // insertion order, which their distinct def names make observable.
+        push_named_file(&mut arena, "dup_first", vec!["dup".to_string()]);
+        push_named_file(&mut arena, "dup_second", vec!["dup".to_string()]);
+
+        arena.canonicalize_source_file_order();
+
+        assert_eq!(
+            def_names_by_file(&arena),
+            vec![vec!["entry_fn"], vec!["dup_first"], vec!["dup_second"]]
+        );
+    }
+
+    #[test]
+    fn last_source_file_is_none_for_empty_arena() {
+        let arena = AstArena::default();
+        assert!(arena.last_source_file().is_none());
+    }
+
+    #[test]
+    fn last_source_file_tracks_the_newest_allocation() {
+        let mut arena = AstArena::default();
+        push_named_file(&mut arena, "first_fn", vec![]);
+        let last = arena.last_source_file().expect("one file allocated");
+        assert_eq!(arena.def_name(last.defs[0]), "first_fn");
+
+        push_named_file(&mut arena, "second_fn", vec!["lib".to_string()]);
+        let last = arena.last_source_file().expect("two files allocated");
+        assert_eq!(arena.def_name(last.defs[0]), "second_fn");
+    }
+
+    #[test]
+    fn last_source_file_returns_the_canonically_last_after_reorder() {
+        let mut arena = AstArena::default();
+        // Allocate so that the newest file is NOT the canonically last one.
+        push_named_file(&mut arena, "zed_fn", vec!["zed".to_string()]);
+        push_named_file(&mut arena, "entry_fn", vec![]);
+        push_named_file(&mut arena, "lib_fn", vec!["lib".to_string()]);
+
+        // Before canonicalization the newest allocation ("lib") is last.
+        let last = arena.last_source_file().expect("files allocated");
+        assert_eq!(arena.def_name(last.defs[0]), "lib_fn");
+
+        arena.canonicalize_source_file_order();
+
+        // After canonicalization the greatest module path ("zed") is last, even
+        // though it was allocated first.
+        let last = arena.last_source_file().expect("files allocated");
+        assert_eq!(arena.def_name(last.defs[0]), "zed_fn");
+        assert_eq!(last.module_path.as_slice(), &["zed".to_string()][..]);
     }
 }

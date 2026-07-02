@@ -11,10 +11,11 @@
 //! and is ignored here.
 //!
 //! Discovery is breadth-first with a visited set keyed by canonical module path,
-//! so import cycles terminate. The files are then stored in the arena in
-//! **canonical order** — entry first, then imported files sorted lexicographically
-//! by module path — which downstream phases consume as their single source of
-//! truth for ordering.
+//! so import cycles terminate. Each file is read and parsed exactly once — into
+//! the shared arena as it is discovered. After the walk the files are reordered
+//! into **canonical order** — entry first, then imported files sorted
+//! lexicographically by module path — which downstream phases consume as their
+//! single source of truth for ordering.
 //!
 //! All filesystem access lives here; `core/parser` stays I/O-free and is driven
 //! through [`inference_parser::parse_into`].
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use inference_ast::arena::AstArena;
-use inference_ast::nodes::{Directive, UseDirective};
+use inference_ast::nodes::{Directive, SourceFileData, UseDirective};
 use rustc_hash::FxHashSet;
 
 use crate::errors::InferenceError;
@@ -69,20 +70,14 @@ impl std::fmt::Display for ProjectWarning {
     }
 }
 
-/// A discovered file: its canonical module path (empty for the entry) and source.
-struct DiscoveredFile {
-    module_path: Vec<String>,
-    source: String,
-}
-
 /// Parses a project starting from `entry`, returning one arena holding every
 /// import-reachable file plus any unreachable-file warnings.
 ///
 /// The source root is `entry`'s parent directory. The entry is parsed first;
 /// its path-form `use` directives are followed breadth-first, each mapped to a
-/// file under the root, until the reachable closure is exhausted. A file
-/// referenced more than once is parsed once. Import cycles are permitted and
-/// terminate via a visited set.
+/// file under the root, until the reachable closure is exhausted. Each reachable
+/// file is read and parsed exactly once, into the shared arena as it is
+/// discovered. Import cycles are permitted and terminate via a visited set.
 ///
 /// # Errors
 ///
@@ -98,18 +93,21 @@ pub fn parse_project(entry: &Path) -> anyhow::Result<ProjectParse> {
         .ok_or_else(|| InferenceError::NoSourceRoot(entry.to_path_buf()))?
         .to_path_buf();
 
-    let discovered = discover_files(entry, &src_root)?;
-    let arena = lower_in_canonical_order(discovered, entry)?;
+    let arena = parse_reachable_files(entry, &src_root)?;
     let warnings = collect_unreachable_warnings(&arena, &src_root, entry);
 
     Ok(ProjectParse { arena, warnings })
 }
 
-/// Breadth-first walk of the import closure, returning the entry first and every
-/// reachable imported file. Each file is keyed by its canonical module path so a
-/// file reached twice (including through a cycle) is visited once.
-fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<DiscoveredFile>> {
-    let mut files = Vec::new();
+/// Breadth-first walk of the import closure, parsing every reachable file exactly
+/// once into a shared arena. Each file is keyed by its canonical module path so a
+/// file reached twice (including through a cycle) is parsed once.
+///
+/// Files accumulate in discovery (BFS) order; the walk ends by reordering them
+/// into canonical order (see [`AstArena::canonicalize_source_file_order`]), the
+/// single source of truth downstream phases consume for ordering.
+fn parse_reachable_files(entry: &Path, src_root: &Path) -> anyhow::Result<AstArena> {
+    let mut arena = AstArena::default();
     let mut visited: FxHashSet<Vec<String>> = FxHashSet::default();
     let mut queue: VecDeque<(Vec<String>, PathBuf)> = VecDeque::new();
 
@@ -123,7 +121,10 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
 
     while let Some((module_path, file_path)) = queue.pop_front() {
         let source = read_source(&file_path)?;
-        let parsed = inference_parser::parse(&source);
+        // `module_path` is moved into the arena by `parse_into` but still needed by
+        // the parse-error arm below, so clone it for the move.
+        let parsed = inference_parser::parse_into(arena, &source, module_path.clone());
+        arena = parsed.arena;
 
         // Surface a file's own syntax errors before resolving its imports. A
         // rejected `use a::b::*;` still lowers to the segments `a::b`, so without
@@ -135,7 +136,14 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
             return Err(parse_error(&module_path, entry, &parsed.errors));
         }
 
-        for segments in path_form_imports(&parsed.arena)? {
+        // `parse_into` lowers the file's `SourceFileData` after all of its defs and
+        // directives, so the file just parsed is the last one stored (pinned by
+        // `parse_into_allocates_the_new_file_last` in `core/parser`).
+        let file = arena
+            .last_source_file()
+            .expect("parse_into stores the file it just lowered");
+
+        for segments in path_form_imports(&arena, file)? {
             if visited.contains(&segments) {
                 continue;
             }
@@ -161,21 +169,33 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
             visited.insert(segments.clone());
             queue.push_back((segments, dep_path));
         }
-
-        files.push(DiscoveredFile {
-            module_path,
-            source,
-        });
     }
 
-    Ok(files)
+    // Files were parsed in discovery (BFS) order; downstream phases consume
+    // canonical order as their single source of truth, so reorder now — before any
+    // `SourceFileId` is handed out.
+    arena.canonicalize_source_file_order();
+
+    // Discovery deduplicates files by module path (and self-imports of the entry),
+    // so each file appears exactly once. A duplicate would lower the same
+    // definitions twice and emit them twice in codegen; assert the invariant so a
+    // future discovery regression is caught here rather than in the output.
+    debug_assert!(
+        arena
+            .source_files()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|w| w[0].module_path != w[1].module_path),
+        "discovered files must have unique module paths after deduplication"
+    );
+
+    Ok(arena)
 }
 
 /// Builds a parse-failure error for `errors`. An imported (non-entry) file is
 /// named by its canonical `module_path`; the entry file is named by its real
 /// `entry` path with non-"imported" wording, because it is the file the user
-/// compiled. Shared by discovery and lowering so both report syntax errors
-/// identically.
+/// compiled.
 fn parse_error(
     module_path: &[String],
     entry: &Path,
@@ -206,55 +226,19 @@ fn parse_error(
     }
 }
 
-/// Lowers every discovered file into one arena in canonical order: entry first,
-/// then imported files sorted lexicographically by module path. The stored order
-/// is what later phases consume, so it is independent of discovery order.
-fn lower_in_canonical_order(
-    mut files: Vec<DiscoveredFile>,
-    entry: &Path,
-) -> anyhow::Result<AstArena> {
-    files.sort_by(|a, b| {
-        // The entry (empty path) sorts first; the empty Vec already compares
-        // less than any non-empty one, so a plain lexicographic order suffices.
-        a.module_path.cmp(&b.module_path)
-    });
-
-    // Discovery deduplicates files by module path (and self-imports of the entry),
-    // so each file appears exactly once. A duplicate would lower the same
-    // definitions twice and emit them twice in codegen; assert the invariant so a
-    // future discovery regression is caught here rather than in the output.
-    debug_assert!(
-        files.windows(2).all(|w| w[0].module_path != w[1].module_path),
-        "discovered files must have unique module paths after deduplication"
-    );
-
-    let mut arena = AstArena::default();
-    for file in files {
-        // Keep the path for the error arm before it is moved into `parse_into`.
-        // Discovery already rejects any file with syntax errors, so this arm is a
-        // defensive backstop that surfaces them identically should lowering ever
-        // observe an error discovery did not.
-        let module_path = file.module_path.clone();
-        let parse = inference_parser::parse_into(arena, &file.source, file.module_path);
-        arena = parse.arena;
-        if !parse.errors.is_empty() {
-            return Err(parse_error(&module_path, entry, &parse.errors));
-        }
-    }
-    Ok(arena)
-}
-
 /// Extracts the path-form `use` imports of an already-parsed file as canonical
 /// module-path segment lists. A braced item import (`use a::b::{x};`) maps to the
 /// file `a::b` — the segments *before* the brace list. The `from`-form is skipped.
 ///
-/// The caller parses the file and surfaces any syntax errors first, so only the
-/// directive shapes of a cleanly-parsed file reach here.
-fn path_form_imports(arena: &AstArena) -> anyhow::Result<Vec<Vec<String>>> {
-    let Some(source_file) = arena.source_files().next() else {
-        return Ok(Vec::new());
-    };
-
+/// The caller passes the just-lowered file explicitly, because the shared arena
+/// holds every file walked so far; `arena` is still needed to resolve the
+/// directives' segment identifiers. The caller parses the file and surfaces any
+/// syntax errors first, so only the directive shapes of a cleanly-parsed file
+/// reach here.
+fn path_form_imports(
+    arena: &AstArena,
+    source_file: &SourceFileData,
+) -> anyhow::Result<Vec<Vec<String>>> {
     let mut imports = Vec::new();
     for directive in &source_file.directives {
         let Directive::Use(use_dir) = directive;
@@ -1140,6 +1124,42 @@ mod tests {
                 mp(&["zed"]),
             ],
         );
+    }
+
+    #[test]
+    fn defs_stay_attached_to_their_files_when_bfs_and_canonical_orders_differ() {
+        // Discovery visits entry -> zebra -> alpha (BFS), but the canonical order
+        // is entry, alpha, zebra, so the post-walk reorder genuinely moves files.
+        // After it, every file's `defs` must still resolve to that file's own
+        // function: a reorder that shuffled files without keeping their defs would
+        // cross-wire them, and this is the only test targeting that failure mode.
+        let project = TempProject::new("bfs-vs-canonical");
+        let entry = project.write("main.inf", "use zebra;\npub fn main() {}");
+        project.write("zebra.inf", "use alpha;\npub fn zebra_fn() {}");
+        project.write("alpha.inf", "pub fn alpha_fn() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["alpha"]), mp(&["zebra"])],
+        );
+
+        let def_names = |module_path: Vec<String>| -> Vec<String> {
+            let file = parse
+                .arena
+                .source_files()
+                .find(|sf| sf.module_path == module_path)
+                .expect("file present in arena");
+            file.defs
+                .iter()
+                .map(|&def_id| parse.arena.def_name(def_id).to_string())
+                .collect()
+        };
+
+        assert_eq!(def_names(Vec::new()), vec!["main".to_string()]);
+        assert_eq!(def_names(mp(&["alpha"])), vec!["alpha_fn".to_string()]);
+        assert_eq!(def_names(mp(&["zebra"])), vec!["zebra_fn".to_string()]);
     }
 
     // Axis: `pub use` in the closure walk
