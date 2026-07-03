@@ -10,6 +10,7 @@ pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
 pub mod compound_return_call_position;
 pub mod dead_code;
+pub mod duplicate_local_name;
 pub mod empty_enum_definition;
 pub mod empty_struct_definition;
 pub mod extern_function_call;
@@ -48,6 +49,7 @@ use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
 use compound_return_call_position::CompoundReturnCallPosition;
 use dead_code::DeadCode;
+use duplicate_local_name::DuplicateLocalName;
 use empty_enum_definition::EmptyEnumDefinition;
 use empty_struct_definition::EmptyStructDefinition;
 use extern_function_call::ExternFunctionCall;
@@ -120,5 +122,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnCompoundField,
         &StructUzumakiAsArgument,
         &UzumakiOnCompoundArrayElement,
+        &DuplicateLocalName,
     ]
 }

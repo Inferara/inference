@@ -1366,7 +1366,8 @@ impl Compiler {
                         assert!(
                             prev.is_none(),
                             "local `{const_name}` collides with an existing entry in locals_map; \
-                             the type-checker should have rejected shadowing",
+                             analysis rule A041 rejects duplicate function-local names before codegen \
+                             (each name maps to exactly one WebAssembly local)",
                         );
                         *local_idx += 1;
                     }
@@ -1386,7 +1387,8 @@ impl Compiler {
                     assert!(
                         prev.is_none(),
                         "local `{var_name}` collides with an existing entry in locals_map; \
-                         the type-checker should have rejected shadowing",
+                         analysis rule A041 rejects duplicate function-local names before codegen \
+                         (each name maps to exactly one WebAssembly local)",
                     );
                     *local_idx += 1;
                 }
@@ -1682,7 +1684,13 @@ impl Compiler {
                     element_layout,
                 };
                 let binding_name = arena[name_id].name.clone();
-                array_offsets.insert(binding_name, slot);
+                let prev = array_offsets.insert(binding_name.clone(), slot);
+                assert!(
+                    prev.is_none(),
+                    "array local `{binding_name}` collides with an existing frame slot; \
+                     analysis rule A041 rejects duplicate function-local names before codegen \
+                     (each name maps to exactly one frame slot)",
+                );
                 *current_offset = aligned_offset.checked_add(byte_count).expect(
                     "Frame offset overflow: total array allocation exceeds u32::MAX",
                 );
@@ -1719,7 +1727,13 @@ impl Compiler {
                             fields: field_slots,
                         };
                         let binding_name = arena[name_id].name.clone();
-                        struct_offsets.insert(binding_name, slot);
+                        let prev = struct_offsets.insert(binding_name.clone(), slot);
+                        assert!(
+                            prev.is_none(),
+                            "struct local `{binding_name}` collides with an existing frame slot; \
+                             analysis rule A041 rejects duplicate function-local names before codegen \
+                             (each name maps to exactly one frame slot)",
+                        );
                         *current_offset = aligned_offset.checked_add(total_size).expect(
                             "Frame offset overflow: struct allocation exceeds u32::MAX",
                         );

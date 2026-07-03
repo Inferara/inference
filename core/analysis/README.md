@@ -131,6 +131,14 @@ A037 is the static half of array bounds checking. When the index is a constant i
 
 A compound (struct or array) `@` is lowered by writing into a *named* frame slot, which only a `let`/`const` binding supplies, so `@` of such a type is rejected wherever no slot exists. These complement A014 (array `@` as a function argument) and A027/A028 (whole-binding compound `@`). A scalar or enum `@` is unaffected: the type checker threads it its declared field/element type, so it lowers to a single uzumaki opcode. Array-literal arguments are handled separately by A012, so these rules do not extend to that position.
 
+### Duplicate Local Names (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A041 | `DuplicateLocalName` | error | a function-local name (`let`/`const`) declared more than once per function body; well-typed across disjoint sibling blocks but collides in the flat WebAssembly local namespace — rename or hoist a single declaration |
+
+A041 rejects a function-local name introduced more than once in a single function body, even when the two declarations sit in disjoint sibling blocks (`if`/`else` arms, sequential `if`s, `loop` bodies, or non-deterministic blocks) and are individually well-typed — the type checker's scope-based shadowing check never flags them, since sibling scopes never coexist. The conflict surfaces one phase later: `core/wasm-codegen` flattens every body local into a single name-keyed WebAssembly local namespace, so two sibling declarations of the same name would otherwise collide. This is a simplicity and auditability rule, not a proof-soundness requirement — the Rocq translation addresses locals by numeric index, so the flat namespace exists only to preserve a 1:1 mapping between source name, WASM local, and proof index for humans reading traces and proofs. The diagnostic cites both declaration sites and suggests renaming one of them or hoisting a single declaration above the blocks.
+
 ## Diagnostic Output Format
 
 ```
@@ -231,6 +239,7 @@ Test files are organized by rule group:
 | `rules_a038.rs` | A038 (uzumaki on compound struct field) |
 | `rules_a039.rs` | A039 (struct uzumaki passed as function argument) |
 | `rules_a040.rs` | A040 (uzumaki as compound element of an array literal) |
+| `rules_a041.rs` | A041 (duplicate function-local name across sibling blocks) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
