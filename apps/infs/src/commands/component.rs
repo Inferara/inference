@@ -15,8 +15,10 @@ use crate::toolchain::binaryen;
 use crate::toolchain::{Platform, ToolchainPaths};
 
 /// The components `infs component` understands. The seam for future components;
-/// unknown names are rejected against this list.
-const KNOWN_COMPONENTS: &[&str] = &["wasm-opt"];
+/// unknown names are rejected against this list. Every entry must have a
+/// matching dispatch arm in [`add`] and [`remove`] — those arms fail loudly on
+/// a listed-but-unhandled name rather than operating on the wrong component.
+const KNOWN_COMPONENTS: &[&str] = &[binaryen::COMPONENT_NAME];
 
 /// Arguments for the `component` command.
 #[derive(Args)]
@@ -57,10 +59,20 @@ pub async fn execute(args: &ComponentArgs) -> Result<()> {
     }
 }
 
-/// Installs a component, then surfaces a precedence note if a non-managed
-/// `wasm-opt` would shadow the managed copy at build time.
+/// Installs a component, dispatching on the validated name so a component
+/// listed in [`KNOWN_COMPONENTS`] without a handler here fails loudly instead
+/// of silently installing the wrong one.
 async fn add(name: &str) -> Result<()> {
     ensure_known_component(name)?;
+    match name {
+        binaryen::COMPONENT_NAME => add_wasm_opt().await,
+        other => bail!("component '{other}' has no install handler; this is a bug in infs"),
+    }
+}
+
+/// Installs the managed Binaryen, then surfaces a precedence note if a
+/// non-managed `wasm-opt` would shadow the managed copy at build time.
+async fn add_wasm_opt() -> Result<()> {
     let platform = Platform::detect()?;
     let paths = ToolchainPaths::new()?;
 
@@ -101,9 +113,18 @@ fn list() -> Result<()> {
     Ok(())
 }
 
-/// Removes a component's managed install.
+/// Removes a component's managed install, dispatching on the validated name
+/// with the same listed-but-unhandled guard as [`add`].
 fn remove(name: &str) -> Result<()> {
     ensure_known_component(name)?;
+    match name {
+        binaryen::COMPONENT_NAME => remove_wasm_opt(),
+        other => bail!("component '{other}' has no remove handler; this is a bug in infs"),
+    }
+}
+
+/// Removes the managed Binaryen install.
+fn remove_wasm_opt() -> Result<()> {
     let paths = ToolchainPaths::new()?;
     binaryen::remove(&paths)?;
     println!(
@@ -164,5 +185,15 @@ mod tests {
                 && msg.contains("Known components: wasm-opt"),
             "an unknown component must name it and list the known ones, got: {msg}"
         );
+    }
+
+    #[test]
+    fn known_components_all_have_dispatch_handlers() {
+        // The add/remove dispatch handles exactly the Binaryen component today.
+        // A new KNOWN_COMPONENTS entry must come with matching dispatch arms;
+        // this pins the current one-to-one state so growing the list without
+        // touching the dispatch is caught here, not by a wrong-component
+        // install.
+        assert_eq!(KNOWN_COMPONENTS, &[binaryen::COMPONENT_NAME]);
     }
 }
