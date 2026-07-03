@@ -85,6 +85,15 @@
 //!   `c < 0` or `c >= length`. This is a compile-time check with zero runtime
 //!   cost; dynamic (non-literal) indices are out of scope for this rule.
 //!
+//! ### Duplicate Local Names (A041)
+//!
+//! - A041: A function-local name (`let` or `const`) may be declared at most once
+//!   per function body. Reusing a name across disjoint sibling blocks is well
+//!   typed but collides in the flat WebAssembly local namespace, so it is
+//!   rejected with a rename-or-hoist hint. This is a simplicity and auditability
+//!   rule — it preserves a 1:1 source-name to local to proof-index mapping per
+//!   function — not a proof-soundness requirement.
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -198,6 +207,7 @@ mod tests {
             AnalysisDiagnostic::UzumakiOnCompoundField { field: "i".to_string(), ty: "Inner".to_string(), location: dummy_location() },
             AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { ty: "Point".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

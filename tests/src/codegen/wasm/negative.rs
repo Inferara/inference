@@ -344,3 +344,28 @@ mod extern_function_call {
         );
     }
 }
+
+mod duplicate_local_name {
+    use crate::utils::try_codegen_no_analysis;
+
+    /// The issue repro — two sequential sibling `if`s each declaring `x` — is
+    /// rejected by analysis rule A041, so it only reaches codegen on the
+    /// no-analysis path. There, `pre_scan_locals`' flat `locals_map` still
+    /// catches the duplicate as a defense-in-depth backstop. This pins that the
+    /// backstop survives and that A041 and codegen agree on this shape.
+    #[test]
+    fn duplicate_local_backstop_assert_still_fires_without_analysis() {
+        let result = try_codegen_no_analysis(
+            r#"pub fn f(c: bool) -> i32 { if c { let x: i32 = 1; return x; } if !c { let x: i32 = 2; return x; } let z: i32 = 0; return z; }"#,
+        );
+        assert!(
+            result.is_err(),
+            "duplicate function-local name should panic in codegen without analysis"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("collides with an existing entry in locals_map"),
+            "unexpected error message: {err}"
+        );
+    }
+}

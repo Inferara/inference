@@ -373,6 +373,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   element has no enclosing variable name and panicked codegen. Distinct from A028
   (whole-array `@`), and also covers a nested-array element such as the outer `@` in
   `[@, [1, 2]]`. The array-element sibling of #225's struct-literal-field fix ([#225])
+- A041 `DuplicateLocalName`: reject duplicate function-local names across disjoint
+  sibling blocks (if/else arms, sequential ifs, non-det blocks) with a two-location
+  diagnostic instead of panicking in codegen ([#217])
 
 ### AST
 
@@ -861,3 +864,4 @@ Initial tagged release.
 [#224]: https://github.com/Inferara/inference/issues/224
 [#225]: https://github.com/Inferara/inference/issues/225
 [#227]: https://github.com/Inferara/inference/issues/227
+[#217]: https://github.com/Inferara/inference/issues/217

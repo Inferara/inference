@@ -209,6 +209,13 @@ pub enum AnalysisDiagnostic {
         length: u32,
         location: Location,
     },
+
+    #[error("local `{name}` is already declared in this function (first declaration at {first_location}); each local name is introduced once per function body — rename one of them or hoist a single declaration above the blocks")]
+    DuplicateLocalName {
+        name: String,
+        location: Location,
+        first_location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -252,7 +259,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::VisibilityInsideSpec { location, .. }
             | AnalysisDiagnostic::RecursionDetected { location, .. }
             | AnalysisDiagnostic::StackDepthExceeded { location, .. }
-            | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. } => location,
+            | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. }
+            | AnalysisDiagnostic::DuplicateLocalName { location, .. } => location,
         }
     }
 
@@ -300,6 +308,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UzumakiOnCompoundField { .. } => "A038",
             AnalysisDiagnostic::StructUzumakiAsArgument { .. } => "A039",
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { .. } => "A040",
+            AnalysisDiagnostic::DuplicateLocalName { .. } => "A041",
         }
     }
 }
@@ -1195,6 +1204,41 @@ mod tests {
             "A040 diagnostic must explain only scalar array elements may use @, got: {text}"
         );
         assert_eq!(err.rule_id(), "A040");
+    }
+
+    #[test]
+    fn display_duplicate_local_name() {
+        let first_location = Location {
+            offset_start: 0,
+            offset_end: 5,
+            start_line: 2,
+            start_column: 9,
+            end_line: 2,
+            end_column: 14,
+        };
+        let err = AnalysisDiagnostic::DuplicateLocalName {
+            name: "x".to_string(),
+            location: test_location(),
+            first_location,
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("local `x` is already declared"),
+            "A041 diagnostic must name the duplicated local, got: {text}"
+        );
+        assert!(
+            text.contains("first declaration at 2:9"),
+            "A041 diagnostic must cite the first declaration's location, got: {text}"
+        );
+        assert!(
+            text.contains("rename one of them or hoist"),
+            "A041 diagnostic must give the rename-or-hoist guidance, got: {text}"
+        );
+        assert!(
+            !text.contains("shadow"),
+            "A041 diagnostic must not use shadowing terminology, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A041");
     }
 
     #[test]

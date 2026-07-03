@@ -80,7 +80,9 @@ The pre-scan intentionally flattens all nested scopes into a single WASM local p
 local declared inside a `forall { }` block, an `if` arm, an `else` arm, or a `loop` body
 shares the same pool as one declared at the top of the function. This is consistent with
 how WebAssembly defines locals: they are function-scoped, not block-scoped. The Inference
-type-checker is responsible for enforcing lexical scoping rules at the language level.
+type-checker enforces lexical scoping for nested (ancestor) shadowing; analysis rule A041
+additionally rejects a name declared more than once across disjoint sibling blocks, since
+such names are individually well-typed but would otherwise collide in this flat pool.
 
 ## Supported Initializer Expression Kinds
 
