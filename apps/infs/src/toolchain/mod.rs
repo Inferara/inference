@@ -11,10 +11,12 @@
 //! - [`download`] - HTTP download with progress tracking
 //! - [`verify`] - SHA256 checksum verification
 //! - [`archive`] - ZIP and tar.gz archive extraction utilities
+//! - [`binaryen`] - Pinned Binaryen (`wasm-opt`) provisioning
 //! - [`doctor`] - Toolchain health checks
 //! - [`conflict`] - PATH conflict detection
 
 pub mod archive;
+pub mod binaryen;
 pub mod conflict;
 pub mod doctor;
 pub mod download;

@@ -48,13 +48,14 @@ describe('settings schema (QA Section 8)', () => {
 describe('commands schema (QA Section 8)', () => {
     const commands: Array<{ command: string; title: string }> = contributes.commands;
 
-    it('has exactly 9 commands registered', () => {
-        assert.strictEqual(commands.length, 9);
+    it('has exactly 10 commands registered', () => {
+        assert.strictEqual(commands.length, 10);
     });
 
     it('contains expected command IDs', () => {
         const ids = commands.map((c) => c.command);
         assert.ok(ids.includes('inference.installToolchain'));
+        assert.ok(ids.includes('inference.installComponent'));
         assert.ok(ids.includes('inference.updateToolchain'));
         assert.ok(ids.includes('inference.selectVersion'));
         assert.ok(ids.includes('inference.runDoctor'));

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { detectInfs } from '../toolchain/detection';
 import { runDoctor, DoctorResult } from '../toolchain/doctor';
 import { formatDoctorChecks } from '../toolchain/doctorFormat';
+import { wasmOptNeedsAttention } from '../toolchain/components';
 import { updateStatusBar } from '../ui/statusBar';
 
 /** Guard against concurrent doctor runs. */
@@ -68,25 +69,43 @@ export function registerDoctorCommand(
                 vscode.commands.executeCommand('inference.refreshConfigView');
 
                 if (result.hasErrors) {
+                    const actions = ['Show Output'];
+                    if (wasmOptNeedsAttention(result)) {
+                        actions.push('Install wasm-opt');
+                    }
                     vscode.window
                         .showErrorMessage(
                             `Inference doctor: ${result.summary}`,
-                            'Show Output',
+                            ...actions,
                         )
                         .then((action) => {
                             if (action === 'Show Output') {
                                 outputChannel.show();
+                            } else if (action === 'Install wasm-opt') {
+                                vscode.commands.executeCommand(
+                                    'inference.installComponent',
+                                    'wasm-opt',
+                                );
                             }
                         });
                 } else if (result.hasWarnings) {
+                    const actions = ['Show Output'];
+                    if (wasmOptNeedsAttention(result)) {
+                        actions.push('Install wasm-opt');
+                    }
                     vscode.window
                         .showWarningMessage(
                             `Inference doctor: ${result.summary}`,
-                            'Show Output',
+                            ...actions,
                         )
                         .then((action) => {
                             if (action === 'Show Output') {
                                 outputChannel.show();
+                            } else if (action === 'Install wasm-opt') {
+                                vscode.commands.executeCommand(
+                                    'inference.installComponent',
+                                    'wasm-opt',
+                                );
                             }
                         });
                 } else {

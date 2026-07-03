@@ -34,6 +34,11 @@ target = "wasm32"
 optimize = "debug"
 mode = "compile"    # "compile" (executable WASM) or "proof" (Rocq translation)
 
+[build.wasm-opt]        # optional: post-build optimization of the executable
+enabled = true          # table presence enables; set false to keep it off
+level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
+auto-install = false    # download wasm-opt automatically if it is missing
+
 [verification]
 output-dir = "proofs/"   # honored only in proof mode
 ```
@@ -129,6 +134,66 @@ target = "wasm32"
 optimize = "release"
 mode = "proof"
 ```
+
+### [build.wasm-opt]
+
+The `[build.wasm-opt]` table is an optional sub-table of `[build]` that enables post-build optimization of the compiled WASM executable via the external [Binaryen](https://github.com/WebAssembly/binaryen) `wasm-opt` binary. `infs` can provision `wasm-opt` for you — `infs component add wasm-opt` installs a pinned, checksum-verified Binaryen release, and `auto-install = true` does the same automatically at build time — or resolve one already on your system; resolution order is covered below.
+
+An `Inference.toml` with no `[build.wasm-opt]` table at all leaves the build pipeline unchanged — this feature is off by default.
+
+#### Fields
+
+- **`enabled`** (boolean, default: `true`): Whether the optimizer runs.
+  - Table *presence* is what turns the feature on: an empty `[build.wasm-opt]` table enables optimization at the default level. Set `enabled = false` to keep the table (and a configured `level`) in the manifest while disabling the step.
+
+- **`level`** (string, default: `"3"`): The optimization level, forwarded to `wasm-opt` as `-O<level>`.
+  - One of `"0"`, `"1"`, `"2"`, `"3"`, `"4"`, `"s"`, `"z"` — the same levels `wasm-opt` itself accepts (`s` and `z` bias toward size over speed). Any other value is a load error naming the offending value and the allowed set.
+
+- **`auto-install`** (boolean, default: `false`): Whether a missing `wasm-opt` is downloaded automatically at build time.
+  - When `true` and `wasm-opt` does not resolve in any of the three tiers below, `infs` downloads the pinned, sha256-verified Binaryen release into `~/.inference/tools/binaryen/<version>/` — the same install `infs component add wasm-opt` performs — before optimizing. The default `false` keeps a build network-free: a missing binary is a hard error with install remediation instead. The opt-in is recorded in the versioned manifest; `infs` has no interactive prompts.
+  - An invalid `WASM_OPT_PATH` override is always an error, even with `auto-install = true` — a typo in that variable is surfaced rather than silently downloaded over.
+
+#### Example
+
+```toml
+[build.wasm-opt]
+enabled = true
+level = "z"
+```
+
+#### When optimization runs
+
+- **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never consults the manifest and is unaffected.
+- **Proof-mode and `-v` builds are always skipped, silently.** A build counts as proof mode when the effective `[build] mode` is `"proof"`, `--mode proof` is passed, or `-v` is passed at all (even without `--mode`). Their WASM can carry the non-deterministic opcodes (`forall`, `exists`, `assume`, `unique`, `@` uzumaki) that `wasm-opt` cannot parse, and they are a different artifact class from an executable.
+- **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off.
+
+#### Disabling optimization for one invocation
+
+Pass `--no-wasm-opt` to skip `[build.wasm-opt]` for a single `infs build` or `infs run` without editing the manifest:
+
+```bash
+infs build --no-wasm-opt
+infs run --no-wasm-opt
+```
+
+#### Resolving the `wasm-opt` binary
+
+`infs` resolves `wasm-opt` through three precedence tiers, in order:
+
+1. **`WASM_OPT_PATH`** environment variable, if set. It must point at an existing file, or the build errors naming the variable and the invalid path — a set override is never silently discarded in favor of a lower tier, even when `auto-install = true`.
+2. **PATH** — a standard lookup for `wasm-opt`. This tier wins over the managed tier below, so a system-installed `wasm-opt` on PATH always takes precedence over an infs-managed one.
+3. **Managed tools** — the pinned Binaryen installed by `infs component add wasm-opt` (or by `auto-install`, see below) at `~/.inference/tools/binaryen/<version>/`.
+
+Set `INFS_VERBOSE=1` to trace which tier resolved `wasm-opt` to stderr (`infs: resolved wasm-opt via <tier>: <path>`).
+
+If no tier resolves, the build fails with install hints led by `infs component add wasm-opt`, followed by the system package managers (`brew install binaryen`, `apt install binaryen`, `npm install -g binaryen`) and a link to the [Binaryen releases page](https://github.com/WebAssembly/binaryen/releases). Set `auto-install = true` to have `infs` provision Binaryen automatically at build time instead of erroring.
+
+The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`); an older version is a hard error naming both the found and required versions. If `--version` cannot be run or its output cannot be parsed, `infs` warns and proceeds rather than blocking the build over an unrecognized binary. This check runs against whichever binary was resolved, managed installs included.
+
+#### Caveats
+
+- **Function names are dropped.** `wasm-opt` strips the WASM names custom section, so stack traces and any tooling that resolves function names from an optimized `out/main.wasm` will not see them. There is currently no flag to preserve it.
+- **Deterministic per Binaryen version, not across versions.** The same source, flags, and Binaryen version always produce identical optimized bytes, but upgrading Binaryen can change the output even for unchanged input. Do not treat an optimized `.wasm` as a stable byte-for-byte reference across toolchain upgrades.
 
 ### [verification]
 

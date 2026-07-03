@@ -116,6 +116,7 @@ pub fn run_all_checks() -> Vec<DoctorCheck> {
     if let Some(ambiguity) = check_resolution_ambiguity() {
         checks.push(ambiguity);
     }
+    checks.push(crate::commands::wasm_opt::doctor_check());
     checks
 }
 
@@ -340,9 +341,9 @@ mod tests {
     fn run_all_checks_returns_expected_count() {
         let checks = run_all_checks();
         // Base checks: infs, platform, toolchain dir, default toolchain,
-        // infc, resolved infc. Ambiguity check is conditional (0 or 1).
+        // infc, resolved infc, wasm-opt. Ambiguity check is conditional (0 or 1).
         assert!(
-            checks.len() == 6 || checks.len() == 7,
+            checks.len() == 7 || checks.len() == 8,
             "unexpected check count: {}",
             checks.len()
         );

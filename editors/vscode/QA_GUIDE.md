@@ -36,6 +36,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 9. Error Handling | **[A]** Most paths automated (`install-failures.test.ts`, `version-parsing.test.ts`, `e2e-installation.test.ts`) |
 | 10. Cross-Platform | Manual (requires physical platforms); detection and extraction logic tested |
 | 11. Privacy & Security | **[A]** HTTPS redirect + SHA-256 automated (`https-redirect.test.ts`, `download.test.ts`) |
+| 12. Component Management | Partial -- component args + doctor-attention logic automated (`components.test.ts`, `doctor.test.ts`); UI flows manual |
 
 ---
 
@@ -46,7 +47,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 216 tests pass, 0 failures |
+| 0.4 | `npm test` | All 224 tests pass, 0 failures |
 | 0.5 | `npm run package` | Produces `inference-0.0.3.vsix` without errors |
 
 ---
@@ -301,3 +302,26 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 11.4 | HTTPS-to-HTTP redirect is blocked | If manifest/download redirects to HTTP, fails with "Refusing HTTPS-to-HTTP redirect: {url} -> {target}" **[A]** | |
 | 11.5 | JSON response size limit | Responses larger than 10 MB are rejected | |
 | 11.6 | Redirect chain limit | More than 5 redirects are rejected: "Too many redirects fetching {url}" | |
+
+---
+
+## 12. Component Management (wasm-opt)
+
+The `inference.installComponent` command shells out to `infs component add wasm-opt`
+to provision the managed Binaryen `wasm-opt` binary. These cases require the extension
+host (F5) and, unless noted, a working toolchain (`infs` on PATH or in `INFERENCE_HOME`).
+
+| # | Step | Expected | Pass? |
+|---|------|----------|-------|
+| 12.1 | In `editors/vscode/`: `npm install`, `npm run build`, `npm test` | Installs and builds clean; all 224 tests pass, 0 failures | |
+| 12.2 | Ctrl+Shift+P > "Inference: Install Component (wasm-opt)" | Progress notification "Inference Component" ("Installing wasm-opt..."). On success: info "Inference: component 'wasm-opt' installed." Doctor re-runs and the status bar refreshes. | |
+| 12.3 | After install, run `~/.inference/tools/binaryen/version_130/bin/wasm-opt --version` in a terminal | Prints a Binaryen version (>= 116) | |
+| 12.4 | Run the install command **again** (component already installed) | Completes quickly with a skip message in the Output channel; success info notification; no error | |
+| 12.5 | Invoke the install command while one is already running | Shows: "Inference component installation is already in progress." | |
+| 12.6 | Run the command with **no** toolchain detected (rename `~/.inference/bin/infs`, clear `inference.path`, remove from PATH) | Warning: "Inference toolchain not found. Install it first." with an "Install" button that routes to `inference.installToolchain` | |
+| 12.7 | Break the managed install (delete `~/.inference/tools/binaryen/version_130/bin/wasm-opt`), then Ctrl+Shift+P > "Inference: Run Doctor" | Doctor reports a WARN for `wasm-opt`. The warning notification shows an "Install wasm-opt" action alongside "Show Output". | |
+| 12.8 | Click "Install wasm-opt" on the doctor warning | Triggers `inference.installComponent`, repairs the managed install; a follow-up doctor run reports `wasm-opt` as OK | |
+| 12.9 | **Offline failure:** disconnect the network, delete the managed install, run the install command | Error: "Inference: failed to install component 'wasm-opt'. See output for details." with "Show Output" and "Retry" buttons | |
+| 12.10 | Click "Show Output" on the failure notification | Reveals the Inference output channel with the failure details | |
+| 12.11 | Click "Retry" on the failure notification | Re-invokes the install command | |
+| 12.12 | **PATH shadowing:** place a `wasm-opt` on PATH while the managed copy exists, then Run Doctor | Doctor's `wasm-opt` OK line notes the managed copy is shadowed by PATH | |

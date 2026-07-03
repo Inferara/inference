@@ -190,4 +190,36 @@ describe('parseDoctorOutput', () => {
         assert.strictEqual(result.hasErrors, false);
         assert.strictEqual(result.hasWarnings, false);
     });
+
+    it('parses wasm-opt component checks', () => {
+        const stdout = [
+            'Checking Inference toolchain installation...',
+            '',
+            "  [OK] wasm-opt: Not installed (optional — needed only for [build.wasm-opt]; install with 'infs component add wasm-opt')",
+            "  [WARN] wasm-opt: Managed install at /x/tools/binaryen is missing version_130/bin/wasm-opt; run 'infs component add wasm-opt' to repair",
+            '',
+            'Some warnings were found. The toolchain may work but could have issues.',
+        ].join('\n');
+
+        const result = parseDoctorOutput(stdout);
+
+        assert.strictEqual(result.checks.length, 2);
+
+        assert.strictEqual(result.checks[0].name, 'wasm-opt');
+        assert.strictEqual(result.checks[0].status, 'ok');
+        assert.strictEqual(
+            result.checks[0].message,
+            "Not installed (optional — needed only for [build.wasm-opt]; install with 'infs component add wasm-opt')",
+        );
+
+        assert.strictEqual(result.checks[1].name, 'wasm-opt');
+        assert.strictEqual(result.checks[1].status, 'warn');
+        assert.strictEqual(
+            result.checks[1].message,
+            "Managed install at /x/tools/binaryen is missing version_130/bin/wasm-opt; run 'infs component add wasm-opt' to repair",
+        );
+
+        assert.strictEqual(result.hasErrors, false);
+        assert.strictEqual(result.hasWarnings, true);
+    });
 });

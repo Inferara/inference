@@ -405,6 +405,36 @@ pub fn set_executable_permissions(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Marks a single file as executable (`0o755`) on Unix; a no-op on Windows,
+/// where executability is determined by extension rather than a permission bit.
+///
+/// Unlike [`set_executable_permissions`], which targets the `infc` binary at a
+/// toolchain root by name, this operates on an arbitrary path — used when
+/// staging individual managed-tool files whose names are not known in advance.
+///
+/// # Errors
+///
+/// Returns an error if file metadata cannot be read or permissions cannot be set.
+#[cfg(unix)]
+pub fn set_executable_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = std::fs::metadata(path)
+        .with_context(|| format!("Failed to get metadata: {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)
+        .with_context(|| format!("Failed to set permissions: {}", path.display()))?;
+    Ok(())
+}
+
+/// Marks a file as executable (no-op on Windows).
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)]
+pub fn set_executable_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,6 +1013,39 @@ mod tests {
             let result = set_executable_permissions(&temp_dir);
 
             assert!(result.is_ok(), "Should succeed without infc binary");
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn set_executable_file_sets_755_on_named_file() {
+            let temp_dir = temp_test_dir("exec_file_755");
+            let file = temp_dir.join("wasm-opt");
+            std::fs::write(&file, b"binary").expect("Should write file");
+
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+                .expect("Should set initial perms");
+
+            set_executable_file(&file).expect("Should set permissions");
+
+            let mode = std::fs::metadata(&file)
+                .expect("Should get metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "file should have 0o755 mode");
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn set_executable_file_errors_on_missing_path() {
+            let temp_dir = temp_test_dir("exec_file_missing");
+            let missing = temp_dir.join("nope");
+
+            assert!(
+                set_executable_file(&missing).is_err(),
+                "a missing path must surface as an error"
+            );
 
             let _ = std::fs::remove_dir_all(&temp_dir);
         }

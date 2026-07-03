@@ -2,10 +2,12 @@
 //!
 //! Both `infs build` (project mode) and `infs run` (project mode) need to
 //! perform the *same* project compilation: resolve the conventional
-//! `src/main.inf` entry point, run the `infc` compatibility handshake, and spawn
+//! `src/main.inf` entry point, run the `infc` compatibility handshake, spawn
 //! `infc` with its working directory set to the project root so `out/` lands at
-//! the root. This module owns that shared logic so the two command modules do
-//! not duplicate it (and so `run` inherits the handshake "for free").
+//! the root, and apply the optional `[build.wasm-opt]` post-build optimization
+//! to the resulting executable. This module owns that shared logic so the two
+//! command modules do not duplicate it (and so `run` inherits both the
+//! handshake and the optimizer "for free", running exactly what it ships).
 //!
 //! `infc` compiles the whole import-reachable closure starting at
 //! `src/main.inf` and is the sole authority on which files are part of the
@@ -63,6 +65,12 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// `infs run` always passes `out_dir = None` (and `mode = None`), so project
 /// `run` always builds an executable in `out/`.
 ///
+/// After a successful `infc` exit, the optional `[build.wasm-opt]` post-build
+/// optimization is applied to `<root>/out/main.wasm` (see
+/// [`crate::commands::wasm_opt::post_build_optimize`]). `no_wasm_opt` (the
+/// `--no-wasm-opt` flag) suppresses it, as do proof/`-v` builds; when no
+/// `[build.wasm-opt]` table is present it is a no-op.
+///
 /// ## Errors
 ///
 /// Returns an error if:
@@ -71,11 +79,14 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
+/// - post-build optimization is active and fails (missing/invalid artifact,
+///   `wasm-opt` resolution, or the optimization itself)
 pub(crate) fn run_project_build(
     ctx: &ProjectContext,
     generate_v_output: bool,
     mode: Option<BuildMode>,
     out_dir: Option<&Path>,
+    no_wasm_opt: bool,
 ) -> Result<()> {
     if !ctx.entry_point.is_file() {
         bail!(
@@ -123,6 +134,7 @@ pub(crate) fn run_project_build(
         .with_context(|| format!("Failed to execute infc at {}", infc_path.display()))?;
 
     if status.success() {
+        crate::commands::wasm_opt::post_build_optimize(ctx, generate_v_output, mode, no_wasm_opt)?;
         Ok(())
     } else {
         let code = status.code().unwrap_or(1);
@@ -341,7 +353,7 @@ mod project_tests {
             entry_point: root.join("src").join("main.inf"),
         };
 
-        let err = run_project_build(&ctx, false, None, None).unwrap_err();
+        let err = run_project_build(&ctx, false, None, None, false).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
@@ -365,7 +377,7 @@ mod project_tests {
             entry_point: entry,
         };
 
-        let err = run_project_build(&ctx, false, None, None).unwrap_err();
+        let err = run_project_build(&ctx, false, None, None, false).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
@@ -437,7 +449,10 @@ mod project_tests {
     fn entry_point_resolves_to_src_main_inf() {
         let dir = assert_fs::TempDir::new().unwrap();
         InferenceToml::new("demo")
-            .write_to_file(&dir.path().join(crate::project::manifest::MANIFEST_FILE_NAME))
+            .write_to_file(
+                &dir.path()
+                    .join(crate::project::manifest::MANIFEST_FILE_NAME),
+            )
             .unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -590,8 +605,14 @@ mod tests {
         // ABI "9.9" would major-mismatch if probed; commit match must short-circuit.
         let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
         let compat = probe_compiler_compatibility(&stub).unwrap();
-        assert!(compat.commit_matched, "matching commit must set commit_matched");
-        assert_eq!(compat.abi, None, "commit match short-circuits the ABI probe");
+        assert!(
+            compat.commit_matched,
+            "matching commit must set commit_matched"
+        );
+        assert_eq!(
+            compat.abi, None,
+            "commit match short-circuits the ABI probe"
+        );
         assert!(compat.supports_out_dir());
     }
 

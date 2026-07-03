@@ -63,7 +63,8 @@ mod tui;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
-    build, default, doctor, init, install, list, new, run, self_cmd, uninstall, version, versions,
+    build, component, default, doctor, init, install, list, new, run, self_cmd, uninstall, version,
+    versions,
 };
 use errors::InfsError;
 
@@ -178,6 +179,12 @@ pub enum Commands {
     /// correctly. Reports any issues with suggested remediation steps.
     Doctor,
 
+    /// Manage optional toolchain components.
+    ///
+    /// Installs, lists, or removes managed components such as `wasm-opt`
+    /// (Binaryen), the optimizer used by the `[build.wasm-opt]` manifest table.
+    Component(component::ComponentArgs),
+
     /// Manage the infs binary itself.
     ///
     /// Provides subcommands for updating or managing the infs CLI tool.
@@ -221,6 +228,7 @@ async fn run() -> Result<()> {
         Some(Commands::Versions(args)) => versions::execute(&args).await,
         Some(Commands::Default(args)) => default::execute(&args).await,
         Some(Commands::Doctor) => doctor::execute().await,
+        Some(Commands::Component(args)) => component::execute(&args).await,
         Some(Commands::SelfCmd(args)) => self_cmd::execute(&args).await,
         None => {
             if cli.headless || !tui::should_use_tui() {
