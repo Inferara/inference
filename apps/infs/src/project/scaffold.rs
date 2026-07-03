@@ -208,9 +208,11 @@ fn write_git_files(project_path: &Path) -> Result<()> {
 /// in project mode (`infs build`/`run` consume it), so the scaffolded file must
 /// produce a value the loader reads back consistently — the round-trip is
 /// covered by a test. `target`/`optimize` stay commented because they are not
-/// yet consumed (writing them would imply they work). `[verification]
-/// output-dir` stays commented because its default (`proofs/`) lives in code
-/// and is honored only in proof mode.
+/// yet consumed (writing them would imply they work). `[build.wasm-opt]` stays
+/// commented because it is opt-in and requires an external `wasm-opt` binary
+/// the project may not have installed. `[verification] output-dir` stays
+/// commented because its default (`proofs/`) lives in code and is honored only
+/// in proof mode.
 fn manifest_content(project_name: &str) -> String {
     let infc_version = detect_infc_version();
     format!(
@@ -234,6 +236,12 @@ mode = "compile"
 # Not yet consumed:
 # target = "wasm32"
 # optimize = "release"
+
+# [build.wasm-opt]
+# Post-build optimization of the executable via Binaryen wasm-opt (requires
+# the `wasm-opt` binary). Uncomment to enable.
+# enabled = true
+# level = "3"
 
 # [verification]
 # Output directory for proof artifacts (honored only in proof mode).

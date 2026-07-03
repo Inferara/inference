@@ -106,20 +106,22 @@ infs build example.inf --analyze
 | `-v` | Generate Rocq (.v) translation file |
 | `--mode proof` | Proof mode: preserve non-det specs; implies `-v` inside `infc` |
 | `--mode compile` | Compile mode: strip specs for executable WASM |
+| `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
 When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
 
 ### Project-mode Manifest Semantics
 
-When `infs build` runs in project mode, it reads two fields from `Inference.toml` to resolve the build configuration:
+When `infs build` runs in project mode, it reads fields from `Inference.toml` to resolve the build configuration:
 
 | Manifest field | Effect |
 |----------------|--------|
 | `[build] mode = "proof"` | Forwards `--mode proof` to `infc`; activates `output-dir` |
 | `[build] mode = "compile"` (default) | Forwards nothing; `infc` defaults to compile mode |
 | `[verification] output-dir` | Honored only in effective-proof mode; relocates both `.wasm` and `.v` |
+| `[build.wasm-opt]` | Opt-in post-build optimization of `out/main.wasm` via Binaryen `wasm-opt`; absent table is a no-op |
 
-CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute).
+CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute) — but it does honor `[build.wasm-opt]`, since `run` optimizes exactly what it then executes. `[build.wasm-opt]` applies only to compile-mode artifacts (proof-mode and `-v` builds always skip it) and can be skipped for a single invocation with `--no-wasm-opt`. See [`docs/inference-toml.md`](docs/inference-toml.md) for the full field reference, including the non-deterministic-construct hard error and `wasm-opt` binary resolution.
 
 ### Run Command
 
@@ -139,9 +141,12 @@ infs run example.inf --entry-point helper
 
 # Pass arguments to the program (single-file only)
 infs run example.inf -- arg1 arg2
+
+# Project mode: build, but skip [build.wasm-opt] for this run
+infs run --no-wasm-opt
 ```
 
-Requires `wasmtime` to be installed.
+Requires `wasmtime` to be installed. In project mode, `infs run` applies the same `[build.wasm-opt]` post-build optimization as `infs build` before executing the result.
 
 ### Project Commands
 

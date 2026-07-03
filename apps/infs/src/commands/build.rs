@@ -67,7 +67,7 @@ use std::process::Command;
 
 use crate::commands::project_build::{check_compiler_compatibility, mode_flag, run_project_build};
 use crate::errors::InfsError;
-use crate::project::manifest::{find_manifest_dir, InferenceToml, MANIFEST_FILE_NAME};
+use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME, find_manifest_dir};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
 
@@ -118,6 +118,14 @@ pub struct BuildArgs {
     /// `use { … } from <module>;`. Repeatable; forwarded verbatim to `infc`.
     #[clap(short = 'L', long = "wasm-lib-dir", value_name = "DIR")]
     pub wasm_lib_dirs: Vec<PathBuf>,
+
+    /// Skip the `[build.wasm-opt]` post-build optimization for this build.
+    ///
+    /// Project mode only: when the manifest declares `[build.wasm-opt]`, this
+    /// leaves `out/main.wasm` exactly as `infc` emitted it. No effect in
+    /// single-file mode or when no `[build.wasm-opt]` table is present.
+    #[clap(long = "no-wasm-opt")]
+    pub no_wasm_opt: bool,
 }
 
 /// Executes the build command with the given arguments.
@@ -187,7 +195,8 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     }
 
     for (name, path) in manifest_wasm_dependencies(path)? {
-        cmd.arg("--wasm-dep").arg(format_wasm_dep_arg(&name, &path)?);
+        cmd.arg("--wasm-dep")
+            .arg(format_wasm_dep_arg(&name, &path)?);
     }
 
     let status = cmd
@@ -275,7 +284,13 @@ fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
     let effective_mode = resolve_effective_mode(args.mode, &ctx.manifest.build.mode);
     let out_dir = resolve_out_dir(effective_mode, &ctx.manifest.verification)?;
 
-    run_project_build(ctx, args.generate_v_output, effective_mode, out_dir.as_deref())
+    run_project_build(
+        ctx,
+        args.generate_v_output,
+        effective_mode,
+        out_dir.as_deref(),
+        args.no_wasm_opt,
+    )
 }
 
 /// Resolves the effective `--mode` to forward to `infc`, or `None` to forward
@@ -383,7 +398,9 @@ mod manifest_dep_tests {
         let temp = assert_fs::TempDir::new().unwrap();
         let manifest = temp.child("Inference.toml");
         manifest
-            .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+            .write_str(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n",
+            )
             .unwrap();
         let source = temp.child("main.inf");
         source.write_str("").unwrap();
@@ -449,7 +466,10 @@ mod tests {
 
     #[test]
     fn manifest_proof_forwards_proof() {
-        assert_eq!(resolve_effective_mode(None, "proof"), Some(BuildMode::Proof));
+        assert_eq!(
+            resolve_effective_mode(None, "proof"),
+            Some(BuildMode::Proof)
+        );
     }
 
     #[test]

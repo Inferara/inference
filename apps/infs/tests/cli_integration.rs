@@ -438,11 +438,13 @@ const PROJECT_MAIN_SRC: &str = "pub fn main() -> i32 {\n    return 0;\n}\n";
 /// `src/main.inf` with the given source. Returns nothing; `dir` is mutated in
 /// place. Paths are built with `join` so they are platform-correct.
 fn scaffold_project(dir: &assert_fs::TempDir, name: &str, main_src: &str) {
-    let manifest = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n"
-    );
+    let manifest =
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n");
     dir.child("Inference.toml").write_str(&manifest).unwrap();
-    dir.child("src").child("main.inf").write_str(main_src).unwrap();
+    dir.child("src")
+        .child("main.inf")
+        .write_str(main_src)
+        .unwrap();
 }
 
 /// Project mode: `infs build` (no path) invoked from the project root discovers
@@ -535,9 +537,9 @@ fn project_build_missing_entry_point_errors() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.current_dir(temp.path()).arg("build");
 
-    cmd.assert().failure().stderr(
-        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
-    );
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("entry point").and(predicate::str::contains("main.inf")));
 }
 
 // Project-mode Multi-file Build Tests (#63)
@@ -631,7 +633,9 @@ fn project_build_unreachable_file_warns_without_stale_text() {
     cmd.assert()
         .success()
         .stderr(predicate::str::contains("orphan.inf"))
-        .stderr(predicate::str::contains("not imported by any reachable file"))
+        .stderr(predicate::str::contains(
+            "not imported by any reachable file",
+        ))
         .stderr(predicate::str::contains(STALE_PENDING_WARNING_FRAGMENT).not());
 
     let wasm = temp.child("out").child("main.wasm");
@@ -785,7 +789,10 @@ fn project_build_wasm_byte_identical_to_infc() {
 
     let project_wasm = temp_project.child("out").child("main.wasm");
     let ref_wasm = temp_ref.child("out").child("main.wasm");
-    assert!(project_wasm.path().exists(), "project build produced no WASM");
+    assert!(
+        project_wasm.path().exists(),
+        "project build produced no WASM"
+    );
     assert!(ref_wasm.path().exists(), "reference infc produced no WASM");
 
     let project_bytes = std::fs::read(project_wasm.path()).unwrap();
@@ -932,9 +939,9 @@ fn project_run_missing_entry_point_errors() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.current_dir(temp.path()).arg("run");
 
-    cmd.assert().failure().stderr(
-        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
-    );
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("entry point").and(predicate::str::contains("main.inf")));
 }
 
 /// `--entry-point` with a non-`main` value in project mode is rejected with
@@ -1043,7 +1050,10 @@ fn scaffold_project_with_manifest(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n{manifest_extra}"
     );
     dir.child("Inference.toml").write_str(&manifest).unwrap();
-    dir.child("src").child("main.inf").write_str(main_src).unwrap();
+    dir.child("src")
+        .child("main.inf")
+        .write_str(main_src)
+        .unwrap();
 }
 
 /// Default-manifest (compile) build writes `<root>/out/main.wasm` and creates
@@ -1088,7 +1098,12 @@ fn project_build_manifest_proof_writes_under_proofs() {
     };
 
     let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n",
+    );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
@@ -1252,7 +1267,12 @@ fn project_run_forces_compile_ignoring_manifest_proof() {
     };
 
     let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n",
+    );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
@@ -1293,7 +1313,10 @@ fn scaffolded_project_manifest_has_compile_mode() {
 
     let project = temp.child("demo");
     let manifest_path = project.child("Inference.toml");
-    assert!(manifest_path.path().exists(), "new must scaffold a manifest");
+    assert!(
+        manifest_path.path().exists(),
+        "new must scaffold a manifest"
+    );
 
     let content = std::fs::read_to_string(manifest_path.path()).unwrap();
     assert!(
@@ -1324,7 +1347,12 @@ fn project_build_old_infc_with_output_dir_hard_errors() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n",
+    );
 
     // Stub infc: reports a non-matching commit and ABI "1.0" (minor 0 → no
     // --out-dir support), exits 0 for the probes.
@@ -1656,8 +1684,7 @@ fn doctor_shows_all_checks() {
 /// `INFC_PATH` removed so resolver priorities behave deterministically.
 #[test]
 fn doctor_output_respects_vscode_check_line_contract() {
-    let check_pattern =
-        regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
+    let check_pattern = regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
 
     let temp = assert_fs::TempDir::new().unwrap();
     let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
@@ -1705,8 +1732,7 @@ fn doctor_output_respects_vscode_check_line_contract() {
 fn doctor_output_respects_vscode_contract_on_path_conflict() {
     use std::os::unix::fs::PermissionsExt;
 
-    let check_pattern =
-        regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
+    let check_pattern = regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
 
     // Build a managed toolchain layout: INFERENCE_HOME/bin/infc must exist
     // so `detect_path_conflicts` considers the expected location "real".
@@ -1744,9 +1770,7 @@ fn doctor_output_respects_vscode_contract_on_path_conflict() {
         .collect();
 
     assert!(
-        check_lines
-            .iter()
-            .any(|l| l.contains("PATH conflict:")),
+        check_lines.iter().any(|l| l.contains("PATH conflict:")),
         "expected a `[WARN] PATH conflict: …` line. Output was:\n{stdout}"
     );
 
@@ -2827,4 +2851,792 @@ fn build_handles_nested_paths() {
         .arg(dest.path());
 
     cmd.assert().success();
+}
+
+// Project-mode wasm-opt Post-Build Optimization Tests
+//
+// These exercise the optional `[build.wasm-opt]` post-build step end-to-end
+// through the `infs` binary. Almost all are hermetic: a dependency-free fake
+// `wasm-opt` (tests/fixtures/fake_wasm_opt.rs) is compiled once per test process
+// and injected per-child via `WASM_OPT_PATH`, so they run on machines without
+// Binaryen installed and never mutate global process state (no `serial_test`
+// needed). The handful of real-binary end-to-end tests skip-gate on
+// `require_wasm_opt`.
+
+/// The invocation marker the fake `wasm-opt` writes before each logged call.
+/// Kept in sync with `tests/fixtures/fake_wasm_opt.rs`.
+const WASM_OPT_INVOCATION_MARKER: &str = "--- wasm-opt invocation ---";
+
+/// `src/main.inf` that leaks a verification-only construct (a `forall` block
+/// with an uzumaki `@`) into an ordinary function. Compile-mode codegen
+/// preserves the `0xfc` opcode, so the post-build scan must reject it before
+/// wasm-opt ever sees the artifact.
+const PROJECT_MAIN_NONDET_SRC: &str =
+    "pub fn main() -> i32 {\n    forall {\n        let x: i32 = @;\n    }\n    return 0;\n}\n";
+
+/// Compiles the dependency-free fake `wasm-opt` fixture once per test process
+/// and returns the path to the built binary.
+///
+/// The binary stands in for a real Binaryen `wasm-opt`, letting the hermetic
+/// optimization tests run anywhere `rustc` is available (which is everywhere
+/// `cargo test` runs). The temp directory holding it is kept alive for the life
+/// of the process via `OnceLock`, so the returned path stays valid across every
+/// test. The `.exe` suffix is applied on Windows so the produced binary is
+/// spawnable.
+fn fake_wasm_opt_binary() -> std::path::PathBuf {
+    static FAKE: std::sync::OnceLock<(assert_fs::TempDir, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    FAKE.get_or_init(|| {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let source = fixture_file("fake_wasm_opt.rs");
+        let binary = dir
+            .path()
+            .join(format!("wasm-opt{}", std::env::consts::EXE_SUFFIX));
+        let status = Command::new("rustc")
+            .arg("--edition")
+            .arg("2024")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .expect("failed to spawn rustc to build the fake wasm-opt fixture");
+        assert!(
+            status.success(),
+            "rustc failed to compile the fake wasm-opt fixture"
+        );
+        (dir, binary)
+    })
+    .1
+    .clone()
+}
+
+/// Skip-gate for the real-binary end-to-end tests: returns `true` only when a
+/// genuine Binaryen `wasm-opt` is on PATH, mirroring `require_infc`'s
+/// skip-with-notice pattern so the suite still passes without Binaryen.
+fn require_wasm_opt() -> bool {
+    if which::which("wasm-opt").is_ok() {
+        true
+    } else {
+        eprintln!("Skipping test: wasm-opt (Binaryen) not found in PATH");
+        false
+    }
+}
+
+/// Parses the fake `wasm-opt` log into one argument vector per recorded
+/// invocation. A missing log file — the optimizer was never spawned — yields an
+/// empty list. The version probe is not logged, so a single optimization run
+/// produces exactly one entry.
+fn optimizer_invocations(log_path: &std::path::Path) -> Vec<Vec<String>> {
+    let Ok(contents) = std::fs::read_to_string(log_path) else {
+        return Vec::new();
+    };
+    contents
+        .split(WASM_OPT_INVOCATION_MARKER)
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| chunk.lines().map(str::to_string).collect())
+        .collect()
+}
+
+/// Validates `bytes` against the same feature envelope the linker and the
+/// optimizer's re-validation enforce (`GC_TYPES | MUTABLE_GLOBAL |
+/// BULK_MEMORY`), using the workspace `inf-wasmparser` fork.
+fn wasm_is_valid(bytes: &[u8]) -> bool {
+    let features = inf_wasmparser::WasmFeatures::GC_TYPES
+        .union(inf_wasmparser::WasmFeatures::MUTABLE_GLOBAL)
+        .union(inf_wasmparser::WasmFeatures::BULK_MEMORY);
+    inf_wasmparser::Validator::new_with_features(features)
+        .validate_all(bytes)
+        .is_ok()
+}
+
+/// The file name of `raw`, as a `&str`, for asserting an argument path points at
+/// the expected artifact regardless of the (absolute, platform-specific) parent.
+fn file_name_of(raw: &str) -> Option<&str> {
+    std::path::Path::new(raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+}
+
+/// With no `[build.wasm-opt]` table the optimizer is never spawned even when
+/// `WASM_OPT_PATH` is set — the default pipeline is untouched — and the ordinary
+/// `out/main.wasm` is still produced. Pins the default-off neutrality.
+#[test]
+fn wasm_opt_absent_table_never_invokes_optimizer() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "absent [build.wasm-opt] must never spawn wasm-opt"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "the ordinary artifact must still be produced"
+    );
+}
+
+/// An enabled `[build.wasm-opt] level = "z"` forwards exactly the expected
+/// argument vector — the level flag, the three feature flags, the input, then
+/// `-o` and the sibling temp target, in order — leaves the artifact in place,
+/// and prints the one-line size summary.
+#[test]
+fn wasm_opt_enabled_forwards_exact_args_and_prints_summary() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-opt -Oz: main.wasm"))
+        .stdout(predicate::str::contains(" -> "))
+        .stdout(predicate::str::contains("bytes"));
+
+    let invocations = optimizer_invocations(log.path());
+    assert_eq!(
+        invocations.len(),
+        1,
+        "wasm-opt must be spawned exactly once for optimization, got: {invocations:?}"
+    );
+    let args = &invocations[0];
+    assert_eq!(args.len(), 7, "unexpected argument count: {args:?}");
+    assert_eq!(args[0], "-Oz");
+    assert_eq!(args[1], "--mvp-features");
+    assert_eq!(args[2], "--enable-mutable-globals");
+    assert_eq!(args[3], "--enable-bulk-memory");
+    assert_eq!(
+        file_name_of(&args[4]),
+        Some("main.wasm"),
+        "input must be out/main.wasm, got: {}",
+        args[4]
+    );
+    assert_eq!(args[5], "-o");
+    assert_eq!(
+        file_name_of(&args[6]),
+        Some("main.wasm.opt"),
+        "output must be the sibling temp file, got: {}",
+        args[6]
+    );
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "the optimized artifact must remain at out/main.wasm"
+    );
+}
+
+/// `[build.wasm-opt] enabled = false` keeps the optimizer off even though the
+/// table is present.
+#[test]
+fn wasm_opt_enabled_false_skips_optimizer() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nenabled = false\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "`enabled = false` must not spawn wasm-opt"
+    );
+    assert!(temp.child("out").child("main.wasm").path().exists());
+}
+
+/// `infs build --no-wasm-opt` suppresses the step even when `[build.wasm-opt]`
+/// is enabled, leaving the artifact exactly as infc emitted it.
+#[test]
+fn wasm_opt_no_wasm_opt_flag_skips_optimizer_on_build() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--no-wasm-opt");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "--no-wasm-opt must not spawn wasm-opt"
+    );
+    assert!(temp.child("out").child("main.wasm").path().exists());
+}
+
+/// A proof-mode manifest skips optimization silently: proof artifacts are a
+/// different class (they carry the non-det opcodes wasm-opt cannot process), so
+/// the optimizer is never spawned and the build still succeeds.
+#[test]
+fn wasm_opt_skipped_for_manifest_proof_mode() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "a proof-mode manifest must skip wasm-opt"
+    );
+}
+
+/// `infs build --mode proof` on a compile-mode manifest that enables the
+/// optimizer skips optimization: the explicitly-owned proof signal wins and the
+/// artifact is left unoptimized.
+#[test]
+fn wasm_opt_skipped_for_cli_proof_mode() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--mode")
+        .arg("proof");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "`--mode proof` must skip wasm-opt"
+    );
+}
+
+/// A plain `-v` build is treated conservatively as a verification workflow and
+/// skips optimization, even on a compile-mode manifest that enables it. Both
+/// `out/main.wasm` and `out/main.v` are still produced.
+#[test]
+fn wasm_opt_skipped_for_v_flag() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    cmd.assert().success();
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "a -v build must skip wasm-opt"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().exists()
+            && temp.child("out").child("main.v").path().exists(),
+        "-v must still write both out/main.wasm and out/main.v"
+    );
+}
+
+/// A verification construct that leaks into an ordinary function is a hard error
+/// when optimization is enabled: the pre-scan names the construct (`forall`) and
+/// points at `spec` blocks, the optimizer is never spawned, and the unoptimized
+/// `out/main.wasm` infc wrote is left in place.
+#[test]
+fn wasm_opt_rejects_leaked_verification_construct() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONDET_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("verification-only construct `forall`")
+            .and(predicate::str::contains("spec")),
+    );
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "the pre-scan must reject before wasm-opt is spawned"
+    );
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "the unoptimized artifact must be left in place after the scan error"
+    );
+}
+
+/// A `WASM_OPT_PATH` that does not name a file is a hard error naming the
+/// environment variable — an explicit override is never silently discarded in
+/// favor of a PATH search.
+#[test]
+fn wasm_opt_missing_binary_via_env_names_env_var() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let missing = temp.child("no-such-wasm-opt");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", missing.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("WASM_OPT_PATH"));
+}
+
+/// With no `WASM_OPT_PATH` override and a PATH containing no `wasm-opt`, the
+/// missing-binary error carries the Binaryen install hints. Unix-only: an empty
+/// PATH is the portable way to guarantee the lookup fails, and infc is still
+/// reached through `INFC_PATH`.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_missing_binary_via_path_hints_install() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("brew install binaryen"));
+}
+
+/// A nonzero `wasm-opt` exit is a hard error carrying its stderr, and the
+/// original artifact is left intact — the optimizer writes to a sibling temp
+/// file that is cleaned up on failure, so the in-place artifact never sees a
+/// partial result.
+#[test]
+fn wasm_opt_nonzero_exit_fails_and_preserves_artifact() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_EXIT", "1")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("fake failure"));
+
+    let artifact = temp.child("out").child("main.wasm");
+    let bytes = std::fs::read(artifact.path()).expect("original artifact must remain readable");
+    assert!(
+        !bytes.is_empty() && wasm_is_valid(&bytes),
+        "the unoptimized artifact must be left valid after a wasm-opt failure"
+    );
+    assert!(
+        !temp.child("out").child("main.wasm.opt").path().exists(),
+        "the temp file must be cleaned up after a failure"
+    );
+}
+
+/// A `wasm-opt` older than the supported minimum is a hard error naming both the
+/// found version and the required minimum.
+#[test]
+fn wasm_opt_version_too_old_errors() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_VERSION", "wasm-opt version 90 (version_90)")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("90").and(predicate::str::contains("116")));
+}
+
+/// An unparseable `--version` banner is a warning, not a blocker: the build
+/// proceeds to optimization and succeeds. A possibly-fine binary must never be
+/// rejected over an unrecognized version string.
+#[test]
+fn wasm_opt_unparseable_version_warns_and_succeeds() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_VERSION", "banana")
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success().stderr(predicate::str::contains(
+        "could not parse a wasm-opt version",
+    ));
+
+    assert_eq!(
+        optimizer_invocations(log.path()).len(),
+        1,
+        "the build must proceed to optimization despite the unparseable version"
+    );
+}
+
+/// Optimized bytes that fail re-validation are a hard error; the original
+/// `out/main.wasm` is left valid and the temp file is cleaned up. This guards
+/// against a `wasm-opt` that emits something outside the executable subset.
+#[test]
+fn wasm_opt_garbage_output_fails_revalidation_and_preserves_artifact() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_GARBAGE", "1")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("failed re-validation"));
+
+    let artifact = temp.child("out").child("main.wasm");
+    let bytes = std::fs::read(artifact.path()).expect("original artifact must remain readable");
+    assert!(
+        wasm_is_valid(&bytes),
+        "the original artifact must stay valid when the optimized output is rejected"
+    );
+    assert!(
+        !temp.child("out").child("main.wasm.opt").path().exists(),
+        "the temp file must be cleaned up after a re-validation failure"
+    );
+}
+
+/// Project `run` applies the same optimization `build` does — it runs exactly
+/// what it ships — so an enabled table spawns the optimizer, and `main`'s return
+/// value (42) still surfaces. Gated on wasmtime.
+#[test]
+fn wasm_opt_run_enabled_invokes_optimizer_and_runs() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+
+    assert_eq!(
+        optimizer_invocations(log.path()).len(),
+        1,
+        "project run must apply the optimization it ships"
+    );
+}
+
+/// `infs run --no-wasm-opt` executes the artifact exactly as infc emitted it:
+/// the optimizer is skipped and `main` still runs. Gated on wasmtime.
+#[test]
+fn wasm_opt_run_no_wasm_opt_flag_skips_optimizer() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--no-wasm-opt");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+
+    assert!(
+        optimizer_invocations(log.path()).is_empty(),
+        "--no-wasm-opt must skip optimization on run too"
+    );
+}
+
+/// Real-binary end-to-end: an optimized artifact validates under the workspace
+/// feature envelope and is no larger than the unoptimized one built from the
+/// same source (`wasm-opt -Oz` at minimum drops the names section). Gated on a
+/// real Binaryen `wasm-opt`.
+#[test]
+fn wasm_opt_real_binary_produces_valid_no_larger_artifact() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+    if !require_wasm_opt() {
+        return;
+    }
+
+    let optimized = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &optimized,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let mut opt_cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    opt_cmd
+        .env("INFC_PATH", &infc_path)
+        .current_dir(optimized.path())
+        .arg("build");
+    opt_cmd.assert().success();
+
+    let unoptimized = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&unoptimized, "demo", PROJECT_MAIN_NONZERO_SRC);
+    let mut plain_cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    plain_cmd
+        .env("INFC_PATH", &infc_path)
+        .current_dir(unoptimized.path())
+        .arg("build");
+    plain_cmd.assert().success();
+
+    let optimized_bytes = std::fs::read(optimized.child("out").child("main.wasm").path()).unwrap();
+    let unoptimized_bytes =
+        std::fs::read(unoptimized.child("out").child("main.wasm").path()).unwrap();
+
+    assert!(
+        wasm_is_valid(&optimized_bytes),
+        "the optimized artifact must validate under the workspace feature set"
+    );
+    assert!(
+        optimized_bytes.len() <= unoptimized_bytes.len(),
+        "optimized ({}) must be no larger than unoptimized ({})",
+        optimized_bytes.len(),
+        unoptimized_bytes.len()
+    );
+}
+
+/// Real-binary end-to-end: running an optimized project yields the same
+/// observable result (`main` returns 42) as running the unoptimized one —
+/// optimization preserves behavior. Gated on both a real `wasm-opt` and
+/// wasmtime.
+#[test]
+fn wasm_opt_real_binary_run_matches_unoptimized() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+    if !require_wasm_opt() {
+        return;
+    }
+
+    let optimized = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &optimized,
+        "demo",
+        PROJECT_MAIN_NONZERO_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let mut opt_run = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    opt_run
+        .env("INFC_PATH", &infc_path)
+        .current_dir(optimized.path())
+        .arg("run");
+    opt_run
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+
+    let unoptimized = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&unoptimized, "demo", PROJECT_MAIN_NONZERO_SRC);
+    let mut plain_run = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    plain_run
+        .env("INFC_PATH", &infc_path)
+        .current_dir(unoptimized.path())
+        .arg("run");
+    plain_run
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
 }

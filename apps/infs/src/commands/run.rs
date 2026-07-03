@@ -39,6 +39,10 @@
 //!   execute. So project `run` ignores `[build] mode` and
 //!   `[verification] output-dir` entirely: the artifact is always an executable
 //!   under `<root>/out/`. Use `infs build` to produce proof artifacts.
+//! - **Applies `[build.wasm-opt]`** when the manifest declares it: `run` builds
+//!   an executable in compile mode, so the same post-build optimization `build`
+//!   performs runs here too (`run` executes exactly what it ships). Pass
+//!   `--no-wasm-opt` to skip it.
 //! - **Missing-WASM guard:** if the build reports success but
 //!   `<root>/out/main.wasm` is absent, `run` errors before invoking wasmtime,
 //!   mirroring the single-file `compile_to_wasm` guard.
@@ -85,6 +89,14 @@ pub struct RunArgs {
     /// (run a single file for custom entry points).
     #[clap(long, default_value = DEFAULT_ENTRY_POINT)]
     pub entry_point: String,
+
+    /// Skip the `[build.wasm-opt]` post-build optimization for this build.
+    ///
+    /// Project mode only: `run` executes the artifact it builds, so this makes
+    /// it run exactly what `infc` emitted. No effect in single-file mode or when
+    /// no `[build.wasm-opt]` table is present.
+    #[clap(long = "no-wasm-opt")]
+    pub no_wasm_opt: bool,
 
     /// Arguments to pass to the invoked function.
     ///
@@ -201,8 +213,10 @@ fn execute_project(args: &RunArgs) -> Result<()> {
     // regardless of `[build] mode` in the manifest: proof-mode WASM embeds the
     // custom non-deterministic opcodes (0xfc family) that wasmtime cannot
     // execute. Hence `mode = None` and `out_dir = None` here — manifest
-    // mode/output-dir resolution lives only in `build`'s project path.
-    run_project_build(&ctx, false, None, None)?;
+    // mode/output-dir resolution lives only in `build`'s project path. The
+    // `[build.wasm-opt]` optimization still applies (unless `--no-wasm-opt`) so
+    // `run` executes exactly what `build` would ship.
+    run_project_build(&ctx, false, None, None, args.no_wasm_opt)?;
 
     let wasm_path = project_wasm_path(&ctx);
     if !wasm_path.exists() {
@@ -361,6 +375,7 @@ mod tests {
         let args = RunArgs {
             path: None,
             entry_point: "helper".to_string(),
+            no_wasm_opt: false,
             args: Vec::new(),
         };
 
@@ -384,6 +399,7 @@ mod tests {
         let args = RunArgs {
             path: None,
             entry_point: DEFAULT_ENTRY_POINT.to_string(),
+            no_wasm_opt: false,
             args: Vec::new(),
         };
 

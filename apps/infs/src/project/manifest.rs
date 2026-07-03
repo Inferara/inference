@@ -26,6 +26,10 @@
 //! optimize = "release"
 //! mode = "compile"        # "compile" (executable) or "proof" (Rocq specs)
 //!
+//! [build.wasm-opt]        # optional: post-build optimization of the executable
+//! enabled = true          # table presence enables; set false to keep it off
+//! level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
+//!
 //! [verification]
 //! output-dir = "proofs/"  # honored only in proof mode
 //! ```
@@ -200,9 +204,7 @@ pub fn validate_wasm_dependency_key(key: &str) -> Result<()> {
         bail!("invalid [wasm-dependencies] key: the module name is empty");
     }
     if key.contains('=') {
-        bail!(
-            "invalid [wasm-dependencies] key `{key}`: a module name cannot contain `=`"
-        );
+        bail!("invalid [wasm-dependencies] key `{key}`: a module name cannot contain `=`");
     }
 
     let segments: Vec<&str> = key.split("::").collect();
@@ -264,6 +266,15 @@ pub struct BuildConfig {
     /// Validated case-sensitively on load (see [`InferenceToml::from_toml`]).
     #[serde(default = "default_mode")]
     pub mode: String,
+
+    /// Optional `[build.wasm-opt]` sub-table. Absent means post-build
+    /// optimization is off; present means on unless `enabled = false`.
+    ///
+    /// Declared last because a TOML sub-table must serialize after the scalar
+    /// keys of its parent table, and `toml` emits struct fields in declaration
+    /// order.
+    #[serde(rename = "wasm-opt", default, skip_serializing_if = "Option::is_none")]
+    pub wasm_opt: Option<WasmOptConfig>,
 }
 
 impl Default for BuildConfig {
@@ -272,17 +283,24 @@ impl Default for BuildConfig {
             target: default_target(),
             optimize: default_optimize(),
             mode: default_mode(),
+            wasm_opt: None,
         }
     }
 }
 
 impl BuildConfig {
     /// Returns true if this is the default configuration.
+    ///
+    /// A present `[build.wasm-opt]` table makes the config non-default even
+    /// when the other fields are defaults: without this, a manifest whose only
+    /// `[build]` content is `[build.wasm-opt]` would round-trip to nothing
+    /// (the whole `[build]` table is skipped when `is_default()` holds).
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.target == default_target()
             && self.optimize == default_optimize()
             && self.mode == default_mode()
+            && self.wasm_opt.is_none()
     }
 
     /// Validates the `mode` field, accepting only `"compile"` or `"proof"`
@@ -299,6 +317,58 @@ impl BuildConfig {
             bail!(
                 "Invalid `[build] mode` value `{}`: expected `compile` or `proof`.",
                 self.mode
+            );
+        }
+        if let Some(wasm_opt) = &self.wasm_opt {
+            wasm_opt.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// The `[build.wasm-opt]` table: post-build optimization of the compile-mode
+/// artifact via the external Binaryen `wasm-opt` binary. Table presence means
+/// enabled unless `enabled = false`. Proof-mode artifacts are never optimized.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WasmOptConfig {
+    /// Whether the optimizer runs. Defaults to `true` so that merely declaring
+    /// `[build.wasm-opt]` turns the feature on.
+    #[serde(default = "default_wasm_opt_enabled")]
+    pub enabled: bool,
+
+    /// Optimization level, forwarded as `-O<level>` to `wasm-opt`. One of
+    /// [`WASM_OPT_LEVELS`]: `"0"`..`"4"`, `"s"`, `"z"`.
+    #[serde(default = "default_wasm_opt_level")]
+    pub level: String,
+}
+
+/// The `-O<level>` values accepted by `[build.wasm-opt] level`, matching the
+/// levels `wasm-opt` itself understands: numeric `0`–`4`, plus the size-biased
+/// `s` and `z`.
+pub const WASM_OPT_LEVELS: &[&str] = &["0", "1", "2", "3", "4", "s", "z"];
+
+impl Default for WasmOptConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_wasm_opt_enabled(),
+            level: default_wasm_opt_level(),
+        }
+    }
+}
+
+impl WasmOptConfig {
+    /// Validates the `level` field against [`WASM_OPT_LEVELS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the offending value and the allowed set when
+    /// `level` is not one of the accepted `-O<level>` values.
+    fn validate(&self) -> Result<()> {
+        if !WASM_OPT_LEVELS.contains(&self.level.as_str()) {
+            bail!(
+                "Invalid `[build.wasm-opt] level` value `{}`: expected one of \
+                 `0`, `1`, `2`, `3`, `4`, `s`, `z`.",
+                self.level
             );
         }
         Ok(())
@@ -467,6 +537,14 @@ fn default_mode() -> String {
     String::from("compile")
 }
 
+fn default_wasm_opt_enabled() -> bool {
+    true
+}
+
+fn default_wasm_opt_level() -> String {
+    String::from("3")
+}
+
 fn default_output_dir() -> String {
     String::from("proofs/")
 }
@@ -585,8 +663,7 @@ impl InferenceToml {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
-        Self::from_toml(&content)
-            .with_context(|| format!("Invalid manifest: {}", path.display()))
+        Self::from_toml(&content).with_context(|| format!("Invalid manifest: {}", path.display()))
     }
 }
 
@@ -740,6 +817,7 @@ mod tests {
             target: String::from("wasm64"),
             optimize: String::from("debug"),
             mode: default_mode(),
+            wasm_opt: None,
         };
         assert!(!config.is_default());
     }
@@ -882,6 +960,142 @@ mod tests {
             !config.is_default(),
             "proof mode must not be reported as the default config"
         );
+    }
+
+    #[test]
+    fn wasm_opt_absent_table_parses_as_none() {
+        // Backcompat: a manifest without [build.wasm-opt] leaves the field
+        // None, and the [build] config still counts as default.
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "compile"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert!(manifest.build.wasm_opt.is_none());
+        assert!(manifest.build.is_default());
+    }
+
+    #[test]
+    fn wasm_opt_bare_table_enables_with_default_level() {
+        // Presence alone enables the optimizer; the level defaults to "3".
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        let wasm_opt = manifest.build.wasm_opt.expect("table present");
+        assert!(wasm_opt.enabled);
+        assert_eq!(wasm_opt.level, "3");
+    }
+
+    #[test]
+    fn wasm_opt_enabled_false_is_honored() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+enabled = false
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        let wasm_opt = manifest.build.wasm_opt.expect("table present");
+        assert!(!wasm_opt.enabled);
+        assert_eq!(wasm_opt.level, "3", "level still defaults when disabled");
+    }
+
+    #[test]
+    fn wasm_opt_accepts_every_documented_level() {
+        for level in WASM_OPT_LEVELS {
+            let src = format!(
+                r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+level = "{level}"
+"#
+            );
+            let manifest = InferenceToml::from_toml(&src)
+                .unwrap_or_else(|e| panic!("level `{level}` must be accepted: {e}"));
+            assert_eq!(manifest.build.wasm_opt.unwrap().level, *level);
+        }
+    }
+
+    #[test]
+    fn wasm_opt_rejects_unknown_level() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+level = "9"
+"#;
+        let err = InferenceToml::from_toml(src).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wasm-opt") && msg.contains("level") && msg.contains('9'),
+            "error must name the table, the field, and the offending value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wasm_opt_table_round_trips_through_toml() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+enabled = true
+level = "z"
+"#;
+        let manifest = InferenceToml::from_toml(src).expect("parses");
+        let serialized = manifest.to_toml().expect("serializes");
+        let reparsed = InferenceToml::from_toml(&serialized).expect("reparses");
+        assert_eq!(manifest, reparsed);
+        assert!(
+            serialized.contains("wasm-opt"),
+            "the [build.wasm-opt] table must survive serialization, got:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn wasm_opt_table_makes_build_config_non_default() {
+        // A [build.wasm-opt]-only manifest must not round-trip to nothing: the
+        // sub-table's presence makes BuildConfig non-default, so the whole
+        // [build] table is serialized rather than skipped.
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+level = "z"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert!(
+            !manifest.build.is_default(),
+            "a present [build.wasm-opt] table must make BuildConfig non-default"
+        );
+        let serialized = manifest.to_toml().unwrap();
+        assert!(serialized.contains("wasm-opt"));
     }
 
     #[test]
@@ -1032,7 +1246,10 @@ mode = "Proof"
         let config = VerificationConfig {
             output_dir: String::from("proofs/"),
         };
-        assert_eq!(config.normalized_output_dir().unwrap(), PathBuf::from("proofs"));
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("proofs")
+        );
     }
 
     #[test]
@@ -1178,7 +1395,9 @@ mode = "Proof"
         // separately in scaffold.rs.)
         let dir = assert_fs::TempDir::new().unwrap();
         let path = dir.path().join(MANIFEST_FILE_NAME);
-        InferenceToml::new("scaffolded").write_to_file(&path).unwrap();
+        InferenceToml::new("scaffolded")
+            .write_to_file(&path)
+            .unwrap();
 
         let loaded = InferenceToml::load(&path).unwrap();
         assert_eq!(loaded.build.mode, "compile");
@@ -1452,7 +1671,14 @@ target = "wasm32"
 
     #[test]
     fn validate_wasm_dependency_key_accepts_logical_names() {
-        for key in ["arith", "crypto", "_priv", "a1", "crypto::sha256", "a::b::c"] {
+        for key in [
+            "arith",
+            "crypto",
+            "_priv",
+            "a1",
+            "crypto::sha256",
+            "a::b::c",
+        ] {
             assert!(
                 validate_wasm_dependency_key(key).is_ok(),
                 "`{key}` should be a valid logical name"
@@ -1509,7 +1735,9 @@ target = "wasm32"
     fn test_find_manifest_dir_in_same_directory() {
         let temp = assert_fs::TempDir::new().unwrap();
         let manifest = temp.child(MANIFEST_FILE_NAME);
-        manifest.write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        manifest
+            .write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
+            .unwrap();
         let source = temp.child("main.inf");
         source.write_str("").unwrap();
 
@@ -1521,7 +1749,9 @@ target = "wasm32"
     fn test_find_manifest_dir_walks_up_from_nested_source() {
         let temp = assert_fs::TempDir::new().unwrap();
         let manifest = temp.child(MANIFEST_FILE_NAME);
-        manifest.write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        manifest
+            .write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n")
+            .unwrap();
         let nested = temp.child("src").child("deep");
         nested.create_dir_all().unwrap();
         let source = nested.child("main.inf");

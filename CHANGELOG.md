@@ -627,6 +627,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- Add opt-in post-build WASM optimization via Binaryen `wasm-opt`
+  - After a successful project-mode `infs build`/`infs run`, when the manifest declares `[build.wasm-opt]`, the external `wasm-opt` binary optimizes `out/main.wasm` in place; absent the table, the pipeline is unchanged
+  - Runs only for executable artifacts: proof-mode builds and any `-v` build are always skipped silently, since their WASM can carry non-deterministic opcodes (`forall`/`exists`/`assume`/`unique`/`@` uzumaki) that `wasm-opt` cannot parse
+  - A compile-mode artifact that still contains a non-deterministic opcode is a hard error naming the construct and pointing at the fix (move it into a `spec` block, or disable optimization), rather than an opaque `wasm-opt` parse failure
+  - `infs run` applies the same optimization as `infs build`, so it always executes exactly what a build would ship; single-file mode is unaffected
+  - New `--no-wasm-opt` flag on `infs build` and `infs run` skips optimization for a single invocation regardless of the manifest
+  - `wasm-opt` is resolved via the `WASM_OPT_PATH` environment variable, falling back to a PATH lookup; if neither resolves, the build fails with install hints (brew/apt/npm, or a GitHub releases link)
+  - The resolved binary must be Binaryen 116 or newer; an older version is a hard error, while an unparseable `--version` output only warns and proceeds
+  - `wasm-opt` strips the WASM names custom section, so stack traces from an optimized artifact lose function names
 - Make `infs build` and `infs run` project-aware ([#223])
   - Invoked with no path, both commands discover the project's `Inference.toml` by walking up from the current directory (nearest ancestor wins; the start directory is canonicalized once for symlink stability), then compile `<root>/src/main.inf` with the compiler's working directory set to the project root so `out/` always lands at the root regardless of where the command was invoked
   - The existing single-file forms (`infs build path/to/file.inf`, `infs run path/to/file.inf`) are preserved unchanged
@@ -714,6 +723,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Project Manifest
 
+- Add optional `[build.wasm-opt]` sub-table to `Inference.toml`
+  - `enabled` (bool, default `true`): table presence alone enables optimization; set `enabled = false` to keep the table while disabling the step
+  - `level` (string, default `"3"`): forwarded to `wasm-opt` as `-O<level>`; one of `"0"`–`"4"`, `"s"`, `"z"`, validated on load with a clear error naming the offending value
+  - `infs new`/`infs init` scaffold a commented-out `[build.wasm-opt]` block after `[build]`
 - Consume `[build]` and `[verification]` configuration in project-mode builds ([#223])
   - New `[build] mode = "compile" | "proof"` field (default `"compile"`), validated on load; an invalid value is a clear error naming the field and allowed values
   - `[verification] output-dir` is honored only in effective-proof builds, where it redirects artifacts via `infc --out-dir`; in compile mode it is ignored so the default `proofs/` never relocates `out/main.wasm`
