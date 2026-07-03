@@ -86,6 +86,10 @@
         "title": "Inference: Install Toolchain"
       },
       {
+        "command": "inference.installComponent",
+        "title": "Inference: Install Component (wasm-opt)"
+      },
+      {
         "command": "inference.updateToolchain",
         "title": "Inference: Update Toolchain"
       },

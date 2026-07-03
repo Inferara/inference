@@ -34,9 +34,10 @@ target = "wasm32"
 optimize = "debug"
 mode = "compile"    # "compile" (executable WASM) or "proof" (Rocq translation)
 
-[build.wasm-opt]     # optional: post-build optimization of the executable
-enabled = true       # table presence enables; set false to keep it off
-level = "3"          # forwarded as -O<level>: "0".."4", "s", "z"
+[build.wasm-opt]        # optional: post-build optimization of the executable
+enabled = true          # table presence enables; set false to keep it off
+level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
+auto-install = false    # download wasm-opt automatically if it is missing
 
 [verification]
 output-dir = "proofs/"   # honored only in proof mode
@@ -136,7 +137,7 @@ mode = "proof"
 
 ### [build.wasm-opt]
 
-The `[build.wasm-opt]` table is an optional sub-table of `[build]` that enables post-build optimization of the compiled WASM executable via the external [Binaryen](https://github.com/WebAssembly/binaryen) `wasm-opt` binary. `infs` does not bundle or download `wasm-opt` itself; resolution order is covered below.
+The `[build.wasm-opt]` table is an optional sub-table of `[build]` that enables post-build optimization of the compiled WASM executable via the external [Binaryen](https://github.com/WebAssembly/binaryen) `wasm-opt` binary. `infs` can provision `wasm-opt` for you — `infs component add wasm-opt` installs a pinned, checksum-verified Binaryen release, and `auto-install = true` does the same automatically at build time — or resolve one already on your system; resolution order is covered below.
 
 An `Inference.toml` with no `[build.wasm-opt]` table at all leaves the build pipeline unchanged — this feature is off by default.
 
@@ -147,6 +148,10 @@ An `Inference.toml` with no `[build.wasm-opt]` table at all leaves the build pip
 
 - **`level`** (string, default: `"3"`): The optimization level, forwarded to `wasm-opt` as `-O<level>`.
   - One of `"0"`, `"1"`, `"2"`, `"3"`, `"4"`, `"s"`, `"z"` — the same levels `wasm-opt` itself accepts (`s` and `z` bias toward size over speed). Any other value is a load error naming the offending value and the allowed set.
+
+- **`auto-install`** (boolean, default: `false`): Whether a missing `wasm-opt` is downloaded automatically at build time.
+  - When `true` and `wasm-opt` does not resolve in any of the three tiers below, `infs` downloads the pinned, sha256-verified Binaryen release into `~/.inference/tools/binaryen/<version>/` — the same install `infs component add wasm-opt` performs — before optimizing. The default `false` keeps a build network-free: a missing binary is a hard error with install remediation instead. The opt-in is recorded in the versioned manifest; `infs` has no interactive prompts.
+  - An invalid `WASM_OPT_PATH` override is always an error, even with `auto-install = true` — a typo in that variable is surfaced rather than silently downloaded over.
 
 #### Example
 
@@ -173,12 +178,17 @@ infs run --no-wasm-opt
 
 #### Resolving the `wasm-opt` binary
 
-1. **`WASM_OPT_PATH`** environment variable, if set. It must point at an existing file, or the build errors naming the variable and the invalid path.
-2. **PATH** — a standard lookup for `wasm-opt`.
+`infs` resolves `wasm-opt` through three precedence tiers, in order:
 
-If neither resolves, the build fails with install hints (`brew install binaryen`, `apt install binaryen`, `npm install -g binaryen`, or a link to the [Binaryen releases page](https://github.com/WebAssembly/binaryen/releases)).
+1. **`WASM_OPT_PATH`** environment variable, if set. It must point at an existing file, or the build errors naming the variable and the invalid path — a set override is never silently discarded in favor of a lower tier, even when `auto-install = true`.
+2. **PATH** — a standard lookup for `wasm-opt`. This tier wins over the managed tier below, so a system-installed `wasm-opt` on PATH always takes precedence over an infs-managed one.
+3. **Managed tools** — the pinned Binaryen installed by `infs component add wasm-opt` (or by `auto-install`, see below) at `~/.inference/tools/binaryen/<version>/`.
 
-The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`); an older version is a hard error naming both the found and required versions. If `--version` cannot be run or its output cannot be parsed, `infs` warns and proceeds rather than blocking the build over an unrecognized binary.
+Set `INFS_VERBOSE=1` to trace which tier resolved `wasm-opt` to stderr (`infs: resolved wasm-opt via <tier>: <path>`).
+
+If no tier resolves, the build fails with install hints led by `infs component add wasm-opt`, followed by the system package managers (`brew install binaryen`, `apt install binaryen`, `npm install -g binaryen`) and a link to the [Binaryen releases page](https://github.com/WebAssembly/binaryen/releases). Set `auto-install = true` to have `infs` provision Binaryen automatically at build time instead of erroring.
+
+The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`); an older version is a hard error naming both the found and required versions. If `--version` cannot be run or its output cannot be parsed, `infs` warns and proceeds rather than blocking the build over an unrecognized binary. This check runs against whichever binary was resolved, managed installs included.
 
 #### Caveats
 

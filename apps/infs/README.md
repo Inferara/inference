@@ -51,6 +51,9 @@ cargo build -p infs --release
 | `infs default <version>` | Set the default toolchain |
 | `infs doctor` | Check installation health with intelligent recommendations |
 | `infs self update` | Update infs itself |
+| `infs component add <name>` | Install a managed component (currently `wasm-opt`, the Binaryen optimizer behind `[build.wasm-opt]`) |
+| `infs component list` | List managed components and their install state |
+| `infs component remove <name>` | Remove an installed managed component |
 
 ### Other
 
@@ -119,9 +122,9 @@ When `infs build` runs in project mode, it reads fields from `Inference.toml` to
 | `[build] mode = "proof"` | Forwards `--mode proof` to `infc`; activates `output-dir` |
 | `[build] mode = "compile"` (default) | Forwards nothing; `infc` defaults to compile mode |
 | `[verification] output-dir` | Honored only in effective-proof mode; relocates both `.wasm` and `.v` |
-| `[build.wasm-opt]` | Opt-in post-build optimization of `out/main.wasm` via Binaryen `wasm-opt`; absent table is a no-op |
+| `[build.wasm-opt]` | Opt-in post-build optimization of `out/main.wasm` via Binaryen `wasm-opt`, resolved from `WASM_OPT_PATH` → PATH → an infs-managed install; absent table is a no-op |
 
-CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute) — but it does honor `[build.wasm-opt]`, since `run` optimizes exactly what it then executes. `[build.wasm-opt]` applies only to compile-mode artifacts (proof-mode and `-v` builds always skip it) and can be skipped for a single invocation with `--no-wasm-opt`. See [`docs/inference-toml.md`](docs/inference-toml.md) for the full field reference, including the non-deterministic-construct hard error and `wasm-opt` binary resolution.
+CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute) — but it does honor `[build.wasm-opt]`, since `run` optimizes exactly what it then executes. `[build.wasm-opt]` applies only to compile-mode artifacts (proof-mode and `-v` builds always skip it) and can be skipped for a single invocation with `--no-wasm-opt`. `wasm-opt` itself does not need to be preinstalled: run `infs component add wasm-opt` to provision the pinned, checksum-verified Binaryen up front, or set `auto-install = true` under `[build.wasm-opt]` to have `infs` download it automatically the first time a build needs it. See [`docs/inference-toml.md`](docs/inference-toml.md) for the full field reference, including the non-deterministic-construct hard error and the complete `wasm-opt` resolution order.
 
 ### Run Command
 

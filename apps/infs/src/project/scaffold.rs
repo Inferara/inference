@@ -238,10 +238,12 @@ mode = "compile"
 # optimize = "release"
 
 # [build.wasm-opt]
-# Post-build optimization of the executable via Binaryen wasm-opt (requires
-# the `wasm-opt` binary). Uncomment to enable.
+# Post-build optimization of the executable via Binaryen wasm-opt. Uncomment to
+# enable; `auto-install` downloads the `wasm-opt` binary on first use when it is
+# not already present (equivalent to `infs component add wasm-opt`).
 # enabled = true
 # level = "3"
+# auto-install = true
 
 # [verification]
 # Output directory for proof artifacts (honored only in proof mode).

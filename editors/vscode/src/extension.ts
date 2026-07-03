@@ -5,6 +5,7 @@ import { detectInfs, inferenceHome } from './toolchain/detection';
 import { exec } from './utils/exec';
 import { compareSemver } from './utils/semver';
 import { registerInstallCommand } from './commands/install';
+import { registerInstallComponentCommand } from './commands/installComponent';
 import { registerDoctorCommand } from './commands/doctor';
 import { registerSelectVersionCommand } from './commands/selectVersion';
 import { registerUpdateCommand, checkForUpdates } from './commands/update';
@@ -33,6 +34,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         registerDoctorCommand(outputChannel, statusBarItem),
     );
+    context.subscriptions.push(registerInstallComponentCommand(outputChannel));
 
     context.subscriptions.push(registerUpdateCommand(outputChannel));
     context.subscriptions.push(registerSelectVersionCommand(outputChannel));

@@ -633,9 +633,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A compile-mode artifact that still contains a non-deterministic opcode is a hard error naming the construct and pointing at the fix (move it into a `spec` block, or disable optimization), rather than an opaque `wasm-opt` parse failure
   - `infs run` applies the same optimization as `infs build`, so it always executes exactly what a build would ship; single-file mode is unaffected
   - New `--no-wasm-opt` flag on `infs build` and `infs run` skips optimization for a single invocation regardless of the manifest
-  - `wasm-opt` is resolved via the `WASM_OPT_PATH` environment variable, falling back to a PATH lookup; if neither resolves, the build fails with install hints (brew/apt/npm, or a GitHub releases link)
+  - `wasm-opt` is resolved via the `WASM_OPT_PATH` environment variable, falling back to PATH, then an infs-managed Binaryen install (see below); if none resolves, the build fails with install hints led by `infs component add wasm-opt`
   - The resolved binary must be Binaryen 116 or newer; an older version is a hard error, while an unparseable `--version` output only warns and proceeds
   - `wasm-opt` strips the WASM names custom section, so stack traces from an optimized artifact lose function names
+- Add infs-managed Binaryen provisioning for `wasm-opt` (`infs component`)
+  - New `infs component add|list|remove <name>` command family (rustup-style) manages optional toolchain components, a tier distinct from the `infc` toolchain install; `wasm-opt` (Binaryen) is the only component today
+  - `infs component add wasm-opt` downloads a pinned, sha256-verified Binaryen release (`version_130`) into `~/.inference/tools/binaryen/<version>/`; the checksum is verified before anything reaches the install directory, the install is idempotent (no network access when already installed) and atomic (staged under a per-process temp directory, published with a single rename), and a broken prior install is repaired rather than left stale
+  - `infs component list` reports each component's install state and location; `infs component remove wasm-opt` deletes the managed install; `add` prints a note when `WASM_OPT_PATH` or a PATH `wasm-opt` would shadow the newly installed managed copy at build time
+  - `wasm-opt` resolution gains a third precedence tier — `WASM_OPT_PATH` env → PATH → the managed install — completing a chain that previously hard-errored whenever the first two missed; set `INFS_VERBOSE=1` to trace which tier resolved the binary
+  - New `[build.wasm-opt] auto-install` manifest key (default `false`): when `true` and `wasm-opt` resolves in no tier, `infs` downloads the pinned Binaryen at build time instead of erroring
+  - The missing-`wasm-opt` install-hint error now leads with `infs component add wasm-opt`, ahead of the brew/apt/npm/releases hints, and mentions `auto-install = true` as the hands-off alternative
+  - `infs doctor` gains an appended `wasm-opt` check: OK naming the resolved path, precedence tier, and Binaryen version (noting when a managed copy is shadowed by PATH); an unused `wasm-opt` reports OK as "not installed (optional)" rather than alarming projects that don't use `[build.wasm-opt]`; a broken managed install, a failing `--version` probe, or an invalid `WASM_OPT_PATH` each WARN with remediation
 - Make `infs build` and `infs run` project-aware ([#223])
   - Invoked with no path, both commands discover the project's `Inference.toml` by walking up from the current directory (nearest ancestor wins; the start directory is canonicalized once for symlink stability), then compile `<root>/src/main.inf` with the compiler's working directory set to the project root so `out/` always lands at the root regardless of where the command was invoked
   - The existing single-file forms (`infs build path/to/file.inf`, `infs run path/to/file.inf`) are preserved unchanged
@@ -726,7 +734,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add optional `[build.wasm-opt]` sub-table to `Inference.toml`
   - `enabled` (bool, default `true`): table presence alone enables optimization; set `enabled = false` to keep the table while disabling the step
   - `level` (string, default `"3"`): forwarded to `wasm-opt` as `-O<level>`; one of `"0"`–`"4"`, `"s"`, `"z"`, validated on load with a clear error naming the offending value
-  - `infs new`/`infs init` scaffold a commented-out `[build.wasm-opt]` block after `[build]`
+  - `auto-install` (bool, default `false`): downloads a missing `wasm-opt` automatically at build time — the same pinned, checksum-verified Binaryen `infs component add wasm-opt` installs — instead of hard-erroring; recorded in the versioned manifest since `infs` has no interactive prompts
+  - `infs new`/`infs init` scaffold a commented-out `[build.wasm-opt]` block after `[build]`, including an `# auto-install = true` line
 - Consume `[build]` and `[verification]` configuration in project-mode builds ([#223])
   - New `[build] mode = "compile" | "proof"` field (default `"compile"`), validated on load; an invalid value is a clear error naming the field and allowed values
   - `[verification] output-dir` is honored only in effective-proof builds, where it redirects artifacts via `infc --out-dir`; in compile mode it is ignored so the default `proofs/` never relocates `out/main.wasm`
@@ -770,6 +779,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Simplify `buildFakeInfcArchive()` to emit only `infc` binary
   - Update doctor check expectations from 6 to 5 checks (single `infc` check replaces `inf-llc`, `rust-lld`, `libLLVM`)
   - Change "missing lib directory triggers doctor warning" to "missing infc triggers doctor failure"
+- Add "Install Component (wasm-opt)" command to VS Code extension (`inference.installComponent`)
+  - Runs `infs component add <name>` with a progress notification; refreshes `infs doctor` on success; offers Show Output / Retry actions on failure
+  - `infs doctor` notifications (error and warning toasts alike) gain an "Install wasm-opt" action button whenever a `wasm-opt` check reports a warning or failure, invoking the install command directly
 
 ---
 

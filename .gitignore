@@ -41,6 +41,7 @@ external/
 !CHANGELOG.md
 *.vsix
 editors/vscode/package-lock.json
+editors/vscode/node_modules/
 
 # mdBook render output
 /book/book/

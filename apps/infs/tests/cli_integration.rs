@@ -3298,10 +3298,13 @@ fn wasm_opt_missing_binary_via_env_names_env_var() {
         .stderr(predicate::str::contains("WASM_OPT_PATH"));
 }
 
-/// With no `WASM_OPT_PATH` override and a PATH containing no `wasm-opt`, the
-/// missing-binary error carries the Binaryen install hints. Unix-only: an empty
-/// PATH is the portable way to guarantee the lookup fails, and infc is still
-/// reached through `INFC_PATH`.
+/// With no `WASM_OPT_PATH` override, a PATH containing no `wasm-opt`, and no
+/// managed install, the missing-binary error leads with the infs-managed option
+/// (`infs component add wasm-opt`) and still carries the Binaryen package hints.
+/// `INFERENCE_HOME` is isolated to an empty directory so a managed `wasm-opt` on
+/// the developer's real machine cannot resolve and mask the error. Unix-only: an
+/// empty PATH is the portable way to guarantee the lookup fails, and infc is
+/// still reached through `INFC_PATH`.
 #[cfg(unix)]
 #[test]
 fn wasm_opt_missing_binary_via_path_hints_install() {
@@ -3316,17 +3319,20 @@ fn wasm_opt_missing_binary_via_path_hints_install() {
         PROJECT_MAIN_SRC,
         "[build.wasm-opt]\nlevel = \"z\"\n",
     );
+    let home = assert_fs::TempDir::new().unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
         .env("PATH", "")
         .env_remove("WASM_OPT_PATH")
         .current_dir(temp.path())
         .arg("build");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("brew install binaryen"));
+    cmd.assert().failure().stderr(
+        predicate::str::contains("infs component add wasm-opt")
+            .and(predicate::str::contains("brew install binaryen")),
+    );
 }
 
 /// A nonzero `wasm-opt` exit is a hard error carrying its stderr, and the
@@ -3639,4 +3645,757 @@ fn wasm_opt_real_binary_run_matches_unoptimized() {
         .assert()
         .success()
         .stdout(predicate::str::contains("42"));
+}
+
+// `infs component` Tests
+//
+// These exercise the managed-component install path end to end without touching
+// the network: a `TcpListener` stub serves an in-test Binaryen tarball, and each
+// test isolates `INFERENCE_HOME` so nothing leaks into the real toolchain. The
+// tarball's `bin/wasm-opt` payload reuses the compiled `fake_wasm_opt_binary()`
+// fixture (a real, spawnable binary), so an install is byte-for-byte realistic.
+
+/// The pinned Binaryen version, mirrored from `toolchain::binaryen::BINARYEN_PIN`
+/// (an integration test cannot import the `infs` binary crate).
+const BINARYEN_PIN: &str = "version_130";
+
+/// Spawns a throwaway HTTP/1.1 server on `127.0.0.1:0` that answers every request
+/// with `body`, and returns its base URL (`http://127.0.0.1:<port>`).
+///
+/// The download client (`reqwest`) issues a single `GET`; the stub drains the
+/// request headers before responding so the client never sees a reset, then
+/// closes the connection (`Connection: close`). The accept loop lives in a
+/// detached thread for the life of the test process.
+fn spawn_binaryen_stub(body: Vec<u8>) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub listener");
+    let base = format!("http://{}", listener.local_addr().expect("stub local addr"));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while let Ok(1) = stream.read(&mut byte) {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") || request.len() > 8192 {
+                    break;
+                }
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            if stream.write_all(header.as_bytes()).is_err() {
+                continue;
+            }
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        }
+    });
+    base
+}
+
+/// Builds a gzip-compressed tar from `(archive_path, bytes)` entries, each with
+/// mode `0o755`. Archive paths use `/` separators (the tar convention).
+fn build_tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::{Builder, Header};
+
+    let mut buf = Vec::new();
+    {
+        let mut builder = Builder::new(GzEncoder::new(&mut buf, Compression::default()));
+        for &(path, bytes) in entries {
+            let mut header = Header::new_gnu();
+            header.set_size(u64::try_from(bytes.len()).expect("entry size fits in u64"));
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes)
+                .expect("append tar entry");
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+    }
+    buf
+}
+
+/// Builds a Binaryen release tarball matching the host platform's required
+/// layout: `binaryen-<pin>/bin/wasm-opt[.exe]`, plus the `lib/libbinaryen.dylib`
+/// sibling the installer requires on macOS.
+fn build_host_binaryen_tarball() -> Vec<u8> {
+    let wasm_opt = std::fs::read(fake_wasm_opt_binary()).expect("read compiled fake wasm-opt");
+    let bin_path = format!(
+        "binaryen-{BINARYEN_PIN}/bin/wasm-opt{}",
+        std::env::consts::EXE_SUFFIX
+    );
+
+    #[cfg(target_os = "macos")]
+    let dylib_path = format!("binaryen-{BINARYEN_PIN}/lib/libbinaryen.dylib");
+    #[cfg(target_os = "macos")]
+    let entries: Vec<(&str, &[u8])> = vec![
+        (bin_path.as_str(), wasm_opt.as_slice()),
+        (dylib_path.as_str(), b"fake libbinaryen dylib"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let entries: Vec<(&str, &[u8])> = vec![(bin_path.as_str(), wasm_opt.as_slice())];
+
+    build_tarball(&entries)
+}
+
+/// The lowercase-hex SHA256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut out = String::with_capacity(64);
+    for b in hasher.finalize() {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Whether `dir` contains an entry whose name starts with `prefix`. Returns
+/// `false` when `dir` does not exist.
+fn dir_has_prefixed_entry(dir: &std::path::Path, prefix: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+}
+
+/// The install path of the managed `wasm-opt` under `home`.
+fn managed_wasm_opt(home: &assert_fs::TempDir) -> assert_fs::fixture::ChildPath {
+    home.child("tools")
+        .child("binaryen")
+        .child(BINARYEN_PIN)
+        .child("bin")
+        .child(format!("wasm-opt{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Builds an `infs component add wasm-opt` command wired to `home` and the stub.
+fn component_add_cmd(home: &assert_fs::TempDir, base: &str, sha: &str) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .env("INFS_BINARYEN_BASE_URL", base)
+        .env("INFS_BINARYEN_SHA256", sha)
+        .args(["component", "add", "wasm-opt"]);
+    cmd
+}
+
+/// Installs the managed component into `home` via a fresh stub, asserting success.
+fn install_managed_component(home: &assert_fs::TempDir) {
+    let tarball = build_host_binaryen_tarball();
+    let sha = sha256_hex(&tarball);
+    let base = spawn_binaryen_stub(tarball);
+    component_add_cmd(home, &base, &sha).assert().success();
+}
+
+/// `component add wasm-opt` downloads from the stub, verifies the checksum,
+/// installs an executable `wasm-opt`, and cleans up the archive and temp dir.
+#[test]
+fn component_add_downloads_verifies_and_installs() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let tarball = build_host_binaryen_tarball();
+    let sha = sha256_hex(&tarball);
+    let base = spawn_binaryen_stub(tarball);
+
+    component_add_cmd(&home, &base, &sha)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installing component 'wasm-opt'"));
+
+    let installed = managed_wasm_opt(&home);
+    assert!(installed.path().exists(), "wasm-opt must be installed");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(installed.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "installed wasm-opt must be executable");
+    }
+
+    assert!(
+        !dir_has_prefixed_entry(home.child("downloads").path(), "binaryen-"),
+        "the downloaded archive must be cleaned up"
+    );
+    assert!(
+        !dir_has_prefixed_entry(home.child("tools").child("binaryen").path(), ".tmp-"),
+        "no per-process temp dir should remain"
+    );
+}
+
+/// A second `add` with the base URL pointed at a dead port still succeeds — an
+/// already-installed component short-circuits before any network access.
+#[test]
+fn component_add_is_idempotent_without_network() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let tarball = build_host_binaryen_tarball();
+    let sha = sha256_hex(&tarball);
+    let base = spawn_binaryen_stub(tarball);
+
+    component_add_cmd(&home, &base, &sha).assert().success();
+
+    // Nothing listens on port 1; reaching the network here would fail.
+    let mut second = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    second
+        .env("INFERENCE_HOME", home.path())
+        .env("INFS_BINARYEN_BASE_URL", "http://localhost:1")
+        .env("INFS_BINARYEN_SHA256", &sha)
+        .args(["component", "add", "wasm-opt"]);
+    second
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already installed"));
+}
+
+/// A checksum mismatch rejects the download, installs nothing, and deletes the
+/// downloaded archive.
+#[test]
+fn component_add_rejects_checksum_mismatch_and_cleans_up() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let tarball = build_host_binaryen_tarball();
+    let base = spawn_binaryen_stub(tarball);
+    let wrong_sha = "0".repeat(64);
+
+    component_add_cmd(&home, &base, &wrong_sha)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Checksum verification failed"));
+
+    assert!(
+        !home
+            .child("tools")
+            .child("binaryen")
+            .child(BINARYEN_PIN)
+            .path()
+            .exists(),
+        "a checksum mismatch must install nothing"
+    );
+    assert!(
+        !dir_has_prefixed_entry(home.child("downloads").path(), "binaryen-"),
+        "the rejected archive must be deleted"
+    );
+}
+
+/// A directory present at the pinned path but missing the binary is a broken
+/// install; `add` repairs it.
+#[test]
+fn component_add_repairs_broken_install() {
+    let home = assert_fs::TempDir::new().unwrap();
+    // Pre-seed a broken install: the version dir exists, but has no binary.
+    home.child("tools")
+        .child("binaryen")
+        .child(BINARYEN_PIN)
+        .child("bin")
+        .create_dir_all()
+        .unwrap();
+
+    install_managed_component(&home);
+
+    assert!(
+        managed_wasm_opt(&home).path().exists(),
+        "a broken install must be repaired"
+    );
+}
+
+/// An unknown component name is rejected, naming the known components. No network
+/// or platform work happens first.
+#[test]
+fn component_add_unknown_component_errors() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .args(["component", "add", "wasm-optimizer"]);
+    cmd.assert().failure().stderr(
+        predicate::str::contains("Unknown component 'wasm-optimizer'")
+            .and(predicate::str::contains("Known components: wasm-opt")),
+    );
+}
+
+/// `component remove wasm-opt` deletes an installed component.
+#[test]
+fn component_remove_present_deletes_install() {
+    let home = assert_fs::TempDir::new().unwrap();
+    install_managed_component(&home);
+    let dir = home.child("tools").child("binaryen").child(BINARYEN_PIN);
+    assert!(dir.path().exists(), "precondition: component installed");
+
+    let mut rm = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    rm.env("INFERENCE_HOME", home.path())
+        .args(["component", "remove", "wasm-opt"]);
+    rm.assert()
+        .success()
+        .stdout(predicate::str::contains("Removed component 'wasm-opt'"));
+
+    assert!(!dir.path().exists(), "remove must delete the install dir");
+}
+
+/// Removing an absent component bails.
+#[test]
+fn component_remove_absent_bails() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .args(["component", "remove", "wasm-opt"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not installed"));
+}
+
+/// Removing an unknown component name is rejected before touching the filesystem.
+#[test]
+fn component_remove_unknown_component_errors() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .args(["component", "remove", "binaryen"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown component 'binaryen'"));
+}
+
+/// `component list` reports the not-installed state with the add hint.
+#[test]
+fn component_list_reports_not_installed() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .args(["component", "list"]);
+    cmd.assert().success().stdout(
+        predicate::str::contains("wasm-opt")
+            .and(predicate::str::contains("not installed"))
+            .and(predicate::str::contains("infs component add wasm-opt")),
+    );
+}
+
+/// `component list` reports the installed state with the version and path.
+#[test]
+fn component_list_reports_installed() {
+    let home = assert_fs::TempDir::new().unwrap();
+    install_managed_component(&home);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFERENCE_HOME", home.path())
+        .args(["component", "list"]);
+    cmd.assert().success().stdout(predicate::str::contains(
+        "installed: Binaryen version_130 at",
+    ));
+}
+
+/// macOS installs the `libbinaryen.dylib` sibling alongside the binary — the
+/// dynamic `wasm-opt` there links against it at runtime.
+#[cfg(target_os = "macos")]
+#[test]
+fn component_add_installs_dylib_sibling_on_macos() {
+    let home = assert_fs::TempDir::new().unwrap();
+    install_managed_component(&home);
+
+    let install_root = home.child("tools").child("binaryen").child(BINARYEN_PIN);
+    assert!(
+        install_root.child("bin").child("wasm-opt").path().exists(),
+        "the wasm-opt binary must be installed"
+    );
+    assert!(
+        install_root
+            .child("lib")
+            .child("libbinaryen.dylib")
+            .path()
+            .exists(),
+        "the libbinaryen.dylib sibling must be installed on macOS"
+    );
+}
+
+/// An archive missing a required file surfaces a layout-drift error and installs
+/// nothing.
+#[test]
+fn component_add_reports_layout_drift_on_missing_file() {
+    let home = assert_fs::TempDir::new().unwrap();
+    // The binary is under an unexpected name, so the required `bin/wasm-opt`
+    // (required on every platform) is absent.
+    let entry = format!("binaryen-{BINARYEN_PIN}/bin/not-wasm-opt");
+    let tarball = build_tarball(&[(entry.as_str(), b"not the binary")]);
+    let sha = sha256_hex(&tarball);
+    let base = spawn_binaryen_stub(tarball);
+
+    component_add_cmd(&home, &base, &sha)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing the expected file"));
+
+    assert!(
+        !home
+            .child("tools")
+            .child("binaryen")
+            .child(BINARYEN_PIN)
+            .path()
+            .exists(),
+        "a layout-drift failure must install nothing"
+    );
+}
+
+// Managed-tier resolution, auto-install, and doctor Tests
+//
+// These exercise the three-tier `wasm-opt` resolver (WASM_OPT_PATH -> PATH ->
+// managed), the manifest `auto-install` build-time provisioning, and the
+// `infs doctor` check. They are unix-gated: an empty PATH is the portable way to
+// force the PATH lookup to miss, and infc is still reached via `INFC_PATH`. Each
+// isolates `INFERENCE_HOME` so nothing leaks into (or resolves from) the
+// developer's real toolchain.
+
+/// Seeds a managed `wasm-opt` under `home` by copying the compiled fake into the
+/// pinned Binaryen layout (`tools/binaryen/<pin>/bin/wasm-opt`) and making it
+/// executable, so the resolver's managed tier finds a runnable binary without a
+/// network install. Returns the installed path.
+#[cfg(unix)]
+fn seed_managed_wasm_opt(home: &assert_fs::TempDir) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = home
+        .child("tools")
+        .child("binaryen")
+        .child(BINARYEN_PIN)
+        .child("bin");
+    bin_dir.create_dir_all().unwrap();
+
+    let managed = bin_dir.child(format!("wasm-opt{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fake_wasm_opt_binary(), managed.path()).expect("copy fake wasm-opt into managed");
+    let mut perms = std::fs::metadata(managed.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(managed.path(), perms).unwrap();
+    managed.path().to_path_buf()
+}
+
+/// A `wasm-opt` on PATH takes precedence over a managed copy: with both present,
+/// resolution reports the PATH tier (the `INFS_VERBOSE` trace names it), matching
+/// `find_infc`'s PATH-over-managed precedence.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_path_beats_managed() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let home = assert_fs::TempDir::new().unwrap();
+    let managed = seed_managed_wasm_opt(&home);
+    assert!(managed.exists(), "precondition: managed copy seeded");
+
+    // The compiled fake's own directory becomes the sole PATH entry, so
+    // `which::which("wasm-opt")` resolves to it.
+    let path_dir = fake_wasm_opt_binary()
+        .parent()
+        .expect("fake wasm-opt has a parent dir")
+        .to_path_buf();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", &path_dir)
+        .env("INFS_VERBOSE", "1")
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("resolved wasm-opt via PATH:"));
+}
+
+/// The managed tier is the fallback when PATH has no `wasm-opt`: with an empty
+/// PATH and no override, resolution uses the managed copy (the `INFS_VERBOSE`
+/// trace names the tier) and the optimizer actually runs.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_managed_tier_used_when_path_empty() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let home = assert_fs::TempDir::new().unwrap();
+    seed_managed_wasm_opt(&home);
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", "")
+        .env("INFS_VERBOSE", "1")
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success().stderr(predicate::str::contains(
+        "resolved wasm-opt via managed tools:",
+    ));
+
+    assert_eq!(
+        optimizer_invocations(log.path()).len(),
+        1,
+        "the managed wasm-opt must run the optimization"
+    );
+}
+
+/// `auto-install = true` downloads the pinned Binaryen from the stub when no
+/// `wasm-opt` resolves, then optimizes with it: the console announces the
+/// auto-install, the managed binary lands under `INFERENCE_HOME`, and the size
+/// summary confirms the optimizer ran.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_auto_install_downloads_then_optimizes() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nauto-install = true\nlevel = \"z\"\n",
+    );
+    let home = assert_fs::TempDir::new().unwrap();
+    let log = temp.child("wasm-opt.log");
+
+    let tarball = build_host_binaryen_tarball();
+    let sha = sha256_hex(&tarball);
+    let base = spawn_binaryen_stub(tarball);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
+        .env("INFS_BINARYEN_BASE_URL", &base)
+        .env("INFS_BINARYEN_SHA256", &sha)
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "[build.wasm-opt] auto-install is enabled.",
+        ))
+        .stdout(predicate::str::contains("wasm-opt -Oz: main.wasm"));
+
+    assert!(
+        managed_wasm_opt(&home).path().exists(),
+        "auto-install must leave the managed wasm-opt installed"
+    );
+    assert_eq!(
+        optimizer_invocations(log.path()).len(),
+        1,
+        "the freshly installed wasm-opt must run the optimization"
+    );
+}
+
+/// `auto-install = false` (the default) with no resolvable `wasm-opt` is a hard
+/// error whose remediation leads with the managed component command *before* the
+/// `brew` package hint — the managed path is the recommended first option.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_auto_install_false_errors_with_component_hint_before_brew() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nauto-install = false\nlevel = \"z\"\n",
+    );
+    let home = assert_fs::TempDir::new().unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build")
+        .output()
+        .expect("infs build should run");
+
+    assert!(
+        !output.status.success(),
+        "a missing wasm-opt with auto-install off must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let component_at = stderr
+        .find("infs component add wasm-opt")
+        .expect("the managed component hint must be present");
+    let brew_at = stderr
+        .find("brew install binaryen")
+        .expect("the brew hint must be present");
+    assert!(
+        component_at < brew_at,
+        "the managed component hint must precede the brew hint; stderr:\n{stderr}"
+    );
+}
+
+/// An offline `auto-install = true` build surfaces the auto-install failure with
+/// remediation context rather than a bare network error: the download against a
+/// dead port fails, and the error names the retry / manual-install path.
+#[cfg(unix)]
+#[test]
+fn wasm_opt_auto_install_offline_reports_context() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nauto-install = true\nlevel = \"z\"\n",
+    );
+    let home = assert_fs::TempDir::new().unwrap();
+    let sha = "0".repeat(64);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("INFERENCE_HOME", home.path())
+        .env("INFS_BINARYEN_BASE_URL", "http://localhost:1")
+        .env("INFS_BINARYEN_SHA256", &sha)
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to auto-install"));
+}
+
+/// `infs doctor` reports a `wasm-opt` that resolves nowhere as an OK optional
+/// line — a project that does not use `[build.wasm-opt]` is never alarmed, and
+/// the line still names the component command for users who do want it.
+#[cfg(unix)]
+#[test]
+fn doctor_reports_missing_wasm_opt_as_optional_ok() {
+    let home = assert_fs::TempDir::new().unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[OK] wasm-opt: Not installed (optional"),
+        "doctor must report a never-installed wasm-opt as optional OK; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("infs component add wasm-opt"),
+        "the optional OK line must name the component command; stdout:\n{stdout}"
+    );
+}
+
+/// `infs doctor` warns when a managed Binaryen directory exists but its binary
+/// is missing (a broken/interrupted install), pointing at the component command
+/// to repair it.
+#[cfg(unix)]
+#[test]
+fn doctor_warns_on_broken_managed_wasm_opt() {
+    let home = assert_fs::TempDir::new().unwrap();
+    // A managed version dir without the binary — a broken/interrupted install.
+    home.child("tools")
+        .child("binaryen")
+        .child(BINARYEN_PIN)
+        .child("bin")
+        .create_dir_all()
+        .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[WARN] wasm-opt:") && stdout.contains("infs component add wasm-opt"),
+        "a broken managed install must warn with the repair hint; stdout:\n{stdout}"
+    );
+}
+
+/// `infs doctor` reports an invalid `WASM_OPT_PATH` as a WARN naming the
+/// environment variable, rather than silently ignoring the user's override.
+#[cfg(unix)]
+#[test]
+fn doctor_warns_on_invalid_wasm_opt_path() {
+    let home = assert_fs::TempDir::new().unwrap();
+    let bogus = home.child("not-a-wasm-opt");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", home.path())
+        .env("WASM_OPT_PATH", bogus.path())
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[WARN] wasm-opt:") && stdout.contains("WASM_OPT_PATH"),
+        "an invalid WASM_OPT_PATH must warn naming the env var; stdout:\n{stdout}"
+    );
+}
+
+/// `infs doctor` reports a healthy managed `wasm-opt` as OK, naming the managed
+/// tier and the Binaryen version its `--version` reports.
+#[cfg(unix)]
+#[test]
+fn doctor_reports_managed_wasm_opt_as_ok() {
+    let home = assert_fs::TempDir::new().unwrap();
+    seed_managed_wasm_opt(&home);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", "")
+        .env_remove("WASM_OPT_PATH")
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[OK] wasm-opt: Found at") && stdout.contains("source: managed tools"),
+        "a healthy managed wasm-opt must be OK naming the managed tier; stdout:\n{stdout}"
+    );
 }

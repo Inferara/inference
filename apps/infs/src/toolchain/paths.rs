@@ -327,6 +327,23 @@ impl ToolchainPaths {
         self.toolchains.join(version)
     }
 
+    /// Returns the directory holding managed developer tools (`<root>/tools`).
+    ///
+    /// Managed components such as Binaryen's `wasm-opt` live here, a tier
+    /// distinct from `toolchains/`: they are not versioned compilers and are
+    /// resolved independently of the `infc` toolchain.
+    #[must_use = "returns the path without side effects"]
+    pub fn tools_dir(&self) -> PathBuf {
+        self.root.join("tools")
+    }
+
+    /// Returns the install directory for a specific Binaryen version
+    /// (`<root>/tools/binaryen/<version>`).
+    #[must_use = "returns the path without side effects"]
+    pub fn binaryen_dir(&self, version: &str) -> PathBuf {
+        self.tools_dir().join("binaryen").join(version)
+    }
+
     /// Returns the path to the file storing the default toolchain version.
     #[must_use = "returns the path without side effects"]
     pub fn default_file(&self) -> PathBuf {
@@ -739,6 +756,25 @@ mod tests {
         let paths = ToolchainPaths::with_root(temp_dir.clone());
 
         assert_eq!(paths.default_file(), temp_dir.join("default"));
+    }
+
+    #[test]
+    fn tools_dir_constructs_correct_path() {
+        let temp_dir = env::temp_dir().join("infs_test_tools_dir");
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        assert_eq!(paths.tools_dir(), temp_dir.join("tools"));
+    }
+
+    #[test]
+    fn binaryen_dir_constructs_correct_path() {
+        let temp_dir = env::temp_dir().join("infs_test_binaryen_dir");
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        assert_eq!(
+            paths.binaryen_dir("version_130"),
+            temp_dir.join("tools").join("binaryen").join("version_130")
+        );
     }
 
     #[test]

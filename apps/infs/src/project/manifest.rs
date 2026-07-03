@@ -29,6 +29,7 @@
 //! [build.wasm-opt]        # optional: post-build optimization of the executable
 //! enabled = true          # table presence enables; set false to keep it off
 //! level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
+//! auto-install = false    # download wasm-opt automatically if it is missing
 //!
 //! [verification]
 //! output-dir = "proofs/"  # honored only in proof mode
@@ -340,6 +341,17 @@ pub struct WasmOptConfig {
     /// [`WASM_OPT_LEVELS`]: `"0"`..`"4"`, `"s"`, `"z"`.
     #[serde(default = "default_wasm_opt_level")]
     pub level: String,
+
+    /// Whether a missing `wasm-opt` is downloaded automatically at build time.
+    ///
+    /// Defaults to `false`: an absent binary is a hard error with install
+    /// remediation, so a build never reaches out to the network unless the
+    /// project opts in. Set `true` to have `infs` provision the pinned,
+    /// checksum-verified Binaryen (the same install `infs component add
+    /// wasm-opt` performs) on first use. The opt-in is recorded in the versioned
+    /// manifest — there are no interactive prompts.
+    #[serde(rename = "auto-install", default)]
+    pub auto_install: bool,
 }
 
 /// The `-O<level>` values accepted by `[build.wasm-opt] level`, matching the
@@ -352,6 +364,7 @@ impl Default for WasmOptConfig {
         Self {
             enabled: default_wasm_opt_enabled(),
             level: default_wasm_opt_level(),
+            auto_install: false,
         }
     }
 }
@@ -1012,6 +1025,73 @@ enabled = false
         let wasm_opt = manifest.build.wasm_opt.expect("table present");
         assert!(!wasm_opt.enabled);
         assert_eq!(wasm_opt.level, "3", "level still defaults when disabled");
+    }
+
+    #[test]
+    fn wasm_opt_auto_install_defaults_to_false() {
+        // Absent `auto-install`, a build never reaches out to the network: a
+        // missing binary is a hard error, not a silent download.
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        let wasm_opt = manifest.build.wasm_opt.expect("table present");
+        assert!(
+            !wasm_opt.auto_install,
+            "auto-install must default to false (opt-in provisioning)"
+        );
+        assert!(
+            !WasmOptConfig::default().auto_install,
+            "the Default impl must also be false"
+        );
+    }
+
+    #[test]
+    fn wasm_opt_auto_install_true_is_parsed() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+auto-install = true
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        let wasm_opt = manifest.build.wasm_opt.expect("table present");
+        assert!(
+            wasm_opt.auto_install,
+            "`auto-install = true` must be honored"
+        );
+    }
+
+    #[test]
+    fn wasm_opt_auto_install_round_trips_through_toml() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build.wasm-opt]
+enabled = true
+level = "z"
+auto-install = true
+"#;
+        let manifest = InferenceToml::from_toml(src).expect("parses");
+        let serialized = manifest.to_toml().expect("serializes");
+        let reparsed = InferenceToml::from_toml(&serialized).expect("reparses");
+        assert_eq!(manifest, reparsed);
+        assert!(
+            serialized.contains("auto-install = true"),
+            "the auto-install flag must survive serialization under its \
+             hyphenated key, got:\n{serialized}"
+        );
     }
 
     #[test]

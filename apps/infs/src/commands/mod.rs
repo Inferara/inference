@@ -22,10 +22,12 @@
 //! - [`list`] - List installed toolchains
 //! - [`versions`] - List available remote versions
 //! - [`default`] - Set default toolchain version
+//! - [`component`] - Manage optional components (e.g. `wasm-opt`)
 //! - [`doctor`] - Check installation health
 //! - [`self_cmd`] - Manage infs itself
 
 pub mod build;
+pub mod component;
 pub mod default;
 pub mod doctor;
 pub mod init;

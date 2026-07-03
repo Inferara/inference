@@ -21,6 +21,7 @@
 //! its outcome is command-execution logic, not manifest/filesystem logic.
 
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,6 +30,9 @@ use inf_wasmparser::{Operator, Parser, Payload, WasmFeatures};
 
 use crate::commands::build::BuildMode;
 use crate::project::ProjectContext;
+use crate::toolchain::binaryen;
+use crate::toolchain::doctor::DoctorCheck;
+use crate::toolchain::{Platform, ToolchainPaths};
 
 /// Environment variable that overrides `wasm-opt` resolution, taking priority
 /// over a PATH lookup.
@@ -38,6 +42,49 @@ const WASM_OPT_PATH_ENV: &str = "WASM_OPT_PATH";
 /// (`--mvp-features` plus the mutable-globals / bulk-memory enables) and the
 /// `-Os`/`-Oz` levels are stable from Binaryen 116 onward.
 const MIN_WASM_OPT_VERSION: u32 = 116;
+
+/// Identifies which precedence tier resolved `wasm-opt`.
+///
+/// [`WasmOptSource::label`] emits the exact strings used in both the
+/// `INFS_VERBOSE` trace line and the `infs doctor` line, so those two surfaces
+/// stay in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WasmOptSource {
+    /// Resolved via the `WASM_OPT_PATH` environment variable (highest priority).
+    EnvOverride,
+    /// Resolved via `which::which("wasm-opt")` against the system `PATH`.
+    SystemPath,
+    /// Resolved via the infs-managed Binaryen under `<root>/tools/binaryen/`.
+    ManagedTools,
+}
+
+impl WasmOptSource {
+    /// The human-readable label for this resolution tier.
+    fn label(self) -> &'static str {
+        match self {
+            Self::EnvOverride => "WASM_OPT_PATH env",
+            Self::SystemPath => "PATH",
+            Self::ManagedTools => "managed tools",
+        }
+    }
+}
+
+/// Whether `INFS_VERBOSE` is set to a non-empty, non-"0" value. Mirrors the
+/// toolchain resolver's predicate so build traces and `infs doctor` agree.
+fn verbose() -> bool {
+    std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Emits a resolution trace line to stderr under `INFS_VERBOSE`.
+fn trace_resolved(source: WasmOptSource, path: &Path) {
+    if verbose() {
+        eprintln!(
+            "infs: resolved wasm-opt via {}: {}",
+            source.label(),
+            path.display()
+        );
+    }
+}
 
 /// Optimizes `<root>/out/main.wasm` in place when `[build.wasm-opt]` is enabled.
 ///
@@ -73,9 +120,7 @@ pub(crate) fn post_build_optimize(
     }
 
     if mode == Some(BuildMode::Proof) || generate_v_output {
-        // Same INFS_VERBOSE semantics as the toolchain resolver: set, non-empty,
-        // and not "0".
-        if std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0") {
+        if verbose() {
             eprintln!(
                 "wasm-opt: skipping a verification build (proof mode or -v); \
                  only executable artifacts are optimized."
@@ -107,7 +152,11 @@ pub(crate) fn post_build_optimize(
         );
     }
 
-    let wasm_opt = resolve_wasm_opt()?;
+    let wasm_opt = match resolve_wasm_opt_with_source()? {
+        Some((path, _)) => path,
+        None if config.auto_install => auto_install_wasm_opt()?,
+        None => return Err(missing_wasm_opt_error()),
+    };
     check_wasm_opt_version(&wasm_opt)?;
 
     let before = wasm_bytes.len() as u64;
@@ -123,32 +172,53 @@ pub(crate) fn post_build_optimize(
     Ok(())
 }
 
-/// Resolves the `wasm-opt` binary: the `WASM_OPT_PATH` override if set,
-/// otherwise a PATH lookup.
+/// Resolves the `wasm-opt` binary and reports which precedence tier fired: the
+/// `WASM_OPT_PATH` override, then `PATH`, then the infs-managed Binaryen under
+/// `<root>/tools/binaryen/`.
+///
+/// `Ok(None)` means `wasm-opt` was found nowhere — the caller decides whether
+/// that is a hard error or triggers `auto-install`. An invalid `WASM_OPT_PATH`
+/// override is an `Err`, never a silent fallthrough: a user who set the variable
+/// gets their mistake surfaced rather than papered over (in particular, an
+/// `auto-install` build must not download over a typo'd override).
+///
+/// Emits an `INFS_VERBOSE` trace naming the winning tier and path.
 ///
 /// # Errors
 ///
-/// Errors when `WASM_OPT_PATH` is set but does not name a file, or when no
-/// `wasm-opt` is found on PATH (with install remediation).
-fn resolve_wasm_opt() -> Result<PathBuf> {
-    resolve_wasm_opt_from(std::env::var_os(WASM_OPT_PATH_ENV).as_deref())
+/// Errors when `WASM_OPT_PATH` is set but does not name a file.
+fn resolve_wasm_opt_with_source() -> Result<Option<(PathBuf, WasmOptSource)>> {
+    let managed = ToolchainPaths::new()
+        .ok()
+        .and_then(|paths| binaryen::installed_wasm_opt(&paths));
+    let resolved = resolve_wasm_opt_from(std::env::var_os(WASM_OPT_PATH_ENV).as_deref(), managed)?;
+    if let Some((path, source)) = &resolved {
+        trace_resolved(*source, path);
+    }
+    Ok(resolved)
 }
 
-/// The testable core of [`resolve_wasm_opt`], with the environment lookup lifted
-/// into `override_path` so tests need not mutate process-global state.
+/// The testable core of [`resolve_wasm_opt_with_source`], with the environment
+/// override and the managed-install lookup lifted into parameters so tests need
+/// not mutate process-global state.
 ///
-/// `Some` is the `WASM_OPT_PATH` override: it must name an existing file or the
-/// call errors (naming the env var and the path). `None` falls back to a PATH
-/// lookup, erroring with install hints when `wasm-opt` is absent.
+/// Precedence: a `WASM_OPT_PATH` override (`override_path`) wins, then a `PATH`
+/// lookup, then `managed`. A `Some` override must name an existing file or the
+/// call errors (naming the env var and the path) — an explicit override is
+/// never discarded in favor of a lower tier. `Ok(None)` means nothing resolved
+/// in any tier.
 ///
 /// # Errors
 ///
-/// See [`resolve_wasm_opt`].
-fn resolve_wasm_opt_from(override_path: Option<&OsStr>) -> Result<PathBuf> {
+/// Errors when `override_path` is `Some` but does not name a file.
+fn resolve_wasm_opt_from(
+    override_path: Option<&OsStr>,
+    managed: Option<PathBuf>,
+) -> Result<Option<(PathBuf, WasmOptSource)>> {
     if let Some(raw) = override_path {
         let path = PathBuf::from(raw);
         if path.is_file() {
-            return Ok(path);
+            return Ok(Some((path, WasmOptSource::EnvOverride)));
         }
         bail!(
             "`{WASM_OPT_PATH_ENV}` is set to `{}`, which is not a file. Point it \
@@ -157,23 +227,56 @@ fn resolve_wasm_opt_from(override_path: Option<&OsStr>) -> Result<PathBuf> {
         );
     }
 
-    which::which("wasm-opt").map_err(|_| missing_wasm_opt_error())
+    if let Ok(path) = which::which("wasm-opt") {
+        return Ok(Some((path, WasmOptSource::SystemPath)));
+    }
+
+    Ok(managed.map(|path| (path, WasmOptSource::ManagedTools)))
 }
 
-/// The install-hint error for a missing `wasm-opt`, mirroring the wasmtime hint
-/// style in [`crate::commands::run`].
+/// Downloads the pinned Binaryen `wasm-opt` at build time for a
+/// `[build.wasm-opt] auto-install = true` project whose `wasm-opt` resolved
+/// nowhere, returning the path to the freshly installed binary.
+///
+/// # Errors
+///
+/// Errors if the toolchain directory cannot be prepared, the platform cannot be
+/// detected, or the download / verification / install fails — with remediation
+/// naming a retry, the manual `infs component add wasm-opt`, and disabling the
+/// optimizer.
+fn auto_install_wasm_opt() -> Result<PathBuf> {
+    println!("wasm-opt not found; [build.wasm-opt] auto-install is enabled.");
+    let paths = ToolchainPaths::new()?;
+    paths.ensure_directories()?;
+    let platform = Platform::detect()?;
+    binaryen::install_blocking(&paths, platform).with_context(|| {
+        format!(
+            "Failed to auto-install the Binaryen `wasm-opt` optimizer ({}). \
+             Retry the build, install it manually with `infs component add \
+             wasm-opt`, or disable optimization (`enabled = false` under \
+             `[build.wasm-opt]`, or pass `--no-wasm-opt`).",
+            binaryen::BINARYEN_PIN
+        )
+    })
+}
+
+/// The install-hint error for a `wasm-opt` that resolved in no tier. Leads with
+/// the infs-managed option, then the system package managers, and points at
+/// `auto-install` for a hands-off setup.
 fn missing_wasm_opt_error() -> anyhow::Error {
     anyhow::anyhow!(
-        "wasm-opt not found in PATH.\n\n\
+        "wasm-opt not found.\n\n\
          `[build.wasm-opt]` is enabled but the Binaryen `wasm-opt` optimizer \
          could not be located. To install Binaryen:\n  \
+         - Managed by infs: infs component add wasm-opt\n  \
          - macOS: brew install binaryen\n  \
          - Linux: apt install binaryen  (or your distribution's package)\n  \
          - npm: npm install -g binaryen\n  \
          - Or download a release: https://github.com/WebAssembly/binaryen/releases\n\n\
-         Then ensure `wasm-opt` is in PATH, or set {WASM_OPT_PATH_ENV} to its \
-         full path. To build without optimization, set `enabled = false` under \
-         `[build.wasm-opt]`, or pass `--no-wasm-opt`."
+         Set `auto-install = true` under `[build.wasm-opt]` to download it \
+         automatically at build time. Then ensure `wasm-opt` is in PATH, or set \
+         {WASM_OPT_PATH_ENV} to its full path. To build without optimization, \
+         set `enabled = false` under `[build.wasm-opt]`, or pass `--no-wasm-opt`."
     )
 }
 
@@ -238,6 +341,112 @@ fn parse_wasm_opt_version(stdout: &str) -> Option<u32> {
     stdout
         .split_whitespace()
         .find_map(|token| token.parse::<u32>().ok())
+}
+
+/// Runs `wasm-opt --version` and returns the parsed major version, or `None` if
+/// the probe cannot be run, exits unsuccessfully, or emits an unparseable
+/// banner. Unlike [`check_wasm_opt_version`] this makes no judgement and emits
+/// no warnings — it is the classifier [`doctor_check`] uses to pick OK vs WARN.
+fn probe_wasm_opt_version(wasm_opt: &Path) -> Option<u32> {
+    let output = Command::new(wasm_opt).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_wasm_opt_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The `infs doctor` health check for `wasm-opt`.
+///
+/// Reports the resolved binary and its precedence tier when one is found and its
+/// version parses; warns when a resolved binary's `--version` fails (a managed
+/// copy gets a repair hint — this catches the macOS missing-dylib case); and
+/// reports the optional never-installed state as OK so a project that does not
+/// use `[build.wasm-opt]` is never alarmed. A `tools/binaryen` directory without
+/// the pinned binary, and an invalid `WASM_OPT_PATH`, both warn with remediation.
+///
+/// The message is always a single line, per the `[OK|WARN|FAIL] name: message`
+/// contract the VS Code extension parses.
+#[must_use]
+pub(crate) fn doctor_check() -> DoctorCheck {
+    const NAME: &str = "wasm-opt";
+    let paths = ToolchainPaths::new().ok();
+    let managed = paths.as_ref().and_then(binaryen::installed_wasm_opt);
+
+    match resolve_wasm_opt_from(
+        std::env::var_os(WASM_OPT_PATH_ENV).as_deref(),
+        managed.clone(),
+    ) {
+        Ok(Some((path, source))) => wasm_opt_doctor_found(NAME, &path, source, managed.as_deref()),
+        Ok(None) => wasm_opt_doctor_absent(NAME, paths.as_ref()),
+        Err(err) => DoctorCheck::warning(NAME, err.to_string()),
+    }
+}
+
+/// Builds the doctor line for a resolved `wasm-opt`: OK with the source tier and
+/// Binaryen version when `--version` parses (noting a managed copy shadowed by a
+/// `PATH` hit), or WARN when the version probe fails.
+fn wasm_opt_doctor_found(
+    name: &str,
+    path: &Path,
+    source: WasmOptSource,
+    managed: Option<&Path>,
+) -> DoctorCheck {
+    let Some(version) = probe_wasm_opt_version(path) else {
+        let hint = if source == WasmOptSource::ManagedTools {
+            "run 'infs component add wasm-opt' to repair"
+        } else {
+            "check the installation"
+        };
+        return DoctorCheck::warning(
+            name,
+            format!(
+                "Found at {} (source: {}) but `wasm-opt --version` failed; {hint}.",
+                path.display(),
+                source.label()
+            ),
+        );
+    };
+
+    let mut message = format!(
+        "Found at {} (source: {}, Binaryen {version})",
+        path.display(),
+        source.label()
+    );
+    if source == WasmOptSource::SystemPath
+        && let Some(managed) = managed
+    {
+        let _ = write!(
+            message,
+            "; managed copy at {} is shadowed by PATH",
+            managed.display()
+        );
+    }
+    DoctorCheck::ok(name, message)
+}
+
+/// Builds the doctor line when no `wasm-opt` resolved: WARN when a managed
+/// Binaryen directory is present but missing its binary (a broken install to
+/// repair), otherwise the optional never-installed OK line that leaves
+/// non-users unalarmed.
+fn wasm_opt_doctor_absent(name: &str, paths: Option<&ToolchainPaths>) -> DoctorCheck {
+    if let Some(paths) = paths {
+        let dir = paths.binaryen_dir(binaryen::BINARYEN_PIN);
+        if dir.exists() {
+            return DoctorCheck::warning(
+                name,
+                format!(
+                    "A managed Binaryen install at {} is missing its wasm-opt \
+                     binary; run 'infs component add wasm-opt' to repair.",
+                    dir.display()
+                ),
+            );
+        }
+    }
+    DoctorCheck::ok(
+        name,
+        "Not installed (optional — needed only for [build.wasm-opt]; install \
+         with 'infs component add wasm-opt')",
+    )
 }
 
 /// Scans `wasm_bytes` for a verification-only opcode and returns its source
@@ -501,23 +710,225 @@ mod tests {
     }
 
     #[test]
-    fn resolve_wasm_opt_from_hits_existing_override() {
+    fn resolve_from_override_wins_over_managed() {
+        // A valid WASM_OPT_PATH override short-circuits before the PATH lookup
+        // and the managed tier, and reports the EnvOverride source.
         let dir = assert_fs::TempDir::new().unwrap();
         let fake = dir.child("wasm-opt");
         fake.write_str("#!/bin/sh\n").unwrap();
-        let resolved = resolve_wasm_opt_from(Some(fake.path().as_os_str())).unwrap();
-        assert_eq!(resolved, fake.path());
+        let managed = dir.path().join("managed-wasm-opt");
+
+        let (path, source) = resolve_wasm_opt_from(Some(fake.path().as_os_str()), Some(managed))
+            .unwrap()
+            .expect("a valid override must resolve");
+        assert_eq!(path, fake.path());
+        assert_eq!(source, WasmOptSource::EnvOverride);
     }
 
     #[test]
-    fn resolve_wasm_opt_from_rejects_nonexistent_override() {
+    fn resolve_from_rejects_nonexistent_override_even_with_managed() {
+        // An invalid override is an error even when a managed copy is available:
+        // a user's mistake is surfaced, never silently papered over by a lower
+        // tier (an auto-install build must not download over a typo).
         let dir = assert_fs::TempDir::new().unwrap();
         let missing = dir.path().join("nope-wasm-opt");
-        let err = resolve_wasm_opt_from(Some(missing.as_os_str())).unwrap_err();
+        let managed = dir.path().join("managed-wasm-opt");
+        let err = resolve_wasm_opt_from(Some(missing.as_os_str()), Some(managed)).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains(WASM_OPT_PATH_ENV) && msg.contains("not a file"),
             "an override that is not a file must name the env var and the failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_from_reports_nothing_when_no_tier_resolves() {
+        // No override, no managed, and a PATH lookup that (in the vanishing
+        // chance a real wasm-opt is present) would be the only hit — the
+        // contract is that a genuine miss is Ok(None). Guarded by clearing the
+        // managed tier; the PATH-dependent cases are covered by the serial and
+        // integration tests.
+        let resolved = resolve_wasm_opt_from(None, None);
+        assert!(
+            matches!(resolved, Ok(None | Some((_, WasmOptSource::SystemPath)))),
+            "with no override and no managed tier, resolution is either a PATH \
+             hit or Ok(None), got: {resolved:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_from_uses_managed_when_path_misses() {
+        // With no override and an empty PATH, the managed tier is the fallback
+        // and is reported as ManagedTools.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let managed = dir.path().join("managed-wasm-opt");
+        std::fs::write(&managed, b"managed").unwrap();
+
+        let original = std::env::var_os("PATH");
+        // SAFETY: serialized test; PATH restored immediately below.
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
+        let resolved = resolve_wasm_opt_from(None, Some(managed.clone()));
+        // SAFETY: restore regardless of the assertion outcome.
+        unsafe {
+            match original {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        let (path, source) = resolved
+            .unwrap()
+            .expect("managed must resolve when PATH misses");
+        assert_eq!(path, managed);
+        assert_eq!(source, WasmOptSource::ManagedTools);
+    }
+
+    // Requires an executable stub on PATH; `which` only accepts an executable
+    // file, so this is gated to unix where a chmod is portable.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn resolve_from_path_wins_over_managed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path_dir = assert_fs::TempDir::new().unwrap();
+        let on_path = path_dir.path().join("wasm-opt");
+        std::fs::write(&on_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&on_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let managed_dir = assert_fs::TempDir::new().unwrap();
+        let managed = managed_dir.path().join("managed-wasm-opt");
+        std::fs::write(&managed, b"managed").unwrap();
+
+        let original = std::env::var_os("PATH");
+        // SAFETY: serialized test; PATH restored immediately below.
+        unsafe {
+            std::env::set_var("PATH", path_dir.path());
+        }
+        let resolved = resolve_wasm_opt_from(None, Some(managed.clone()));
+        // SAFETY: restore regardless of the assertion outcome.
+        unsafe {
+            match original {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        // If `which` located our stub, PATH must win over managed. In a
+        // restricted sandbox where `which` cannot see it, fall through to the
+        // managed tier — both are acceptable; what must never happen is PATH
+        // losing to managed when PATH did resolve.
+        let (path, source) = resolved.unwrap().expect("a tier must resolve");
+        if source == WasmOptSource::SystemPath {
+            assert_eq!(
+                path.canonicalize().unwrap(),
+                on_path.canonicalize().unwrap(),
+                "the PATH hit must be the stub, not the managed copy"
+            );
+        } else {
+            assert_eq!(source, WasmOptSource::ManagedTools);
+        }
+    }
+
+    #[test]
+    fn wasm_opt_source_labels_are_stable() {
+        // The labels are a contract shared by the INFS_VERBOSE trace and the
+        // doctor line; they must not drift.
+        assert_eq!(WasmOptSource::EnvOverride.label(), "WASM_OPT_PATH env");
+        assert_eq!(WasmOptSource::SystemPath.label(), "PATH");
+        assert_eq!(WasmOptSource::ManagedTools.label(), "managed tools");
+    }
+
+    #[test]
+    fn doctor_absent_reports_optional_ok_without_managed_residue() {
+        // No managed Binaryen directory: the never-installed state is optional
+        // OK so a project that does not use `[build.wasm-opt]` is never alarmed.
+        let root = assert_fs::TempDir::new().unwrap();
+        let paths = ToolchainPaths::with_root(root.path().to_path_buf());
+        let check = wasm_opt_doctor_absent("wasm-opt", Some(&paths));
+        assert_eq!(check.prefix(), "[OK]");
+        assert!(check.message.contains("Not installed (optional"));
+        assert!(check.message.contains("infs component add wasm-opt"));
+    }
+
+    #[test]
+    fn doctor_absent_warns_on_broken_managed_dir() {
+        // A managed directory without the binary is a broken install: WARN with
+        // the repair hint.
+        let root = assert_fs::TempDir::new().unwrap();
+        let paths = ToolchainPaths::with_root(root.path().to_path_buf());
+        std::fs::create_dir_all(paths.binaryen_dir(binaryen::BINARYEN_PIN)).unwrap();
+        let check = wasm_opt_doctor_absent("wasm-opt", Some(&paths));
+        assert_eq!(check.prefix(), "[WARN]");
+        assert!(check.message.contains("repair"));
+        assert!(check.message.contains("infs component add wasm-opt"));
+    }
+
+    /// Writes an executable stub at `<dir>/wasm-opt` printing `version_output`
+    /// (empty means print nothing) and exiting `exit_code`.
+    #[cfg(unix)]
+    fn write_version_stub(
+        dir: &assert_fs::TempDir,
+        version_output: &str,
+        exit_code: i32,
+    ) -> PathBuf {
+        use assert_fs::prelude::*;
+        use std::os::unix::fs::PermissionsExt;
+        let stub = dir.child("wasm-opt");
+        stub.write_str(&format!(
+            "#!/bin/sh\necho '{version_output}'\nexit {exit_code}\n"
+        ))
+        .unwrap();
+        std::fs::set_permissions(stub.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        stub.path().to_path_buf()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_found_warns_when_version_probe_fails() {
+        // A resolved binary whose `--version` exits nonzero warns; a managed
+        // copy gets the repair hint (this is the macOS missing-dylib case),
+        // everything else the generic "check the installation".
+        let dir = assert_fs::TempDir::new().unwrap();
+        let stub = write_version_stub(&dir, "", 1);
+
+        let managed = wasm_opt_doctor_found("wasm-opt", &stub, WasmOptSource::ManagedTools, None);
+        assert_eq!(managed.prefix(), "[WARN]");
+        assert!(
+            managed
+                .message
+                .contains("run 'infs component add wasm-opt' to repair")
+        );
+
+        let system = wasm_opt_doctor_found("wasm-opt", &stub, WasmOptSource::SystemPath, None);
+        assert_eq!(system.prefix(), "[WARN]");
+        assert!(system.message.contains("check the installation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_found_ok_notes_managed_shadowed_by_path() {
+        // A PATH hit that parses a version, with a managed copy also present,
+        // is OK and notes the managed copy is shadowed by PATH.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let stub = write_version_stub(&dir, "wasm-opt version 118 (test)", 0);
+        let managed = dir.path().join("managed-wasm-opt");
+
+        let check =
+            wasm_opt_doctor_found("wasm-opt", &stub, WasmOptSource::SystemPath, Some(&managed));
+        assert_eq!(check.prefix(), "[OK]");
+        assert!(
+            check.message.contains("source: PATH, Binaryen 118"),
+            "the OK line must name the tier and version, got: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("shadowed by PATH"),
+            "a shadowed managed copy must be noted, got: {}",
+            check.message
         );
     }
 
@@ -646,6 +1057,7 @@ mod tests {
         manifest.build.wasm_opt = wasm_opt.map(|(enabled, level)| WasmOptConfig {
             enabled,
             level: level.to_string(),
+            auto_install: false,
         });
         ProjectContext {
             root: root.to_path_buf(),
