@@ -6,3 +6,9 @@ license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
 description = "Inference IDE support"
+
+[dependencies]
+inference-ide-db.workspace = true
+inference-ast.workspace = true
+inference-type-checker.workspace = true
+rustc-hash.workspace = true

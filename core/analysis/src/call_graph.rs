@@ -348,26 +348,24 @@ fn type_name_of(arena: &AstArena, expr: ExprId) -> Option<String> {
 /// (`Free`) target distinct nodes. If no candidate names an existing node the
 /// edge is dropped, so callers can never manufacture a false edge.
 pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>> {
-    // Build the key → index map with an explicit insert so a duplicate key is a
-    // loud failure rather than a silent last-wins overwrite. Two nodes sharing a
-    // key would mean a recursive function's self-edge could resolve to a
-    // different node, masking the cycle from the recursion check (A035).
-    // `FnKey` is injective by construction and the type checker rejects genuine
-    // duplicate definitions first, so a collision here is an upstream invariant
-    // break; surface it in debug builds and keep the first node in release so the
-    // graph stays usable.
+    // Build the key → index map, keeping the first node on a duplicate key.
+    //
+    // On the fail-fast compiler path `FnKey` is injective: the type checker
+    // rejects genuine duplicate definitions before analysis runs, so no two nodes
+    // share a key and this map is a plain bijection — the branch that discards a
+    // later duplicate is never taken, and A035/A036 outputs on valid programs are
+    // unchanged. The IDE resilient path has no such guarantee: error recovery
+    // lowers every unparseable top-level construct to an `<error>` placeholder
+    // function (a single stray `forall { }` lowers to two), and a program caught
+    // mid-edit can momentarily name the same function twice, so distinct nodes can
+    // carry the same key. Keeping the first node is a deterministic, total
+    // degradation — an already-broken program may have a self-edge resolve to the
+    // wrong same-keyed node, at worst making A035/A036 miss a diagnostic on code
+    // that does not yet compile. That is never a false positive, and never a panic
+    // that would abort the analysis (or, in debug builds, the whole LSP process).
     let mut index: HashMap<&FnKey, usize> = HashMap::with_capacity(nodes.len());
     for (i, n) in nodes.iter().enumerate() {
-        if let Some(&existing) = index.get(&n.key) {
-            debug_assert!(
-                false,
-                "duplicate call-graph key `{}` at node {i} (already node {existing}); \
-                 FnKey must be injective or A035/A036 may miss a self-edge",
-                n.key
-            );
-            continue;
-        }
-        index.insert(&n.key, i);
+        index.entry(&n.key).or_insert(i);
     }
 
     nodes
@@ -561,6 +559,32 @@ mod tests {
         assert_eq!(
             adj[2][0].0, 1,
             "edge into `lib::x::helper` must target the qualified node, not the entry `helper`"
+        );
+    }
+
+    /// The IDE resilient path can present two nodes under the same `FnKey`: a
+    /// single stray `forall { }` lowers to two `<error>` placeholder functions,
+    /// and a program mid-edit can name the same function twice. Building the
+    /// adjacency must not panic; it keeps the first same-keyed node
+    /// deterministically, so an edge naming that key resolves to it and every
+    /// other node still yields a row.
+    #[test]
+    fn adjacency_keeps_first_node_on_duplicate_key() {
+        let dup_key = || FnKey::free_in(Vec::new(), "<error>");
+        let nodes = vec![
+            node(dup_key(), vec![]),
+            node(dup_key(), vec![]),
+            node(
+                FnKey::free_in(Vec::new(), "caller"),
+                vec![free_edge("<error>", Vec::new())],
+            ),
+        ];
+        let adj = resolve_adjacency(&nodes);
+        assert_eq!(adj.len(), 3, "every node yields an adjacency row");
+        assert_eq!(
+            adj[2],
+            vec![(0, loc())],
+            "an edge naming the duplicated key resolves to the first same-keyed node"
         );
     }
 

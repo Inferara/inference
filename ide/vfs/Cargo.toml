@@ -6,3 +6,6 @@ license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
 description = "Virtual File System for Inference IDE support"
+
+[dependencies]
+rustc-hash.workspace = true
