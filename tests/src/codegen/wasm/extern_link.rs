@@ -313,10 +313,15 @@ mod extern_link_tests {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let rocq = wasm_to_v("c1prog", &unified, &empty).expect("wasm-to-v succeeds");
 
-        // Post-link indices: add_three=0, check=1, merged sum=2.
+        // Post-link indices: add_three=0, check=1, merged sum=2. The list is
+        // assertion-valued (empty); the post-link index survives in the comment.
         assert!(
-            rocq.contains("Definition c1prog__MySpec_specs : list N := (1 :: nil)%N."),
-            "MySpec_specs must name `check` at post-link index 1, not the merged \
+            rocq.contains("Definition c1prog__MySpec_specs : list assertion := (@nil assertion)."),
+            "MySpec_specs definition missing; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("(* function indices: 1 (assertion payloads pending) *)"),
+            "MySpec's comment must name `check` at post-link index 1, not the merged \
              extern at 2; .v was:\n{rocq}"
         );
     }

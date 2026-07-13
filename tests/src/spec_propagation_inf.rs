@@ -188,12 +188,17 @@ mod fixture_spec_calls_top {
             "top-level main must also call helper at 0; observed: {main_call_target}"
         );
 
-        // Round-trip must emit Caller's per-spec list with exactly one index.
+        // Round-trip must emit Caller's per-spec list (assertion-valued, empty)
+        // with exactly index 2 carried in the comment.
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
         assert!(
-            v.contains("Definition calltop__Caller_specs : list N := (2 :: nil)%N."),
-            "Caller_specs should list exactly index 2:\n{v}"
+            v.contains("Definition calltop__Caller_specs : list assertion := (@nil assertion)."),
+            "Caller_specs definition missing:\n{v}"
+        );
+        assert!(
+            v.contains("(* function indices: 2 (assertion payloads pending) *)"),
+            "Caller_specs should carry exactly index 2 in its comment:\n{v}"
         );
     }
 }
@@ -248,11 +253,12 @@ mod fixture_three_specs {
             "definitions must be emitted alphabetically (Alpha < Beta < Gamma):\n{v}"
         );
 
-        // The empty spec is emitted with `(@nil N)` (NOT `[]%N`); this is
-        // load-bearing for consumer modules without `Open Scope N_scope`.
+        // The empty spec is emitted with `(@nil assertion)` (NOT `[]`); the
+        // explicit form is load-bearing for consumer modules regardless of
+        // scope state (same rationale as the former `(@nil N)`).
         assert!(
-            v.contains("Definition threespecs__Gamma_specs : list N := (@nil N)."),
-            "empty spec must emit `(@nil N)`:\n{v}"
+            v.contains("Definition threespecs__Gamma_specs : list assertion := (@nil assertion)."),
+            "empty spec must emit `(@nil assertion)`:\n{v}"
         );
 
         // The structural well-formedness theorem is emitted once.
@@ -411,8 +417,12 @@ mod fixture_spec_const_e2e {
             "spec function body must push the constant 42:\n{v}"
         );
         assert!(
-            v.contains("Definition spec_const__Answer_specs : list N := (1 :: nil)%N."),
-            "per-spec index list must be [1]:\n{v}"
+            v.contains("Definition spec_const__Answer_specs : list assertion := (@nil assertion)."),
+            "per-spec assertion list (empty, payloads pending) must be emitted:\n{v}"
+        );
+        assert!(
+            v.contains("(* function indices: 1 (assertion payloads pending) *)"),
+            "per-spec index comment must carry index 1:\n{v}"
         );
         // Post-#21 contract: 1-arg ValidModule + 2-arg ValidSpec.
         assert!(
@@ -662,8 +672,8 @@ mod fixture_quant_kinds_e2e {
             "exists spec must select ValidExistsSpec:\n{v}"
         );
         assert!(
-            v.contains("Definition quant_kinds__ExistsSpec__exists_specs : list N :="),
-            "exists spec must emit its __exists_specs list:\n{v}"
+            v.contains("Definition quant_kinds__ExistsSpec__exists_specs : list assertion :="),
+            "exists spec must emit its (assertion-valued) __exists_specs list:\n{v}"
         );
         assert!(
             !v.contains("Theorem valid_quant_kinds__ExistsSpec :"),
@@ -732,11 +742,11 @@ mod fixture_spec_name_collision_e2e {
         // Both the kind-suffixed name (spec Foo's exists group) and the
         // similarly-named spec's plain name are present and DISTINCT.
         assert!(
-            v.contains("Definition collide__Foo__exists_specs : list N :="),
+            v.contains("Definition collide__Foo__exists_specs : list assertion :="),
             "spec Foo's exists group uses the __ separator:\n{v}"
         );
         assert!(
-            v.contains("Definition collide__Foo_exists_specs : list N :="),
+            v.contains("Definition collide__Foo_exists_specs : list assertion :="),
             "spec Foo_exists's plain spec list is unaffected:\n{v}"
         );
 

@@ -21,40 +21,58 @@ The translator assumes a Rocq context that supplies the following:
   the proof obligation for the structural well-formedness of the module
   (typing, locality, validation of the WASM sections themselves). It does
   **not** mention spec indices.
-- A predicate `ValidSpec : module -> list N -> Prop`. **Two arguments**:
-  the module and a list of WASM function indices, each of which must
-  hold a property captured by the spec. This is the per-spec verification
-  obligation. Each `n ∈ idxs` is a WASM function index in module `m`;
-  holding `ValidSpec m idxs` asserts that, for every such index, the
-  function at that index satisfies the per-spec invariant supplied by
-  the consumer's Rocq library. The contract is intentionally generic:
-  this document fixes the arity (`module → list N → Prop`) and the call
+- A type `assertion` (the downstream library's spec-assertion syntax,
+  defined in its `Assertions` module) — the element type of every emitted
+  `_specs` list.
+- A predicate `ValidSpec : module -> list assertion -> Prop`. **Two
+  arguments**: the module and a list of spec assertions, each of which
+  must be witnessed by some function of the module. This is the per-spec
+  verification obligation. The contract is intentionally generic: this
+  document fixes the arity (`module → list assertion → Prop`) and the call
   shape (`Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs`);
-  the downstream library defines what the per-spec invariant actually
-  says about each indexed function. `ValidSpec` is the obligation for
-  `forall`-quantified and regular spec functions: a **universal** safety
-  property (the function is trap-free for every input).
-- A predicate `ValidExistsSpec : module -> list N -> Prop`, the obligation
-  for `exists`-quantified spec functions. Same arity and call shape as
-  `ValidSpec` (`Theorem valid_<mod>__<SpecName>_exists : ValidExistsSpec
-  <mod> <mod>__<SpecName>_exists_specs`), but a strictly stronger
+  the downstream library defines what holding a spec assertion means.
+  `ValidSpec` is the obligation for `forall`-quantified and regular spec
+  functions: a **universal** safety property (the witnessing function is
+  trap-free for every input, reaching the assertion).
+- A predicate `ValidExistsSpec : module -> list assertion -> Prop`, the
+  obligation for `exists`-quantified spec functions. Same arity and call
+  shape as `ValidSpec` (`Theorem valid_<mod>__<SpecName>__exists :
+  ValidExistsSpec <mod> <mod>__<SpecName>__exists_specs`), but a different
   property: **existential reachability** — there is an input from which
-  the function runs to completion without trapping. This is *more than
-  trap-freedom*; a universal `ValidSpec` does not imply it.
-- A predicate `ValidUniqueSpec : module -> list N -> Prop`, the obligation
-  for `unique`-quantified spec functions (`Theorem
-  valid_<mod>__<SpecName>_unique : ValidUniqueSpec <mod>
-  <mod>__<SpecName>_unique_specs`): existential reachability **plus** that
-  the witness input is the only non-trapping one.
+  the witnessing function runs to completion (without trapping) into the
+  assertion. This is *more than trap-freedom*; a universal `ValidSpec`
+  does not imply it.
+- A predicate `ValidUniqueSpec : module -> list assertion -> Prop`, the
+  obligation for `unique`-quantified spec functions (`Theorem
+  valid_<mod>__<SpecName>__unique : ValidUniqueSpec <mod>
+  <mod>__<SpecName>__unique_specs`): existential reachability **plus**
+  that the witness input is the only non-trapping one.
 
 `ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec` all share the
-`module → list N → Prop` arity. `ValidModule` and `ValidSpec` are defined
-in the downstream library's `Verifier` module; `ValidExistsSpec` and
-`ValidUniqueSpec` in its `Exists` module. The generated file always
-`Require Import Verifier`, and additionally `Require Import Exists` when
-(and only when) it emits an `exists`/`unique` obligation — so an
-all-`forall`/regular program's output is byte-identical to before these
-predicates existed.
+`module → list assertion → Prop` arity (assertion-valued: wasm-verifier
+PR #2 for `ValidSpec`, issue #6 for the existential pair — the former
+`module → list N → Prop` index-list forms are gone downstream).
+`ValidModule` and `ValidSpec` are defined in the downstream library's
+`Verifier` module; `ValidExistsSpec` and `ValidUniqueSpec` in its `Exists`
+module; `assertion` in its `Assertions` module. The generated file always
+`Require Import Verifier` (and `From Wasm Require Import host`, which
+supplies the `host` typeclass behind the always-emitted `Section Host`
+wrapper); it additionally `Require Import Assertions` when (and only
+when) it emits at least one `_specs` list — so a zero-spec module's
+output gains no WasmVerifier imports beyond `Verifier` — and
+`Require Import Exists` when (and only when) it emits an
+`exists`/`unique` obligation. With these imports the raw artifact
+type-checks against the downstream library as-is (checked by replacing
+the `Qed` skeletons with `Abort`).
+
+The translator cannot yet synthesize assertion payloads from spec bodies,
+so **every emitted `_specs` list is currently empty** —
+`(@nil assertion)` — with the group's WASM function indices preserved in
+a preceding comment (`(* function indices: … (assertion payloads
+pending) *)`) for the downstream prover, who carries the semantic content
+in standalone per-function lemmas (see wasm-verifier's
+`examples/E2EQuantKinds.v` for the reference shape). Emitting real
+assertion payloads is the next translator milestone.
 
 The pre-#21 form `ValidModule : module -> list N -> Prop` is no longer
 emitted. Downstream proofs that consumed the old 2-argument shape must
@@ -71,8 +89,10 @@ indices `[3, 4]` and `[7]` respectively, the generator produces:
 
 Definition Foo : module := {| ... |}.
 
-Definition Foo__A_specs : list N := [3; 4]%N.
-Definition Foo__B_specs : list N := [7]%N.
+(* function indices: 3 4 (assertion payloads pending) *)
+Definition Foo__A_specs : list assertion := (@nil assertion).
+(* function indices: 7 (assertion payloads pending) *)
+Definition Foo__B_specs : list assertion := (@nil assertion).
 
 Section Host.
 Context `{ho: host}.
@@ -105,8 +125,10 @@ non-empty group emits its own `_specs` list and theorem:
 
 ```coq
 (* spec Q with a forall fn at index 3 and an exists fn at index 4 *)
-Definition Foo__Q_specs : list N := [3]%N.
-Definition Foo__Q__exists_specs : list N := [4]%N.
+(* function indices: 3 (assertion payloads pending) *)
+Definition Foo__Q_specs : list assertion := (@nil assertion).
+(* function indices: 4 (assertion payloads pending) *)
+Definition Foo__Q__exists_specs : list assertion := (@nil assertion).
 
 Theorem valid_Foo__Q : ValidSpec Foo Foo__Q_specs.
 Theorem valid_Foo__Q__exists : ValidExistsSpec Foo Foo__Q__exists_specs.
@@ -119,10 +141,10 @@ and `<mod>__<Spec>__unique_specs` / `valid_<mod>__<Spec>__unique`. The `__`
 `__` inside any module or spec name, a kind-suffixed name can never alias
 another spec's `_specs` list (a plain-`_` form would let a spec literally
 named `<Spec>_exists` collide with spec `<Spec>`'s exists list). A spec
-with only `forall`/regular functions emits exactly its prior single
-`_specs`/`ValidSpec` pair (byte-identical to pre-quantifier output); a
-spec with no functions at all keeps the legacy `_specs := (@nil N)` +
-`ValidSpec` shape. The obligation kind is recovered from the
+with only `forall`/regular functions emits exactly its single
+`_specs`/`ValidSpec` pair; a spec with no functions at all keeps the
+legacy `_specs := (@nil assertion)` + `ValidSpec` shape (with no indices
+comment). The obligation kind is recovered from the
 `inference.spec_funcs` section (see below) — the vanilla WASM body no
 longer carries the quantifier.
 
@@ -146,16 +168,13 @@ Notes:
 - Spec entries are sorted by spec name. The order is deterministic
   regardless of how the spec map was assembled (codegen ordering,
   embedded-section ordering, or caller-supplied ordering).
-- Empty per-spec lists are emitted as `(@nil N)` (not `[]%N`) so that
-  the generated definition type-checks regardless of whether
-  `Open Scope N_scope` is in effect at the Require site. The `%N` scope
-  notation depends on `Open Scope N_scope` being active at the consumer's
-  `Require` site, which the emitter cannot guarantee. `(@nil N)` is the
-  explicit form and resolves regardless of consumer scope state. This
+- Every per-spec list is emitted as `(@nil assertion)` (not `[]` or
+  `nil`): the explicit form resolves regardless of consumer scope/notation
+  state at the `Require` site, which the emitter cannot guarantee. This
   matches the convention used by Coq's own program extraction and
-  CompCert's AST emission — future contributors should not "modernize"
-  to `[]%N` because that breaks consumer modules that omit
-  `Open Scope N_scope`.
+  CompCert's AST emission (the same rationale that previously mandated
+  `(@nil N)` over `[]%N`) — future contributors should not "modernize"
+  to bracket notation.
 - Spec names are validated against the Rocq identifier rules
   (see `core/wasm-to-v/src/rocq_names.rs`). A spec named `Definition`,
   `forall`, or `list` is rejected with `WasmToVError::InvalidRocqIdentifier`
@@ -226,6 +245,19 @@ In `compile` mode the spec map is empty and no custom section is emitted,
 so compile-mode `.wasm` is byte-identical to pre-`spec` output.
 
 ## Migration
+
+### `list N` → `list assertion` (assertion-valued specs)
+
+The `_specs` lists were previously `list N` (WASM function indices).
+They are now `list assertion` and emitted empty, with the indices in a
+comment. Downstream proofs that destructured the index lists must move
+that per-function content into standalone lemmas (wasm-verifier's
+`examples/E2EQuantKinds.v` shows the pattern: the emptied obligation is
+discharged over `[::]`, the per-function reachability/uniqueness lemmas
+stand alone). This tracks wasm-verifier PR #2 (`ValidSpec`) and issue #6
+(`ValidExistsSpec`/`ValidUniqueSpec`).
+
+### Pre-#21 `ValidModule` (2-argument)
 
 If you previously consumed:
 

@@ -6,7 +6,7 @@
 //!   2.  Export gating
 //!   3.  Custom WASM section round-trip
 //!   4.  Per-spec emission ordering and theorems
-//!   5.  Empty list `(@nil N)`
+//!   5.  Empty list `(@nil assertion)`
 //!   6.  Invalid module names
 //!   7.  No regressions (verified out-of-band via `cargo test`)
 //!   8.  Compile-mode emits no spec section
@@ -553,17 +553,26 @@ mod scenario_4_per_spec_emission {
         // mod_name argument is overridden by the embedded "output" module name.
         let v = inference::wasm_to_v("M", output.wasm(), &map).expect("translate ok");
         assert!(
-            v.contains("Definition output__A_specs : list N := (0 :: nil)%N."),
+            v.contains("Definition output__A_specs : list assertion := (@nil assertion)."),
             "A def:\n{v}"
         );
         assert!(
-            v.contains("Definition output__B_specs : list N := (1 :: nil)%N."),
+            v.contains("Definition output__B_specs : list assertion := (@nil assertion)."),
             "B def:\n{v}"
+        );
+        // The indices survive as comments (one per spec, sorted A then B).
+        assert!(
+            v.contains("(* function indices: 0 (assertion payloads pending) *)"),
+            "A indices comment:\n{v}"
+        );
+        assert!(
+            v.contains("(* function indices: 1 (assertion payloads pending) *)"),
+            "B indices comment:\n{v}"
         );
     }
 }
 
-// Scenario 5: Empty list `(@nil N)`
+// Scenario 5: Empty list `(@nil assertion)`
 #[cfg(test)]
 mod scenario_5_empty_list {
     use super::helpers::compile;
@@ -571,7 +580,7 @@ mod scenario_5_empty_list {
     use rustc_hash::FxHashMap;
 
     /// When the spec map is empty, the translator must emit no `_specs` line
-    /// at all (no per-spec definition). The `(@nil N)` literal is only relevant
+    /// at all (no per-spec definition). The `(@nil assertion)` literal is only relevant
     /// once a spec exists but has no surviving inner functions; the current
     /// emission strategy is to skip `Definition` lines entirely when the map
     /// is empty.
@@ -587,7 +596,7 @@ mod scenario_5_empty_list {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Empty", output.wasm(), &empty).expect("translate ok");
         assert!(
-            !v.contains("_specs : list N"),
+            !v.contains("_specs : list assertion"),
             "no per-spec definitions expected when map is empty:\n{v}"
         );
         assert!(
@@ -600,8 +609,8 @@ mod scenario_5_empty_list {
         );
     }
 
-    /// `(@nil N)` is emitted when an explicit spec is present but its indices
-    /// list is empty. Asserts that NO `[]%N` substring leaks through.
+    /// `(@nil assertion)` is emitted when an explicit spec is present but its
+    /// indices list is empty. Asserts that NO `[]%N` substring leaks through.
     #[test]
     fn explicit_spec_with_empty_indices_emits_at_nil_n_not_bracket_pct_n() {
         let source = r#"pub fn main() -> i32 { return 0; }"#;
@@ -612,8 +621,8 @@ mod scenario_5_empty_list {
         map.insert("MySpec".to_string(), Vec::new());
         let v = inference::wasm_to_v("Mod", output.wasm(), &map).expect("translate ok");
         assert!(
-            v.contains("(@nil N)"),
-            "expected `(@nil N)` for empty spec indices list:\n{v}"
+            v.contains("(@nil assertion)"),
+            "expected `(@nil assertion)` for empty spec indices list:\n{v}"
         );
         assert_eq!(
             v.matches("[]%N").count(),
@@ -1248,7 +1257,8 @@ mod scenario_7_empty_spec {
 
     /// A user-authored empty `spec MySpec { }` must surface a per-spec entry
     /// with an empty index list, so the Rocq translator still emits both a
-    /// `Definition output__MySpec_specs : list N := (@nil N).` line and a
+    /// `Definition output__MySpec_specs : list assertion := (@nil assertion).`
+    /// line and a
     /// `Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs.`
     /// theorem. Without `ensure_spec_registered`, the spec vanished silently
     /// from the proof artifact because the bucket iteration only recorded
@@ -1272,8 +1282,12 @@ mod scenario_7_empty_spec {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
         assert!(
-            v.contains("Definition output__MySpec_specs : list N := (@nil N)."),
-            "empty spec must emit the `(@nil N)` definition line:\n{v}"
+            v.contains("Definition output__MySpec_specs : list assertion := (@nil assertion)."),
+            "empty spec must emit the `(@nil assertion)` definition line:\n{v}"
+        );
+        assert!(
+            !v.contains("(* function indices:"),
+            "an empty spec has no indices to carry in a comment:\n{v}"
         );
         assert!(
             v.contains("Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs."),
@@ -1281,10 +1295,11 @@ mod scenario_7_empty_spec {
         );
     }
 
-    /// T1: mixing an empty spec with a non-empty one must produce both kinds
-    /// of `Definition` line in the generated Rocq output, in alphabetical
-    /// order. The empty list renders as `(@nil N)`, the non-empty as
-    /// `(idx :: nil)%N`. This guards a regression where empty-spec handling could
+    /// T1: mixing an empty spec with a non-empty one must produce both
+    /// `Definition` lines in the generated Rocq output, in alphabetical
+    /// order. Both lists render as `(@nil assertion)` (assertion payloads
+    /// pending); the non-empty one additionally carries its indices in a
+    /// comment. This guards a regression where empty-spec handling could
     /// short-circuit the per-spec emission loop and drop the non-empty entry
     /// (or vice versa).
     #[test]
@@ -1306,13 +1321,18 @@ mod scenario_7_empty_spec {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
         assert!(
-            v.contains("Definition output__A_specs : list N := (@nil N)."),
-            "empty spec A must render `(@nil N)`:\n{v}"
+            v.contains("Definition output__A_specs : list assertion := (@nil assertion)."),
+            "empty spec A must render `(@nil assertion)`:\n{v}"
         );
-        let expected_b = format!("Definition output__B_specs : list N := ({b_idx} :: nil)%N.");
         assert!(
-            v.contains(&expected_b),
-            "non-empty spec B must render `({b_idx} :: nil)%N`:\n{v}"
+            v.contains("Definition output__B_specs : list assertion := (@nil assertion)."),
+            "non-empty spec B must render `(@nil assertion)` too:\n{v}"
+        );
+        let expected_b_comment =
+            format!("(* function indices: {b_idx} (assertion payloads pending) *)");
+        assert!(
+            v.contains(&expected_b_comment),
+            "non-empty spec B must carry its index in a comment:\n{v}"
         );
         let pos_a = v.find("Definition output__A_specs").unwrap();
         let pos_b = v.find("Definition output__B_specs").unwrap();
@@ -1430,7 +1450,7 @@ mod scenario_8_compile_mode_no_section {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
         assert_eq!(
-            v.matches("_specs : list N").count(),
+            v.matches("_specs : list assertion").count(),
             0,
             "compile-mode .v output must contain zero per-spec definitions:\n{v}",
         );
@@ -1514,7 +1534,7 @@ mod scenario_10_wasm_to_v_compile_mode {
 
         // No per-spec definition or ValidSpec lines.
         assert_eq!(
-            v.matches("_specs : list N").count(),
+            v.matches("_specs : list assertion").count(),
             0,
             "no per-spec definitions expected:\n{v}"
         );

@@ -421,8 +421,8 @@ pub(crate) struct Compiler {
     /// WASM function indices for functions that originated in `spec` blocks,
     /// keyed by spec name. Populated during Stage 1 registration in proof mode;
     /// consumed (moved out) by [`Self::finish_and_take`] so the Rocq translator
-    /// can emit per-spec `Definition <mod>__<SpecName>_specs : list N`
-    /// definitions.
+    /// can emit per-spec `Definition <mod>__<SpecName>_specs : list assertion`
+    /// definitions (currently empty, indices carried in a comment).
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
     /// Per-spec proof-obligation kinds, parallel to
     /// [`Self::spec_func_indices_by_spec`] (same key, same order): the i-th kind

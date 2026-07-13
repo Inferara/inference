@@ -299,9 +299,21 @@ mod tests {
         map.insert("Spec1".to_string(), vec![3, 4, 7]);
         let output = translate_bytes("Fac", &bytes, &map).expect("translate succeeds");
 
+        // Assertion-valued contract (wasm-verifier PR #2 / issue #6): the list
+        // is `list assertion`, emitted empty with the indices in a comment.
         assert!(
-            output.contains("Definition Fac__Spec1_specs : list N := (3 :: 4 :: 7 :: nil)%N."),
+            output
+                .contains("Definition Fac__Spec1_specs : list assertion := (@nil assertion)."),
             "output should contain Fac__Spec1_specs definition; got:\n{output}",
+        );
+        assert!(
+            output.contains("(* function indices: 3 4 7 (assertion payloads pending) *)"),
+            "output should carry the spec's function indices in a comment; got:\n{output}",
+        );
+        // `assertion` comes from the Assertions module.
+        assert!(
+            output.contains("From WasmVerifier Require Import Assertions."),
+            "output should import Assertions for the `assertion` type; got:\n{output}",
         );
         // Structural well-formedness theorem (1-arg ValidModule), always emitted.
         assert!(
@@ -330,13 +342,18 @@ mod tests {
         let output = translate_bytes("Fac", &bytes, &empty).expect("translate succeeds");
 
         assert!(
-            !output.contains("_specs : list N"),
+            !output.contains("_specs : list assertion"),
             "output should contain no per-spec definitions when the map is empty; got:\n{output}",
         );
         // No per-spec ValidSpec theorems when there are no specs.
         assert!(
             !output.contains("ValidSpec"),
             "output should contain no ValidSpec theorems when the spec map is empty; got:\n{output}",
+        );
+        // Zero-spec artifacts are unchanged: no Assertions import either.
+        assert!(
+            !output.contains("From WasmVerifier Require Import Assertions."),
+            "zero-spec output should not import Assertions; got:\n{output}",
         );
         // The structural ValidModule theorem is still emitted (contract: a zero-spec module
         // emits only the module record and `Theorem valid_<mod> : ValidModule <mod>`).

@@ -761,8 +761,9 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// - `spec_funcs_by_spec`: WASM function indices that originated from `spec`
 ///   blocks, grouped by spec name (typically obtained from
 ///   [`CodegenOutput::spec_func_indices_by_spec`]). Emitted as per-spec
-///   `Definition <mod_name>__<SpecName>_specs : list N` definitions consumed
-///   by the corresponding `ValidModule` theorems. Pass an empty `FxHashMap`
+///   `Definition <mod_name>__<SpecName>_specs : list assertion` definitions
+///   (currently empty, indices carried in a comment) consumed by the
+///   corresponding `Valid*Spec` theorems. Pass an empty `FxHashMap`
 ///   when no spec marker is needed.
 ///
 /// # Errors

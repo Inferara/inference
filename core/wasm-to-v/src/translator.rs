@@ -134,7 +134,10 @@
 //! From Wasm Require Import bytes.
 //! From Wasm Require Import numerics.
 //! From Wasm Require Import datatypes.
+//! From Wasm Require Import host.
+//! From WasmVerifier Require Import Assertions.  (* only when specs are present *)
 //! From WasmVerifier Require Import Verifier.
+//! From WasmVerifier Require Import Exists.      (* only when exists/unique specs are present *)
 //!
 //! (* Helper definitions *)
 //! Definition Vi32 i := ...
@@ -231,8 +234,11 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
     /// WASM function indices that originated from `spec` blocks, keyed by
-    /// spec name. Each entry materializes as a `<mod>__<SpecName>_specs : list N`
-    /// Rocq definition consumed by the corresponding `ValidModule` theorem.
+    /// spec name. Each entry materializes as a
+    /// `<mod>__<SpecName>_specs : list assertion` Rocq definition (emitted
+    /// empty, with the indices preserved in a comment, until the translator
+    /// can synthesize assertion payloads) consumed by the corresponding
+    /// `Valid*Spec` theorem.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
 
     /// Per-index proof obligations, parallel to [`Self::spec_funcs_by_spec`]
@@ -271,25 +277,31 @@ impl SpecKindGroups {
     }
 }
 
-/// Emits a `Definition <def_name> : list N := …` for a group's indices.
+/// Emits a `Definition <def_name> : list assertion := …` for a spec group.
 ///
-/// Empty lists use `(@nil N)` (not `[]%N`) so the definition type-checks
-/// regardless of whether `Open Scope N_scope` is in effect at the consumer's
-/// `Require` site; non-empty lists use the `(… :: nil)%N` cons form.
+/// The downstream contract is **assertion-valued** (`ValidSpec`/
+/// `ValidExistsSpec`/`ValidUniqueSpec : module -> list assertion -> Prop` —
+/// wasm-verifier PR #2 for `ValidSpec`, issue #6 for the existential pair).
+/// The translator cannot synthesize assertion payloads from spec bodies yet,
+/// so every list is emitted **empty** — `(@nil assertion)`, the explicit form
+/// that type-checks regardless of consumer scope state (same rationale as the
+/// former `(@nil N)`) — and the group's WASM function indices are preserved in
+/// a comment for the downstream prover, who carries the semantic content in
+/// standalone per-function lemmas (see wasm-verifier's `E2EQuantKinds.v`).
 fn push_specs_definition(res: &mut String, def_name: &str, indices: &[u32]) {
     res.push('\n');
-    if indices.is_empty() {
-        res.push_str(format!("Definition {def_name} : list N := (@nil N).\n").as_str());
-    } else {
+    if !indices.is_empty() {
         let indices_str = indices
             .iter()
             .map(u32::to_string)
             .collect::<Vec<_>>()
-            .join(" :: ");
+            .join(" ");
         res.push_str(
-            format!("Definition {def_name} : list N := ({indices_str} :: nil)%N.\n").as_str(),
+            format!("(* function indices: {indices_str} (assertion payloads pending) *)\n")
+                .as_str(),
         );
     }
+    res.push_str(format!("Definition {def_name} : list assertion := (@nil assertion).\n").as_str());
 }
 
 /// Emits a `Theorem <thm_name> : <predicate> <module> <specs>.` with the
@@ -464,6 +476,17 @@ impl WasmParseData<'_> {
         res.push_str("From Wasm Require Import bytes.\n");
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
+        // The `host` typeclass backs the always-emitted `Section Host.
+        // Context `{ho: host}.` wrapper around the theorems; without this
+        // import the raw artifact does not type-check.
+        res.push_str("From Wasm Require Import host.\n");
+        if !spec_groups.is_empty() {
+            // The `_specs` lists are `list assertion` (assertion-valued
+            // contract); `assertion` lives in `Assertions`, which `Verifier`
+            // Requires but does not re-export. Emit it only when a spec is
+            // present so zero-spec artifacts are unchanged.
+            res.push_str("From WasmVerifier Require Import Assertions.\n");
+        }
         res.push_str("From WasmVerifier Require Import Verifier.\n");
         if needs_exists_import {
             // `ValidExistsSpec` / `ValidUniqueSpec` live in `Exists` (which
@@ -664,21 +687,27 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
-        // Emit per-spec lists of WASM function indices, sorted by spec name for
-        // deterministic output and split by obligation kind. Spec names were
-        // validated against the Rocq identifier rules at the top of `translate()`
-        // so that `<mod>__<SpecName>_specs` (and the `__exists_specs` /
+        // Emit per-spec `_specs` lists, sorted by spec name for deterministic
+        // output and split by obligation kind. Spec names were validated
+        // against the Rocq identifier rules at the top of `translate()` so
+        // that `<mod>__<SpecName>_specs` (and the `__exists_specs` /
         // `__unique_specs` siblings) are always syntactically legal Rocq
         // identifiers.
+        //
+        // The lists are ASSERTION-VALUED (`list assertion`, matching the
+        // downstream `ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec :
+        // module -> list assertion -> Prop` — wasm-verifier PR #2 / issue #6)
+        // and currently emitted empty, with each group's function indices in a
+        // comment (see `push_specs_definition`).
         //
         // A spec function's quantifier picks its predicate: `forall`/regular →
         // `ValidSpec`, `exists` → `ValidExistsSpec`, `unique` → `ValidUniqueSpec`
         // (the existential predicates assert *reachability*, strictly more than
         // the universal trap-freedom `ValidSpec` asserts). A spec with no
-        // functions keeps the legacy single `_specs := (@nil N)` / `ValidSpec`
-        // shape, and an all-`forall`/regular spec keeps exactly its prior
-        // `_specs` / `ValidSpec` output — only `exists`/`unique` functions add
-        // the new sibling definitions and theorems.
+        // functions keeps the legacy single `_specs` / `ValidSpec` shape, and
+        // an all-`forall`/regular spec emits only its single `_specs` /
+        // `ValidSpec` pair — only `exists`/`unique` functions add the sibling
+        // definitions and theorems.
         //
         // The kind is joined with the reserved `__` separator
         // (`<mod>__<SpecName>__exists_specs`), not a plain `_`. Because
@@ -737,7 +766,7 @@ impl WasmParseData<'_> {
         res.push_str("Qed.\n");
         // Per-spec verification obligations, one theorem per non-empty kind group.
         // `ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec` are all 2-argument
-        // predicates (module, list of WASM function indices) and each entails
+        // predicates (module, list of spec assertions) and each entails
         // `ValidModule`.
         for g in &spec_groups {
             if g.is_empty() {

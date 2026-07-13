@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Rocq output: the per-spec `_specs` lists are now **assertion-valued** —
+  `Definition <mod>__<SpecName>_specs : list assertion := (@nil assertion).` —
+  matching the downstream wasm-verifier contract
+  (`ValidSpec`/`ValidExistsSpec`/`ValidUniqueSpec : module -> list assertion -> Prop`;
+  wasm-verifier PR #2 for `ValidSpec`, issue #6 for the existential pair). The
+  former `list N` index lists are gone; each group's WASM function indices are
+  preserved in a preceding `(* function indices: … *)` comment, and the
+  generated file now imports `From WasmVerifier Require Import Assertions.`
+  whenever at least one spec is present (zero-spec output is unchanged).
+  Assertion payloads are not synthesized yet — every list is emitted empty;
+  downstream provers carry the semantic content in standalone lemmas (see
+  `core/wasm-to-v/ROCQ_CONTRACT.md` → Migration).
 - `inference_wasm_codegen::CodegenOutput::spec_func_indices: Vec<u32>` →
   `spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>`. The accessor renames
   to `spec_func_indices_by_spec()`. Library embedders of `core/inference` must
