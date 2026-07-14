@@ -154,6 +154,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifact-infc
           Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact-infc\
+          Copy-Item target\x86_64-pc-windows-gnu\release\inference-lsp.exe artifact-infc\
 
       - name: Prepare infs Artifact Package (Windows)
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
@@ -166,6 +167,7 @@ jobs:
         run: |
           mkdir -p artifact-infc
           cp target/release/infc artifact-infc/
+          cp target/release/inference-lsp artifact-infc/
 
       - name: Prepare infs Artifact Package (Linux)
         if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
@@ -204,6 +206,7 @@ jobs:
         run: |
           mkdir -p artifact-infc
           cp target/release/infc artifact-infc/
+          cp target/release/inference-lsp artifact-infc/
 
       - name: Prepare infs Artifact Package (macOS)
         if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build

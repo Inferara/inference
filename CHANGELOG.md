@@ -807,6 +807,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `TypeCheckerBuilder::build_typed_context` is re-expressed on top of this function, so the compiler and the IDE share exactly one checking implementation
 - Add a `FileLoader` seam to `core/inference` (`exists`/`read`) so the import-closure walk can be driven by either a `DiskLoader` (the compiler) or an IDE-supplied overlay-then-disk loader, plus a resilient walk variant, `load_project_resilient`, that collects every problem (broken imports, per-file syntax errors) instead of failing fast on the first one ([#33])
   - `parse_project` is re-expressed on top of the same closure-walk logic and remains byte-identical for a clean project
+- Ship `inference-lsp` with the managed toolchain ([#33])
+  - Release packaging bundles the `inference-lsp` binary inside the existing `infc-<platform>` archives (no new archive names, no manifest-format change), so `infs install` places it in `toolchains/<version>/` automatically
+  - `infs` symlinks `inference-lsp` into `$INFERENCE_HOME/bin` next to `infc` when the default toolchain contains it, cleans the stale symlink when switching to a toolchain that predates bundling, marks it executable on Unix, and includes it in PATH-shadowing conflict detection
+  - `infs doctor` gains an appended `inference-lsp` check: `[OK]` with the resolved path when the default toolchain bundles it, `[WARN]` with an upgrade hint when the toolchain predates bundling (never `[FAIL]` — the language server is optional)
+- VS Code extension 0.0.5: built-in LSP client — installing the extension now brings up the language server out of the box ([#33])
+  - Starts `inference-lsp` over stdio on activation (new `onLanguage:inference` activation event), resolving the binary via `inference.lsp.path` setting → `$INFERENCE_HOME/bin` → PATH, mirroring the `infs` detection order; silent (log-only) when the binary is absent
+  - Auto-starts the server after a toolchain install/update completes, so the first-run flow (install extension → accept toolchain install) needs no reload
+  - New settings `inference.lsp.enabled` / `inference.lsp.path` and command `Inference: Restart Language Server`; server traces go to a dedicated `Inference Language Server` output channel
 
 ---
 

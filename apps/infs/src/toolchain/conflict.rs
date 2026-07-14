@@ -48,6 +48,10 @@ pub struct PathConflict {
 /// 2. The found path differs from the expected managed path
 /// 3. The expected managed binary actually exists
 ///
+/// Only `infc` participates in this shared conflict block. PATH visibility of
+/// the optional `inference-lsp` server is reported exclusively by the dedicated
+/// `inference-lsp` doctor check, which appends its own "; also on PATH" note.
+///
 /// # Arguments
 ///
 /// * `bin_dir` - The managed toolchain bin directory (e.g., `~/.inference/bin`)
@@ -527,5 +531,56 @@ mod tests {
     fn format_duplicate_path_warning_empty_for_zero_paths() {
         let lines = format_duplicate_path_warning(&[]);
         assert!(lines.is_empty());
+    }
+
+    /// Writes an executable stub named `name` into `dir` so `which::which`
+    /// counts it as a match.
+    fn write_executable_stub(dir: &Path, name: &str) -> PathBuf {
+        let stub = dir.join(name);
+        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).unwrap();
+        }
+        stub
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn detect_conflicts_excludes_shadowed_inference_lsp() {
+        let platform = Platform::detect().unwrap();
+        let lsp_name = format!("inference-lsp{}", platform.executable_extension());
+
+        // The managed bin directory holds the expected inference-lsp...
+        let bin_dir = assert_fs::TempDir::new().unwrap();
+        write_executable_stub(bin_dir.path(), &lsp_name);
+
+        // ...and PATH resolves inference-lsp to a different directory, so the
+        // managed copy is shadowed. The shared PATH-conflict block must still
+        // ignore it: LSP PATH visibility is reported solely by the dedicated
+        // `inference-lsp` doctor check, not here.
+        let stub_dir = assert_fs::TempDir::new().unwrap();
+        write_executable_stub(stub_dir.path(), &lsp_name);
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        // SAFETY: serialized; PATH restored below before assertions.
+        unsafe {
+            env::set_var("PATH", stub_dir.path());
+        }
+
+        let conflicts = detect_path_conflicts(bin_dir.path());
+
+        // SAFETY: restore PATH before assertions so a panic doesn't leak state.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        assert!(
+            conflicts.iter().all(|c| c.binary != lsp_name),
+            "inference-lsp must not appear in the shared PATH-conflict block: {conflicts:?}"
+        );
     }
 }

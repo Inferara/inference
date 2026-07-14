@@ -1,4 +1,5 @@
 import * as assert from 'node:assert';
+import * as fs from 'node:fs';
 import { describe, it } from 'node:test';
 
 // exec.ts uses child_process.spawn; we test it by running real simple commands.
@@ -51,9 +52,13 @@ describe('exec', () => {
     it('respects cwd option', async () => {
         const result = await exec('pwd', [], { cwd: '/tmp' });
         assert.strictEqual(result.exitCode, 0);
-        assert.ok(
-            result.stdout.trim().startsWith('/tmp'),
-            `Expected /tmp, got ${result.stdout.trim()}`,
+        // pwd prints the physical path; on macOS /tmp is a symlink to
+        // /private/tmp, so compare against the resolved real path.
+        const expected = fs.realpathSync('/tmp');
+        assert.strictEqual(
+            result.stdout.trim(),
+            expected,
+            `Expected ${expected}, got ${result.stdout.trim()}`,
         );
     });
 

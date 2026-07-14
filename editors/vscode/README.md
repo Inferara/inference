@@ -28,6 +28,25 @@ Full syntax highlighting support for Inference language constructs:
 - Automatically activates for `.inf` files
 - Custom file icon for Inference source files
 
+### Language Server
+
+The extension automatically starts the Inference language server (`inference-lsp`) for `.inf` files, providing rich language intelligence:
+
+- **Diagnostics** - Compiler errors and warnings as you type
+- **Hover** - Type information and documentation, including explanations of the non-deterministic operators (`forall`, `exists`, `assume`, `unique`, `@`)
+- **Go to Definition** - Jump to symbol definitions (F12)
+- **Completions** - Context-aware code completion
+- **Document Symbols** - Outline view and breadcrumb navigation
+- **Inlay Hints** - Inline type annotations
+
+The server binary is resolved using the following priority (mirroring `infs` detection):
+
+1. Custom path from `inference.lsp.path` setting (if set but not executable, the server is not started - no fallback)
+2. Managed installation in `INFERENCE_HOME/bin/inference-lsp` (respects `INFERENCE_HOME` environment variable)
+3. System `PATH`
+
+If the binary is not found, the extension stays quiet: a line is logged to the "Inference" output channel and the server simply stays off until the toolchain is installed or updated. Server traces are written to the dedicated "Inference Language Server" output channel. Use **Inference: Restart Language Server** to pick up a new binary after an update or a settings change made outside VS Code.
+
 ### Toolchain Management
 
 The extension provides comprehensive toolchain management through integration with the `infs` CLI. All operations are fully automated and require no manual configuration.
@@ -87,6 +106,7 @@ Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 - **Inference: Update Toolchain** - Check for updates and install the latest version
 - **Inference: Select Toolchain Version** - Browse and switch between available versions
 - **Inference: Run Doctor** - Execute comprehensive health diagnostics
+- **Inference: Restart Language Server** - Stop and restart `inference-lsp`, re-resolving the binary location
 - **Inference: Refresh Configuration** - Reload the Configuration sidebar view
 - **Inference: Show Output** - Open the Inference output log channel
 - **Inference: Reset PATH Fallback Preference** - Clear saved PATH fallback acceptance
@@ -116,6 +136,8 @@ A guided setup walkthrough is available via **Get Started: Open Walkthrough...**
 - **`inference.path`** (string, default: `""`) - Custom path to the `infs` binary. Leave empty for automatic detection. Scope: machine (not synced across devices).
 - **`inference.autoInstall`** (boolean, default: `true`) - Prompt to install toolchain if not found on activation.
 - **`inference.checkForUpdates`** (boolean, default: `true`) - Automatically check for toolchain updates on activation.
+- **`inference.lsp.enabled`** (boolean, default: `true`) - Start the Inference language server automatically. Disable to turn off all language intelligence features.
+- **`inference.lsp.path`** (string, default: `""`) - Custom path to the `inference-lsp` binary. Leave empty for automatic detection. Scope: machine (not synced across devices).
 
 ### Environment Variables
 
@@ -183,6 +205,14 @@ Learn more:
 2. Run **Inference: Run Doctor** to see detailed diagnostics
 3. Verify `inference.path` setting if using a custom location
 4. Try **Inference: Install Toolchain** to install automatically
+
+### Language server not running
+
+1. Check the Output panel (View > Output > Select "Inference") for a "Language server" log line explaining why it did not start
+2. Ensure `inference.lsp.enabled` is `true`
+3. Install or update the toolchain (**Inference: Install Toolchain** / **Inference: Update Toolchain**) so `inference-lsp` is present in `INFERENCE_HOME/bin`
+4. Alternatively, set `inference.lsp.path` to the binary location (note: if this setting points to a non-executable path, the server is not started and no fallback occurs)
+5. Run **Inference: Restart Language Server** after fixing the binary location
 
 ### Terminal commands not found
 

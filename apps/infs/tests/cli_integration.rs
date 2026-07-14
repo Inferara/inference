@@ -1669,7 +1669,8 @@ fn doctor_shows_all_checks() {
         .stdout(predicate::str::contains("Platform"))
         .stdout(predicate::str::contains("Toolchain directory"))
         .stdout(predicate::str::contains("Default toolchain"))
-        .stdout(predicate::str::contains("infc"));
+        .stdout(predicate::str::contains("infc"))
+        .stdout(predicate::str::contains("inference-lsp"));
 }
 
 /// Verifies that `infs doctor` output respects the VS Code extension's line contract.

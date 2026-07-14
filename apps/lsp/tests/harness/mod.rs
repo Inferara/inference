@@ -23,10 +23,12 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 /// How long any single message read waits before the test gives up on the server.
-const RECV_TIMEOUT: Duration = Duration::from_secs(10);
+/// Generous because the suite runs its server spawns in parallel and shares the
+/// machine with whatever else CI is compiling; a hang still fails, just later.
+const RECV_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long to wait for the child process to exit before killing it and failing.
-const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One item the reader thread pulls off the child's stdout.
 enum Incoming {
