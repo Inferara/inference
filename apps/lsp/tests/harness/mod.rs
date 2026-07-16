@@ -172,6 +172,14 @@ impl LspClient {
         self.wait_for_response(id)
     }
 
+    /// Sends an `initialize` request with arbitrary params and returns the whole
+    /// response (with `result` or `error`), asserting nothing and sending no
+    /// `initialized` follow-up. Used to drive the paths where the handshake must
+    /// itself fail (malformed params) or be rejected (a repeated initialize).
+    pub fn initialize_raw(&mut self, params: Value) -> Value {
+        self.request("initialize", params)
+    }
+
     /// Runs the initialize handshake with the given client capabilities and
     /// returns the `InitializeResult` value, then sends `initialized`.
     pub fn initialize(&mut self, capabilities: Value) -> Value {

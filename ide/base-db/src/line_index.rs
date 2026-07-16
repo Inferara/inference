@@ -119,6 +119,26 @@ impl LineIndex {
         Some(line_end as u32)
     }
 
+    /// Converts a [`LineCol`] into a byte offset, clamping a position past the end
+    /// of the file to the file's end rather than failing.
+    ///
+    /// Where [`offset`](Self::offset) returns `None` for a line past EOF, this
+    /// clamps the whole position to the text length — the end of the file — which
+    /// extends the character clamp `offset` already applies within a line to the
+    /// line dimension too. The result is always a valid offset, so a caller that
+    /// wants a window honored — an inlay-hint request range whose end sits one line
+    /// past EOF — clamps to the file's end instead of discarding the window.
+    #[must_use = "the converted offset is the reason to call this"]
+    pub fn offset_clamped(&self, line_col: LineCol) -> u32 {
+        let last_line = self.line_starts.len() - 1;
+        if line_col.line as usize > last_line {
+            return self.text.len() as u32;
+        }
+        // The line is in range, so `offset` clamps the character and yields `Some`;
+        // the text length is a defensive fallback that keeps this total.
+        self.offset(line_col).unwrap_or(self.text.len() as u32)
+    }
+
     /// Exclusive byte offset of the end of a line's content.
     ///
     /// For every line but the last this excludes the whole line terminator: two
@@ -366,6 +386,31 @@ mod tests {
         assert_eq!(index.offset(lc(1, 0)), Some(6)); // '😀'
         assert_eq!(index.offset(lc(1, 2)), Some(10)); // 'b'
         assert_eq!(index.offset(lc(1, 3)), Some(11)); // end of file
+    }
+
+    #[test]
+    fn offset_clamped_clamps_an_out_of_range_line_to_the_file_end() {
+        let index = LineIndex::new("ab\ncd");
+        // In-range positions behave exactly like `offset`.
+        assert_eq!(index.offset_clamped(lc(0, 0)), 0);
+        assert_eq!(index.offset_clamped(lc(1, 1)), 4); // between 'c' and 'd'
+        assert_eq!(index.offset_clamped(lc(1, 2)), 5); // end of the last line
+        // A character past a valid line still clamps to that line's end.
+        assert_eq!(index.offset_clamped(lc(0, 99)), 2);
+        // A line past EOF clamps to the file end, where `offset` returns `None`.
+        assert_eq!(index.offset(lc(2, 0)), None);
+        assert_eq!(index.offset_clamped(lc(2, 0)), 5);
+        // A wildly out-of-range line clamps the same way.
+        assert_eq!(index.offset_clamped(lc(9999, 4)), 5);
+    }
+
+    #[test]
+    fn offset_clamped_on_a_trailing_newline_clamps_to_the_empty_last_line() {
+        // Line starts: [0, 4]; the last line is the empty line after the '\n'.
+        let index = LineIndex::new("abc\n");
+        assert_eq!(index.offset_clamped(lc(1, 0)), 4);
+        // A line past the empty last line clamps back to it, not to line 0.
+        assert_eq!(index.offset_clamped(lc(5, 0)), 4);
     }
 
     #[test]

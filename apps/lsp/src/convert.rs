@@ -42,12 +42,27 @@ pub(crate) fn offset(index: &ide::LineIndex, position: Position) -> Option<u32> 
     })
 }
 
-/// The `ide` byte range of an LSP range, or `None` when either endpoint's line is
-/// out of range.
-pub(crate) fn text_range(index: &ide::LineIndex, range: Range) -> Option<ide::TextRange> {
-    Some(ide::TextRange {
-        start: offset(index, range.start)?,
-        end: offset(index, range.end)?,
+/// The `ide` byte range of an LSP range, clamping an endpoint whose line is past
+/// the end of the file to the file's end.
+///
+/// Used for the inlay-hint request window: an out-of-range endpoint (an end one
+/// line past EOF is a common client spelling for "to the end") must still yield a
+/// bounded range so the window is honored, never widened to the whole file by a
+/// single unmappable position.
+pub(crate) fn text_range_clamped(index: &ide::LineIndex, range: Range) -> ide::TextRange {
+    ide::TextRange {
+        start: offset_clamped(index, range.start),
+        end: offset_clamped(index, range.end),
+    }
+}
+
+/// The `ide` byte offset of an LSP position, clamping a line past EOF to the end
+/// of the file (`offset` clamps a past-EOL character within a line; this extends
+/// the same clamp to the line).
+fn offset_clamped(index: &ide::LineIndex, position: Position) -> u32 {
+    index.offset_clamped(ide::LineCol {
+        line: position.line,
+        character: position.character,
     })
 }
 
@@ -136,14 +151,45 @@ pub(crate) fn symbol_information(
     }
 }
 
-pub(crate) fn hover(index: &ide::LineIndex, hover: ide::Hover) -> Hover {
+/// A hover rendered in `format`. A client that did not advertise Markdown in its
+/// `textDocument.hover.contentFormat` gets [`MarkupKind::PlainText`], for which
+/// the `ide` layer's Markdown is reduced to plain text (see [`plain_text`]) so
+/// fences and backticks are not rendered literally.
+pub(crate) fn hover(index: &ide::LineIndex, hover: ide::Hover, format: MarkupKind) -> Hover {
+    let value = match format {
+        MarkupKind::PlainText => plain_text(&hover.contents_markdown),
+        MarkupKind::Markdown => hover.contents_markdown,
+    };
     Hover {
         contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: hover.contents_markdown,
+            kind: format,
+            value,
         }),
         range: Some(range(index, hover.range)),
     }
+}
+
+/// Reduces the limited Markdown the `ide` layer emits — fenced code blocks and
+/// inline code — to plain text for a client that accepts only plain text.
+///
+/// Fence delimiter lines (`` ``` ``) are dropped and inline-code backticks
+/// removed; every other character is preserved verbatim, so a `*` inside a code
+/// example (a multiplication, say) survives rather than being mistaken for
+/// emphasis and stripped.
+fn plain_text(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut wrote_line = false;
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            continue;
+        }
+        if wrote_line {
+            out.push('\n');
+        }
+        wrote_line = true;
+        out.extend(line.chars().filter(|&ch| ch != '`'));
+    }
+    out
 }
 
 pub(crate) fn completion_item_kind(kind: ide::CompletionItemKind) -> CompletionItemKind {
@@ -204,7 +250,7 @@ mod tests {
     use super::{
         completion_item, completion_item_kind, diagnostic, document_symbol, hover, inlay_hint,
         inlay_hint_kind, offset, position, range, severity, symbol_information, symbol_kind,
-        text_range,
+        text_range_clamped,
     };
 
     fn index(text: &str) -> ide::LineIndex {
@@ -281,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn text_range_is_none_when_an_endpoint_line_is_out_of_range() {
+    fn text_range_clamped_maps_an_in_range_window_exactly() {
         let index = index("ab\ncd");
         let good = lsp_types::Range {
             start: Position {
@@ -294,12 +340,21 @@ mod tests {
             },
         };
         assert_eq!(
-            text_range(&index, good),
-            Some(ide::TextRange { start: 0, end: 4 })
+            text_range_clamped(&index, good),
+            ide::TextRange { start: 0, end: 4 }
         );
-        let bad = lsp_types::Range {
+    }
+
+    #[test]
+    fn text_range_clamped_clamps_an_out_of_range_end_to_the_file_end() {
+        // The bug this guards: an end one line past EOF used to make the whole
+        // conversion `None`, disabling the inlay clip and returning hints outside
+        // the requested window. It must clamp to the file end instead, keeping a
+        // valid start intact so the window is honored.
+        let index = index("ab\ncd");
+        let past_eof_end = lsp_types::Range {
             start: Position {
-                line: 0,
+                line: 1,
                 character: 0,
             },
             end: Position {
@@ -307,7 +362,10 @@ mod tests {
                 character: 0,
             },
         };
-        assert_eq!(text_range(&index, bad), None);
+        assert_eq!(
+            text_range_clamped(&index, past_eof_end),
+            ide::TextRange { start: 3, end: 5 }
+        );
     }
 
     #[test]
@@ -418,13 +476,72 @@ mod tests {
                 contents_markdown: "```inference\nfn f()\n```".to_owned(),
                 range: ide::TextRange { start: 3, end: 4 },
             },
+            MarkupKind::Markdown,
         );
         let HoverContents::Markup(markup) = converted.contents else {
             panic!("hover contents are markdown");
         };
         assert_eq!(markup.kind, MarkupKind::Markdown);
-        assert!(markup.value.contains("fn f()"));
+        assert_eq!(markup.value, "```inference\nfn f()\n```");
         assert!(converted.range.is_some());
+    }
+
+    #[test]
+    fn hover_as_plaintext_strips_fences_and_backticks() {
+        let index = index("fn f() {}");
+        let converted = hover(
+            &index,
+            ide::Hover {
+                contents_markdown: "```inference\nfn f() -> i32\n```".to_owned(),
+                range: ide::TextRange { start: 3, end: 4 },
+            },
+            MarkupKind::PlainText,
+        );
+        let HoverContents::Markup(markup) = converted.contents else {
+            panic!("hover contents are markup");
+        };
+        assert_eq!(markup.kind, MarkupKind::PlainText);
+        // The fence delimiter lines are gone and the signature stands alone.
+        assert_eq!(markup.value, "fn f() -> i32");
+    }
+
+    #[test]
+    fn plaintext_hover_drops_inline_code_but_keeps_a_code_example_intact() {
+        let index = index("fn f() {}");
+        // Prose with inline code and a fenced example whose body contains a `*`
+        // that must survive (it is a multiplication, not emphasis).
+        let markdown = "**`exists`** holds when\n\n```inference\nassert(n * n == 25);\n```";
+        let converted = hover(
+            &index,
+            ide::Hover {
+                contents_markdown: markdown.to_owned(),
+                range: ide::TextRange { start: 0, end: 1 },
+            },
+            MarkupKind::PlainText,
+        );
+        let HoverContents::Markup(markup) = converted.contents else {
+            panic!("hover contents are markup");
+        };
+        assert!(
+            !markup.value.contains('`'),
+            "no backticks remain: {:?}",
+            markup.value
+        );
+        assert!(
+            !markup.value.contains("```"),
+            "no fence delimiters remain: {:?}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("assert(n * n == 25);"),
+            "the code example's `*` survives: {:?}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("**exists** holds when"),
+            "inline-code backticks are removed, emphasis asterisks preserved: {:?}",
+            markup.value
+        );
     }
 
     #[test]
