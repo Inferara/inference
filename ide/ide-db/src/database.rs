@@ -34,8 +34,22 @@ use crate::analysis::FileAnalysis;
 /// 3. **Own directory** — otherwise the file's own directory, the behavior for a
 ///    bare, project-less file.
 ///
-/// A manifest created or edited *after* a file was opened is not observed until
-/// that file's analysis is recomputed for another reason: there is no filesystem
+/// # Sticky per-document source root
+///
+/// The tiers run only once per open document: a *definitive* root (a manifest or
+/// a closure donor) is cached and reused on every later recompute, so a root
+/// adopted from a donor survives that donor's eviction. Without the cache, a
+/// change to a file shared by the donor entry and a non-entry file evicts both
+/// analyses in one call; re-analyzing the non-entry file first would then find no
+/// memoized donor and wrongly fall back to its own directory — the very tier-3
+/// mistake #243 removes, reappearing intermittently after any shared-file change.
+/// The own-directory fallback is *not* cached, so a file first resolved
+/// provisionally can still be upgraded to a donor's root once a governing entry
+/// is analyzed. `didClose` drops the cached root, so the next open re-resolves
+/// from scratch.
+///
+/// A manifest created or edited *after* a file's root was cached is therefore not
+/// observed until the document is closed and reopened: there is no filesystem
 /// watch in v1 (see the `inference::manifest` module).
 ///
 /// # Closure-aware invalidation
@@ -71,6 +85,12 @@ use crate::analysis::FileAnalysis;
 pub struct RootDatabase {
     vfs: Vfs,
     analyses: FxHashMap<PathBuf, FileAnalysis>,
+    /// Per-document sticky source root, keyed by entry path. Populated the first
+    /// time an entry resolves to a *definitive* root (a manifest or a closure
+    /// donor) and reused on every recompute until the document is closed, so an
+    /// adopted donor root outlives that donor's eviction. The own-directory
+    /// fallback is deliberately absent, keeping the upgrade path alive.
+    source_roots: FxHashMap<PathBuf, PathBuf>,
     /// Monotonic source of per-analysis generation stamps.
     generation: u64,
 }
@@ -112,6 +132,9 @@ impl RootDatabase {
         if let Some(id) = self.vfs.file_id(path) {
             self.vfs.remove_contents(id);
         }
+        // Drop the sticky source root so the next open re-resolves from scratch,
+        // observing a manifest created or a governing entry opened meanwhile.
+        self.source_roots.remove(path);
         self.invalidate(path, false);
     }
 
@@ -133,17 +156,31 @@ impl RootDatabase {
     }
 
     /// Resolves the source root `entry`'s import closure should resolve against,
-    /// in three tiers (see the type-level docs and issue #243).
+    /// in three tiers (see the type-level docs and issue #243), caching a
+    /// definitive result so it survives later invalidation.
     ///
-    /// Manifest discovery (tier 1) reads the nearest `Inference.toml` from disk;
-    /// the closure fallback (tier 2) only ever donates the root of an entry whose
-    /// import closure already contains `entry`, so an unrelated open file never
-    /// lends its root.
-    fn resolve_source_root(&self, entry: &Path) -> PathBuf {
+    /// A cached root (from an earlier resolution of the same open document) wins
+    /// outright. Otherwise manifest discovery (tier 1) reads the nearest
+    /// `Inference.toml` from disk, and the closure fallback (tier 2) only ever
+    /// donates the root of an entry whose import closure already contains `entry`,
+    /// so an unrelated open file never lends its root. Both are *definitive* and
+    /// are cached: reused on every recompute and dropped only on `didClose`.
+    /// Caching the donor root is the point — it lets an adopted root outlive the
+    /// donor's eviction, which a change to a file shared by the donor and this
+    /// file would otherwise lose (re-resolving would find no donor and wrongly
+    /// fall to tier 3). The own-directory fallback (tier 3) is *not* cached, so a
+    /// file resolved provisionally can still be upgraded once a governing entry is
+    /// analyzed.
+    fn resolve_source_root(&mut self, entry: &Path) -> PathBuf {
+        if let Some(root) = self.source_roots.get(entry) {
+            return root.clone();
+        }
         if let Some(root) = inference::manifest_source_root(entry) {
+            self.source_roots.insert(entry.to_path_buf(), root.clone());
             return root;
         }
         if let Some(root) = self.closure_donor_source_root(entry) {
+            self.source_roots.insert(entry.to_path_buf(), root.clone());
             return root;
         }
         entry

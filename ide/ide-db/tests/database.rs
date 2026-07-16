@@ -970,3 +970,84 @@ fn didchange_under_manifest_root_invalidates_and_recovers() {
         "the recompute must still resolve lib::b under the manifest root"
     );
 }
+
+#[test]
+fn closure_donor_root_survives_shared_dep_change_when_dependent_reanalyzes_first() {
+    // No manifest. The project entry `main.inf` pulls `lib/a.inf` and the shared
+    // `lib/b.inf` into its closure against `<root>`; analyzing `lib/a.inf`
+    // standalone then adopts that root via the closure-donor tier. A change to the
+    // shared `lib/b.inf` evicts BOTH main's analysis (the donor) and a.inf's in one
+    // call. Re-analyzing a.inf *before* main leaves no memoized donor — yet the
+    // adopted root must survive the donor's eviction, or `use lib::b;` falls back to
+    // a.inf's own directory and reports a false missing import (the pre-fix bug).
+    let tree = TempTree::new("closure-donor-survives-shared-change");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    let b = tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // Memoize the entry so its closure can donate, then adopt its root for a.inf.
+    assert!(db.analysis(&main).import_problems().is_empty());
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&a);
+        assert!(
+            analysis.import_problems().is_empty(),
+            "lib/a.inf adopts the entry's source root, got: {:?}",
+            analysis.import_problems()
+        );
+        analysis.generation()
+    };
+
+    // The shared-dependency change evicts both the donor and a.inf.
+    db.change_document(&b, "pub fn seven() -> i32 { return 8; }");
+
+    // Re-analyze a.inf first: the donor is gone, so only the sticky adopted root
+    // keeps lib::b resolving.
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.generation() > first_gen,
+        "the shared-dependency change must recompute a.inf ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        analysis.import_problems().is_empty(),
+        "the adopted root must survive the donor's eviction, got: {:?}",
+        analysis.import_problems()
+    );
+    assert!(
+        closure_defines(analysis, &b_mod, "seven"),
+        "lib/b.inf's symbols must remain visible after the recompute"
+    );
+}
+
+#[test]
+fn closing_a_document_drops_its_sticky_source_root() {
+    // The sticky root must not outlive the open document. `lib/a.inf` adopts the
+    // entry `main.inf`'s root via the closure-donor tier; closing a.inf evicts its
+    // analysis and, because a.inf is in main's closure, main's too — so no donor
+    // remains. Re-analyzing a.inf must then re-resolve from scratch, falling to its
+    // own directory (where `use lib::b;` cannot be found) rather than serving the
+    // dropped adopted root.
+    let tree = TempTree::new("close-drops-sticky-root");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    assert!(db.analysis(&main).import_problems().is_empty());
+    assert!(
+        db.analysis(&a).import_problems().is_empty(),
+        "lib/a.inf adopts the entry's source root before the close"
+    );
+
+    db.close_document(&a);
+
+    let analysis = db.analysis(&a);
+    assert_eq!(
+        analysis.import_problems().len(),
+        1,
+        "with the sticky root dropped and no donor left, lib::b cannot resolve"
+    );
+    assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
+}
