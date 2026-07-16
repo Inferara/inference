@@ -28,6 +28,7 @@ repository = "https://github.com/Inferara/inference"
 [workspace.dependencies]
 # Core Inference crates
 inference = { path = "./core/inference", version = "0.0.1" }
+inference-project-model = { path = "./core/project-model", version = "0.0.1" }
 inference-ast = { path = "./core/ast", version = "0.0.1" }
 inference-parser = { path = "./core/parser", version = "0.0.1" }
 inference-type-checker = { path = "./core/type-checker", version = "0.0.1" }
@@ -61,6 +62,7 @@ inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.99"
 toml = "1.1.2"
 cov-mark = { version = "2.2.0", default-features = false }
 leb128 = "0.2.6"

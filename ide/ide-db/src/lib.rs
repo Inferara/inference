@@ -45,7 +45,7 @@ pub use inference_vfs::{FileId, Vfs};
 // Re-export the compiler types that appear in `FileAnalysis`'s public results so
 // a consumer names them through ide-db alone. `ide-db` is the single façade the
 // feature layer above depends on.
-pub use inference::{FileParseErrors, ImportProblem};
+pub use inference_project_model::{FileParseErrors, ImportProblem};
 pub use inference_analysis::errors::{AnalysisDiagnostic, LabeledDiagnostic, Severity};
 pub use inference_ast::ids::{DefId, NodeId, SourceFileId};
 pub use inference_ast::nodes::Location;

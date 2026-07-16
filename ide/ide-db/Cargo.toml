@@ -8,7 +8,7 @@ repository = { workspace = true }
 description = "IDE Database for Inference IDE support"
 
 [dependencies]
-inference.workspace = true
+inference-project-model.workspace = true
 inference-analysis.workspace = true
 inference-ast.workspace = true
 inference-base-db.workspace = true

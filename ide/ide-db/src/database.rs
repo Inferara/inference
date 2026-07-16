@@ -14,6 +14,19 @@ use crate::analysis::FileAnalysis;
 /// Each open file is analyzed as its own project entry. Analyses are computed
 /// lazily on first request and memoized until a document change invalidates them.
 ///
+/// # Query model: read-through-`&mut self`, single-threaded
+///
+/// Because a query computes and memoizes its analysis in place,
+/// [`analysis`](Self::analysis) — a *read* — takes `&mut self`, and so does every
+/// feature query layered on it. This is correct and sufficient for the LSP main
+/// loop, which drives the database from a single thread. It is also a deliberate
+/// constraint: reading through `&mut self` forecloses request cancellation and
+/// parallel reads, which would require memoizing behind shared interior
+/// mutability (a per-query cell, dependency tracking, and cancellation) rather
+/// than a plain `&mut`-guarded map. Adopting Salsa (issue #157) is the planned
+/// path to that model; until then callers must serialize access, and no query may
+/// assume it can run concurrently with another.
+///
 /// # Per-entry source root
 ///
 /// Path-form imports resolve relative to a project's single **source root**, not
@@ -50,7 +63,7 @@ use crate::analysis::FileAnalysis;
 ///
 /// A manifest created or edited *after* a file's root was cached is therefore not
 /// observed until the document is closed and reopened: there is no filesystem
-/// watch in v1 (see the `inference::manifest` module).
+/// watch in v1 (see the `inference_project_model::manifest` module).
 ///
 /// # Closure-aware invalidation
 ///
@@ -175,7 +188,7 @@ impl RootDatabase {
         if let Some(root) = self.source_roots.get(entry) {
             return root.clone();
         }
-        if let Some(root) = inference::manifest_source_root(entry) {
+        if let Some(root) = inference_project_model::manifest_source_root(entry) {
             self.source_roots.insert(entry.to_path_buf(), root.clone());
             return root;
         }

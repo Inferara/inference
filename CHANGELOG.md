@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WASM custom section name for the per-spec function index map is now `inference.spec_funcs` (vendor-prefixed namespace). External tools previously looking for `metadata.code.inference.spec_funcs` must update. The latter was a misuse of the WebAssembly tool-conventions reserved namespace ([CodeMetadata.md](https://github.com/WebAssembly/tool-conventions/blob/main/CodeMetadata.md)) ([issue#16])
 - `inference.spec_funcs` custom section payload now starts with a `varuint32` version byte (`1` for current format). Consumers should reject unsupported versions. This is a wire-format change — anyone parsing the section directly must update; the in-tree parser handles it transparently. ([issue#16])
 
+### Changed
+
+- Extract the shared project front end into a new leaf crate `inference-project-model` (`core/project-model`) so the IDE/LSP stack no longer transitively links the WASM/Rocq backend ([#256])
+  - The crate owns the import-closure walk and `FileLoader` seam (`parse_project`, `load_project_resilient`, `DiskLoader`, `ProjectParse`, `ResilientProjectParse`, …), `read_source_file`/`strip_utf8_bom`, the `InferenceError` project errors, and manifest source-root discovery (`manifest_source_root`). Its dependencies are leaf-safe (`inference-parser`, `inference-ast`, `toml`, `rustc-hash`) — no type-checker, codegen, or wasm crates.
+  - `core/inference` re-exports every one of these items unchanged, so `infc`, `infs`, tools, and tests keep reaching them as `inference::…` with no call-site churn; compiler behavior is byte-identical.
+  - `ide-db` now depends on `inference-project-model` instead of the full `inference` orchestration crate. `cargo tree -p inference-ide-db` (and `-p inference-ide`, `-p inference-lsp`) links none of `inference-wasm-codegen`, `inference-wasm-to-v-translator`, `inference-wasm-linker`, `inf-wasmparser`, or `wasm-encoder`.
+- Drop the always-empty `ResilientProjectParse::warnings` field (the resilient IDE walk never scans for unreachable files); the fail-fast `parse_project` keeps reporting `ProjectParse::warnings` ([#256])
+- Document `RootDatabase`'s single-threaded, read-through-`&mut self` query model on `RootDatabase` and `ide/ide`'s `Analysis`: memoizing on read forecloses cancellation and parallel reads until a Salsa-style rewrite ([#157]) ([#256])
+- Declare `serde_json` in `[workspace.dependencies]` and inherit it in `apps/lsp`, `apps/infs`, and `tests` ([#256])
+
 ### Language
 
 - File-based module hierarchy (Zig-style, no `mod` keyword) ([#63])
@@ -1023,3 +1033,5 @@ Initial tagged release.
 [#241]: https://github.com/Inferara/inference/issues/241
 [#240]: https://github.com/Inferara/inference/issues/240
 [#249]: https://github.com/Inferara/inference/issues/249
+[#157]: https://github.com/Inferara/inference/issues/157
+[#256]: https://github.com/Inferara/inference/issues/256

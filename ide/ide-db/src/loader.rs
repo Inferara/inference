@@ -2,13 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use inference::{read_source_file, FileLoader};
+use inference_project_model::{read_source_file, FileLoader};
 use inference_vfs::Vfs;
 
 /// A [`FileLoader`] that consults the editor's in-memory overlay first and falls
 /// back to disk.
 ///
-/// This is the reader ide-db hands to `inference::load_project_resilient`, so an
+/// This is the reader ide-db hands to `inference_project_model::load_project_resilient`, so an
 /// open, unsaved buffer shadows its on-disk contents while imports the editor
 /// has never opened are still read from disk. It is the IDE half of the single
 /// import-resolution seam the compiler and the IDE share (the compiler passes a
@@ -87,7 +87,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use inference::FileLoader;
+    use inference_project_model::FileLoader;
     use inference_vfs::Vfs;
 
     use super::{overlay_text, VfsLoader};

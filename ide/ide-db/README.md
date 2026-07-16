@@ -13,7 +13,7 @@ apps/lsp
     |
 ide/ide
     |
-ide/ide-db  -----consumes-----> core/inference, core/analysis,
+ide/ide-db  -----consumes-----> core/project-model, core/analysis,
     |                            core/type-checker, core/ast, core/parser
 ide/base-db
     |
@@ -23,7 +23,9 @@ ide/vfs
 `ide-db` is the first layer in the IDE stack that depends on the compiler. It
 is also the *only* IDE layer that does: `ide/ide` above it never names a
 compiler type in its public API, and everything below it (`vfs`, `base-db`) is
-compiler-independent plumbing.
+compiler-independent plumbing. It reaches the compiler's front end through the
+leaf `core/project-model` crate rather than the `inference` orchestration crate,
+so the IDE stack never links the WASM/Rocq backend.
 
 ## What It Owns
 
@@ -46,7 +48,7 @@ or a compiler type re-exported verbatim (`TypeCheckError`, `AnalysisDiagnostic`,
 `NodeId`, `Location`, …). The feature layer above (`ide/ide`) translates these
 into editor-terminology PODs; the protocol layer above that (`apps/lsp`)
 translates *those* into LSP JSON. Import resolution is **not** reimplemented
-here — the closure walk lives in `core/inference` behind a `FileLoader` seam,
+here — the closure walk lives in `core/project-model` behind a `FileLoader` seam,
 and `ide-db` drives it with an overlay-then-disk loader, so the compiler and
 the IDE resolve imports identically by construction.
 
@@ -90,23 +92,23 @@ same file always arrives under one path (the LSP layer does this once, per
 
 ### The overlay-then-disk `FileLoader`
 
-`core/inference` exposes import resolution behind a `FileLoader` trait — a seam
-with exactly two methods, `exists` and `read` — so the same closure-walk logic
-drives both the compiler (`DiskLoader`, straight to `std::fs`) and the IDE. This
-crate's `VfsLoader` implements that trait by consulting the editor's `Vfs`
+`core/project-model` exposes import resolution behind a `FileLoader` trait — a
+seam with exactly two methods, `exists` and `read` — so the same closure-walk
+logic drives both the compiler (`DiskLoader`, straight to `std::fs`) and the IDE.
+This crate's `VfsLoader` implements that trait by consulting the editor's `Vfs`
 overlay first and falling back to disk, so an open, unsaved buffer shadows its
 on-disk contents while an import the editor has never opened is still read
-from disk. Driving `inference::load_project_resilient` through this loader is
-what guarantees the compiler and the IDE can never disagree about which files a
-program imports — there is exactly one resolution algorithm, parameterized
+from disk. Driving `inference_project_model::load_project_resilient` through this
+loader is what guarantees the compiler and the IDE can never disagree about which
+files a program imports — there is exactly one resolution algorithm, parameterized
 over where bytes come from.
 
 `FileAnalysis::compute` builds the loader, calls `load_project_resilient_with_root`
 (which never fails fast — every file is parsed resiliently and every problem,
 from a broken import to a syntax error, is collected as data rather than
 aborting), then type-checks the merged arena losslessly with
-`inference::type_check_with_diagnostics` and runs every registered analysis
-rule (`inference_analysis::rules::all_rules()`) over the resulting
+`inference_type_checker::check_with_diagnostics` and runs every registered
+analysis rule (`inference_analysis::rules::all_rules()`) over the resulting
 `TypedContext`.
 
 ## Per-File-Local Offsets
@@ -172,5 +174,6 @@ cargo test -p inference-ide-db
 - [`ide/vfs`](../vfs/README.md) — the path/overlay store `RootDatabase` wraps
 - [`ide/base-db`](../base-db/README.md) — `LineIndex` and the position PODs re-exported here
 - [`ide/ide`](../ide/README.md) — the feature layer built on `FileAnalysis`
-- [`core/inference`](../../core/inference/README.md) — `load_project_resilient`, `FileLoader`, `type_check_with_diagnostics`
+- [`core/project-model`](../../core/project-model/README.md) — `load_project_resilient`, `FileLoader`, and manifest source-root discovery, the leaf front end this crate drives
+- [`core/type-checker`](../../core/type-checker/README.md) — `check_with_diagnostics`, the lossless type-check `FileAnalysis` runs
 - [`core/analysis`](../../core/analysis/README.md) — the rules run over every `FileAnalysis`

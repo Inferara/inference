@@ -282,19 +282,19 @@ pub use inference_type_checker::{TypeCheckDiagnostic, TypeCheckOutcome};
 /// [`TypeCheckError::location`]: inference_type_checker::errors::TypeCheckError::location
 pub use inference_type_checker::errors::TypeCheckError;
 
-pub mod errors;
 pub mod extern_prelude;
-pub mod manifest;
-mod project;
 pub mod wasm_link;
 
-pub use errors::InferenceError;
-pub use manifest::manifest_source_root;
-pub use project::{
-    load_project_resilient, parse_project, read_source_file, strip_utf8_bom, DiskLoader,
-    load_project_resilient_with_root,
-    FileLoader, FileParseErrors, ImportProblem, LoadedFile, ProjectParse, ProjectWarning,
-    ResilientProjectParse,
+/// Re-export of the shared project front end so compiler-side consumers reach the
+/// import-closure walk, file loaders, and manifest discovery as `inference::…`
+/// without a direct dependency on `inference-project-model`. This is the same leaf
+/// crate `ide-db` depends on directly, which is what keeps the compiler and the
+/// IDE from ever disagreeing about which files a program is made of — there is one
+/// closure-walk implementation, parameterized over a [`FileLoader`].
+pub use inference_project_model::{
+    load_project_resilient, load_project_resilient_with_root, manifest_source_root, parse_project,
+    read_source_file, strip_utf8_bom, DiskLoader, FileLoader, FileParseErrors, ImportProblem,
+    InferenceError, LoadedFile, ProjectParse, ProjectWarning, ResilientProjectParse,
 };
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
