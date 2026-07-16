@@ -32,12 +32,12 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 5. Syntax Highlighting | Manual (requires VS Code host) |
 | 6. Language Configuration | Manual (requires VS Code host) |
 | 7. Walkthrough | **[A]** Schema validated (`settings-schema.test.ts`); interactive steps manual |
-| 8. Settings | **[A]** Schema validated (5 settings, 11 commands in `settings-schema.test.ts`) |
+| 8. Settings | **[A]** Schema validated (6 settings, 11 commands in `settings-schema.test.ts`) |
 | 9. Error Handling | **[A]** Most paths automated (`install-failures.test.ts`, `version-parsing.test.ts`, `e2e-installation.test.ts`) |
 | 10. Cross-Platform | Manual (requires physical platforms); detection and extraction logic tested |
 | 11. Privacy & Security | **[A]** HTTPS redirect + SHA-256 automated (`https-redirect.test.ts`, `download.test.ts`) |
 | 12. Component Management | Partial -- component args + doctor-attention logic automated (`components.test.ts`, `doctor.test.ts`); UI flows manual |
-| 13. Language Server | Partial -- binary resolution + config-change logic automated (`lsp-resolve.test.ts`); client lifecycle and editor features manual |
+| 13. Language Server | Partial -- binary resolution + config-change logic automated (`lsp-resolve.test.ts`), start-timeout helper automated (`timeout.test.ts`); client lifecycle and editor features manual |
 
 ---
 
@@ -254,7 +254,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 7.3 | Click "Install Toolchain" in walkthrough | Triggers install command, step completes | |
 | 7.4 | Step 2: "Verify Your Installation" | Shows "Run Doctor" button. Completion event: `onCommand:inference.runDoctor` | |
 | 7.5 | Click "Run Doctor" in walkthrough | Triggers doctor command, step completes | |
-| 7.6 | Step 3: "Create a Project" | Shows "Create New File" link. Completion event: `onLanguage:inference` | |
+| 7.6 | Step 3: "Create a Project" | Shows "Create New File" link and instructs saving the file with the `.inf` extension (language-server features are file-scheme only; untitled buffers get grammar-level highlighting but no diagnostics/hover/goto). Completion event: `onLanguage:inference` **[A]** description validated | |
 | 7.7 | Step 4: "Build Your Program" | Shows terminal command example: `infs build main.inf`. Completion event: `stepSelected` | |
 
 ---
@@ -263,12 +263,13 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 8.1 | Open Settings, search "inference" | Shows exactly 5 settings: path, autoInstall, checkForUpdates, lsp.enabled, lsp.path **[A]** | |
+| 8.1 | Open Settings, search "inference" | Shows exactly 6 settings: path, autoInstall, checkForUpdates, lsp.enabled, lsp.path, and the `inference-lsp.trace.server` protocol-trace knob **[A]** | |
 | 8.2 | `inference.path` | Type: string, default: empty, scope: machine. Accepts file path to infs binary. **[A]** | |
 | 8.3 | `inference.autoInstall` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.4 | `inference.checkForUpdates` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.5 | `inference.lsp.enabled` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.6 | `inference.lsp.path` | Type: string, default: empty, scope: machine. Accepts file path to inference-lsp binary. **[A]** | |
+| 8.7 | `inference-lsp.trace.server` | Type: string enum `off`/`messages`/`verbose`, default: `off`, scope: window. Recognized by settings.json IntelliSense (no "unknown configuration setting" marker). **[A]** | |
 
 ---
 
@@ -343,8 +344,12 @@ host (F5) and, unless noted, a working toolchain (`infs` on PATH or in `INFERENC
 The extension starts the `inference-lsp` binary (stdio LSP server) automatically
 when it can be resolved. Resolution mirrors `infs` detection: `inference.lsp.path`
 setting (no fallback if set but not executable) > `INFERENCE_HOME/bin/inference-lsp`
-> PATH. Resolution and config-change logic are automated in `lsp-resolve.test.ts`;
-the cases below need a live extension host (F5) and a built `inference-lsp` binary.
+> PATH. The client registers for `file`-scheme documents only: untitled buffers
+get grammar-level syntax highlighting but no language-server features until saved
+as `.inf` (the server's URI layer ignores non-file URIs by design). Resolution and
+config-change logic are automated in `lsp-resolve.test.ts` and the start-timeout
+helper in `timeout.test.ts`; the cases below need a live extension host (F5) and
+a built `inference-lsp` binary.
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
@@ -365,3 +370,7 @@ the cases below need a live extension host (F5) and a built `inference-lsp` bina
 | 13.15 | Ctrl+Shift+P > "Inference: Restart Language Server" | Server stops and starts; fresh `Language server started` line in Output | |
 | 13.16 | **Toolchain switch pickup:** with the server running, run "Inference: Update Toolchain" or "Inference: Select Toolchain Version" and let it succeed | Server restarts automatically on the new toolchain's binary WITHOUT a manual restart or window reload (Output shows "Language server stopped." then a fresh `Language server started: ...`) | |
 | 13.17 | Close VS Code / reload window | No orphan `inference-lsp` processes remain (check with `ps`/Task Manager) | |
+| 13.18 | **Untitled buffer (by design):** create an untitled buffer and set its language to Inference | Syntax highlighting works; NO diagnostics/hover/goto (file-scheme document selector). Saving the buffer as `.inf` activates the full feature set. | |
+| 13.19 | **Hung start:** point `inference.lsp.path` at a script that spawns but never answers initialize (e.g. `#!/bin/sh` + `sleep 1000`), restart the server | After 30s the attempt is abandoned: Output logs `Language server failed to start ... no response to the initialize request within 30s`, a warning notification with a "Show Output" button appears, the process is shut down, and later lifecycle commands (restart, disable) still work — the queue is not wedged | |
+| 13.20 | **Disable during slow start:** with a slow-to-initialize server, set `inference.lsp.enabled: false` while the start is still in flight | The server ends up STOPPED once the in-flight start completes — the last setting wins regardless of interleaving | |
+| 13.21 | **Protocol trace:** set `inference-lsp.trace.server` to `verbose` | "Inference Language Server" output channel logs LSP protocol traffic; setting back to `off` silences it | |
