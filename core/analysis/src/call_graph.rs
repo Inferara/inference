@@ -645,14 +645,20 @@ mod tests {
         );
     }
 
-    /// `is_parse_recovered` must catch the recovery marker wherever the parser can
-    /// synthesize it — a free/method name, a recovered struct name, or a recovered
-    /// spec name — while a fully real key is rejected. The `module_path` qualifier
-    /// is filesystem-derived and never counts, even if a segment literally spells
-    /// the marker.
+    /// `is_parse_recovered` must catch the recovery marker in *every* recoverable
+    /// identity segment the parser can synthesize — all eight across the four
+    /// variants: `Free.name`; `Method.struct_name` / `Method.name`;
+    /// `SpecFree.spec` / `SpecFree.name`; and `SpecMethod.spec` /
+    /// `SpecMethod.struct_name` / `SpecMethod.name`. Each positive case leaves the
+    /// other segments real so a branch that silently stopped inspecting one of
+    /// them regresses here. A fully real key is rejected, and the `module_path`
+    /// qualifier is filesystem-derived and never counts, even if a segment
+    /// literally spells the marker.
     #[test]
     fn parse_recovered_predicate_matches_every_synthesized_segment() {
+        // Free.name
         assert!(is_parse_recovered(&FnKey::free_in(Vec::new(), "<error>")));
+        // Method.struct_name and Method.name
         assert!(is_parse_recovered(&FnKey::method_in(
             path(&["a"]),
             "<error>",
@@ -663,10 +669,23 @@ mod tests {
             "T",
             "<error>"
         )));
+        // SpecFree.spec and SpecFree.name
         assert!(is_parse_recovered(&FnKey::spec_free_folded(
             &[],
             "<error>",
             "f"
+        )));
+        assert!(is_parse_recovered(&FnKey::spec_free_folded(
+            &[],
+            "S",
+            "<error>"
+        )));
+        // SpecMethod.spec, SpecMethod.struct_name, and SpecMethod.name
+        assert!(is_parse_recovered(&FnKey::spec_method_folded(
+            &[],
+            "<error>",
+            "T",
+            "m"
         )));
         assert!(is_parse_recovered(&FnKey::spec_method_folded(
             &[],
@@ -674,12 +693,22 @@ mod tests {
             "<error>",
             "m"
         )));
+        assert!(is_parse_recovered(&FnKey::spec_method_folded(
+            &[],
+            "S",
+            "T",
+            "<error>"
+        )));
 
         assert!(!is_parse_recovered(&FnKey::free_in(path(&["a"]), "real")));
         assert!(!is_parse_recovered(&FnKey::method_in(
             path(&["a"]),
             "T",
             "m"
+        )));
+        assert!(!is_parse_recovered(&FnKey::spec_free_folded(&[], "S", "f")));
+        assert!(!is_parse_recovered(&FnKey::spec_method_folded(
+            &[], "S", "T", "m"
         )));
         assert!(
             !is_parse_recovered(&FnKey::free_in(path(&["<error>"]), "real")),
@@ -692,19 +721,17 @@ mod tests {
     /// resolve to the wrong same-keyed node and mask a cycle from A035/A036. In
     /// debug builds the `debug_assert` must fire. Gated to debug builds (the
     /// assert is compiled out in release) and catching the unwind rather than
-    /// using `#[should_panic]` (banned), with the default hook muted so the
-    /// intentional panic does not litter the test log.
+    /// using `#[should_panic]` (banned); the panic hook is left untouched so no
+    /// process-global state is mutated (mirrors the parser's
+    /// `advance_guard_panics_on_stuck_loop`).
     #[cfg(debug_assertions)]
     #[test]
     fn adjacency_tripwire_fires_on_genuine_duplicate_in_debug() {
         let dup_key = || FnKey::free_in(path(&["lib"]), "collide");
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let result = std::panic::catch_unwind(|| {
             let nodes = vec![node(dup_key(), vec![]), node(dup_key(), vec![])];
             resolve_adjacency(&nodes)
         });
-        std::panic::set_hook(prev_hook);
         assert!(
             result.is_err(),
             "a genuine (non-recovered) duplicate FnKey must trip the debug tripwire"
