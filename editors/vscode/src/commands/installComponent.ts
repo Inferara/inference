@@ -103,7 +103,7 @@ function installWithProgress(
     infsPath: string,
     component: ComponentName,
     outputChannel: vscode.OutputChannel,
-): Promise<ExecResult> {
+): Thenable<ExecResult> {
     return vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,

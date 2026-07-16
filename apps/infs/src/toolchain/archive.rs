@@ -369,14 +369,20 @@ fn find_common_root_folder<R: std::io::Read + std::io::Seek>(
     }
 }
 
-/// Sets executable permissions on the `infc` binary within a toolchain directory (Unix only).
+/// Sets executable permissions on the managed binaries within a toolchain
+/// directory (Unix only).
+///
+/// Always targets the `infc` binary at the toolchain root, plus each optional
+/// managed binary (e.g. the bundled `inference-lsp` server) when present.
+/// Toolchains that predate the bundling lack the optional binaries, so their
+/// absence is silently skipped.
 ///
 /// On Windows, this function does nothing since executable permissions are not
 /// managed the same way.
 ///
 /// # Arguments
 ///
-/// * `dir` - The toolchain directory containing the `infc` binary at root.
+/// * `dir` - The toolchain directory containing the managed binaries at root.
 ///
 /// # Errors
 ///
@@ -393,6 +399,13 @@ pub fn set_executable_permissions(dir: &Path) -> Result<()> {
         perms.set_mode(0o755);
         std::fs::set_permissions(&infc_path, perms)
             .with_context(|| format!("Failed to set permissions: {}", infc_path.display()))?;
+    }
+
+    for optional in crate::toolchain::ToolchainPaths::OPTIONAL_MANAGED_BINARIES {
+        let path = dir.join(optional);
+        if path.is_file() {
+            set_executable_file(&path)?;
+        }
     }
 
     Ok(())
@@ -1013,6 +1026,47 @@ mod tests {
             let result = set_executable_permissions(&temp_dir);
 
             assert!(result.is_ok(), "Should succeed without infc binary");
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn set_executable_permissions_sets_755_on_bundled_inference_lsp() {
+            let temp_dir = temp_test_dir("exec_perm_lsp");
+            let infc_path = temp_dir.join("infc");
+            let lsp_path = temp_dir.join("inference-lsp");
+            std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
+            std::fs::write(&lsp_path, b"lsp binary").expect("Should write inference-lsp");
+
+            for path in [&infc_path, &lsp_path] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+                    .expect("Should set initial perms");
+            }
+
+            set_executable_permissions(&temp_dir).expect("Should set permissions");
+
+            let lsp_mode = std::fs::metadata(&lsp_path)
+                .expect("Should get metadata")
+                .permissions()
+                .mode();
+            assert_eq!(lsp_mode & 0o777, 0o755, "inference-lsp should have 0o755 mode");
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn set_executable_permissions_skips_absent_inference_lsp() {
+            let temp_dir = temp_test_dir("exec_perm_lsp_absent");
+            let infc_path = temp_dir.join("infc");
+            std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
+
+            // A toolchain that predates the bundling has no inference-lsp; the
+            // call must still succeed and leave the directory unchanged.
+            set_executable_permissions(&temp_dir).expect("Should succeed without inference-lsp");
+            assert!(
+                !temp_dir.join("inference-lsp").exists(),
+                "no inference-lsp file should be created"
+            );
 
             let _ = std::fs::remove_dir_all(&temp_dir);
         }

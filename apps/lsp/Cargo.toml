@@ -10,3 +10,11 @@ description = "Inference Language Server Protocol implementation"
 [[bin]]
 name = "inference-lsp"
 path = "src/main.rs"
+
+[dependencies]
+lsp-server = "=0.8.0"
+lsp-types = "=0.97.0"
+serde_json = "1.0"
+anyhow.workspace = true
+rustc-hash.workspace = true
+inference-ide.workspace = true

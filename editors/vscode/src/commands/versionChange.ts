@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { installAndSetDefault } from '../toolchain/versions';
+import { ensureLspStarted } from '../lsp/client';
 
 /**
  * Perform a version change (install + set default) with progress UI.
@@ -33,6 +34,7 @@ export async function performVersionChange(
                 );
                 vscode.commands.executeCommand('inference.applyTerminalPath');
                 vscode.commands.executeCommand('inference.runDoctor');
+                void ensureLspStarted();
                 vscode.window
                     .showInformationMessage(
                         `Inference toolchain ${actionVerb.toLowerCase()} to v${version}.`,

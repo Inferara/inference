@@ -1,8 +1,8 @@
 # Inference VS Code Extension -- Manual QA Guide
 
-**Version:** 0.0.3
-**Branch:** `127-update-vscode-extension-after-removing-llvm`
-**Date:** 2026-02-18
+**Version:** 0.0.5
+**Branch:** `33-feature-lsp-server`
+**Date:** 2026-07-04
 
 ---
 
@@ -32,11 +32,12 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 5. Syntax Highlighting | Manual (requires VS Code host) |
 | 6. Language Configuration | Manual (requires VS Code host) |
 | 7. Walkthrough | **[A]** Schema validated (`settings-schema.test.ts`); interactive steps manual |
-| 8. Settings | **[A]** Schema validated (9 commands in `settings-schema.test.ts`) |
+| 8. Settings | **[A]** Schema validated (5 settings, 11 commands in `settings-schema.test.ts`) |
 | 9. Error Handling | **[A]** Most paths automated (`install-failures.test.ts`, `version-parsing.test.ts`, `e2e-installation.test.ts`) |
 | 10. Cross-Platform | Manual (requires physical platforms); detection and extraction logic tested |
 | 11. Privacy & Security | **[A]** HTTPS redirect + SHA-256 automated (`https-redirect.test.ts`, `download.test.ts`) |
 | 12. Component Management | Partial -- component args + doctor-attention logic automated (`components.test.ts`, `doctor.test.ts`); UI flows manual |
+| 13. Language Server | Partial -- binary resolution + config-change logic automated (`lsp-resolve.test.ts`); client lifecycle and editor features manual |
 
 ---
 
@@ -47,8 +48,8 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 224 tests pass, 0 failures |
-| 0.5 | `npm run package` | Produces `inference-0.0.3.vsix` without errors |
+| 0.4 | `npm test` | All 257 tests pass, 0 failures |
+| 0.5 | `npm run package` | Produces `inference-0.0.5.vsix` without errors (bundled; no `node_modules` inside the VSIX) |
 
 ---
 
@@ -184,18 +185,25 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 4.4.8 | If install succeeds but setting default fails | Warning: "Inference: vX.Y.Z was installed but could not be set as default. Run `infs default X.Y.Z` manually." with "Show Output" button | |
 | 4.4.9 | If install itself fails | Error: "Inference: Failed to install vX.Y.Z: {error}" | |
 
-### 4.5 Show Output (`inference.showOutput`)
+### 4.5 Restart Language Server (`inference.restartLsp`)
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 4.5.1 | Ctrl+Shift+P > "Inference: Show Output" | Opens the "Inference" output channel panel | |
+| 4.5.1 | Ctrl+Shift+P > "Inference: Restart Language Server" (server running) | Output channel "Inference" logs "Language server stopped." then "Language server started: {path} ({source})" | |
+| 4.5.2 | Run the command with **no** `inference-lsp` binary available | No notification; Output channel logs "Language server not started: inference-lsp not found ..." | |
 
-### 4.6 Reset PATH Fallback Preference (`inference.resetPathAcceptance`)
+### 4.6 Show Output (`inference.showOutput`)
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 4.6.1 | Ctrl+Shift+P > "Inference: Reset PATH Fallback Preference" | Info: "Inference: PATH fallback preference has been reset." | |
-| 4.6.2 | Reload window after reset (with INFERENCE_HOME set, infs only in PATH) | PATH fallback warning reappears | |
+| 4.6.1 | Ctrl+Shift+P > "Inference: Show Output" | Opens the "Inference" output channel panel | |
+
+### 4.7 Reset PATH Fallback Preference (`inference.resetPathAcceptance`)
+
+| # | Step | Expected | Pass? |
+|---|------|----------|-------|
+| 4.7.1 | Ctrl+Shift+P > "Inference: Reset PATH Fallback Preference" | Info: "Inference: PATH fallback preference has been reset." | |
+| 4.7.2 | Reload window after reset (with INFERENCE_HOME set, infs only in PATH) | PATH fallback warning reappears | |
 
 ---
 
@@ -255,10 +263,12 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 8.1 | Open Settings, search "inference" | Shows exactly 3 settings: path, autoInstall, checkForUpdates **[A]** | |
+| 8.1 | Open Settings, search "inference" | Shows exactly 5 settings: path, autoInstall, checkForUpdates, lsp.enabled, lsp.path **[A]** | |
 | 8.2 | `inference.path` | Type: string, default: empty, scope: machine. Accepts file path to infs binary. **[A]** | |
 | 8.3 | `inference.autoInstall` | Type: boolean, default: true. Toggleable. **[A]** | |
 | 8.4 | `inference.checkForUpdates` | Type: boolean, default: true. Toggleable. **[A]** | |
+| 8.5 | `inference.lsp.enabled` | Type: boolean, default: true. Toggleable. **[A]** | |
+| 8.6 | `inference.lsp.path` | Type: string, default: empty, scope: machine. Accepts file path to inference-lsp binary. **[A]** | |
 
 ---
 
@@ -313,7 +323,7 @@ host (F5) and, unless noted, a working toolchain (`infs` on PATH or in `INFERENC
 
 | # | Step | Expected | Pass? |
 |---|------|----------|-------|
-| 12.1 | In `editors/vscode/`: `npm install`, `npm run build`, `npm test` | Installs and builds clean; all 224 tests pass, 0 failures | |
+| 12.1 | In `editors/vscode/`: `npm install`, `npm run build`, `npm test` | Installs and builds clean; all 257 tests pass, 0 failures | |
 | 12.2 | Ctrl+Shift+P > "Inference: Install Component (wasm-opt)" | Progress notification "Inference Component" ("Installing wasm-opt..."). On success: info "Inference: component 'wasm-opt' installed." Doctor re-runs and the status bar refreshes. | |
 | 12.3 | After install, run `~/.inference/tools/binaryen/version_130/bin/wasm-opt --version` in a terminal | Prints a Binaryen version (>= 116) | |
 | 12.4 | Run the install command **again** (component already installed) | Completes quickly with a skip message in the Output channel; success info notification; no error | |
@@ -325,3 +335,33 @@ host (F5) and, unless noted, a working toolchain (`infs` on PATH or in `INFERENC
 | 12.10 | Click "Show Output" on the failure notification | Reveals the Inference output channel with the failure details | |
 | 12.11 | Click "Retry" on the failure notification | Re-invokes the install command | |
 | 12.12 | **PATH shadowing:** place a `wasm-opt` on PATH while the managed copy exists, then Run Doctor | Doctor's `wasm-opt` OK line notes the managed copy is shadowed by PATH | |
+
+---
+
+## 13. Language Server
+
+The extension starts the `inference-lsp` binary (stdio LSP server) automatically
+when it can be resolved. Resolution mirrors `infs` detection: `inference.lsp.path`
+setting (no fallback if set but not executable) > `INFERENCE_HOME/bin/inference-lsp`
+> PATH. Resolution and config-change logic are automated in `lsp-resolve.test.ts`;
+the cases below need a live extension host (F5) and a built `inference-lsp` binary.
+
+| # | Step | Expected | Pass? |
+|---|------|----------|-------|
+| 13.1 | With `inference-lsp` in `~/.inference/bin` (or on PATH), open a `.inf` file | Output channel "Inference" logs `Language server started: {path} (managed|path)`. A second output channel "Inference Language Server" appears for server traces. | |
+| 13.2 | Introduce a syntax/type error in the `.inf` file | Squiggles appear; Problems panel lists the diagnostic | |
+| 13.3 | Hover a non-deterministic construct (e.g. `forall`) | Hover popup explains the operator | |
+| 13.4 | Hover a variable or function name | Hover shows type information | |
+| 13.5 | F12 (Go to Definition) on a function call | Cursor jumps to the function definition | |
+| 13.6 | Trigger completion (Ctrl+Space) in a function body | Context-aware completion items appear | |
+| 13.7 | Open the Outline view | Document symbols (functions, types) are listed | |
+| 13.8 | Rename note | Rename (F2) is not provided yet -- no crash, VS Code reports no rename provider | |
+| 13.9 | **Missing binary (quiet path):** remove `inference-lsp` from all locations, reload window | NO notification. Output channel logs `Language server not started: inference-lsp not found ...`. Toolchain-missing notification (if any) comes from the toolchain check only. | |
+| 13.10 | **Out-of-the-box story:** from 13.9, run "Inference: Install Toolchain" and wait for success | Language server starts automatically after the install completes, WITHOUT a window reload (Output shows `Language server started: ...`) | |
+| 13.11 | **Disable:** set `inference.lsp.enabled: false` while the server is running | Server stops (Output: "Language server stopped."); diagnostics disappear | |
+| 13.12 | **Re-enable:** set `inference.lsp.enabled: true` | Server starts again without a reload | |
+| 13.13 | **Custom path:** set `inference.lsp.path` to a valid binary | Server restarts using that path; Output shows `(settings)` as the source | |
+| 13.14 | **Invalid custom path (no fallback):** set `inference.lsp.path` to a nonexistent path while managed/PATH binaries exist | Server stops and does NOT fall back; Output logs the path is not executable; no notification | |
+| 13.15 | Ctrl+Shift+P > "Inference: Restart Language Server" | Server stops and starts; fresh `Language server started` line in Output | |
+| 13.16 | **Update pickup:** after "Inference: Update Toolchain" replaces the managed binary, run the restart command | Server restarts on the new binary version | |
+| 13.17 | Close VS Code / reload window | No orphan `inference-lsp` processes remain (check with `ps`/Task Manager) | |

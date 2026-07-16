@@ -264,6 +264,23 @@
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
+/// Re-export of the lossless type-check entry point and its result types so
+/// downstream consumers (IDE/LSP) get the structured diagnostics and the
+/// partially-populated [`TypedContext`] without a direct dependency on
+/// `inference-type-checker`. Mirrors the [`type_check`] wrapper, but keeps the
+/// per-error [`TypeCheckError`] and file label instead of joining them into one
+/// string.
+///
+/// [`TypeCheckError`]: inference_type_checker::errors::TypeCheckError
+pub use inference_type_checker::{TypeCheckDiagnostic, TypeCheckOutcome};
+
+/// Re-export of the structured type-check error so downstream consumers can
+/// match on a [`TypeCheckDiagnostic`]'s variant and read its source location
+/// (via [`TypeCheckError::location`]) without a direct dependency on
+/// `inference-type-checker`. Mirrors the [`WasmToVError`]/[`LinkError`] re-exports.
+///
+/// [`TypeCheckError::location`]: inference_type_checker::errors::TypeCheckError::location
+pub use inference_type_checker::errors::TypeCheckError;
 
 pub mod errors;
 pub mod extern_prelude;
@@ -271,7 +288,10 @@ mod project;
 pub mod wasm_link;
 
 pub use errors::InferenceError;
-pub use project::{parse_project, ProjectParse, ProjectWarning};
+pub use project::{
+    load_project_resilient, parse_project, DiskLoader, FileLoader, FileParseErrors, ImportProblem,
+    LoadedFile, ProjectParse, ProjectWarning, ResilientProjectParse,
+};
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
@@ -504,6 +524,24 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
     let type_checker_builder =
         inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?;
     Ok(type_checker_builder.typed_context())
+}
+
+/// Type-checks `arena` losslessly, returning the [`TypedContext`] together with
+/// the structured type-check diagnostics instead of one aggregated string.
+///
+/// Unlike [`type_check`], which discards the context on any error and joins the
+/// errors into a single [`anyhow::Error`], this preserves every error's variant,
+/// per-file-local source location, and optional module-path file label, and
+/// returns the (possibly partially populated) context alongside them. It is the
+/// entry point tooling (IDE/LSP) uses to report diagnostics and still serve
+/// features on the parts of the program that type-checked.
+///
+/// See [`TypeCheckOutcome`] for the guarantees the returned context provides
+/// when errors are present. The runtime compilation pipeline keeps using
+/// [`type_check`]; the two share exactly one checking implementation.
+#[must_use = "the outcome carries both the typed context and the diagnostics"]
+pub fn type_check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
+    inference_type_checker::check_with_diagnostics(arena)
 }
 
 /// Performs semantic analysis on the typed AST.

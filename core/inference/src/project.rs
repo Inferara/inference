@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use inference_ast::arena::AstArena;
-use inference_ast::nodes::{Directive, SourceFileData, UseDirective};
+use inference_ast::nodes::{Directive, Location, SourceFileData, UseDirective};
+use inference_parser::ParseError;
 use rustc_hash::FxHashSet;
 
 use crate::errors::InferenceError;
@@ -36,6 +37,45 @@ const SOURCE_EXTENSION: &str = "inf";
 /// Maximum edit distance at which a sibling filename is offered as a
 /// "did you mean" suggestion for a missing import.
 const SUGGESTION_MAX_DISTANCE: usize = 2;
+
+/// Reads source files for the import-closure walk.
+///
+/// The walk itself is pure: it decides which files a program's `use` graph
+/// reaches and where each one lives, but never touches the filesystem directly.
+/// A `FileLoader` supplies the two capabilities it needs — existence and
+/// contents — so the same resolution logic drives both the compiler (a
+/// [`DiskLoader`]) and the IDE (an overlay-then-disk loader that lets an open,
+/// unsaved buffer shadow its on-disk contents). Keeping one walk behind this
+/// seam is what guarantees the compiler and the IDE can never disagree about
+/// which files a program imports.
+pub trait FileLoader {
+    /// Whether a source file exists at `path`.
+    #[must_use = "the existence check is the reason to call this"]
+    fn exists(&self, path: &Path) -> bool;
+
+    /// Reads the full source text at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error if the file cannot be read.
+    fn read(&self, path: &Path) -> std::io::Result<String>;
+}
+
+/// A [`FileLoader`] backed directly by the filesystem, used by the compiler
+/// front end. Existence is a plain `is_file` probe and reads go straight to
+/// `std::fs`.
+#[derive(Debug, Default)]
+pub struct DiskLoader;
+
+impl FileLoader for DiskLoader {
+    fn exists(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+}
 
 /// Outcome of parsing a project: the unified arena plus any non-fatal warnings.
 ///
@@ -70,6 +110,114 @@ impl std::fmt::Display for ProjectWarning {
     }
 }
 
+/// A single reachable file discovered by the resilient walk: its canonical
+/// module path (empty for the entry file) paired with the absolute path it was
+/// read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedFile {
+    /// Source-root-relative module path; empty for the entry file.
+    pub module_path: Vec<String>,
+    /// The path the file was read from.
+    pub path: PathBuf,
+}
+
+/// A file's own syntax errors, labeled with the file it belongs to.
+///
+/// Source locations in a merged multi-file arena are per-file-local, so the
+/// module path is required to attribute each error to the right file. The entry
+/// file carries an empty module path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileParseErrors {
+    /// Source-root-relative module path of the file; empty for the entry file.
+    pub module_path: Vec<String>,
+    /// The syntax errors the resilient parser collected for this file.
+    pub errors: Vec<ParseError>,
+}
+
+/// A `use` import that could not be resolved to a file on the loader.
+///
+/// Unlike the compiler front end, which fails fast on the first missing import,
+/// the resilient walk records each one as structured data anchored at the `use`
+/// directive so the IDE can render a diagnostic in place without aborting the
+/// rest of the analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportProblem {
+    /// The `::`-joined import path as written (`lib::arith`).
+    pub referenced_as: String,
+    /// The absolute path the resolver looked for.
+    pub expected_path: PathBuf,
+    /// The nearest sibling `.inf` stem, when one is within the suggestion
+    /// distance; used to offer a "did you mean" hint.
+    pub suggestion: Option<String>,
+    /// Location of the `use` directive within the importing file. Offsets are
+    /// per-file-local, to be resolved against the importing file's line index.
+    pub location: Location,
+    /// Module path of the importing file, naming which file `location` belongs
+    /// to; empty for the entry file.
+    pub importing_module_path: Vec<String>,
+}
+
+/// The lossless outcome of the resilient project walk, for IDE use.
+///
+/// Where [`parse_project`] fails fast and discards everything on the first
+/// problem, this returns the merged arena built from every reachable file that
+/// could be read (each parsed resiliently) alongside the problems collected
+/// along the way, so an editor can serve features on the healthy parts of a
+/// program with broken imports or syntax errors.
+#[derive(Debug)]
+#[must_use = "the resilient parse carries the arena and every collected problem"]
+pub struct ResilientProjectParse {
+    /// Every reachable file that could be read, lowered into one arena in
+    /// canonical order (entry first, then imports sorted by module path).
+    pub arena: AstArena,
+    /// Per-file syntax errors, each labeled with its file's module path.
+    pub parse_errors: Vec<FileParseErrors>,
+    /// `use` imports that did not resolve to a file.
+    pub import_problems: Vec<ImportProblem>,
+    /// Always empty. The resilient walk does not scan the source tree for
+    /// unreachable files: that scan enumerates and canonicalizes every `.inf`
+    /// under the source root — work an editor would repeat on every keystroke,
+    /// growing with the tree — and no IDE consumer reads the result. The field is
+    /// retained so the resilient outcome mirrors [`ProjectParse`]'s shape; the
+    /// fail-fast [`parse_project`] still populates its own warnings.
+    pub warnings: Vec<ProjectWarning>,
+    /// Every file actually read, in discovery order: its module path and the
+    /// path it was read from. Serves as both the closure file set and the
+    /// module-path → path mapping.
+    pub files: Vec<LoadedFile>,
+}
+
+/// A problem encountered while walking the import closure. Recorded by the walk
+/// in the exact sequence the fail-fast front end would surface them, so
+/// [`parse_project`] can translate the first one and stay byte-identical.
+enum WalkProblem {
+    /// A reachable file could not be read.
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// A `use` path segment is not a usable file/directory name.
+    InvalidSegment {
+        referenced_as: String,
+        segment: String,
+    },
+    /// A file failed to parse (its own syntax errors).
+    FileParse {
+        module_path: Vec<String>,
+        errors: Vec<ParseError>,
+    },
+    /// A `use` named a file the loader has no contents for.
+    MissingImport(ImportProblem),
+}
+
+/// The raw result of one closure walk, shared by the fail-fast compiler entry
+/// and the resilient IDE entry.
+struct WalkOutcome {
+    arena: AstArena,
+    files: Vec<LoadedFile>,
+    problems: Vec<WalkProblem>,
+}
+
 /// Parses a project starting from `entry`, returning one arena holding every
 /// import-reachable file plus any unreachable-file warnings.
 ///
@@ -78,6 +226,10 @@ impl std::fmt::Display for ProjectWarning {
 /// file under the root, until the reachable closure is exhausted. Each reachable
 /// file is read and parsed exactly once, into the shared arena as it is
 /// discovered. Import cycles are permitted and terminate via a visited set.
+///
+/// Reads go through a [`DiskLoader`] and the walk fails fast on the first
+/// problem, preserving the exact errors and ordering the compiler front end has
+/// always produced.
 ///
 /// # Errors
 ///
@@ -93,107 +245,362 @@ pub fn parse_project(entry: &Path) -> anyhow::Result<ProjectParse> {
         .ok_or_else(|| InferenceError::NoSourceRoot(entry.to_path_buf()))?
         .to_path_buf();
 
-    let arena = parse_reachable_files(entry, &src_root)?;
-    let warnings = collect_unreachable_warnings(&arena, &src_root, entry);
+    let WalkOutcome {
+        arena, problems, ..
+    } = resolve_closure(entry, &src_root, &DiskLoader, false);
 
+    if let Some(problem) = problems.into_iter().next() {
+        return Err(fail_fast_error(problem, entry));
+    }
+
+    let warnings = collect_unreachable_warnings(&arena, &src_root, entry);
     Ok(ProjectParse { arena, warnings })
 }
 
-/// Breadth-first walk of the import closure, parsing every reachable file exactly
-/// once into a shared arena. Each file is keyed by its canonical module path so a
-/// file reached twice (including through a cycle) is parsed once.
+/// Resiliently loads the import closure of `entry` through `loader`, collecting
+/// every problem instead of failing fast.
+///
+/// Imports resolve exactly as they do for [`parse_project`] — the same
+/// `<src_root>/<segments>.inf` mapping, the reserved `use root;` handle, and
+/// entry self-import deduplication — but every file is parsed resiliently and
+/// every problem (a file's syntax errors, an unresolved import) is recorded
+/// while the walk keeps going. Reads consult `loader`, so an IDE overlay can
+/// shadow on-disk contents. The returned arena holds every file that could be
+/// read, so editor features still work on the healthy parts of a broken program.
+///
+/// The source root is `entry`'s parent directory (or the empty path when it has
+/// none, matching how a bare filename resolves relative to the working
+/// directory). Unreachable-file warnings and missing-import suggestions are
+/// computed against the filesystem, matching [`parse_project`].
+pub fn load_project_resilient(entry: &Path, loader: &dyn FileLoader) -> ResilientProjectParse {
+    let src_root = entry
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+
+    let WalkOutcome {
+        arena,
+        files,
+        problems,
+    } = resolve_closure(entry, &src_root, loader, true);
+
+    let mut parse_errors = Vec::new();
+    let mut import_problems = Vec::new();
+    for problem in problems {
+        match problem {
+            WalkProblem::FileParse {
+                module_path,
+                errors,
+            } => parse_errors.push(FileParseErrors {
+                module_path,
+                errors,
+            }),
+            WalkProblem::MissingImport(import) => import_problems.push(import),
+            // A read race (the loader claimed a file exists, then failed to read
+            // it) or an invalid segment (unreachable from valid lexer output)
+            // simply drops the affected file/directive from the closure.
+            WalkProblem::Io { .. } | WalkProblem::InvalidSegment { .. } => {}
+        }
+    }
+
+    // The resilient walk never scans the source tree for unreachable files. The
+    // scan enumerates and canonicalizes every `.inf` file under the source root,
+    // which for an editor runs on every keystroke and grows with the tree — yet no
+    // IDE consumer reads these warnings. They are always empty here; the fail-fast
+    // compiler keeps the scan (see [`ResilientProjectParse::warnings`]).
+    // The resilient walk never scans the source tree for unreachable files. The
+    // scan enumerates and canonicalizes every `.inf` file under the source root,
+    // which for an editor runs on every keystroke and grows with the tree — yet no
+    // IDE consumer reads these warnings. They are always empty here; the fail-fast
+    // compiler keeps the scan (see [`ResilientProjectParse::warnings`]).
+    ResilientProjectParse {
+        arena,
+        parse_errors,
+        import_problems,
+        warnings: Vec::new(),
+        files,
+    }
+}
+
+/// Breadth-first walk of the import closure through `loader`, parsing every
+/// reachable file exactly once into a shared arena. Each file is keyed by its
+/// canonical module path so a file reached twice (including through a cycle) is
+/// parsed once.
+///
+/// When `resilient` is false the walk stops at the first problem it records
+/// (fail-fast, for the compiler); when true it records every problem and keeps
+/// going (for the IDE). Either way, problems are recorded in a fixed order per
+/// file — its read error, then its own syntax errors, then its first invalid
+/// segment, then its missing imports — so the fail-fast caller surfaces exactly
+/// the error it always has.
 ///
 /// Files accumulate in discovery (BFS) order; the walk ends by reordering them
 /// into canonical order (see [`AstArena::canonicalize_source_file_order`]), the
 /// single source of truth downstream phases consume for ordering.
-fn parse_reachable_files(entry: &Path, src_root: &Path) -> anyhow::Result<AstArena> {
-    let mut arena = AstArena::default();
-    let mut visited: FxHashSet<Vec<String>> = FxHashSet::default();
-    let mut queue: VecDeque<(Vec<String>, PathBuf)> = VecDeque::new();
+fn resolve_closure(
+    entry: &Path,
+    src_root: &Path,
+    loader: &dyn FileLoader,
+    resilient: bool,
+) -> WalkOutcome {
+    Walk::new(entry, src_root, loader, resilient).run()
+}
 
-    // The entry is the one file with an empty module path. It is keyed by the
-    // empty segment list, but a `use main;` that resolves to the entry file
-    // carries the segments `["main"]`, which the visited set would not catch — so
-    // a path resolving to the entry file is recognized separately, below.
-    let entry_canonical = std::fs::canonicalize(entry).ok();
-    visited.insert(Vec::new());
-    queue.push_back((Vec::new(), entry.to_path_buf()));
+/// The mutable state of one closure walk. Holds the growing arena, the BFS
+/// frontier, and the collected problems; its methods carry one file at a time
+/// through read → parse → import resolution.
+struct Walk<'a> {
+    src_root: &'a Path,
+    loader: &'a dyn FileLoader,
+    resilient: bool,
+    /// The entry's path exactly as given. A self-import that resolves back to the
+    /// entry is recognized by plain equality against this, which holds even for an
+    /// editor overlay that never reached disk (and so cannot be canonicalized).
+    entry_raw: PathBuf,
+    /// The entry's canonical path, used to also recognize a self-import that
+    /// reaches the entry through a different spelling or a symlink. `None` if the
+    /// entry cannot be canonicalized (e.g. an unsaved overlay buffer).
+    entry_canonical: Option<PathBuf>,
+    arena: AstArena,
+    visited: FxHashSet<Vec<String>>,
+    queue: VecDeque<(Vec<String>, PathBuf)>,
+    files: Vec<LoadedFile>,
+    problems: Vec<WalkProblem>,
+}
 
-    while let Some((module_path, file_path)) = queue.pop_front() {
-        let source = read_source(&file_path)?;
-        // `module_path` is moved into the arena by `parse_into` but still needed by
-        // the parse-error arm below, so clone it for the move.
-        let parsed = inference_parser::parse_into(arena, &source, module_path.clone());
-        arena = parsed.arena;
-
-        // Surface a file's own syntax errors before resolving its imports. A
-        // rejected `use a::b::*;` still lowers to the segments `a::b`, so without
-        // this guard the glob would be probed as the file `a/b.inf`; when that
-        // file is absent, the "file not found" lookup would mask the educational
-        // glob diagnostic. Reporting the parse error first means the user sees why
-        // their directive is invalid rather than a misleading missing-file path.
-        if !parsed.errors.is_empty() {
-            return Err(parse_error(&module_path, entry, &parsed.errors));
-        }
-
-        // `parse_into` lowers the file's `SourceFileData` after all of its defs and
-        // directives, so the file just parsed is the last one stored (pinned by
-        // `parse_into_allocates_the_new_file_last` in `core/parser`).
-        let file = arena
-            .last_source_file()
-            .expect("parse_into stores the file it just lowered");
-        debug_assert_eq!(
-            file.module_path, module_path,
-            "parse_into must store the just-lowered file last"
-        );
-
-        for segments in path_form_imports(&arena, file)? {
-            if visited.contains(&segments) {
-                continue;
-            }
-            let dep_path = module_file_path(src_root, &segments);
-            if !dep_path.is_file() {
-                return Err(missing_import_error(&segments, &dep_path));
-            }
-            // A `use` that names the entry file itself (e.g. `use main;` when the
-            // entry is `src/main.inf`) is a self-import: the entry is already in
-            // the closure under the empty module path, so re-discovering it here
-            // would lower its definitions into the arena twice and emit every
-            // entry function twice. Skip it, mirroring the reserved `use root;`
-            // handle. The reserved-handle name is the intended way to reach the
-            // entry; a literal self-import resolving to it is just deduplicated.
-            // Canonicalization failures fall through to normal handling so a real
-            // distinct file is never wrongly dropped.
-            if let (Some(entry_path), Ok(dep_canonical)) =
-                (entry_canonical.as_ref(), std::fs::canonicalize(&dep_path))
-                && *entry_path == dep_canonical
-            {
-                continue;
-            }
-            visited.insert(segments.clone());
-            queue.push_back((segments, dep_path));
+impl<'a> Walk<'a> {
+    fn new(entry: &Path, src_root: &'a Path, loader: &'a dyn FileLoader, resilient: bool) -> Self {
+        let mut visited = FxHashSet::default();
+        let mut queue = VecDeque::new();
+        // The entry is the one file with an empty module path. A `use main;` that
+        // resolves back to the entry carries the segments `["main"]`, which the
+        // visited set would not catch — so a path resolving to the entry file is
+        // recognized separately, by comparing canonical paths.
+        visited.insert(Vec::new());
+        queue.push_back((Vec::new(), entry.to_path_buf()));
+        Walk {
+            src_root,
+            loader,
+            resilient,
+            entry_raw: entry.to_path_buf(),
+            entry_canonical: std::fs::canonicalize(entry).ok(),
+            arena: AstArena::default(),
+            visited,
+            queue,
+            files: Vec::new(),
+            problems: Vec::new(),
         }
     }
 
-    // Files were parsed in discovery (BFS) order; downstream phases consume
-    // canonical order as their single source of truth, so reorder now — before any
-    // `SourceFileId` is handed out.
-    arena.canonicalize_source_file_order();
+    fn run(mut self) -> WalkOutcome {
+        while let Some((module_path, file_path)) = self.queue.pop_front() {
+            if self.process_file(&module_path, file_path) {
+                return self.into_outcome();
+            }
+        }
 
-    // Discovery deduplicates files by module path (and self-imports of the entry),
-    // so each file appears exactly once. A duplicate would lower the same
-    // definitions twice and emit them twice in codegen; assert the invariant so a
-    // future discovery regression is caught here rather than in the output.
-    debug_assert!(
-        arena
-            .source_files()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .all(|w| w[0].module_path != w[1].module_path),
-        "discovered files must have unique module paths after deduplication"
-    );
+        // Files were parsed in discovery (BFS) order; downstream phases consume
+        // canonical order as their single source of truth, so reorder now —
+        // before any `SourceFileId` is handed out.
+        self.arena.canonicalize_source_file_order();
 
-    Ok(arena)
+        // Discovery deduplicates files by module path (and self-imports of the
+        // entry), so each file appears exactly once. A duplicate would lower the
+        // same definitions twice; assert the invariant so a future discovery
+        // regression is caught here rather than in the output.
+        debug_assert!(
+            self.arena
+                .source_files()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .all(|w| w[0].module_path != w[1].module_path),
+            "discovered files must have unique module paths after deduplication"
+        );
+
+        self.into_outcome()
+    }
+
+    fn into_outcome(self) -> WalkOutcome {
+        WalkOutcome {
+            arena: self.arena,
+            files: self.files,
+            problems: self.problems,
+        }
+    }
+
+    /// Reads, parses, and resolves the imports of one popped file. Returns `true`
+    /// when a fail-fast walk recorded a problem and should stop.
+    fn process_file(&mut self, module_path: &[String], file_path: PathBuf) -> bool {
+        let source = match self.loader.read(&file_path) {
+            Ok(source) => source,
+            Err(source) => {
+                self.problems.push(WalkProblem::Io {
+                    path: file_path,
+                    source,
+                });
+                return !self.resilient;
+            }
+        };
+
+        let parsed = inference_parser::parse_into(
+            std::mem::take(&mut self.arena),
+            &source,
+            module_path.to_vec(),
+        );
+        self.arena = parsed.arena;
+        self.files.push(LoadedFile {
+            module_path: module_path.to_vec(),
+            path: file_path,
+        });
+
+        // Surface a file's own syntax errors before resolving its imports. A
+        // rejected `use a::b::*;` still lowers to the segments `a::b`, so without
+        // this ordering the glob would be probed as the file `a/b.inf`; when that
+        // file is absent, the "file not found" lookup would mask the educational
+        // glob diagnostic. Capture the error spans before the errors move into the
+        // recorded problem: a `use` directive overlapping one of them is skipped
+        // below so the resilient walk mirrors the fail-fast ordering instead of
+        // resolving imports out of a directive that failed to parse.
+        let error_spans: Vec<Location> = parsed.errors.iter().map(|error| error.span).collect();
+        if !parsed.errors.is_empty() {
+            self.problems.push(WalkProblem::FileParse {
+                module_path: module_path.to_vec(),
+                errors: parsed.errors,
+            });
+            if !self.resilient {
+                return true;
+            }
+        }
+
+        // `parse_into` lowers the file's `SourceFileData` after all of its defs
+        // and directives, so the file just parsed is the last one stored (pinned
+        // by `parse_into_allocates_the_new_file_last` in `core/parser`).
+        let (imports, invalids) = {
+            let file = self
+                .arena
+                .last_source_file()
+                .expect("parse_into stores the file it just lowered");
+            debug_assert_eq!(
+                file.module_path.as_slice(),
+                module_path,
+                "parse_into must store the just-lowered file last"
+            );
+            path_form_imports(&self.arena, file)
+        };
+
+        if let Some(invalid) = invalids.into_iter().next() {
+            self.problems.push(WalkProblem::InvalidSegment {
+                referenced_as: invalid.referenced_as,
+                segment: invalid.segment,
+            });
+            if !self.resilient {
+                return true;
+            }
+        }
+
+        // Drop imports whose `use` directive overlaps one of this file's own parse
+        // errors. In fail-fast mode `error_spans` is empty here (a syntax error
+        // returned above), so this is a no-op and the compiler is unchanged; the
+        // resilient walk uses it to avoid probing a syntax-mangled directive (a
+        // rejected glob) as a file and resurrecting a misleading missing-import.
+        let imports = imports
+            .into_iter()
+            .filter(|import| !location_overlaps_any(import.location, &error_spans))
+            .collect();
+
+        self.enqueue_imports(imports, module_path)
+    }
+
+    /// Enqueues the file imports of one file, recording a missing-import problem
+    /// for any the loader cannot find and deduplicating a self-import of the
+    /// entry. Returns `true` when a fail-fast walk hit a missing import.
+    fn enqueue_imports(
+        &mut self,
+        imports: Vec<FileImport>,
+        importing_module_path: &[String],
+    ) -> bool {
+        for import in imports {
+            if self.visited.contains(&import.segments) {
+                continue;
+            }
+            let dep_path = module_file_path(self.src_root, &import.segments);
+            if !self.loader.exists(&dep_path) {
+                self.problems.push(WalkProblem::MissingImport(ImportProblem {
+                    referenced_as: import.segments.join("::"),
+                    suggestion: suggest_sibling(&dep_path),
+                    expected_path: dep_path,
+                    location: import.location,
+                    importing_module_path: importing_module_path.to_vec(),
+                }));
+                if !self.resilient {
+                    return true;
+                }
+                continue;
+            }
+            // A `use` naming the entry file itself is a self-import: the entry is
+            // already in the closure under the empty module path, so skip it
+            // rather than lower its definitions twice.
+            if self.is_self_import(&dep_path) {
+                continue;
+            }
+            self.visited.insert(import.segments.clone());
+            self.queue.push_back((import.segments, dep_path));
+        }
+        false
+    }
+
+    /// Whether `dep_path` names the entry file, so a `use` resolving to it is a
+    /// self-import to deduplicate rather than lower a second time.
+    ///
+    /// Plain path equality is the primary check: `dep_path` and the entry path are
+    /// both built from the same source root with identical spelling, so they match
+    /// exactly — and, crucially, this still holds when the entry lives only in an
+    /// editor overlay and so cannot be canonicalized. Canonicalization is a
+    /// fallback that additionally catches a self-import reaching the entry through
+    /// a different spelling or a symlink; it applies only when both paths exist on
+    /// disk, so a genuinely distinct file is never wrongly dropped.
+    fn is_self_import(&self, dep_path: &Path) -> bool {
+        if dep_path == self.entry_raw.as_path() {
+            return true;
+        }
+        if let (Some(entry_canonical), Ok(dep_canonical)) = (
+            self.entry_canonical.as_deref(),
+            std::fs::canonicalize(dep_path),
+        ) {
+            return entry_canonical == dep_canonical.as_path();
+        }
+        false
+    }
+}
+
+/// Translates the first problem a fail-fast walk recorded into the compiler's
+/// public error, preserving the exact variants and messages `parse_project` has
+/// always produced.
+fn fail_fast_error(problem: WalkProblem, entry: &Path) -> anyhow::Error {
+    match problem {
+        WalkProblem::Io { path, source } => anyhow!(InferenceError::Io { path, source }),
+        WalkProblem::InvalidSegment {
+            referenced_as,
+            segment,
+        } => anyhow!(InferenceError::InvalidImportSegment {
+            referenced_as,
+            segment,
+        }),
+        WalkProblem::FileParse {
+            module_path,
+            errors,
+        } => parse_error(&module_path, entry, &errors),
+        WalkProblem::MissingImport(ImportProblem {
+            referenced_as,
+            expected_path,
+            suggestion,
+            ..
+        }) => anyhow!(InferenceError::ImportFileNotFound {
+            referenced_as,
+            expected_path,
+            suggestion,
+        }),
+    }
 }
 
 /// Builds a parse-failure error for `errors`. An imported (non-entry) file is
@@ -230,46 +637,75 @@ fn parse_error(
     }
 }
 
+/// A path-form `use` import naming a source file to load, with the location of
+/// the `use` directive in the importing file.
+struct FileImport {
+    segments: Vec<String>,
+    location: Location,
+}
+
+/// A `use` path segment that is not a usable file/directory name, carrying the
+/// full directive path it appeared in for the diagnostic.
+struct InvalidImportSegment {
+    referenced_as: String,
+    segment: String,
+}
+
 /// Extracts the path-form `use` imports of an already-parsed file as canonical
-/// module-path segment lists. A braced item import (`use a::b::{x};`) maps to the
-/// file `a::b` — the segments *before* the brace list. The `from`-form is skipped.
+/// module-path segment lists paired with each directive's location, plus any
+/// directives whose segments are not usable filesystem names. A braced item
+/// import (`use a::b::{x};`) maps to the file `a::b` — the segments *before* the
+/// brace list. The `from`-form and the reserved `use root;` handle are skipped.
+///
+/// Invalid-segment directives are returned separately, in directive order, so a
+/// fail-fast caller can report the first one exactly as the previous
+/// `use_directive_segments` `?` did, while a resilient caller can skip them (an
+/// invalid segment is not reachable from valid lexer output).
 ///
 /// The caller passes the just-lowered file explicitly, because the shared arena
 /// holds every file walked so far; `arena` is still needed to resolve the
-/// directives' segment identifiers. The caller parses the file and surfaces any
-/// syntax errors first, so only the directive shapes of a cleanly-parsed file
-/// reach here.
+/// directives' segment identifiers.
 fn path_form_imports(
     arena: &AstArena,
     source_file: &SourceFileData,
-) -> anyhow::Result<Vec<Vec<String>>> {
+) -> (Vec<FileImport>, Vec<InvalidImportSegment>) {
     let mut imports = Vec::new();
+    let mut invalids = Vec::new();
     for directive in &source_file.directives {
         let Directive::Use(use_dir) = directive;
         if use_dir.from.is_some() {
             continue;
         }
-        let segments = use_directive_segments(arena, use_dir)?;
-        // `use root;` / `use root::{x};` is the reserved handle for the program
-        // entry file (Inference's `@import("root")`), not a file to load: the entry
-        // is already in the closure. A literal `src/root.inf` is shadowed by the
-        // reserved name and would surface as an unreachable-file warning instead.
-        if is_root_handle(&segments) {
-            continue;
-        }
-        if !segments.is_empty() {
-            imports.push(segments);
+        match use_directive_segments(arena, use_dir) {
+            Ok(segments) => {
+                // `use root;` / `use root::{x};` is the reserved handle for the
+                // program entry file (Inference's `@import("root")`), not a file
+                // to load: the entry is already in the closure. A literal
+                // `src/root.inf` is shadowed by the reserved name and surfaces as
+                // an unreachable-file warning instead.
+                if is_root_handle(&segments) {
+                    continue;
+                }
+                if !segments.is_empty() {
+                    imports.push(FileImport {
+                        segments,
+                        location: use_dir.location,
+                    });
+                }
+            }
+            Err(invalid) => invalids.push(invalid),
         }
     }
-    Ok(imports)
+    (imports, invalids)
 }
 
 /// Resolves a path-form `use` directive's segment identifiers to validated owned
-/// strings. Rejects a segment that is not a usable file/directory name.
+/// strings, or reports the first segment that is not a usable file/directory
+/// name.
 fn use_directive_segments(
     arena: &AstArena,
     use_dir: &UseDirective,
-) -> anyhow::Result<Vec<String>> {
+) -> Result<Vec<String>, InvalidImportSegment> {
     let mut segments = Vec::with_capacity(use_dir.segments.len());
     for &ident in &use_dir.segments {
         let segment = arena.ident_name(ident).to_string();
@@ -280,10 +716,10 @@ fn use_directive_segments(
                 .map(|&id| arena.ident_name(id))
                 .collect::<Vec<_>>()
                 .join("::");
-            return Err(anyhow!(InferenceError::InvalidImportSegment {
+            return Err(InvalidImportSegment {
                 referenced_as,
                 segment,
-            }));
+            });
         }
         segments.push(segment);
     }
@@ -305,6 +741,19 @@ fn is_valid_segment(segment: &str) -> bool {
         && !segment.contains('\\')
 }
 
+/// Whether `location`'s byte range intersects any span in `error_spans`.
+///
+/// Used to recognize a `use` directive that failed to parse: a rejected glob
+/// `use a::b::*;` still lowers to the segments `a::b`, and its syntax error falls
+/// inside the directive's own span, so the overlap drops it from import resolution
+/// before it is probed as the file `a/b.inf`. A healthy directive elsewhere in the
+/// same file does not overlap the error, so it is still followed.
+fn location_overlaps_any(location: Location, error_spans: &[Location]) -> bool {
+    error_spans.iter().any(|span| {
+        location.offset_start < span.offset_end && span.offset_start < location.offset_end
+    })
+}
+
 /// Maps canonical module-path segments to the file they name under `src_root`:
 /// `["lib", "arith"]` ⇒ `<src_root>/lib/arith.inf`.
 fn module_file_path(src_root: &Path, segments: &[String]) -> PathBuf {
@@ -316,30 +765,14 @@ fn module_file_path(src_root: &Path, segments: &[String]) -> PathBuf {
     path
 }
 
-/// Reads a source file into a string, mapping IO failures to [`InferenceError::Io`].
-fn read_source(path: &Path) -> anyhow::Result<String> {
-    std::fs::read_to_string(path).map_err(|source| {
-        anyhow!(InferenceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
-    })
-}
-
-/// Builds a missing-import error, offering the nearest sibling `.inf` stem as a
-/// suggestion when one is within [`SUGGESTION_MAX_DISTANCE`] edits. The
-/// suggestion is searched in the directory the missing file would have lived in.
-fn missing_import_error(segments: &[String], expected_path: &Path) -> anyhow::Error {
-    let referenced_as = segments.join("::");
-    let suggestion = expected_path
+/// Offers the nearest sibling `.inf` stem as a suggestion for a missing import
+/// when one is within [`SUGGESTION_MAX_DISTANCE`] edits. The suggestion is
+/// searched in the directory the missing file would have lived in.
+fn suggest_sibling(expected_path: &Path) -> Option<String> {
+    expected_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .and_then(|target| nearest_sibling(expected_path, target));
-    anyhow!(InferenceError::ImportFileNotFound {
-        referenced_as,
-        expected_path: expected_path.to_path_buf(),
-        suggestion,
-    })
+        .and_then(|target| nearest_sibling(expected_path, target))
 }
 
 /// Finds the closest-named sibling `.inf` file to `target` (the missing file's
@@ -398,6 +831,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Enumerates every `.inf` file under `src_root` and warns about those reached by
 /// no import chain (i.e. not present in the arena's canonical file set). The
 /// entry file is always reachable and never warned about.
+///
+/// Only the fail-fast compiler front end calls this — a single build, not a
+/// per-keystroke query. The resilient IDE walk skips it entirely (its warnings are
+/// always empty), so the recursive directory scan never runs interactively.
 fn collect_unreachable_warnings(
     arena: &AstArena,
     src_root: &Path,
@@ -1616,5 +2053,471 @@ mod tests {
             vec![Vec::<String>::new(), vec!["main".to_string()]],
             "a non-entry file named main is discovered like any other import"
         );
+    }
+
+    // Axis: the resilient IDE variant (`load_project_resilient`)
+    //
+    // These exercise the collecting walk that ide-db drives: it shares the same
+    // import resolution as `parse_project` but parses every file resiliently and
+    // records problems instead of failing fast.
+
+    /// The canonical module paths of a resilient parse's files, in stored order.
+    fn resilient_module_paths(parse: &ResilientProjectParse) -> Vec<Vec<String>> {
+        parse
+            .arena
+            .source_files()
+            .map(|sf| sf.module_path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn resilient_and_fail_fast_produce_identical_arenas_for_a_clean_project() {
+        // The single-source-of-truth invariant: the compiler and the IDE must
+        // never disagree about which files a program imports or how they are
+        // lowered. On a clean project, both walks discover files in the same BFS
+        // order and lower them identically, so the arenas are byte-identical.
+        let project = TempProject::new("resilient-parity");
+        let entry = project.write(
+            "main.inf",
+            "use math;\nuse lib::arith;\npub fn main() -> i32 { return 0; }",
+        );
+        project.write("math.inf", "use lib::arith;\npub fn foo() {}");
+        project.write(
+            "lib/arith.inf",
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        );
+
+        let fail_fast = parse_project(&entry).expect("clean project parses");
+        let resilient = load_project_resilient(&entry, &DiskLoader);
+
+        assert!(resilient.parse_errors.is_empty());
+        assert!(resilient.import_problems.is_empty());
+        assert_eq!(
+            fail_fast.arena, resilient.arena,
+            "clean-project arenas must be byte-identical across both walks"
+        );
+        assert_eq!(fail_fast.warnings, resilient.warnings);
+    }
+
+    #[test]
+    fn resilient_walk_at_a_filesystem_root_returns_without_scanning_the_disk() {
+        // Regression: an editor that opens a lone file living at a filesystem root
+        // makes the source root the whole volume (`/main.inf` -> src_root `/`). The
+        // resilient walk must not scan the source tree for unreachable files —
+        // otherwise it walks every directory on disk, on every keystroke, and never
+        // returns. The resilient walk skips that scan unconditionally, so a root
+        // source tree returns at once. An in-memory loader supplies the entry so
+        // the test never depends on a real file at the root; a worker thread with a
+        // timeout turns a regressed hang into a failed assertion rather than a stuck
+        // test run.
+        struct RootEntryLoader {
+            entry: PathBuf,
+            source: String,
+        }
+
+        impl FileLoader for RootEntryLoader {
+            fn exists(&self, path: &Path) -> bool {
+                path == self.entry
+            }
+
+            fn read(&self, path: &Path) -> std::io::Result<String> {
+                if path == self.entry {
+                    Ok(self.source.clone())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                }
+            }
+        }
+
+        // A path directly under the filesystem root, so its parent — the source
+        // root the walk derives — is the root itself, with no parent of its own.
+        let fs_root = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .expect("the temp dir has a root ancestor")
+            .to_path_buf();
+        assert!(
+            fs_root.parent().is_none(),
+            "the derived filesystem root must have no parent"
+        );
+        let entry = fs_root.join("inference-lsp-root-regression.inf");
+        let loader = RootEntryLoader {
+            entry: entry.clone(),
+            source: "pub fn main() {}".to_string(),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let parse = load_project_resilient(&entry, &loader);
+            let _ = tx.send(parse.warnings.len());
+        });
+
+        let warning_count = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect(
+                "the resilient walk at a filesystem root did not return: \
+                 the whole-disk unreachable scan was not skipped",
+            );
+        assert_eq!(
+            warning_count, 0,
+            "a lone file at a filesystem root has no unreachable-file warnings"
+        );
+    }
+
+    #[test]
+    fn resilient_walk_collects_a_broken_imported_files_parse_errors_and_keeps_the_rest() {
+        // A syntax error in one imported file must not abort the walk: the entry
+        // and the other imports are still lowered, and the broken file's errors
+        // are collected, labeled with its module path.
+        let project = TempProject::new("resilient-broken");
+        let entry = project.write(
+            "main.inf",
+            "use broken;\nuse good;\npub fn main() -> i32 { return 0; }",
+        );
+        project.write("broken.inf", "pub fn oops( { return 1; }");
+        project.write("good.inf", "pub fn good() -> i32 { return 7; }");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        // Every file was still discovered and lowered.
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["broken"]),
+                mp(&["good"]),
+            ],
+        );
+        // The broken file's syntax errors are collected and labeled.
+        assert_eq!(parse.parse_errors.len(), 1, "only the broken file errors");
+        assert_eq!(parse.parse_errors[0].module_path, mp(&["broken"]));
+        assert!(!parse.parse_errors[0].errors.is_empty());
+        assert!(parse.import_problems.is_empty());
+        // The good file's definition survives in the arena.
+        let good_defs: Vec<&str> = parse
+            .arena
+            .source_files()
+            .find(|sf| sf.module_path == mp(&["good"]))
+            .expect("good file present")
+            .defs
+            .iter()
+            .map(|&d| parse.arena.def_name(d))
+            .collect();
+        assert_eq!(good_defs, vec!["good"]);
+    }
+
+    #[test]
+    fn resilient_walk_records_a_missing_import_with_location_and_suggestion() {
+        // A missing import becomes structured data anchored at the `use`
+        // directive, not a hard error. The importing file is still analyzable.
+        let project = TempProject::new("resilient-missing");
+        let entry = project.write(
+            "main.inf",
+            "use arith;\npub fn main() -> i32 { return 0; }",
+        );
+        // A near-miss sibling one edit away drives the suggestion.
+        project.write("arithh.inf", "pub fn add() {}");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        assert_eq!(parse.import_problems.len(), 1);
+        let problem = &parse.import_problems[0];
+        assert_eq!(problem.referenced_as, "arith");
+        assert!(problem.expected_path.ends_with("arith.inf"));
+        assert_eq!(problem.suggestion.as_deref(), Some("arithh"));
+        // The problem is anchored in the entry file at the `use` directive, which
+        // begins at the first byte of the source.
+        assert!(problem.importing_module_path.is_empty());
+        assert_eq!(problem.location.offset_start, 0);
+        assert!(parse.parse_errors.is_empty());
+        // The entry itself is still lowered.
+        assert_eq!(resilient_module_paths(&parse), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn resilient_walk_honors_the_reserved_use_root_handle() {
+        // `use root;` is the reserved entry handle, not a file to load, so it does
+        // not produce a missing-import problem even though no `root.inf` exists.
+        let project = TempProject::new("resilient-root");
+        let entry = project.write(
+            "main.inf",
+            "use root;\npub fn main() -> i32 { return 0; }",
+        );
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        assert!(parse.import_problems.is_empty(), "`use root;` names no file");
+        assert!(parse.parse_errors.is_empty());
+        assert_eq!(resilient_module_paths(&parse), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn resilient_walk_deduplicates_a_self_import_of_the_entry() {
+        // A `use main;` from a sub-file resolves back to the entry, already in the
+        // closure under the empty module path; the resilient walk deduplicates it
+        // exactly as the compiler does, so the entry is lowered once.
+        let project = TempProject::new("resilient-self-import");
+        let entry = project.write(
+            "main.inf",
+            "use lib::helper;\npub fn main() -> i32 { return 0; }",
+        );
+        project.write(
+            "lib/helper.inf",
+            "use main;\npub fn doubled() -> i32 { return 14; }",
+        );
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        let entry_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path.is_empty())
+            .count();
+        assert_eq!(entry_count, 1, "the entry is lowered exactly once");
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["lib", "helper"])],
+        );
+        assert!(parse.import_problems.is_empty());
+    }
+
+    #[test]
+    fn resilient_walk_terminates_on_a_two_file_import_cycle() {
+        // Two files importing each other must terminate via the visited set, just
+        // like the fail-fast walk, and both appear once.
+        let project = TempProject::new("resilient-cycle");
+        let entry = project.write("main.inf", "use a;\npub fn main() {}");
+        project.write("a.inf", "use b;\npub fn fa() {}");
+        project.write("b.inf", "use a;\npub fn fb() {}");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["a"]), mp(&["b"])],
+        );
+        assert!(parse.import_problems.is_empty());
+        assert!(parse.parse_errors.is_empty());
+    }
+
+    #[test]
+    fn resilient_walk_reports_every_read_file_with_its_module_path() {
+        // The `files` list is the closure file set plus the module-path → path
+        // mapping ide-db consumes: every reachable file that was read, once.
+        let project = TempProject::new("resilient-files");
+        let entry = project.write("main.inf", "use lib::a;\npub fn main() {}");
+        let a = project.write("lib/a.inf", "pub fn fa() {}");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        let mut by_module: Vec<(Vec<String>, PathBuf)> = parse
+            .files
+            .iter()
+            .map(|f| (f.module_path.clone(), f.path.clone()))
+            .collect();
+        by_module.sort();
+        assert_eq!(by_module.len(), 2);
+        assert_eq!(by_module[0].0, Vec::<String>::new());
+        assert_eq!(by_module[0].1, entry);
+        assert_eq!(by_module[1].0, mp(&["lib", "a"]));
+        assert_eq!(by_module[1].1, a);
+    }
+
+    #[test]
+    fn resilient_walk_uses_the_loader_overlay_over_disk() {
+        // A custom loader can shadow on-disk contents (the overlay-then-disk model
+        // ide-db uses). Here the loader serves a different entry body than the one
+        // on disk, and reports which paths it was asked to read.
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+
+        struct MapLoader {
+            files: HashMap<PathBuf, String>,
+            reads: RefCell<Vec<PathBuf>>,
+        }
+        impl FileLoader for MapLoader {
+            fn exists(&self, path: &Path) -> bool {
+                self.files.contains_key(path)
+            }
+            fn read(&self, path: &Path) -> std::io::Result<String> {
+                self.reads.borrow_mut().push(path.to_path_buf());
+                self.files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            }
+        }
+
+        let entry = PathBuf::from("/proj/main.inf");
+        let dep = PathBuf::from("/proj/lib/dep.inf");
+        let mut files = HashMap::new();
+        files.insert(entry.clone(), "use lib::dep;\npub fn main() {}".to_string());
+        files.insert(dep.clone(), "pub fn helper() {}".to_string());
+        let loader = MapLoader {
+            files,
+            reads: RefCell::new(Vec::new()),
+        };
+
+        let parse = load_project_resilient(&entry, &loader);
+
+        assert!(parse.import_problems.is_empty());
+        assert!(parse.parse_errors.is_empty());
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["lib", "dep"])],
+        );
+        // Both files were read through the loader, never `std::fs`.
+        let reads = loader.reads.borrow();
+        assert!(reads.contains(&entry));
+        assert!(reads.contains(&dep));
+    }
+
+    #[test]
+    fn resilient_walk_deduplicates_a_self_import_of_an_overlay_only_entry() {
+        // Regression: an entry that lives only in an editor overlay (never written
+        // to disk) cannot be canonicalized, so the self-import dedup must fall back
+        // to plain path equality. A `use main;` in a reachable file resolves back
+        // to the overlay entry; without the fallback the entry is lowered twice —
+        // once under the empty module path and once under a phantom `["main"]`
+        // module mapped to the same file — duplicating every entry symbol for the
+        // type checker, the analysis rules, and cross-file IDE features.
+        use std::collections::HashMap;
+
+        struct OverlayLoader {
+            files: HashMap<PathBuf, String>,
+        }
+        impl FileLoader for OverlayLoader {
+            fn exists(&self, path: &Path) -> bool {
+                self.files.contains_key(path)
+            }
+            fn read(&self, path: &Path) -> std::io::Result<String> {
+                self.files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            }
+        }
+
+        // Paths under a directory that does not exist on disk, so the entry cannot
+        // be canonicalized — the overlay-only condition. The loader serves both.
+        let entry = PathBuf::from("/inference-overlay-only/main.inf");
+        let lib = PathBuf::from("/inference-overlay-only/lib.inf");
+        let mut files = HashMap::new();
+        files.insert(
+            entry.clone(),
+            "use lib;\npub fn main() -> i32 { return 0; }".to_string(),
+        );
+        files.insert(
+            lib.clone(),
+            "use main;\npub fn helper() -> i32 { return 7; }".to_string(),
+        );
+        let loader = OverlayLoader { files };
+
+        let parse = load_project_resilient(&entry, &loader);
+
+        // The entry is lowered exactly once (empty path); no phantom `["main"]`.
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["lib"])],
+            "the overlay-only entry must not be re-lowered as a `[\"main\"]` module",
+        );
+        let entry_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path.is_empty())
+            .count();
+        assert_eq!(
+            entry_count, 1,
+            "the overlay-only entry is lowered exactly once"
+        );
+    }
+
+    #[test]
+    fn resilient_walk_never_reports_unreachable_warnings() {
+        // Regression: the resilient/IDE walk must not scan the source tree for
+        // unreachable files. That scan enumerates and canonicalizes every `.inf`
+        // under the source root — work an editor repeats on every keystroke — yet
+        // no IDE consumer reads the warnings. An orphan the fail-fast walk warns
+        // about must yield no resilient warning at all.
+        let project = TempProject::new("resilient-no-warn");
+        let entry = project.write("main.inf", "pub fn main() -> i32 { return 0; }");
+        project.write("orphan.inf", "pub fn orphan() {}");
+
+        // The fail-fast compiler still warns about the orphan...
+        let fail_fast = parse_project(&entry).expect("project parses");
+        assert_eq!(
+            fail_fast.warnings.len(),
+            1,
+            "the compiler still scans for and warns about orphans"
+        );
+
+        // ...but the resilient walk skips the scan entirely.
+        let resilient = load_project_resilient(&entry, &DiskLoader);
+        assert!(
+            resilient.warnings.is_empty(),
+            "the resilient walk must not compute unreachable-file warnings, got {:?}",
+            resilient.warnings,
+        );
+    }
+
+    #[test]
+    fn resilient_walk_ignores_imports_of_a_parse_rejected_glob_when_target_absent() {
+        // Regression: a rejected glob `use a::b::*;` still lowers to the segments
+        // `a::b`, so without care the resilient walk probes it as the file
+        // `a/b.inf` and manufactures a misleading missing-import problem that
+        // accompanies the directive's own educational glob diagnostic. The
+        // fail-fast walk never does this (it stops at the syntax error); the
+        // resilient walk must mirror that intent by not resolving imports out of a
+        // directive that failed to parse. Here `a/b.inf` does not exist.
+        let project = TempProject::new("resilient-glob-absent");
+        let entry = project.write(
+            "main.inf",
+            "use a::b::*;\npub fn main() -> i32 { return 0; }",
+        );
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        // The glob's own syntax error is still collected on the entry file.
+        assert_eq!(
+            parse.parse_errors.len(),
+            1,
+            "the glob syntax error is still reported"
+        );
+        assert_eq!(parse.parse_errors[0].module_path, Vec::<String>::new());
+        // ...but no missing-import problem is manufactured from the rejected glob.
+        assert!(
+            parse.import_problems.is_empty(),
+            "a parse-rejected glob directive must not drive import resolution, got {:?}",
+            parse.import_problems,
+        );
+        // Only the entry is in the closure; `a/b.inf` was never probed.
+        assert_eq!(resilient_module_paths(&parse), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn resilient_walk_does_not_pull_in_the_file_named_by_a_parse_rejected_glob() {
+        // Companion to the absent-target case: even when `a/b.inf` exists on disk,
+        // a rejected glob `use a::b::*;` must not silently pull it into the
+        // closure. The fail-fast compiler refuses at the glob without touching
+        // `b.inf`, and the resilient walk must not diverge by analyzing it.
+        let project = TempProject::new("resilient-glob-present");
+        let entry = project.write(
+            "main.inf",
+            "use a::b::*;\npub fn main() -> i32 { return 0; }",
+        );
+        project.write("a/b.inf", "pub fn helper() -> i32 { return 1; }");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        // `a/b.inf` was not pulled into the closure by the rejected directive.
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new()],
+            "a file named by a parse-rejected glob must not enter the closure",
+        );
+        assert!(parse.import_problems.is_empty());
+        // The glob syntax error is still surfaced on the entry.
+        assert_eq!(parse.parse_errors.len(), 1);
+        assert_eq!(parse.parse_errors[0].module_path, Vec::<String>::new());
     }
 }

@@ -272,8 +272,15 @@ pub struct ToolchainPaths {
 }
 
 impl ToolchainPaths {
-    /// Name of the binary managed by the toolchain.
+    /// Name of the primary binary managed by the toolchain. Every toolchain
+    /// archive contains it, so a missing copy is always an error.
     pub const MANAGED_BINARY: &str = "infc";
+
+    /// Additional binaries newer toolchains bundle alongside [`Self::MANAGED_BINARY`]
+    /// and symlink into `bin/` when present. Toolchains released before the
+    /// bundling lack these, so a missing optional binary is silently skipped
+    /// rather than treated as an error.
+    pub const OPTIONAL_MANAGED_BINARIES: &[&str] = &["inference-lsp"];
 
     /// Creates a new `ToolchainPaths` instance.
     ///
@@ -610,7 +617,11 @@ impl ToolchainPaths {
 
     /// Updates symlinks in the bin directory to point to the specified version.
     ///
-    /// Creates a symlink for the `infc` binary.
+    /// Creates a symlink for the `infc` binary, and for each optional managed
+    /// binary that the selected toolchain bundles. Optional binaries absent
+    /// from the toolchain (e.g. an older version predating the bundling) are
+    /// skipped, and any stale symlink left over from a version that did
+    /// include them is removed so `bin/` reflects the selected toolchain.
     ///
     /// # Errors
     ///
@@ -625,29 +636,43 @@ impl ToolchainPaths {
         let binary = format!("{}{ext}", Self::MANAGED_BINARY);
         self.create_symlink(version, &binary)?;
 
+        for optional in Self::OPTIONAL_MANAGED_BINARIES {
+            let binary = format!("{optional}{ext}");
+            if self.binary_path(version, &binary).exists() {
+                self.create_symlink(version, &binary)?;
+            } else {
+                self.remove_symlink(&binary)?;
+            }
+        }
+
         Ok(())
     }
 
-    /// Removes the symlink from the bin directory.
+    /// Removes the symlinks from the bin directory.
     ///
-    /// Removes the symlink for the `infc` binary.
+    /// Removes the symlink for the `infc` binary and for every optional
+    /// managed binary. Removing a symlink that does not exist is a no-op.
     ///
     /// # Errors
     ///
-    /// Returns an error if the symlink cannot be removed.
+    /// Returns an error if a symlink cannot be removed.
     pub fn remove_symlinks(&self) -> Result<()> {
         let platform = crate::toolchain::Platform::detect()?;
         let ext = platform.executable_extension();
 
-        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
-        self.remove_symlink(&binary)?;
+        for name in Self::managed_binary_names() {
+            let binary = format!("{name}{ext}");
+            self.remove_symlink(&binary)?;
+        }
 
         Ok(())
     }
 
     /// Checks if symlinks in the bin directory are valid (point to existing binaries).
     ///
-    /// Returns a list of binary names that have broken symlinks.
+    /// Returns a list of binary names that have broken symlinks. A managed
+    /// binary with no symlink at all is not reported: optional binaries are
+    /// legitimately absent when the default toolchain predates their bundling.
     #[must_use = "returns list of broken symlinks without side effects"]
     pub fn validate_symlinks(&self) -> Vec<String> {
         let Ok(platform) = crate::toolchain::Platform::detect() else {
@@ -656,13 +681,21 @@ impl ToolchainPaths {
         let ext = platform.executable_extension();
 
         let mut broken = Vec::new();
-        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
-        let symlink_path = self.symlink_path(&binary);
-
-        if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
-            broken.push(binary);
+        for name in Self::managed_binary_names() {
+            let binary = format!("{name}{ext}");
+            let symlink_path = self.symlink_path(&binary);
+            if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
+                broken.push(binary);
+            }
         }
         broken
+    }
+
+    /// Iterates over every managed binary name, primary first, then the
+    /// optional binaries in declaration order.
+    fn managed_binary_names() -> impl Iterator<Item = &'static str> {
+        std::iter::once(Self::MANAGED_BINARY)
+            .chain(Self::OPTIONAL_MANAGED_BINARIES.iter().copied())
     }
 
     /// Repairs broken symlinks by updating them to point to the default version,
@@ -944,6 +977,14 @@ mod tests {
     }
 
     #[test]
+    fn optional_managed_binaries_contains_inference_lsp() {
+        assert!(
+            ToolchainPaths::OPTIONAL_MANAGED_BINARIES.contains(&"inference-lsp"),
+            "inference-lsp must be a managed optional binary"
+        );
+    }
+
+    #[test]
     fn binary_path_returns_toolchain_root_path() {
         let temp_dir = env::temp_dir().join("infs_test_binary_path");
         let paths = ToolchainPaths::with_root(temp_dir.clone());
@@ -984,6 +1025,122 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// Writes a fake executable binary at `path`, marking it executable on Unix
+    /// so symlink resolution treats it as a real target.
+    fn write_stub_binary(path: &Path) {
+        std::fs::write(path, b"fake binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Returns the primary and optional managed binary file names for the
+    /// running platform (with any executable extension applied).
+    fn managed_binary_file_names() -> (String, String) {
+        let ext = crate::toolchain::Platform::detect()
+            .unwrap()
+            .executable_extension();
+        (
+            format!("{}{ext}", ToolchainPaths::MANAGED_BINARY),
+            format!("inference-lsp{ext}"),
+        )
+    }
+
+    #[test]
+    fn update_symlinks_links_optional_binary_when_present() {
+        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_opt_present");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.2.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let (infc, lsp) = managed_binary_file_names();
+        write_stub_binary(&toolchain_dir.join(&infc));
+        write_stub_binary(&toolchain_dir.join(&lsp));
+
+        paths.update_symlinks("0.2.0").unwrap();
+
+        assert!(paths.symlink_path(&infc).exists(), "infc symlink should exist");
+        assert!(
+            paths.symlink_path(&lsp).exists(),
+            "inference-lsp symlink should exist when the toolchain bundles it"
+        );
+        assert!(
+            paths.validate_symlinks().is_empty(),
+            "both symlinks should resolve to real binaries"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn update_symlinks_skips_optional_binary_when_absent() {
+        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_opt_absent");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let (infc, lsp) = managed_binary_file_names();
+        // Only the primary binary is present (older toolchain, no bundled LSP).
+        write_stub_binary(&toolchain_dir.join(&infc));
+
+        // A missing optional binary must not turn update_symlinks into an error.
+        paths.update_symlinks("0.1.0").unwrap();
+
+        assert!(paths.symlink_path(&infc).exists(), "infc symlink should exist");
+        assert!(
+            paths.symlink_path(&lsp).symlink_metadata().is_err(),
+            "no inference-lsp symlink should be created when the toolchain lacks it"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn update_symlinks_removes_stale_optional_symlink_on_switch() {
+        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_switch");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let (infc, lsp) = managed_binary_file_names();
+
+        // Version that bundles the LSP server.
+        let with_lsp = paths.toolchain_dir("0.2.0");
+        std::fs::create_dir_all(&with_lsp).unwrap();
+        write_stub_binary(&with_lsp.join(&infc));
+        write_stub_binary(&with_lsp.join(&lsp));
+        paths.update_symlinks("0.2.0").unwrap();
+        assert!(
+            paths.symlink_path(&lsp).exists(),
+            "inference-lsp symlink should exist for the bundling version"
+        );
+
+        // Version that predates the bundling.
+        let without_lsp = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&without_lsp).unwrap();
+        write_stub_binary(&without_lsp.join(&infc));
+        paths.update_symlinks("0.1.0").unwrap();
+
+        assert!(
+            paths.symlink_path(&infc).exists(),
+            "infc symlink should survive the switch"
+        );
+        assert!(
+            paths.symlink_path(&lsp).symlink_metadata().is_err(),
+            "stale inference-lsp symlink must be removed when switching to a version without it"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     #[test]
     fn remove_symlinks_removes_managed_binary_symlink() {
         let temp_dir = env::temp_dir().join("infs_test_remove_symlinks");
@@ -1014,6 +1171,35 @@ mod tests {
         assert!(
             !symlink.exists(),
             "Symlink should not exist after remove_symlinks"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn remove_symlinks_removes_optional_binary_symlink() {
+        let temp_dir = env::temp_dir().join("infs_test_remove_symlinks_optional");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.2.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let (infc, lsp) = managed_binary_file_names();
+        write_stub_binary(&toolchain_dir.join(&infc));
+        write_stub_binary(&toolchain_dir.join(&lsp));
+        paths.update_symlinks("0.2.0").unwrap();
+        assert!(paths.symlink_path(&lsp).exists());
+
+        paths.remove_symlinks().unwrap();
+        assert!(
+            paths.symlink_path(&infc).symlink_metadata().is_err(),
+            "infc symlink should be removed"
+        );
+        assert!(
+            paths.symlink_path(&lsp).symlink_metadata().is_err(),
+            "inference-lsp symlink should be removed"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

@@ -12,6 +12,13 @@ import { registerUpdateCommand, checkForUpdates } from './commands/update';
 import { createStatusBar, updateStatusBar } from './ui/statusBar';
 import { InferenceConfigProvider, ConfigItem } from './ui/configTree';
 import { runDoctor } from './toolchain/doctor';
+import {
+    handleLspConfigChange,
+    initializeLspClient,
+    restartLspClient,
+    startLspClient,
+    stopLspClient,
+} from './lsp/client';
 
 /** Minimum infs CLI version the extension can work with. */
 const MIN_INFS_VERSION = '0.0.1-beta.1';
@@ -91,6 +98,17 @@ export function activate(context: vscode.ExtensionContext) {
             if (e.affectsConfiguration('inference')) {
                 configProvider.refresh();
             }
+            handleLspConfigChange(e).catch((err) =>
+                outputChannel.error(`Language server reconfigure failed: ${err}`),
+            );
+        }),
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('inference.restartLsp', () => {
+            restartLspClient().catch((err) =>
+                outputChannel.error(`Language server restart failed: ${err}`),
+            );
         }),
     );
 
@@ -107,13 +125,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     applyTerminalPath(context);
 
+    initializeLspClient(context, outputChannel);
+    startLspClient().catch((err) =>
+        outputChannel.error(`Language server start failed: ${err}`),
+    );
+
     checkToolchain(context, statusBarItem, configProvider).catch((err) =>
         outputChannel.error(`Toolchain check failed: ${err}`),
     );
 }
 
-export function deactivate() {
-    // Nothing to clean up
+export function deactivate(): Thenable<void> {
+    return stopLspClient();
 }
 
 /**

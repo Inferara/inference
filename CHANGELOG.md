@@ -728,6 +728,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
 - Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
 - Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
+- ide: the resilient project walk (`inference::load_project_resilient`) no longer runs the unreachable-file warning scan at all — `ResilientProjectParse::warnings` is documented always-empty. The scan recursively walked and canonicalized every `.inf` under the source root on every keystroke (and, for a document at a volume root like `/main.inf`, the entire disk) to compute warnings the IDE discards. The fail-fast compiler path (`parse_project`) keeps the scan — it runs once per build, not once per keystroke — so compiler behavior is unchanged ([#33])
+- Extern-import diagnostics (`use { … } from <module>;` binding errors such as an undeclared extern import or an ambiguous extern module) reported from an *imported* file now carry that file's module-path label instead of rendering as if they were in the entry file. Locations are per-file-local, so the missing label made these errors point at wrong positions in the entry file — visible in both the aggregated compiler message and the structured diagnostics the LSP consumes ([#33])
 
 ### Project Manifest
 
@@ -782,6 +784,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add "Install Component (wasm-opt)" command to VS Code extension (`inference.installComponent`)
   - Runs `infs component add <name>` with a progress notification; refreshes `infs doctor` on success; offers Show Output / Retry actions on failure
   - `infs doctor` notifications (error and warning toasts alike) gain an "Install wasm-opt" action button whenever a `wasm-opt` check reports a warning or failure, invoking the install command directly
+
+### IDE / LSP
+
+- Add `inference-lsp`, a Language Server Protocol server for Inference (`apps/lsp`) ([#33])
+  - A synchronous, single-threaded `lsp-server` 0.8 stdio binary; single-threaded by design because `TypedContext` is `!Send`
+  - Diagnostics: merged syntax, import, type-check, and analysis-rule findings (rule codes `A001`–`A041`), published on `didOpen`/`didChange`/`didClose`
+  - Hover: type of the identifier/expression under the cursor, plus dedicated explanations of the non-deterministic keywords (`forall`, `exists`, `unique`, `assume`) and the uzumaki `@` operator, including their Rocq lowering (`BI_forall`/`BI_exists`/`BI_assume`/`BI_uzumaki_num`)
+  - Goto-definition, including cross-file resolution into an imported module
+  - Document symbols (hierarchical or flattened, negotiated from client capabilities), completions (context-aware: struct members only after `.`), and inlay hints annotating every non-det block and `@` binding
+  - Full-text document sync (`TextDocumentSyncKind::Full`); UTF-16 position encoding only (the LSP default; no `positionEncoding` negotiation)
+  - `file://` URI handling with percent-encoding and Windows drive-letter support
+  - End-to-end test suite (`apps/lsp/tests/e2e.rs`) spawning the real binary over stdio and asserting on raw JSON-RPC across 18 scenarios (handshake, diagnostics lifecycle, hover, goto, cross-file import, document symbols, completion, inlay hints, UTF-16 positions, robustness, shutdown/exit, stdout framing hygiene)
+- Add the `ide/` crate stack backing the LSP server ([#33])
+  - `ide/vfs`: `FileId` path interning plus an open-document content overlay; no file I/O, no path canonicalization
+  - `ide/base-db`: `LineIndex` (byte offset ⇄ 0-based line / UTF-16 column) and the `TextRange`/`LineCol`/`FilePosition`/`FileRange` position PODs
+  - `ide/ide-db`: `RootDatabase` with closure-aware analysis invalidation, analyzing every open file as its own project entry; `FileAnalysis` merges parse errors, structured type diagnostics, and analysis findings behind an overlay-then-disk `FileLoader` driving `core/inference`'s shared import-closure walk
+  - `ide/ide`: the `AnalysisHost`/`Analysis` feature API — diagnostics, hover, goto-definition, document symbols, completions, and inlay hints, all returned as editor-terminology PODs with no compiler type crossing the boundary
+- Add structured type-check diagnostics: `inference_type_checker::check_with_diagnostics` (re-exported as `inference::type_check_with_diagnostics`) ([#33])
+  - Returns a `TypeCheckOutcome { typed_context, errors: Vec<TypeCheckDiagnostic> }` instead of aggregating errors into one `anyhow::Error` string
+  - Lossless: the returned `TypedContext` is fully indexed (symbol table assigned, canonical-key indexes built) even when errors are present, so tooling can still query `lookup_struct`/`lookup_enum`/`call_target`/`get_node_typeinfo` for the parts of the program that did check
+  - `TypeCheckerBuilder::build_typed_context` is re-expressed on top of this function, so the compiler and the IDE share exactly one checking implementation
+- Add a `FileLoader` seam to `core/inference` (`exists`/`read`) so the import-closure walk can be driven by either a `DiskLoader` (the compiler) or an IDE-supplied overlay-then-disk loader, plus a resilient walk variant, `load_project_resilient`, that collects every problem (broken imports, per-file syntax errors) instead of failing fast on the first one ([#33])
+  - `parse_project` is re-expressed on top of the same closure-walk logic and remains byte-identical for a clean project
+- Ship `inference-lsp` with the managed toolchain ([#33])
+  - Release packaging bundles the `inference-lsp` binary inside the existing `infc-<platform>` archives (no new archive names, no manifest-format change), so `infs install` places it in `toolchains/<version>/` automatically
+  - `infs` symlinks `inference-lsp` into `$INFERENCE_HOME/bin` next to `infc` when the default toolchain contains it, cleans the stale symlink when switching to a toolchain that predates bundling, marks it executable on Unix, and includes it in PATH-shadowing conflict detection
+  - `infs doctor` gains an appended `inference-lsp` check: `[OK]` with the resolved path when the default toolchain bundles it, `[WARN]` with an upgrade hint when the toolchain predates bundling (never `[FAIL]` — the language server is optional)
+- VS Code extension 0.0.5: built-in LSP client — installing the extension now brings up the language server out of the box ([#33])
+  - Starts `inference-lsp` over stdio on activation (new `onLanguage:inference` activation event), resolving the binary via `inference.lsp.path` setting → `$INFERENCE_HOME/bin` → PATH, mirroring the `infs` detection order; silent (log-only) when the binary is absent
+  - Auto-starts the server after a toolchain install/update completes, so the first-run flow (install extension → accept toolchain install) needs no reload
+  - New settings `inference.lsp.enabled` / `inference.lsp.path` and command `Inference: Restart Language Server`; server traces go to a dedicated `Inference Language Server` output channel
 
 ---
 
@@ -890,3 +923,4 @@ Initial tagged release.
 [#225]: https://github.com/Inferara/inference/issues/225
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
+[#33]: https://github.com/Inferara/inference/issues/33

@@ -2,7 +2,7 @@
   "name": "inference",
   "displayName": "Inference",
   "description": "Language support for Inference - a programming language for verified WebAssembly",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "inference-lang",
   "license": "GPL-3.0",
   "icon": "icons/inference.png",
@@ -27,6 +27,7 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "workspaceContains:**/*.inf",
+    "onLanguage:inference",
     "onView:inference.configView"
   ],
   "contributes": {
@@ -41,8 +42,8 @@
     },
     "views": {
       "inference": [
-        {          
-          "id": "inference.configView",          
+        {
+          "id": "inference.configView",
           "name": "Configuration",
           "icon": "icons/file_icon.svg"
         }
@@ -100,6 +101,10 @@
       {
         "command": "inference.runDoctor",
         "title": "Inference: Run Doctor"
+      },
+      {
+        "command": "inference.restartLsp",
+        "title": "Inference: Restart Language Server"
       },
       {
         "command": "inference.showOutput",
@@ -161,6 +166,17 @@
           "type": "boolean",
           "default": true,
           "description": "Check for toolchain updates on activation."
+        },
+        "inference.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the Inference language server (inference-lsp) automatically. Provides diagnostics, hover, go to definition, completions, and more."
+        },
+        "inference.lsp.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Path to the inference-lsp binary. Leave empty for auto-detection (INFERENCE_HOME/bin, then PATH). If set but not executable, the language server is not started."
         }
       }
     },
@@ -230,7 +246,7 @@
     "build:prod": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
     "test": "node --import tsx --test src/test/**/*.test.ts",
-    "package": "vsce package",
+    "package": "vsce package --no-dependencies",
     "publish": "vsce publish",
     "test syntax": "tsx --test test/grammar.test.ts test/language-config.test.ts"
   },
@@ -243,5 +259,8 @@
     "typescript": "^5.3.0",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.1.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }

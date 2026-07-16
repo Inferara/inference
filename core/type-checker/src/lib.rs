@@ -98,9 +98,10 @@
 
 use std::marker::PhantomData;
 
+use anyhow::bail;
 use inference_ast::arena::AstArena;
 
-use crate::{type_checker::TypeChecker, typed_context::TypedContext};
+use crate::{errors::TypeCheckError, type_checker::TypeChecker, typed_context::TypedContext};
 
 mod definition_graph;
 pub mod errors;
@@ -158,20 +159,26 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
     pub fn build_typed_context(
         arena: AstArena,
     ) -> anyhow::Result<TypeCheckerBuilder<TypeCheckerCompleteState>> {
-        let mut ctx = TypedContext::new(arena);
-        let mut type_checker = TypeChecker::default();
-        match type_checker.infer_types(&mut ctx) {
-            Ok(symbol_table) => {
-                ctx.symbol_table = symbol_table;
-                ctx.build_type_indexes();
-            }
-            Err(e) => {
-                return Err(e);
-            }
+        let TypeCheckOutcome {
+            typed_context,
+            errors,
+        } = check_with_diagnostics(arena);
+        if !errors.is_empty() {
+            // Prefix each error with the `::`-joined module path of the file it
+            // was produced in; the entry file stays a bare `line:col` (its label
+            // is `None`), so single-file programs read exactly as before.
+            let error_messages: Vec<String> = errors
+                .into_iter()
+                .map(|d| match d.file_label {
+                    Some(label) => format!("{label}:{}", d.error),
+                    None => d.error.to_string(),
+                })
+                .collect();
+            bail!(error_messages.join("; "));
         }
 
         Ok(TypeCheckerBuilder {
-            typed_context: ctx,
+            typed_context,
             _state: PhantomData,
         })
     }
@@ -182,5 +189,105 @@ impl TypeCheckerBuilder<TypeCheckerCompleteState> {
     #[must_use = "consumes builder and returns the typed context"]
     pub fn typed_context(self) -> TypedContext {
         self.typed_context
+    }
+}
+
+/// A single structured type-check diagnostic: a [`TypeCheckError`] paired with
+/// the module-path file label of the file it was produced in.
+///
+/// The label is required because source locations in a multi-file program are
+/// per-file-local in the merged arena, so a bare `line:col` from an imported
+/// file would otherwise be misattributed to the entry file. It matches
+/// [`inference_ast::nodes::file_label`]: `None` for the entry file, the
+/// `::`-joined module path (e.g. `lib::geom`) otherwise. The per-error source
+/// location is available without string parsing via
+/// [`TypeCheckError::location`](crate::errors::TypeCheckError::location).
+#[derive(Debug, Clone)]
+pub struct TypeCheckDiagnostic {
+    /// The `::`-joined module path of the file this error belongs to, or `None`
+    /// for the entry file.
+    pub file_label: Option<String>,
+    /// The structured error, carrying its own per-file-local source location.
+    pub error: TypeCheckError,
+}
+
+/// The lossless outcome of a type-check run: the typed context together with
+/// every structured diagnostic collected. Produced by [`check_with_diagnostics`].
+///
+/// # Partial context guarantees
+///
+/// The [`typed_context`](Self::typed_context) is returned whether or not type
+/// checking found errors, because the checker recovers from errors and runs
+/// every phase to completion rather than aborting on the first one. As a result
+/// the *whole-program* tables are always fully built, up to what was resolvable:
+///
+/// - [`TypedContext::arena`] — the parsed arena, always complete (type checking
+///   never mutates it).
+/// - [`TypedContext::lookup_struct`] / [`TypedContext::lookup_enum`] and the
+///   underlying symbol table (methods, functions, imports) — populated for every
+///   definition the checker could register, independent of body errors, because
+///   the symbol table is assigned into the context and its canonical-key indexes
+///   are built even on the error path.
+///
+/// Only *per-node* results are affected by errors, and only for the nodes that
+/// failed:
+///
+/// - [`TypedContext::get_node_typeinfo`] answers for every node that was
+///   successfully typed. A node inside a definition whose body failed to
+///   type-check may be absent, but each definition is inferred independently, so
+///   a node in a *sibling* definition that did check is unaffected.
+/// - [`TypedContext::call_target`] answers for every call that resolved to a
+///   known function; an unresolved (erroring) call is absent.
+///
+/// When [`errors`](Self::errors) is empty the context is exactly the one
+/// [`TypeCheckerBuilder::build_typed_context`] yields on success.
+///
+/// [`TypedContext::arena`]: crate::typed_context::TypedContext::arena
+/// [`TypedContext::lookup_struct`]: crate::typed_context::TypedContext::lookup_struct
+/// [`TypedContext::lookup_enum`]: crate::typed_context::TypedContext::lookup_enum
+/// [`TypedContext::get_node_typeinfo`]: crate::typed_context::TypedContext::get_node_typeinfo
+/// [`TypedContext::call_target`]: crate::typed_context::TypedContext::call_target
+pub struct TypeCheckOutcome {
+    /// The typed context, populated as far as error recovery allowed (see the
+    /// type-level docs for the exact partial guarantees).
+    pub typed_context: TypedContext,
+    /// Every structured diagnostic collected, in the same order the aggregated
+    /// [`TypeCheckerBuilder::build_typed_context`] message renders them. Empty
+    /// when the program type-checks cleanly.
+    pub errors: Vec<TypeCheckDiagnostic>,
+}
+
+/// Type-checks `arena` losslessly: runs the same pipeline as
+/// [`TypeCheckerBuilder::build_typed_context`] but returns the (possibly
+/// partially populated) [`TypedContext`] together with the structured errors,
+/// instead of discarding the context and joining the errors into one string.
+///
+/// This is the structured entry point the IDE/LSP layer builds on: every error
+/// keeps its variant, its per-file-local source location (via
+/// [`TypeCheckError::location`](crate::errors::TypeCheckError::location)), and
+/// its optional module-path file label without any string parsing. See
+/// [`TypeCheckOutcome`] for what the returned context is guaranteed to contain
+/// when errors are present.
+///
+/// [`TypeCheckerBuilder::build_typed_context`] is re-expressed on top of this
+/// function, so the two share exactly one checking implementation.
+#[must_use = "the outcome carries both the typed context and the diagnostics"]
+pub fn check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
+    let mut ctx = TypedContext::new(arena);
+    let mut type_checker = TypeChecker::default();
+    let (symbol_table, errors) = type_checker.check_collecting(&mut ctx);
+    // Assign the symbol table and build the canonical-key indexes even when there
+    // are errors, so the partial context answers `lookup_struct`/`lookup_enum`
+    // and method/call queries for the parts of the program that did check — the
+    // whole point of a lossless entry point for tooling.
+    ctx.symbol_table = symbol_table;
+    ctx.build_type_indexes();
+    let errors = errors
+        .into_iter()
+        .map(|(file_label, error)| TypeCheckDiagnostic { file_label, error })
+        .collect();
+    TypeCheckOutcome {
+        typed_context: ctx,
+        errors,
     }
 }

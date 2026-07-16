@@ -10,6 +10,10 @@
 //! - Toolchain directory existence
 //! - Default toolchain configuration
 //! - `infc` compiler binary presence
+//! - Bundled `inference-lsp` language server presence
+
+use std::fmt::Write as _;
+use std::path::Path;
 
 use super::conflict::enumerate_infc_on_path;
 use super::resolver::{self, find_infc_with_source};
@@ -117,6 +121,7 @@ pub fn run_all_checks() -> Vec<DoctorCheck> {
         checks.push(ambiguity);
     }
     checks.push(crate::commands::wasm_opt::doctor_check());
+    checks.push(check_inference_lsp());
     checks
 }
 
@@ -309,6 +314,72 @@ pub fn check_resolution_ambiguity() -> Option<DoctorCheck> {
     ))
 }
 
+/// Checks whether the managed `inference-lsp` language server is available.
+///
+/// Newer toolchain archives bundle the LSP server alongside `infc`, so the
+/// managed copy lands in the default toolchain directory (and is symlinked
+/// into `bin/`). The VS Code extension resolves the server through a PATH tier
+/// as well, so any `inference-lsp` also visible on `PATH` is noted on the same
+/// line.
+///
+/// Statuses, chosen so `infs doctor` still exits zero when the optional server
+/// is simply absent:
+/// - **OK** — the default toolchain bundles the server; the resolved path is
+///   reported, with a PATH hit appended when one exists.
+/// - **OK** — no default toolchain is set at all (deferring to
+///   [`check_default_toolchain`], which owns that diagnosis).
+/// - **Warning** — a default toolchain is set but predates the bundling; the
+///   message hints at upgrading and notes any PATH fallback.
+#[must_use]
+pub fn check_inference_lsp() -> DoctorCheck {
+    let Ok(platform) = Platform::detect() else {
+        return DoctorCheck::error("inference-lsp", "Cannot detect platform");
+    };
+    let binary_with_ext = format!("inference-lsp{}", platform.executable_extension());
+    let path_hit = which::which(&binary_with_ext).ok();
+
+    let Ok(paths) = ToolchainPaths::new() else {
+        return DoctorCheck::error("inference-lsp", "Cannot determine toolchain paths");
+    };
+
+    inference_lsp_check(&paths, &binary_with_ext, path_hit.as_deref())
+}
+
+/// Pure decision logic for [`check_inference_lsp`], separated from the
+/// environment reads (platform, PATH, toolchain root) so every branch is
+/// unit-testable with a `ToolchainPaths` rooted at a temp directory.
+fn inference_lsp_check(
+    paths: &ToolchainPaths,
+    binary_with_ext: &str,
+    path_hit: Option<&Path>,
+) -> DoctorCheck {
+    let default_version = match paths.get_default_version() {
+        Ok(Some(v)) => v,
+        Ok(None) => return DoctorCheck::ok("inference-lsp", "No toolchain installed"),
+        Err(e) => {
+            return DoctorCheck::error("inference-lsp", format!("Cannot read default version: {e}"));
+        }
+    };
+
+    let binary_path = paths.binary_path(&default_version, binary_with_ext);
+    if binary_path.exists() {
+        let mut message = format!("Found at {}", binary_path.display());
+        if let Some(hit) = path_hit {
+            let _ = write!(message, "; also on PATH at {}", hit.display());
+        }
+        DoctorCheck::ok("inference-lsp", message)
+    } else {
+        let mut message = format!(
+            "toolchain {default_version} does not include inference-lsp; \
+             install a newer toolchain to add the language server"
+        );
+        if let Some(hit) = path_hit {
+            let _ = write!(message, "; a copy is available on PATH at {}", hit.display());
+        }
+        DoctorCheck::warning("inference-lsp", message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,9 +412,10 @@ mod tests {
     fn run_all_checks_returns_expected_count() {
         let checks = run_all_checks();
         // Base checks: infs, platform, toolchain dir, default toolchain,
-        // infc, resolved infc, wasm-opt. Ambiguity check is conditional (0 or 1).
+        // infc, resolved infc, wasm-opt, inference-lsp. Ambiguity check is
+        // conditional (0 or 1).
         assert!(
-            checks.len() == 7 || checks.len() == 8,
+            checks.len() == 8 || checks.len() == 9,
             "unexpected check count: {}",
             checks.len()
         );
@@ -440,6 +512,112 @@ mod tests {
         let msg = no_default_toolchain_message(&paths);
         assert!(msg.contains("infs default"));
         assert!(msg.contains("0.1.0"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// The bundled `inference-lsp` binary name for the running platform.
+    fn lsp_binary_name() -> String {
+        let ext = Platform::detect().unwrap().executable_extension();
+        format!("inference-lsp{ext}")
+    }
+
+    #[test]
+    fn check_inference_lsp_returns_valid_doctor_check() {
+        let check = check_inference_lsp();
+        assert_eq!(check.name, "inference-lsp");
+        assert!(!check.message.is_empty());
+        assert!(
+            check.status == DoctorCheckStatus::Ok
+                || check.status == DoctorCheckStatus::Warning
+                || check.status == DoctorCheckStatus::Error
+        );
+    }
+
+    #[test]
+    fn inference_lsp_check_ok_when_no_default_toolchain() {
+        let temp_dir = std::env::temp_dir().join("infs_test_lsp_no_default");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let check = inference_lsp_check(&paths, &lsp_binary_name(), None);
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert_eq!(check.message, "No toolchain installed");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn inference_lsp_check_ok_when_toolchain_bundles_server() {
+        let temp_dir = std::env::temp_dir().join("infs_test_lsp_present");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let binary = lsp_binary_name();
+
+        std::fs::create_dir_all(paths.toolchain_dir("0.2.0")).unwrap();
+        std::fs::write(paths.binary_path("0.2.0", &binary), b"lsp").unwrap();
+        paths.set_default_version("0.2.0").unwrap();
+
+        let check = inference_lsp_check(&paths, &binary, None);
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.message.starts_with("Found at"));
+        assert!(!check.message.contains("also on PATH"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn inference_lsp_check_notes_path_hit_when_present() {
+        let temp_dir = std::env::temp_dir().join("infs_test_lsp_present_path");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let binary = lsp_binary_name();
+
+        std::fs::create_dir_all(paths.toolchain_dir("0.2.0")).unwrap();
+        std::fs::write(paths.binary_path("0.2.0", &binary), b"lsp").unwrap();
+        paths.set_default_version("0.2.0").unwrap();
+
+        let hit = Path::new("/usr/local/bin/inference-lsp");
+        let check = inference_lsp_check(&paths, &binary, Some(hit));
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.message.contains("also on PATH at /usr/local/bin/inference-lsp"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn inference_lsp_check_warns_when_toolchain_predates_bundling() {
+        let temp_dir = std::env::temp_dir().join("infs_test_lsp_absent");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        // Default toolchain exists but does not bundle inference-lsp.
+        std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
+        paths.set_default_version("0.1.0").unwrap();
+
+        let check = inference_lsp_check(&paths, &lsp_binary_name(), None);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains("does not include inference-lsp"));
+        assert!(check.message.contains("0.1.0"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn inference_lsp_check_warns_but_notes_path_fallback() {
+        let temp_dir = std::env::temp_dir().join("infs_test_lsp_absent_path");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
+        paths.set_default_version("0.1.0").unwrap();
+
+        let hit = Path::new("/opt/tools/inference-lsp");
+        let check = inference_lsp_check(&paths, &lsp_binary_name(), Some(hit));
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains("does not include inference-lsp"));
+        assert!(check.message.contains("a copy is available on PATH at /opt/tools/inference-lsp"));
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

@@ -30,7 +30,6 @@
 //! `ConflictingTypeInference` / `CannotInferTypeParameter` when the
 //! substitution can't be determined unambiguously.
 
-use anyhow::bail;
 use inference_ast::arena::AstArena;
 use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
@@ -171,7 +170,7 @@ impl TypeChecker {
     /// Load external modules from prelude before import resolution.
     ///
     /// The prelude is consumed (moved into symbol table as virtual scopes).
-    /// Call this before `infer_types()` to make external modules available.
+    /// Call this before `check_collecting()` to make external modules available.
     ///
     /// # Arguments
     /// * `prelude` - The external prelude containing parsed external modules
@@ -189,7 +188,18 @@ impl TypeChecker {
 }
 
 impl TypeChecker {
-    /// Infer types for all definitions in the context.
+    /// Runs every type-check phase and returns the populated symbol table paired
+    /// with the structured errors collected along the way (empty on success).
+    ///
+    /// This is the single implementation of the phase pipeline; both entry points
+    /// go through it. It never fails: errors are collected rather than fatal (see
+    /// the module docs), so every phase runs to completion and the returned symbol
+    /// table is as complete as the checker could make it even when some bodies
+    /// failed to type-check. The caller decides how to surface the errors —
+    /// [`check_with_diagnostics`](crate::check_with_diagnostics) returns them
+    /// structured, while
+    /// [`TypeCheckerBuilder::build_typed_context`](crate::TypeCheckerBuilder::build_typed_context)
+    /// renders and joins them into one aggregated [`anyhow::Error`].
     ///
     /// Phase ordering:
     /// 1. `process_directives()` - Register raw imports in scopes
@@ -197,7 +207,10 @@ impl TypeChecker {
     /// 3. `resolve_imports()` - Bind import paths to symbols
     /// 4. `collect_function_and_constant_definitions()` - Register functions
     /// 5. Infer variable types in function bodies
-    pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
+    pub(crate) fn check_collecting(
+        &mut self,
+        ctx: &mut TypedContext,
+    ) -> (SymbolTable, Vec<(Option<String>, TypeCheckError)>) {
         self.process_directives(ctx);
         self.collect_extern_bindings(ctx);
         self.register_types(ctx);
@@ -249,20 +262,7 @@ impl TypeChecker {
             }
         }
         self.exit_files();
-        if !self.errors.is_empty() {
-            // Prefix each error with the `::`-joined module path of the file it was
-            // produced in; the entry file stays a bare `line:col` (its `label` is
-            // `None`), so single-file programs read exactly as before.
-            let error_messages: Vec<String> = std::mem::take(&mut self.errors)
-                .into_iter()
-                .map(|(label, error)| match label {
-                    Some(label) => format!("{label}:{error}"),
-                    None => error.to_string(),
-                })
-                .collect();
-            bail!(error_messages.join("; "))
-        }
-        Ok(self.symbol_table.clone())
+        (self.symbol_table.clone(), std::mem::take(&mut self.errors))
     }
 
     fn infer_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
@@ -3757,9 +3757,16 @@ impl TypeChecker {
 
         let extern_decls = Self::collect_top_level_extern_decls(arena);
 
-        // field name → (distinct modules in first-seen order, first import location)
-        let mut imports: FxHashMap<String, (Vec<String>, Location)> = FxHashMap::default();
+        // field name → (distinct modules in first-seen order, first import
+        // location, label of the file that owns that first `use … from`). The
+        // owning-file label rides alongside the location because this scan runs
+        // at the root cursor over every file's directives: a dangling or
+        // ambiguous import in an imported file must be stamped with that file,
+        // not the entry, or the location (per-file-local) is misattributed.
+        let mut imports: FxHashMap<String, (Vec<String>, Location, Option<String>)> =
+            FxHashMap::default();
         for sf in arena.source_files() {
+            let owner_label = inference_ast::nodes::file_label(&sf.module_path);
             for directive in &sf.directives {
                 let Directive::Use(use_dir) = directive;
                 let Some(module_ref) = &use_dir.from else {
@@ -3775,7 +3782,7 @@ impl TypeChecker {
                     let field = arena[field_id].name.clone();
                     let entry = imports
                         .entry(field)
-                        .or_insert_with(|| (Vec::new(), use_dir.location));
+                        .or_insert_with(|| (Vec::new(), use_dir.location, owner_label.clone()));
                     if !entry.0.contains(&module) {
                         entry.0.push(module.clone());
                     }
@@ -3783,13 +3790,16 @@ impl TypeChecker {
             }
         }
 
-        for (field, (modules, location)) in imports {
+        for (field, (modules, location, owner_label)) in imports {
             let Some(&decl) = extern_decls.get(&field) else {
-                self.push_error(TypeCheckError::ExternImportNotDeclared {
-                    name: field,
-                    module: modules.join(", "),
-                    location,
-                });
+                self.push_error_with_label(
+                    owner_label,
+                    TypeCheckError::ExternImportNotDeclared {
+                        name: field,
+                        module: modules.join(", "),
+                        location,
+                    },
+                );
                 continue;
             };
             if modules.len() > 1 {
@@ -3798,11 +3808,14 @@ impl TypeChecker {
                     .map(|m| format!("`{m}`"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.push_error(TypeCheckError::AmbiguousExternModule {
-                    name: field,
-                    modules: module_list,
-                    location,
-                });
+                self.push_error_with_label(
+                    owner_label,
+                    TypeCheckError::AmbiguousExternModule {
+                        name: field,
+                        modules: module_list,
+                        location,
+                    },
+                );
                 continue;
             }
             let logical_module = modules.into_iter().next().expect("one module");
@@ -4634,6 +4647,18 @@ impl TypeChecker {
     fn push_error_for_scope(&mut self, scope_id: u32, error: TypeCheckError) {
         let module_path = self.symbol_table.file_module_path_of_scope(scope_id);
         let label = inference_ast::nodes::file_label(&module_path);
+        self.errors.push((label, error));
+    }
+
+    /// Records an error stamped with an explicit file label rather than the file
+    /// currently open. Extern-binding collection runs at the root (the current
+    /// label is `None`) while iterating the `use … from` directives of every
+    /// file in the closure, so a dangling or ambiguous import belonging to an
+    /// imported file must carry that file's label — computed from the owning
+    /// file's module path at scan time — or its per-file-local location is
+    /// misattributed to the entry document. The entry file's own directives pass
+    /// `None`, matching every other entry diagnostic.
+    fn push_error_with_label(&mut self, label: Option<String>, error: TypeCheckError) {
         self.errors.push((label, error));
     }
 

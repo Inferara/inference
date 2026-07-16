@@ -8,6 +8,7 @@ import {
 } from '../toolchain/installation';
 import { runDoctor } from '../toolchain/doctor';
 import { updateStatusBar } from '../ui/statusBar';
+import { ensureLspStarted } from '../lsp/client';
 
 /** Guard against concurrent install attempts. */
 let installing = false;
@@ -55,6 +56,7 @@ export function registerInstallCommand(
                 updateStatusBar(statusBarItem, doctorResult);
                 vscode.commands.executeCommand('inference.refreshConfigView');
                 vscode.commands.executeCommand('inference.applyTerminalPath');
+                void ensureLspStarted();
 
                 notifyInstallSuccess(result.version, result.doctorWarnings);
             } catch (err) {
@@ -73,7 +75,7 @@ export function registerInstallCommand(
 function installWithProgress(
     platform: PlatformInfo,
     outputChannel: vscode.OutputChannel,
-): Promise<InstallResult> {
+): Thenable<InstallResult> {
     return vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
