@@ -157,7 +157,9 @@ fn push_top_level_defs(file: &FileAnalysis, entry: SourceFileId, items: &mut Vec
 /// A plain `use lib;` (or `use lib::geom;`) binds only the trailing namespace, so
 /// its `pub` items are offered *qualified* — label and inserted text `lib::item`,
 /// since the LSP layer inserts the label verbatim — alongside the bare namespace
-/// name itself. A braced `use lib::{a, b};` binds `a` and `b` bare, so exactly the
+/// name itself, but only once the module resolves: a `use` naming a module that
+/// does not exist contributes nothing, since its name would not compile. A braced
+/// `use lib::{a, b};` binds `a` and `b` bare, so exactly the
 /// braced names are offered bare (an item that names no `pub` definition in the
 /// target is dropped rather than offered as code that will not resolve). A
 /// `use … from <module>` clause imports an external symbol handled elsewhere and
@@ -188,14 +190,14 @@ fn push_imported(file: &FileAnalysis, entry: SourceFileId, items: &mut Vec<Compl
             let Some(binding) = segments.last() else {
                 continue;
             };
+            let Some(sfid) = file.source_file_id(&segments) else {
+                continue;
+            };
             items.push(CompletionItem {
                 label: binding.clone(),
                 kind: CompletionItemKind::Module,
                 detail: None,
             });
-            let Some(sfid) = file.source_file_id(&segments) else {
-                continue;
-            };
             for &def in &arena[sfid].defs {
                 if def_is_public(arena, def) {
                     items.push(qualified_def_completion(file, sfid, def, binding));
@@ -458,14 +460,12 @@ fn offset_in_comment_or_string(source: &str, offset: u32) -> bool {
             break;
         }
         match token.kind {
-            SyntaxKind::Comment | SyntaxKind::DocComment if start < offset && offset <= end => {
+            SyntaxKind::Comment | SyntaxKind::DocComment if offset <= end => {
                 return true;
             }
-            SyntaxKind::String if start < offset && offset < end => return true,
+            SyntaxKind::String if offset < end => return true,
             SyntaxKind::Error
-                if start < offset
-                    && offset <= end
-                    && source.as_bytes().get(start as usize) == Some(&b'"') =>
+                if offset <= end && source.as_bytes().get(start as usize) == Some(&b'"') =>
             {
                 return true;
             }
@@ -702,6 +702,19 @@ fn m(p: P) -> i32 { return p.; }";
         assert!(
             !has_label(&items, "lib::hidden") && !has_label(&items, "hidden"),
             "a private def is not importable, so it is not offered: {items:?}"
+        );
+    }
+
+    #[test]
+    fn a_plain_import_of_a_nonexistent_module_offers_nothing() {
+        // `use ghost;` names a module that is not on disk, so the namespace never
+        // resolves. Neither its bare name nor any qualified item may be offered —
+        // accepting `ghost` would insert a name the checker rejects (issue #246).
+        let source = "use ghost;\nfn main() -> i32 { return 0; }";
+        let items = complete(source, at(source, "return 0"));
+        assert!(
+            !has_label(&items, "ghost"),
+            "a nonexistent module contributes no completion: {items:?}"
         );
     }
 
