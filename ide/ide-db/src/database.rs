@@ -11,9 +11,32 @@ use crate::analysis::FileAnalysis;
 /// Owns the editor's open-document overlay and the per-entry-file analyses
 /// derived from it.
 ///
-/// Each open file is analyzed as its own project entry (its directory is the
-/// source root). Analyses are computed lazily on first request and memoized
-/// until a document change invalidates them.
+/// Each open file is analyzed as its own project entry. Analyses are computed
+/// lazily on first request and memoized until a document change invalidates them.
+///
+/// # Per-entry source root
+///
+/// Path-form imports resolve relative to a project's single **source root**, not
+/// to the importing file's own directory: a `use lib::b;` written anywhere in a
+/// project resolves to `<src_root>/lib/b.inf`. Analyzing an opened file with its
+/// own directory as the root therefore probes the wrong locations for any file in
+/// a subdirectory, yielding false missing-import diagnostics on a program the
+/// compiler accepts. Each entry's source root is resolved in three tiers so the
+/// IDE agrees with the compiler (see issue #243):
+///
+/// 1. **Manifest walk-up** — the nearest ancestor `Inference.toml` names the
+///    project; its source root (`<manifest_dir>/src`) is used when the opened file
+///    lives under it. This is what makes the IDE and `infs` resolve identically.
+/// 2. **Closure fallback** — with no manifest, if the file is already part of an
+///    analyzed entry's import closure, that entry's source root is reused, so a
+///    file navigated into from its project entry resolves the same way the entry
+///    resolved it.
+/// 3. **Own directory** — otherwise the file's own directory, the behavior for a
+///    bare, project-less file.
+///
+/// A manifest created or edited *after* a file was opened is not observed until
+/// that file's analysis is recomputed for another reason: there is no filesystem
+/// watch in v1 (see the `inference::manifest` module).
 ///
 /// # Closure-aware invalidation
 ///
@@ -94,13 +117,57 @@ impl RootDatabase {
 
     /// The analysis of `path` treated as a project entry, computed on first
     /// request and memoized until invalidated.
+    ///
+    /// The import closure resolves against the source root chosen by
+    /// [`resolve_source_root`](Self::resolve_source_root), so a file in a
+    /// subdirectory of a manifested project resolves its imports as the compiler
+    /// would rather than against its own directory.
     pub fn analysis(&mut self, path: &Path) -> &FileAnalysis {
         if !self.analyses.contains_key(path) {
+            let src_root = self.resolve_source_root(path);
             self.generation += 1;
-            let analysis = FileAnalysis::compute(&self.vfs, path, self.generation);
+            let analysis = FileAnalysis::compute(&self.vfs, path, &src_root, self.generation);
             self.analyses.insert(path.to_path_buf(), analysis);
         }
         &self.analyses[path]
+    }
+
+    /// Resolves the source root `entry`'s import closure should resolve against,
+    /// in three tiers (see the type-level docs and issue #243).
+    ///
+    /// Manifest discovery (tier 1) reads the nearest `Inference.toml` from disk;
+    /// the closure fallback (tier 2) only ever donates the root of an entry whose
+    /// import closure already contains `entry`, so an unrelated open file never
+    /// lends its root.
+    fn resolve_source_root(&self, entry: &Path) -> PathBuf {
+        if let Some(root) = inference::manifest_source_root(entry) {
+            return root;
+        }
+        if let Some(root) = self.closure_donor_source_root(entry) {
+            return root;
+        }
+        entry
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf()
+    }
+
+    /// The source root of an already-memoized entry whose import closure contains
+    /// `file`, or `None` when no such entry exists.
+    ///
+    /// The donor's closure is exactly the set of files it reached from its own
+    /// source root, so reusing that root resolves `file`'s imports the same way
+    /// the donor resolved them. `file` itself is never its own donor. When several
+    /// entries qualify the one with the lexicographically smallest entry path
+    /// wins, so the choice is deterministic across repeated analyses.
+    fn closure_donor_source_root(&self, file: &Path) -> Option<PathBuf> {
+        self.analyses
+            .iter()
+            .filter(|(entry, analysis)| {
+                entry.as_path() != file && analysis.closure_contains(file)
+            })
+            .min_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, analysis)| analysis.source_root().to_path_buf())
     }
 
     /// Drops every memoized analysis affected by a change to `changed`.
