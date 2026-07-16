@@ -28,14 +28,28 @@ const INLAY_KIND_TYPE: i64 = 1;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+// Only the debug-only panic-boundary test asserts on this code.
+#[cfg(debug_assertions)]
 const INTERNAL_ERROR: i64 = -32603;
 
-/// A document whose *analysis* panics: a named constant used as an array size
-/// hits an unimplemented `todo!` deep in the type-checker (#240). It is the most
-/// direct in-tree trigger for the message-loop panic boundary; if #240 is fixed
-/// so this no longer unwinds, replace it with another deterministic panic.
-const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
-fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
+/// The environment variable that arms the server's debug-only analysis-panic seam,
+/// and the path marker the panic-boundary tests arm it with. Only the panic-trigger
+/// fixture's path carries the marker, so a healthy `main.inf` sibling in the same
+/// session analyzes normally. Gated on `debug_assertions` with the tests that use
+/// them: the server's seam is a no-op in release builds, so these have no meaning
+/// there.
+#[cfg(debug_assertions)]
+const PANIC_ENV: &str = "INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR";
+#[cfg(debug_assertions)]
+const PANIC_PATH_MARKER: &str = "panic-trigger";
+
+/// A well-formed document whose *path* (not its contents) makes the armed server
+/// seam force a deterministic analysis panic — the trigger the message-loop panic
+/// boundary (#241) needs without depending on a specific compiler bug. The former
+/// in-tree trigger (a named constant as an array size) became an ordinary
+/// diagnostic once #240 was fixed, so the panic is now injected by the seam.
+#[cfg(debug_assertions)]
+const PANIC_DOC_SOURCE: &str = "fn main() -> i32 { return 0; }";
 
 /// A single-file fixture: an isolated temp dir with `main.inf` written to disk,
 /// plus its `file://` URI. The returned [`TempDir`] must be kept alive for the
@@ -44,6 +58,18 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 fn fixture(tag: &str, source: &str) -> (TempDir, String) {
     let dir = TempDir::new(tag);
     let path = dir.write("main.inf", source);
+    let uri = path_to_uri(&path);
+    (dir, uri)
+}
+
+/// A fixture whose document path carries [`PANIC_PATH_MARKER`], so an armed server
+/// forces a deterministic analysis panic for it (see [`PANIC_DOC_SOURCE`]). The
+/// file is named `panic-trigger.inf` rather than `main.inf` so the marker matches
+/// only this document, never a healthy sibling in the same temp-dir tag.
+#[cfg(debug_assertions)]
+fn panic_fixture(tag: &str) -> (TempDir, String) {
+    let dir = TempDir::new(tag);
+    let path = dir.write("panic-trigger.inf", PANIC_DOC_SOURCE);
     let uri = path_to_uri(&path);
     (dir, uri)
 }
@@ -971,21 +997,27 @@ fn query_or_fragment_uri_is_ignored_without_crashing() {
 }
 
 // --- 22. an analysis panic is contained, not fatal to the session (#241) ------
+//
+// These three tests drive the server's debug-only analysis-panic seam, which is a
+// no-op in release builds; they are compiled and run only under `debug_assertions`
+// (the standard `cargo test` runs debug).
 
+#[cfg(debug_assertions)]
 #[test]
 fn a_request_whose_analysis_panics_is_answered_internal_error() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     // The panic file lives on disk but is never opened; a request against it reads
-    // it from disk, analyzes, and unwinds. The message-loop boundary must turn that
-    // into a failed request carrying its own id, not a dead process.
-    let (_dir, panic_uri) = fixture("panic-request", PANIC_SOURCE);
+    // it from disk, analyzes, and unwinds (the armed seam fires on its path). The
+    // message-loop boundary must turn that into a failed request carrying its own
+    // id, not a dead process.
+    let (_dir, panic_uri) = panic_fixture("panic-request");
     let healthy = "fn f() -> i32 { return 1; }";
     let (_healthy_dir, healthy_uri) = fixture("panic-request-healthy", healthy);
     client.did_open(&healthy_uri, healthy, 1);
 
-    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_SOURCE, "arr"));
+    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_DOC_SOURCE, "main"));
     assert_eq!(
         response["error"]["code"],
         json!(INTERNAL_ERROR),
@@ -1002,9 +1034,10 @@ fn a_request_whose_analysis_panics_is_answered_internal_error() {
     client.shutdown_exit_ok();
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     let healthy = "fn f() -> i32 { return 1; }";
@@ -1012,10 +1045,10 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
     client.did_open(&healthy_uri, healthy, 1);
 
     // Opening the panic file computes its diagnostics on the loop thread, which
-    // unwinds. The notification boundary contains it: nothing is published for the
-    // file (so we must not wait on a publish that never comes), and the session
-    // lives on. Sent raw for that reason.
-    let (_dir, panic_uri) = fixture("panic-didopen", PANIC_SOURCE);
+    // unwinds (the armed seam fires on its path). The notification boundary contains
+    // it: nothing is published for the file (so we must not wait on a publish that
+    // never comes), and the session lives on. Sent raw for that reason.
+    let (_dir, panic_uri) = panic_fixture("panic-didopen");
     client.send_notification(
         "textDocument/didOpen",
         json!({
@@ -1023,7 +1056,7 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
                 "uri": panic_uri,
                 "languageId": "inference",
                 "version": 1,
-                "text": PANIC_SOURCE,
+                "text": PANIC_DOC_SOURCE,
             }
         }),
     );
@@ -1038,9 +1071,10 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
     client.shutdown_exit_ok();
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     let healthy = "fn f() -> i32 { return 1; }";
@@ -1051,7 +1085,7 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
     // re-sends didOpen for the same bad file. Each didOpen unwinds during diagnostics;
     // every one must be contained, and the healthy document stay answerable across all
     // of them — otherwise one bad file becomes a permanent LSP outage.
-    let (_dir, panic_uri) = fixture("panic-loop", PANIC_SOURCE);
+    let (_dir, panic_uri) = panic_fixture("panic-loop");
     for version in 1..=5 {
         client.send_notification(
             "textDocument/didOpen",
@@ -1060,7 +1094,7 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
                     "uri": panic_uri,
                     "languageId": "inference",
                     "version": version,
-                    "text": PANIC_SOURCE,
+                    "text": PANIC_DOC_SOURCE,
                 }
             }),
         );
@@ -1070,6 +1104,32 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
             "the server is still alive after panicking didOpen #{version}, got {hover}"
         );
     }
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn named_constant_array_size_publishes_a_diagnostic_over_the_wire() {
+    // The #240 fix seen end-to-end: the source that used to `todo!`-panic the
+    // analysis (a named constant as an array size) now type-checks into an ordinary
+    // diagnostic. The server is spawned *without* the panic seam armed, so opening
+    // the file must publish a normal diagnostic instead of crashing the session.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let source = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
+    let (_dir, uri) = fixture("const-array-size", source);
+    let published = client.did_open(&uri, source, 1);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .filter_map(|d| d["message"].as_str())
+            .any(|message| message.contains("array size must be an integer literal")),
+        "the named-constant array size is published as a diagnostic, got {:?}",
+        published.diagnostics
+    );
 
     client.shutdown_exit_ok();
 }

@@ -740,6 +740,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An inlay-hint request range whose end is past EOF now clamps to the file end (new `LineIndex::offset_clamped`, extending the existing character clamp to the line dimension) instead of disabling the clip entirely and returning hints outside the requested window
   - `didClose` for a URI this server cannot map to a file publishes nothing — no empty diagnostics set under the garbage URI and no dependents republish — mirroring `didOpen`, which already ignores such URIs
   - An oversized `Content-Length` (unbounded pre-allocation in `lsp-server` 0.8's `read_msg_text`) is documented in the crate's known-limitations note alongside the existing malformed-frame limitation; it is upstream framing owned by the reader thread with no clean stdio seam to bound without vendoring the transport
+- type-checker: a named constant used as an array size (`let a: [i32; N] = …`) is now reported as a diagnostic instead of aborting the compiler and the IDE analysis with a `todo!` panic ([#240])
+  - `extract_array_size_from_arena` is total again: a non-literal or out-of-range size collapses to a `0` sentinel rather than panicking, so building a `TypeInfo` never unwinds
+  - `validate_array_size` raises the diagnostic — a named constant is `NonLiteralArraySize` ("array size must be an integer literal; named constant `N` is not yet supported…", located at the size identifier), a zero or out-of-range literal stays `InvalidArraySize`
+  - Both the fail-fast (`build_typed_context`) and lossless (`check_with_diagnostics`) entry points surface it as an ordinary diagnostic; the size-`0` sentinel no longer cascades a spurious array-literal-size or variable/return type mismatch, so the reproduction reports exactly one error
+  - The [#241] message-loop panic-boundary tests, which had used this exact panic as their trigger, now inject a deliberate panic through a debug-only server seam (`INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR`, invisible in release builds) instead
+  - Compile-time constant evaluation of array sizes remains future work (#79)
 
 ### Project Manifest
 
@@ -934,5 +940,6 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#240]: https://github.com/Inferara/inference/issues/240
 [#241]: https://github.com/Inferara/inference/issues/241
 [#249]: https://github.com/Inferara/inference/issues/249

@@ -461,9 +461,81 @@ fn panic_response(id: RequestId) -> Response {
     )
 }
 
+/// The environment variable that arms the analysis-panic test seam out of process.
+///
+/// The panic-boundary tests (#241) need a document whose analysis deterministically
+/// unwinds. Rather than couple that guarantee to a specific compiler bug, the seam
+/// is deliberate and self-contained: any document whose path contains the substring
+/// named here panics when it is analyzed. The out-of-process e2e harness sets this
+/// on the server it spawns; the in-process unit tests use the thread-local arm
+/// ([`arm_analysis_panic`]) instead, which does not race across parallel tests.
+#[cfg(debug_assertions)]
+const TEST_PANIC_ENV: &str = "INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR";
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// In-process arm for [`analysis_panic_seam`]. `None` unless a unit test set it;
+    /// see [`TEST_PANIC_ENV`] for the out-of-process arm.
+    static ANALYSIS_PANIC_SUBSTR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only seam (compiled only in debug builds) that forces a deterministic panic
+/// while analyzing a marked document, so the message-loop panic boundary (#241) can
+/// be exercised without depending on a specific compiler bug as its trigger.
+///
+/// A document panics when its path contains the armed substring — set either by the
+/// [`TEST_PANIC_ENV`] environment variable (the out-of-process e2e harness) or by
+/// the thread-local [`arm_analysis_panic`] (in-process unit tests). Every other
+/// document is analyzed normally. In release builds this compiles to nothing.
+#[cfg(debug_assertions)]
+pub(crate) fn analysis_panic_seam(path: &std::path::Path) {
+    let display = path.to_string_lossy();
+    let matches = |substr: &str| !substr.is_empty() && display.contains(substr);
+    let armed_in_process = ANALYSIS_PANIC_SUBSTR.with(|cell| {
+        cell.borrow().as_deref().is_some_and(matches)
+    });
+    let armed_by_env = std::env::var(TEST_PANIC_ENV).is_ok_and(|substr| matches(&substr));
+    assert!(
+        !(armed_in_process || armed_by_env),
+        "deliberate LSP analysis panic for {display}: exercising the #241 panic boundary"
+    );
+}
+
+/// Release builds carry no test seam; the call sites optimize away entirely.
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn analysis_panic_seam(_path: &std::path::Path) {}
+
+/// Arms [`analysis_panic_seam`] in the current thread for documents whose path
+/// contains `substr`, disarming when the returned guard drops. Used by the unit
+/// tests, where an environment variable would race across the parallel test
+/// threads sharing this process. Gated on `debug_assertions` alongside the seam it
+/// arms, so a release test build (where the seam is a no-op) neither references the
+/// absent thread-local nor compiles a dead arming helper.
+#[cfg(all(test, debug_assertions))]
+pub(crate) fn arm_analysis_panic(substr: &str) -> AnalysisPanicArm {
+    ANALYSIS_PANIC_SUBSTR.with(|cell| *cell.borrow_mut() = Some(substr.to_owned()));
+    AnalysisPanicArm
+}
+
+/// Drop guard returned by [`arm_analysis_panic`]; clears the thread-local arm.
+#[cfg(all(test, debug_assertions))]
+pub(crate) struct AnalysisPanicArm;
+
+#[cfg(all(test, debug_assertions))]
+impl Drop for AnalysisPanicArm {
+    fn drop(&mut self) {
+        ANALYSIS_PANIC_SUBSTR.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    // `Arc` and the `Document` constructor are only reached through `track`, which is
+    // debug-only; gating the imports keeps a release test build warning-free.
+    #[cfg(debug_assertions)]
     use std::sync::Arc;
 
     use lsp_server::{Request, RequestId, Response};
@@ -473,7 +545,9 @@ mod tests {
     use lsp_types::request::{HoverRequest, Initialize, Request as _};
     use lsp_types::Uri;
 
-    use super::{Document, NegotiatedCapabilities, ServerState};
+    use super::{NegotiatedCapabilities, ServerState};
+    #[cfg(debug_assertions)]
+    use super::{arm_analysis_panic, Document};
 
     /// A client that supports everything this server negotiates. The individual
     /// tests here do not depend on the negotiated bits (those are exercised by the
@@ -485,13 +559,18 @@ mod tests {
         }
     }
 
-    /// A document that panics the analysis stack: a named constant used as an
-    /// array size hits an unimplemented `todo!` deep in the type-checker (#240).
-    /// It is the most direct in-tree trigger for the message-loop panic boundary;
-    /// if #240 is fixed so this no longer panics, replace it with another
-    /// deterministic panic trigger.
-    const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
-fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
+    /// The path substring the panic-boundary tests arm the analysis-panic seam with;
+    /// only the documents deliberately named with it (`.../panic.inf`) unwind, while
+    /// the healthy siblings analyze normally.
+    #[cfg(debug_assertions)]
+    const PANIC_MARKER: &str = "panic";
+
+    /// A well-formed document used by the panic-boundary tests. Its analysis panics
+    /// not because of its contents — it type-checks cleanly — but because its path
+    /// carries [`PANIC_MARKER`] and the armed [`super::analysis_panic_seam`] forces
+    /// a deterministic unwind for it (see #241 for the boundary it exercises).
+    #[cfg(debug_assertions)]
+    const PANIC_DOC_SOURCE: &str = "fn main() -> i32 { return 0; }";
 
     fn open(state: &mut ServerState, uri: &str, text: &str) {
         state.on_notification(did_open_notification(uri, text));
@@ -506,7 +585,9 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     /// Installs `text` as the overlay for `uri` and tracks the document, without
     /// computing diagnostics — so a document whose *analysis* panics can be staged
-    /// for a later query without the staging itself unwinding.
+    /// for a later query without the staging itself unwinding. Only the debug-only
+    /// panic-boundary test uses it.
+    #[cfg(debug_assertions)]
     fn track(state: &mut ServerState, uri: &str, text: &str) {
         let uri = Uri::from_str(uri).expect("a valid uri");
         let path = crate::uri::to_path(&uri).expect("a file uri");
@@ -527,6 +608,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         crate::handlers::publish_diagnostics_params(state, &uri).diagnostics
     }
 
+    #[cfg(debug_assertions)]
     fn hover_request(id: i32, uri: &str, line: u32, character: u32) -> Request {
         Request::new(
             RequestId::from(id),
@@ -766,13 +848,19 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         );
     }
 
+    // Gated on `debug_assertions`: the analysis-panic seam these two tests rely on is
+    // a no-op in release builds, so the tests are compiled and run only where it is
+    // active (the standard `cargo test` runs debug).
+    #[cfg(debug_assertions)]
     #[test]
     fn handle_request_resilient_contains_a_handler_panic() {
+        let _arm = arm_analysis_panic(PANIC_MARKER);
         let mut state = ServerState::new(full_client());
-        // Stage both documents without analyzing them (analyzing the panic file
-        // would unwind on its own); the requests below are what must be contained.
-        // Requests never republish, so staging a healthy sibling this way is safe.
-        track(&mut state, "file:///inf-test/panic.inf", PANIC_SOURCE);
+        // Stage both documents (tracking never analyzes, so it never unwinds); the
+        // hover request against the panic file is what the seam makes unwind, and
+        // what the resilient wrapper must contain. Requests never republish, so
+        // staging a healthy sibling this way is safe.
+        track(&mut state, "file:///inf-test/panic.inf", PANIC_DOC_SOURCE);
         track(
             &mut state,
             "file:///inf-test/ok.inf",
@@ -780,7 +868,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         );
 
         let response =
-            state.handle_request_resilient(hover_request(1, "file:///inf-test/panic.inf", 1, 25));
+            state.handle_request_resilient(hover_request(1, "file:///inf-test/panic.inf", 0, 3));
         assert_eq!(
             error_code(&response),
             lsp_server::ErrorCode::InternalError as i32,
@@ -801,8 +889,10 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn on_notification_resilient_contains_a_diagnostics_panic_and_recovers() {
+        let _arm = arm_analysis_panic(PANIC_MARKER);
         let mut state = ServerState::new(full_client());
         // A healthy document opened before the bad one; the bad open's panic must
         // not disturb it. (An undeclared variable keeps its diagnostics non-empty.)
@@ -816,7 +906,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         // and rebuilds the host rather than tearing down the session.
         let publishes = state.on_notification_resilient(did_open_notification(
             "file:///inf-test/panic.inf",
-            PANIC_SOURCE,
+            PANIC_DOC_SOURCE,
         ));
         assert!(
             publishes.is_empty(),
@@ -828,6 +918,31 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
         assert!(
             !diagnostics_for(&mut state, "file:///inf-test/ok.inf").is_empty(),
             "the healthy document survives the recovery and is still analyzed"
+        );
+    }
+
+    #[test]
+    fn named_constant_array_size_publishes_a_diagnostic_not_a_panic() {
+        // The #240 fix at the LSP boundary: the source that used to `todo!`-panic the
+        // analysis now type-checks into an ordinary diagnostic, so opening it
+        // publishes a normal diagnostic set instead of unwinding the session. The
+        // seam is not armed here — the panic must be gone on its own.
+        let mut state = ServerState::new(full_client());
+        let source = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
+        let mut publishes = state.on_notification(did_open_notification(
+            "file:///inf-test/const-size.inf",
+            source,
+        ));
+        assert_eq!(publishes.len(), 1, "the only open document publishes once");
+        let published = publishes.remove(0);
+        assert!(
+            published
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("array size must be an integer literal")),
+            "the named-constant array size is reported as a diagnostic, got {:?}",
+            published.diagnostics
         );
     }
 }

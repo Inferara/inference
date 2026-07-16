@@ -58,12 +58,25 @@ impl LspClient {
     /// Spawns the compiled server binary with piped stdio and starts the reader.
     #[must_use]
     pub fn spawn() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_inference-lsp"))
+        Self::spawn_with_env(&[])
+    }
+
+    /// Spawns the server with extra environment variables set on the child process.
+    ///
+    /// Used by the panic-boundary tests to arm the debug-only analysis-panic seam
+    /// (`INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR`) in the spawned server, since the
+    /// server runs out of process and cannot be armed in-process.
+    #[must_use]
+    pub fn spawn_with_env(env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_inference-lsp"));
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn inference-lsp");
+            .stderr(Stdio::null());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn inference-lsp");
 
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
