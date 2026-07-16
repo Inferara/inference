@@ -55,7 +55,7 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
 
 /// Removes a single leading UTF-8 BOM from `text`, if present. A BOM-free string
 /// is returned untouched (no reallocation).
-#[must_use]
+#[must_use = "the stripped text is the return value, not an in-place edit"]
 pub fn strip_utf8_bom(mut text: String) -> String {
     if text.starts_with(UTF8_BOM) {
         text.drain(..UTF8_BOM.len_utf8());

@@ -932,3 +932,4 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#248]: https://github.com/Inferara/inference/issues/248

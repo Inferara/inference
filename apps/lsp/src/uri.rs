@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn windows_drive_case_is_canonicalized_to_uppercase() {
-        // [15]: VS Code sends the drive colon percent-encoded and lowercased; on
+        // VS Code sends the drive colon percent-encoded and lowercased; on
         // Windows both spellings must decode to the one std-canonical (uppercase)
         // path, so the overlay and the analysis memo key them as one document.
         let lower = file_uri_to_path("file:///c%3A/Users/x/main.inf", WINDOWS);
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn posix_drive_shape_stays_absolute() {
-        // [18]: on POSIX `/c:/…` is a genuine absolute path (a directory literally
+        // On POSIX `/c:/…` is a genuine absolute path (a directory literally
         // named `c:`), never a Windows drive — it must not lose its leading slash
         // nor have its case folded, and it must round-trip.
         let path = file_uri_to_path("file:///c%3A/proj/main.inf", POSIX);
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn query_and_fragment_uris_are_rejected() {
-        // [16]: a document URI carries neither a query nor a fragment; both are
+        // A document URI carries neither a query nor a fragment; both are
         // rejected rather than fused onto the filename.
         assert_eq!(file_uri_to_path("file:///a.inf?x=1#f", POSIX), None);
         assert_eq!(file_uri_to_path("file:///a.inf?ver=1", POSIX), None);
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn posix_backslash_is_a_literal_filename_byte() {
-        // [17]: on POSIX a backslash is an ordinary byte; from_path percent-encodes
+        // On POSIX a backslash is an ordinary byte; from_path percent-encodes
         // it (%5C) rather than rewriting it to a slash, so the round trip is exact.
         let path = "/home/a\\b.inf";
         let uri = path_to_file_uri(path, POSIX).expect("uri");
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn dot_segments_are_removed() {
-        // [1]: `/a/../b.inf` and `/b.inf` must intern as one document.
+        // `/a/../b.inf` and `/b.inf` must intern as one document.
         let indirect = file_uri_to_path("file:///a/../b.inf", POSIX);
         let direct = file_uri_to_path("file:///b.inf", POSIX);
         assert_eq!(indirect.as_deref(), Some("/b.inf"));
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn path_form_unc_is_rejected() {
-        // [2]: an empty authority with a `//` path is a UNC path (SMB I/O on
+        // An empty authority with a `//` path is a UNC path (SMB I/O on
         // Windows), rejected like a remote authority on every host.
         assert_eq!(file_uri_to_path("file:////server/share/x.inf", POSIX), None);
         assert_eq!(
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn scheme_is_matched_case_insensitively() {
-        // [5]: RFC 3986 §3.1 — the scheme is case-insensitive.
+        // RFC 3986 §3.1 — the scheme is case-insensitive.
         let canonical = file_uri_to_path("file:///home/a.inf", POSIX);
         assert_eq!(canonical.as_deref(), Some("/home/a.inf"));
         for spelling in ["File:///home/a.inf", "FILE:///home/a.inf", "FiLe:///home/a.inf"] {
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn minimal_single_slash_form_is_accepted() {
-        // [5]: RFC 8089 `file:/path` (no authority) is spec-valid and trivially
+        // RFC 8089 `file:/path` (no authority) is spec-valid and trivially
         // normalized to the same path as the authority form.
         let minimal = file_uri_to_path("file:/home/user/main.inf", POSIX);
         let authority = file_uri_to_path("file:///home/user/main.inf", POSIX);
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn bare_and_relative_drive_uris_are_rejected_on_windows() {
-        // [6]: a drive prefix must yield an absolute path. A bare `C:` or a
+        // A drive prefix must yield an absolute path. A bare `C:` or a
         // drive-relative `C:name` resolve against a per-drive working directory,
         // so they are not documents this server can serve.
         assert_eq!(file_uri_to_path("file:///C:", WINDOWS), None);
