@@ -66,14 +66,28 @@ impl ServerState {
     ///
     /// A `todo!`/`unwrap` deep in the type-checker or analysis passes (the class
     /// tracked in #240) unwinds; left unguarded it would tear down the whole
-    /// session. Caught here, the offending request is answered with an
-    /// `InternalError` carrying its original id — so the client can correlate the
-    /// failure — and every other document keeps working. A stack overflow aborts
-    /// the process on its own and cannot be caught; that is intentionally left to
-    /// abort.
+    /// session. Caught here, the analysis host is rebuilt from the tracked open
+    /// documents — the same recovery the notification path takes — the offending
+    /// request is answered with an `InternalError` carrying its original id (so
+    /// the client can correlate the failure), and every other document keeps
+    /// working. A stack overflow aborts the process on its own and cannot be
+    /// caught; that is intentionally left to abort.
+    ///
+    /// A memoizing query does mutate the host: it bumps the analysis generation
+    /// stamp before computing an analysis and stores the finished analysis only
+    /// afterward, so a panic partway through leaves at most a bumped stamp and
+    /// never a half-built cache entry. The unconditional rebuild does not lean on
+    /// that invariant — it keeps the recovery identical to the notification path
+    /// and robust to future changes in what a query mutates.
     pub(crate) fn handle_request_resilient(&mut self, request: Request) -> Response {
         let id = request.id.clone();
-        catch(|| self.handle_request(request)).unwrap_or_else(|| panic_response(id))
+        match catch(|| self.handle_request(request)) {
+            Some(response) => response,
+            None => {
+                self.rebuild_host();
+                panic_response(id)
+            }
+        }
     }
 
     /// Routes a request to its handler, producing the response to send back. An
@@ -320,8 +334,9 @@ fn send(connection: &Connection, message: Message) -> anyhow::Result<()> {
 /// backtrace are written to stderr as usual — only the unwind is swallowed, and
 /// only stderr (never stdout, the protocol channel) is touched. `f` borrows the
 /// server state mutably, which is not `UnwindSafe`; asserting it is safe is sound
-/// here because the sole recovery — [`ServerState::rebuild_host`] — discards the
-/// state a panic could have left inconsistent rather than reading it back.
+/// because both callers treat a caught panic the same way: they discard the host
+/// with [`ServerState::rebuild_host`] and never read the possibly-inconsistent
+/// cached state back. Any future `catch` site must recover the same way.
 fn catch<R>(f: impl FnOnce() -> R) -> Option<R> {
     std::panic::catch_unwind(AssertUnwindSafe(f)).ok()
 }
@@ -591,10 +606,10 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
     }
 
     #[test]
-    fn handle_request_resilient_contains_a_handler_panic() {
+    fn handle_request_resilient_contains_a_handler_panic_and_rebuilds_the_host() {
         let mut state = ServerState::new(true);
         // Stage both documents without analyzing them (analyzing the panic file
-        // would unwind on its own); the requests below are what must be contained.
+        // would unwind on its own); the request below is what must be contained.
         // Requests never republish, so staging a healthy sibling this way is safe.
         track(&mut state, "file:///inf-test/panic.inf", PANIC_SOURCE);
         track(
@@ -602,6 +617,18 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
             "file:///inf-test/ok.inf",
             "fn f() -> i32 { return 1; }",
         );
+
+        // The recovery rebuilds the host from the tracked documents, so make the
+        // sibling's *tracked* text (a rebuild's only input) diverge from its stale
+        // host overlay: an undeclared variable the current host, still holding the
+        // clean overlay, would not report. A reported diagnostic afterward can then
+        // only come from a rebuild.
+        let ok_uri = Uri::from_str("file:///inf-test/ok.inf").expect("a valid uri");
+        state
+            .documents
+            .get_mut(&ok_uri)
+            .expect("the tracked document")
+            .text = "fn g() -> i32 { return x; }".into();
 
         let response =
             state.handle_request_resilient(hover_request(1, "file:///inf-test/panic.inf", 1, 25));
@@ -616,12 +643,12 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
             "the failed request's own id is echoed back"
         );
 
-        // A healthy request against another document still succeeds afterward.
-        let good =
-            state.handle_request_resilient(hover_request(2, "file:///inf-test/ok.inf", 0, 3));
+        // The host was rebuilt from the tracked documents — proven by the sibling's
+        // last-seen text (not its stale overlay) now being analyzed and reporting
+        // its undeclared variable — so the session keeps serving from a clean host.
         assert!(
-            good.error.is_none(),
-            "the server still answers after containing a panic"
+            !diagnostics_for(&mut state, "file:///inf-test/ok.inf").is_empty(),
+            "the sibling's tracked text is analyzed after the rebuild"
         );
     }
 
