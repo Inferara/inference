@@ -94,6 +94,25 @@ use crate::analysis::FileAnalysis;
 /// Analyses and the overlay are keyed by exact path spelling; a caller that may
 /// refer to one file by two spellings must canonicalize before calling in, so
 /// the same file always arrives under one path.
+///
+/// # Eviction
+///
+/// Open documents' analyses are never evicted — they are the editor's working
+/// set and are invalidated (not dropped) as their closures change. Two other
+/// sources of memoized analyses are bounded so a long session cannot grow the map
+/// without limit:
+///
+/// * **Closing a document** removes its overlay, so its memoized entry analysis
+///   (computed from that overlay) is dropped rather than left to serve vanished
+///   buffer text; a later query recomputes it from disk. Closure-aware
+///   invalidation already covers this — a document is always part of its own
+///   closure — and any still-open dependent that imported the closed file
+///   re-reads it from disk on its next query.
+/// * **Feature requests on never-opened paths** (a hover or goto against a URI the
+///   editor never sent a `didOpen` for reaches disk through the loader) each
+///   memoize an entry that no document change ever invalidates. These are capped
+///   at [`MAX_UNOPENED_ANALYSES`] with FIFO eviction of the oldest, so navigating
+///   through an unbounded number of dependency files cannot grow the map forever.
 #[derive(Default)]
 pub struct RootDatabase {
     vfs: Vfs,
@@ -106,7 +125,21 @@ pub struct RootDatabase {
     source_roots: FxHashMap<PathBuf, PathBuf>,
     /// Monotonic source of per-analysis generation stamps.
     generation: u64,
+    /// Entry paths of memoized analyses for documents the editor never opened, in
+    /// the order they were memoized (oldest first). Bounds the map against feature
+    /// requests on arbitrary URIs; see [`MAX_UNOPENED_ANALYSES`].
+    unopened_order: Vec<PathBuf>,
 }
+
+/// The most memoized analyses to retain for documents that were never opened.
+///
+/// A feature request against a URI the editor never opened memoizes an analysis
+/// that no document change invalidates, so without a bound they accumulate for the
+/// life of the session. Eight is comfortably more than the handful of dependency
+/// files a single navigation touches, while keeping the retained set small; the
+/// eviction is FIFO over never-opened entries only, so open documents are never
+/// affected.
+const MAX_UNOPENED_ANALYSES: usize = 8;
 
 impl RootDatabase {
     /// Opens `path` with `text` as its in-memory contents (an editor `didOpen`).
@@ -124,6 +157,9 @@ impl RootDatabase {
         let newly_available = self.vfs.contents_of_path(path).is_none();
         let id = self.vfs.intern(path);
         self.vfs.set_contents(id, text.into());
+        // An opened document is part of the editor's working set, never a
+        // never-opened entry subject to the eviction cap.
+        self.unopened_order.retain(|tracked| tracked != path);
         self.invalidate(path, newly_available);
     }
 
@@ -140,7 +176,13 @@ impl RootDatabase {
     /// Drops the in-memory contents of `path` (an editor `didClose`).
     ///
     /// The path stays interned; only its overlay is removed, so analyses whose
-    /// closure includes `path` recompute and read it from disk next time.
+    /// closure includes `path` recompute and read it from disk next time. The
+    /// closed document's own entry analysis is dropped too — it was computed from
+    /// the now-removed overlay, so serving it afterwards would return stale buffer
+    /// text — and a later query recomputes it from disk. Closure-aware
+    /// invalidation removes both, since a document is always part of its own
+    /// closure; the explicit removal here states that intent directly and keeps
+    /// the never-opened tracking consistent.
     pub fn close_document(&mut self, path: &Path) {
         if let Some(id) = self.vfs.file_id(path) {
             self.vfs.remove_contents(id);
@@ -148,7 +190,18 @@ impl RootDatabase {
         // Drop the sticky source root so the next open re-resolves from scratch,
         // observing a manifest created or a governing entry opened meanwhile.
         self.source_roots.remove(path);
+        self.analyses.remove(path);
+        self.unopened_order.retain(|tracked| tracked != path);
         self.invalidate(path, false);
+    }
+
+    /// Whether an analysis for `path` is currently memoized.
+    ///
+    /// Used by the protocol layer to tell which open documents a change actually
+    /// invalidated (their analyses were dropped) from those left untouched.
+    #[must_use = "the analyzed state is the reason to call this"]
+    pub fn is_analyzed(&self, path: &Path) -> bool {
+        self.analyses.contains_key(path)
     }
 
     /// The analysis of `path` treated as a project entry, computed on first
@@ -164,8 +217,38 @@ impl RootDatabase {
             self.generation += 1;
             let analysis = FileAnalysis::compute(&self.vfs, path, &src_root, self.generation);
             self.analyses.insert(path.to_path_buf(), analysis);
+            if self.vfs.contents_of_path(path).is_none() {
+                // Memoized for a path the editor never opened; bound how many such
+                // entries accumulate over a session.
+                self.record_unopened_analysis(path.to_path_buf());
+            }
         }
         &self.analyses[path]
+    }
+
+    /// Records `path` as the most-recently memoized never-opened analysis and
+    /// evicts the oldest ones beyond [`MAX_UNOPENED_ANALYSES`].
+    ///
+    /// The FIFO list is first pruned of paths that are no longer never-opened
+    /// memoized entries (opened since, or dropped by invalidation), so the cap
+    /// counts only entries actually held for never-opened documents.
+    fn record_unopened_analysis(&mut self, path: PathBuf) {
+        let mut kept = Vec::with_capacity(self.unopened_order.len() + 1);
+        for tracked in std::mem::take(&mut self.unopened_order) {
+            if tracked != path
+                && self.analyses.contains_key(&tracked)
+                && self.vfs.contents_of_path(&tracked).is_none()
+            {
+                kept.push(tracked);
+            }
+        }
+        kept.push(path);
+        self.unopened_order = kept;
+
+        while self.unopened_order.len() > MAX_UNOPENED_ANALYSES {
+            let evicted = self.unopened_order.remove(0);
+            self.analyses.remove(&evicted);
+        }
     }
 
     /// Resolves the source root `entry`'s import closure should resolve against,

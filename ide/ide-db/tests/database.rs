@@ -1021,6 +1021,66 @@ fn closure_donor_root_survives_shared_dep_change_when_dependent_reanalyzes_first
     );
 }
 
+// Eviction (issue #247): closing a document drops its overlay-derived analysis,
+// and analyses memoized for never-opened paths are capped so a long session
+// cannot grow the map without bound. Open documents are never evicted.
+
+#[test]
+fn closing_a_document_drops_its_memoized_entry_analysis() {
+    let tree = TempTree::new("close-drops-entry");
+    let entry = tree.write("main.inf", "pub fn main() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, "pub fn main() -> i32 { return 0; }");
+
+    let before = db.analysis(&entry).generation();
+    db.close_document(&entry);
+    // The overlay is gone, so the analysis computed from it must not be served
+    // again: the next query recomputes from disk.
+    let after = db.analysis(&entry).generation();
+    assert!(
+        after > before,
+        "closing a document must drop its memoized analysis ({before} -> {after})"
+    );
+}
+
+#[test]
+fn a_closed_file_remains_available_through_an_open_dependents_closure() {
+    // `main` imports `lib`; both are opened, and `lib` also exists on disk. Closing
+    // `lib` drops its own entry, but the still-open dependent `main` re-reads it
+    // from disk on its next query, so `lib`'s symbols stay visible.
+    let tree = TempTree::new("close-dependent-disk");
+    let main = tree.write(
+        "main.inf",
+        "use lib;\npub fn main() -> i32 { return lib::helper(); }",
+    );
+    let lib = tree.write("lib.inf", "pub fn helper() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&lib, "pub fn helper() -> i32 { return 7; }");
+    db.open_document(
+        &main,
+        "use lib;\npub fn main() -> i32 { return lib::helper(); }",
+    );
+
+    let lib_mod = vec!["lib".to_string()];
+    let before = {
+        let analysis = db.analysis(&main);
+        assert!(closure_defines(analysis, &lib_mod, "helper"));
+        analysis.generation()
+    };
+
+    db.close_document(&lib);
+    let analysis = db.analysis(&main);
+    assert!(
+        analysis.generation() > before,
+        "closing an imported file must invalidate the open dependent ({before} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "helper"),
+        "the dependent must re-read the closed file from disk and still see its symbols"
+    );
+}
+
 #[test]
 fn closing_a_document_drops_its_sticky_source_root() {
     // The sticky root must not outlive the open document. `lib/a.inf` adopts the
@@ -1050,4 +1110,87 @@ fn closing_a_document_drops_its_sticky_source_root() {
         "with the sticky root dropped and no donor left, lib::b cannot resolve"
     );
     assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
+}
+
+#[test]
+fn never_opened_analyses_are_capped_with_fifo_eviction() {
+    // The cap is a small constant (8). Memoizing analyses for ten never-opened
+    // files evicts the two oldest, so re-querying an oldest one recomputes while a
+    // recent one is still a cache hit.
+    let tree = TempTree::new("unopened-cap");
+    let mut db = RootDatabase::default();
+
+    let mut paths = Vec::new();
+    let mut first_gen = Vec::new();
+    for i in 0..10 {
+        let path = tree.write(
+            &format!("f{i}.inf"),
+            &format!("pub fn f{i}() -> i32 {{ return {i}; }}"),
+        );
+        first_gen.push(db.analysis(&path).generation());
+        paths.push(path);
+    }
+
+    // The oldest never-opened analysis was evicted: re-querying it recomputes with
+    // a fresh, larger generation stamp.
+    let requeried_oldest = db.analysis(&paths[0]).generation();
+    assert!(
+        requeried_oldest > first_gen[9],
+        "the oldest never-opened analysis must be evicted and recomputed ({} -> {requeried_oldest})",
+        first_gen[0]
+    );
+
+    // A recently memoized never-opened analysis is retained: re-querying is a cache
+    // hit that returns its original generation.
+    assert_eq!(
+        db.analysis(&paths[9]).generation(),
+        first_gen[9],
+        "a recently memoized never-opened analysis must be retained"
+    );
+}
+
+#[test]
+fn open_documents_are_never_evicted_by_the_never_opened_cap() {
+    let tree = TempTree::new("open-never-evicted");
+    let opened = tree.write("open.inf", "pub fn kept() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&opened, "pub fn kept() -> i32 { return 0; }");
+    let open_gen = db.analysis(&opened).generation();
+
+    // Flood the cap with far more never-opened files than it retains.
+    for i in 0..20 {
+        let path = tree.write(&format!("f{i}.inf"), &format!("pub fn f{i}() {{}}"));
+        let _ = db.analysis(&path).generation();
+    }
+
+    assert_eq!(
+        db.analysis(&opened).generation(),
+        open_gen,
+        "an open document's analysis must survive the never-opened cap untouched"
+    );
+}
+
+#[test]
+fn opening_a_previously_unopened_analysis_exempts_it_from_the_cap() {
+    // A path first seen via a feature request while never opened is capped; once
+    // the editor opens it, it joins the working set and is exempt even as the cap
+    // churns with other never-opened files.
+    let tree = TempTree::new("promote-out-of-cap");
+    let promoted = tree.write("promoted.inf", "pub fn kept() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+
+    let _ = db.analysis(&promoted).generation();
+    db.open_document(&promoted, "pub fn kept() -> i32 { return 0; }");
+    let open_gen = db.analysis(&promoted).generation();
+
+    for i in 0..20 {
+        let path = tree.write(&format!("f{i}.inf"), &format!("pub fn f{i}() {{}}"));
+        let _ = db.analysis(&path).generation();
+    }
+
+    assert_eq!(
+        db.analysis(&promoted).generation(),
+        open_gen,
+        "a document opened after first being seen unopened must be exempt from the cap"
+    );
 }

@@ -122,12 +122,22 @@ The `initialize` handshake itself is driven through `server::initialize`
 request with an `InvalidParams` error instead of aborting the process after the
 handshake, and the initialize result carries `serverInfo` (name and version).
 
-A single document notification republishes **every** open document, not just
-the notified one. Editing one file can invalidate another open document whose
-import closure includes it (`ide-db` drops exactly those analyses), and the
-client would otherwise keep rendering the dependent's stale diagnostics. This
-is bounded: an unaffected document's analysis is still memoized, so its
-republish recomputes nothing, and an editor keeps only a handful of files open.
+Because each keystroke arrives as its own full-text `didChange` and analysis is
+single-threaded, `run` sheds per-keystroke work two ways (issue #247). When the
+head of the queue is a `didChange`, the immediately-available backlog is drained
+non-blockingly and consecutive changes to the *same* document collapse to their
+final text, so a typing burst runs the closure pipeline once rather than once per
+keystroke; a `didOpen`/`didClose` for that document, or any request, is a barrier
+the coalescer never reorders across, and no other message is dropped. And a
+notification publishes eagerly only for the *changed* document: every other open
+document it invalidated (editing one file invalidates another whose import
+closure includes it — `ide-db` drops exactly those analyses) is queued and
+republished when the loop next goes idle, so an interactive request arriving right
+behind a keystroke is answered before the other documents recompute. The queue is
+always drained before the loop blocks, a request against a queued document
+publishes it fresh immediately, and a shutdown flushes it — so the client never
+keeps a stale diagnostic set. Documents a change left untouched keep their
+memoized analysis and are not republished at all.
 
 `handlers.rs` holds one function per LSP method. Each resolves the document's
 path from its URI, converts the LSP position(s) to a byte offset using the

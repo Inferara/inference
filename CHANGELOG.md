@@ -744,6 +744,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
 - compiler: the multi-file project front end parses each reachable file exactly once — the import walk now lowers files directly into the shared arena and reorders them into canonical order afterward via the new `AstArena::canonicalize_source_file_order`; previously discovery parsed every file into a throwaway arena just to read its `use` directives and lowering re-parsed it ([#227])
+- lsp: shed per-keystroke work in the single-threaded message loop and bound the analysis cache ([#247])
+  - Coalesce a typing burst: when the head of the queue is a `didChange`, the immediately-available backlog is drained non-blockingly (`try_recv`) and consecutive changes to the *same* document collapse to their final text, so the closure pipeline runs once per burst instead of once per keystroke. A `didOpen`/`didClose` for that document or any request is a barrier the coalescer never reorders across, and no other message is dropped. Measured a ~59 KB file at ~3.9 ms/recompute: a 10-keystroke burst drops from ~39 ms to ~3.9 ms
+  - Defer dependent republishes: a notification publishes eagerly only for the changed document; every other open document it invalidated is queued and republished when the loop next goes idle, so an interactive request arriving right behind a keystroke is answered before the other documents recompute. The queue is drained before the loop blocks, a request against a queued document publishes it fresh immediately, and a shutdown flushes it. For a ~30 KB shared lib, time-to-first-response for a request behind a keystroke stops scaling with the open-dependent count (~2.5 ms flat vs ~2.5 → 6.7 → 12.4 ms at 1 → 4 → 8 dependents)
+  - Share line indexes: `FileAnalysis` stores each closure file's `LineIndex` behind an `Arc`, and `Analysis::line_index`/`closure_line_index` return `Arc` handles, so a position query no longer copies the whole document's text (~66 KB / 2 heap allocations per request on a ~59 KB file → 0)
+  - Bound the analysis cache: closing a document drops its overlay-derived analysis (recomputed from disk on demand), and analyses memoized for never-opened paths (feature requests on arbitrary URIs) are FIFO-capped at 8; open documents are never evicted
 
 ### Changed
 
@@ -1033,5 +1038,6 @@ Initial tagged release.
 [#241]: https://github.com/Inferara/inference/issues/241
 [#240]: https://github.com/Inferara/inference/issues/240
 [#249]: https://github.com/Inferara/inference/issues/249
+[#247]: https://github.com/Inferara/inference/issues/247
 [#157]: https://github.com/Inferara/inference/issues/157
 [#256]: https://github.com/Inferara/inference/issues/256
