@@ -1402,3 +1402,76 @@ fn did_close_of_an_unmappable_uri_publishes_nothing() {
 
     client.shutdown_exit_ok();
 }
+
+// --- 29. a typing burst is coalesced over the real stdio transport (#247 item 1) -
+
+#[test]
+fn a_typing_burst_is_coalesced_into_far_fewer_recomputes() {
+    // Regression for the coalescer being a no-op over the production transport.
+    // lsp-server's stdio uses a zero-capacity rendezvous channel, so before the
+    // transport pump a burst never accumulated where the coalescer could see it —
+    // every keystroke recomputed and published once (a burst of N produced exactly N
+    // publishes). Sending a dense burst of raw didChanges — without waiting for a
+    // publish between them — lets a backlog build in the pump's buffer while the
+    // server is still analyzing an earlier change, so the rest collapse to their
+    // final text. The burst must therefore yield strictly fewer publishes than the
+    // number of changes sent.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // A chunky source so a debug-build recompute comfortably outlasts the microseconds
+    // it takes to write and buffer the next frame, guaranteeing a backlog forms.
+    let mut base = String::new();
+    for i in 0..60 {
+        base.push_str(&format!("fn f{i}() -> i32 {{ return {i}; }}\n"));
+    }
+    let (_dir, uri) = fixture("coalesce-burst", &base);
+    client.did_open(&uri, &base, 1);
+
+    // A dense burst of full-text changes, each still clean, sent raw so they queue
+    // behind the first recompute rather than being drained one at a time.
+    const BURST: i64 = 25;
+    for version in 2..=BURST + 1 {
+        let clean = format!("{base}fn extra{version}() -> i32 {{ return {version}; }}\n");
+        client.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [ { "text": clean } ],
+            }),
+        );
+    }
+    // The final change (highest version) breaks the file, so the definitive last state
+    // is distinguishable from every clean intermediate — proving the coalescer keeps
+    // the final text, not a stale earlier one.
+    let final_version = BURST + 2;
+    let broken = format!("{base}fn broken() -> i32 {{ return undeclared_x; }}\n");
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": final_version },
+            "contentChanges": [ { "text": broken } ],
+        }),
+    );
+
+    let publishes = client.drain_publishes(Duration::from_secs(3));
+    let for_uri: Vec<_> = publishes.iter().filter(|(u, _)| u == &uri).collect();
+    let changes_sent = final_version - 1; // versions 2..=final_version
+
+    assert!(!for_uri.is_empty(), "the burst must publish at least once");
+    assert!(
+        (for_uri.len() as i64) < changes_sent,
+        "a coalesced burst publishes fewer than the {changes_sent} changes sent, got {} \
+         (before the transport pump this was exactly {changes_sent})",
+        for_uri.len()
+    );
+    // The last publish for the file carries the final broken text's diagnostic.
+    let last = for_uri.last().expect("at least one publish");
+    assert!(
+        !last.1.is_empty(),
+        "the last publish reflects the final broken text, got {:?}",
+        last.1
+    );
+
+    client.shutdown_exit_ok();
+}

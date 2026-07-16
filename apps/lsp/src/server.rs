@@ -11,7 +11,9 @@
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 
 use inference_ide::AnalysisHost;
 use lsp_server::{
@@ -396,12 +398,15 @@ fn drain_until_exit(connection: &Connection) {
 /// closure pipeline once per keystroke while an interactive request waits behind
 /// the burst. Two mechanisms shed that cost (issue #247):
 ///
-/// * **Coalescing.** When the head of the queue is a `didChange`, the
-///   immediately-available backlog is drained and consecutive changes to the same
-///   document collapse to their final text ([`coalesce_changes`]), so a typing
-///   burst runs the pipeline once, not once per keystroke. A `didOpen`/`didClose`
-///   for that document, or any request, is a barrier the coalescer never reorders
-///   across, and no non-`didChange` message is ever dropped.
+/// * **Coalescing.** A dedicated forwarder ([`spawn_transport_pump`]) keeps the
+///   transport's rendezvous receiver continuously drained into a buffer, so while
+///   the loop analyzes one change the burst behind it accumulates there. When the
+///   head of that buffer is a `didChange`, the available backlog is drained and
+///   consecutive changes to the same document collapse to their final text
+///   ([`coalesce_changes`]), so a typing burst runs the pipeline a handful of times
+///   instead of once per keystroke. A `didOpen`/`didClose` for that document, or
+///   any request, is a barrier the coalescer never reorders across, and no
+///   non-`didChange` message is ever dropped.
 /// * **Deferred dependents.** A notification publishes eagerly only for the
 ///   changed document; every other open document it invalidated is queued
 ///   ([`ServerState::on_notification`]) and republished when the loop next goes
@@ -440,23 +445,28 @@ pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::R
     let mut state = ServerState::new(NegotiatedCapabilities::from_init_params(init_params));
     let mut shutting_down = false;
 
+    // Read through a buffering forwarder rather than the transport receiver
+    // directly, so a typing burst can accumulate a backlog the coalescer can
+    // collapse (see [`spawn_transport_pump`]).
+    let incoming = spawn_transport_pump(connection)?;
+
     loop {
-        let message = match connection.receiver.try_recv() {
+        let message = match incoming.try_recv() {
             Ok(message) => message,
-            Err(empty_or_disconnected) if empty_or_disconnected.is_empty() => {
+            Err(TryRecvError::Empty) => {
                 // The backlog is empty: refresh every document a recent change
                 // invalidated before parking on the next message, so no queued
                 // republish is left indefinitely stale.
                 publish_all(connection, state.drain_pending_republishes())?;
-                match connection.receiver.recv() {
+                match incoming.recv() {
                     Ok(message) => message,
                     Err(_) => return Ok(()),
                 }
             }
-            Err(_) => return Ok(()),
+            Err(TryRecvError::Disconnected) => return Ok(()),
         };
 
-        for message in coalesced_batch(message, connection) {
+        for message in coalesced_batch(message, &incoming) {
             if handle_message(connection, &mut state, &mut shutting_down, message)?.is_break() {
                 return Ok(());
             }
@@ -542,18 +552,49 @@ fn publish_all(
     Ok(())
 }
 
+/// Spawns a forwarder that drains the transport's rendezvous receiver into an
+/// unbounded buffer, and returns the buffer's receiver for the loop to read.
+///
+/// `lsp-server`'s stdio and socket transports connect their reader thread to the
+/// loop over a zero-capacity channel (`bounded(0)`): the reader blocks handing over
+/// each frame until the loop takes it, so consecutive frames of a typing burst
+/// never pile up in the channel — they sit unparsed in the OS pipe, invisible to a
+/// `try_recv`. Draining that channel continuously on a dedicated thread moves the
+/// backlog into an unbounded buffer instead, so while the loop is busy analyzing
+/// one change the burst behind it collects where [`coalesced_batch`] can see and
+/// collapse it. Without this, coalescing is a no-op over the production transport,
+/// since [`Connection::memory`] (the tests' transport) is the only one that buffers.
+///
+/// The forwarder ends on its own when either end disconnects — the transport closes
+/// (its reader gone) or the loop drops the returned receiver — so it needs no
+/// explicit join.
+fn spawn_transport_pump(connection: &Connection) -> anyhow::Result<Receiver<Message>> {
+    let source = connection.receiver.clone();
+    let (buffered_sender, buffered_receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("inference-lsp-transport-pump".to_owned())
+        .spawn(move || {
+            for message in source {
+                if buffered_sender.send(message).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(buffered_receiver)
+}
+
 /// The batch of messages to process for `first`, in arrival order.
 ///
-/// Only a `didChange` head is worth batching: the immediately-available backlog
-/// is drained non-blockingly and consecutive same-document changes collapse to
-/// their final text ([`coalesce_changes`]). Any other head is returned alone so
+/// Only a `didChange` head is worth batching: the backlog the transport pump has
+/// buffered is drained non-blockingly and consecutive same-document changes collapse
+/// to their final text ([`coalesce_changes`]). Any other head is returned alone so
 /// requests and lifecycle notifications keep exact arrival order and timing.
-fn coalesced_batch(first: Message, connection: &Connection) -> Vec<Message> {
+fn coalesced_batch(first: Message, incoming: &Receiver<Message>) -> Vec<Message> {
     if did_change_uri(&first).is_none() {
         return vec![first];
     }
     let mut batch = vec![first];
-    while let Ok(message) = connection.receiver.try_recv() {
+    while let Ok(message) = incoming.try_recv() {
         batch.push(message);
     }
     coalesce_changes(batch)
@@ -782,7 +823,9 @@ mod tests {
     use lsp_types::request::{HoverRequest, Initialize, Request as _, Shutdown};
     use lsp_types::{InitializeParams, PublishDiagnosticsParams, Uri};
 
-    use super::{coalesce_changes, is_barrier_for, run, NegotiatedCapabilities, ServerState};
+    use super::{
+        coalesce_changes, coalesced_batch, is_barrier_for, run, NegotiatedCapabilities, ServerState,
+    };
     #[cfg(debug_assertions)]
     use super::{arm_analysis_panic, Document};
 
@@ -1488,6 +1531,43 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
         assert_eq!(
             tags(&coalesce_changes(batch)),
             vec!["req:1".to_owned(), format!("open:{DOC_A}"), format!("change:{DOC_A}:5")],
+        );
+    }
+
+    #[test]
+    fn coalesced_batch_collapses_a_buffered_change_backlog() {
+        // The transport pump surfaces a typing burst to the loop as a buffered
+        // backlog; this covers the drain-and-coalesce path over that buffer
+        // directly. A `didChange` head plus two more for the same document, all
+        // already buffered, collapse to the final text — what a keystroke burst must
+        // become once the pump lets the backlog exist.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(change_msg(DOC_A, 2)).expect("buffer a change");
+        sender.send(change_msg(DOC_A, 3)).expect("buffer a change");
+        let batch = coalesced_batch(change_msg(DOC_A, 1), &receiver);
+        assert_eq!(
+            tags(&batch),
+            vec![format!("change:{DOC_A}:3")],
+            "a buffered same-document burst collapses to its final text"
+        );
+    }
+
+    #[test]
+    fn coalesced_batch_returns_a_non_change_head_alone_without_draining() {
+        // A non-`didChange` head is never batched: it is returned immediately and the
+        // buffered backlog behind it is left untouched, so nothing is reordered ahead
+        // of a request or lifecycle event and no message is dropped.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(change_msg(DOC_A, 1)).expect("buffer a change");
+        let batch = coalesced_batch(request_msg(9), &receiver);
+        assert_eq!(
+            tags(&batch),
+            vec!["req:9".to_owned()],
+            "the request head is returned alone"
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the backlog behind a non-change head is left for the next loop turn"
         );
     }
 
