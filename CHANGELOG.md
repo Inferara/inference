@@ -322,6 +322,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Whole-program call graph for the module hierarchy, keyed on the shared `FnKey` ([#63])
   - A035 (recursion) and A036 (stack depth) span files: cross-file `::` / `root::` call edges are resolved and an imported struct's frame is sized from its defining file, so cross-file recursion and >64 KB cross-file stack chains are caught instead of compiling and overflowing at runtime
   - The call graph indexes the structured `FnKey` from `inference-fn-key`, never a flattened name, so same-named functions across files stay distinct nodes
+- Restore the duplicate-`FnKey` tripwire in `resolve_adjacency`, now tolerant of parse-recovered keys ([#255])
+  - The LSP server ([#239]) rewrote `resolve_adjacency` to keep-first on any duplicate `FnKey` in every build, silently dropping the previous `debug_assert!(false)` that guarded `FnKey` injectivity; a genuine duplicate means a recursive self-edge can resolve to the wrong same-keyed node and mask a cycle from A035/A036 (the #63 canonical-key bug class)
+  - That removal was necessary because the resilient IDE path lowers every unparseable construct to an `<error>` placeholder function, so a broken parse legitimately yields two nodes under one key and the old assert aborted debug builds (and the LSP process) on it
+  - The tripwire now fires in debug builds only when the duplicate key carries no parser recovery marker (`is_parse_recovered`); recovered keys are exempt and the keep-first behavior is unchanged in every build, so release builds and resilient parses still degrade deterministically
 - Add `core/analysis/` crate with rule-based static analysis between type checking and codegen ([#156])
   - Five analysis rules: A001 break-outside-loop, A002 break-in-nondet, A003 return-in-loop, A004 infinite-loop-without-break, A005 return-in-nondet
   - `Rule` trait with `rule!` declarative macro for zero-boilerplate rule definitions
@@ -924,3 +928,5 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#239]: https://github.com/Inferara/inference/pull/239
+[#255]: https://github.com/Inferara/inference/issues/255
