@@ -8,10 +8,14 @@
 //! results back. Nothing here prints to stdout; that stream is the protocol
 //! channel.
 
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use inference_ide::AnalysisHost;
-use lsp_server::{Connection, ErrorCode, ExtractError, Message, Notification, Request, Response};
+use lsp_server::{
+    Connection, ErrorCode, ExtractError, Message, Notification, Request, RequestId, Response,
+};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit, Notification as _,
     PublishDiagnostics,
@@ -31,6 +35,11 @@ use crate::handlers;
 pub(crate) struct Document {
     pub(crate) path: PathBuf,
     pub(crate) version: i32,
+    /// The document's last-seen text. Retained so [`ServerState`] can rebuild the
+    /// analysis host from the tracked documents after a contained panic, without
+    /// re-reading anything from disk (the editor's overlay may never have been
+    /// saved).
+    pub(crate) text: Arc<str>,
 }
 
 /// The analysis host plus per-document bookkeeping. Feature queries and
@@ -50,6 +59,21 @@ impl ServerState {
             documents: FxHashMap::default(),
             hierarchical_symbols,
         }
+    }
+
+    /// Routes a request through [`handle_request`](Self::handle_request),
+    /// containing any panic in the analysis stack.
+    ///
+    /// A `todo!`/`unwrap` deep in the type-checker or analysis passes (the class
+    /// tracked in #240) unwinds; left unguarded it would tear down the whole
+    /// session. Caught here, the offending request is answered with an
+    /// `InternalError` carrying its original id — so the client can correlate the
+    /// failure — and every other document keeps working. A stack overflow aborts
+    /// the process on its own and cannot be caught; that is intentionally left to
+    /// abort.
+    pub(crate) fn handle_request_resilient(&mut self, request: Request) -> Response {
+        let id = request.id.clone();
+        catch(|| self.handle_request(request)).unwrap_or_else(|| panic_response(id))
     }
 
     /// Routes a request to its handler, producing the response to send back. An
@@ -100,6 +124,30 @@ impl ServerState {
                     request.method
                 ),
             ),
+        }
+    }
+
+    /// Applies a document notification through
+    /// [`on_notification`](Self::on_notification), containing any panic in the
+    /// analysis stack.
+    ///
+    /// Diagnostics are computed on the message loop thread, so a panic while
+    /// analyzing a just-opened or just-changed document would otherwise abort the
+    /// session — and, because the client re-sends the same `didOpen` on restart,
+    /// crash-loop until it gives up (#241). Caught here, the failed notification
+    /// publishes nothing, and the analysis host — which the unwinding computation
+    /// may have left with half-updated state — is rebuilt from the tracked open
+    /// documents so later queries start from a clean, consistent host.
+    pub(crate) fn on_notification_resilient(
+        &mut self,
+        notification: Notification,
+    ) -> Vec<PublishDiagnosticsParams> {
+        match catch(|| self.on_notification(notification)) {
+            Some(publishes) => publishes,
+            None => {
+                self.rebuild_host();
+                Vec::new()
+            }
         }
     }
 
@@ -162,6 +210,23 @@ impl ServerState {
         }
         publishes
     }
+
+    /// Replaces the analysis host with a fresh one carrying only the tracked open
+    /// documents' last-seen text.
+    ///
+    /// Called after a contained analysis panic: rather than reason about which
+    /// cached state the unwinding computation may have corrupted, the host is
+    /// discarded and rebuilt from the [`documents`](Self::documents) the server
+    /// still considers open. The first query after this recomputes every analysis
+    /// from scratch. Documents are the sole source of truth here, so anything the
+    /// editor had not opened is simply gone — which is correct.
+    fn rebuild_host(&mut self) {
+        let mut host = AnalysisHost::default();
+        for document in self.documents.values() {
+            host.open_document(&document.path, Arc::clone(&document.text));
+        }
+        self.host = host;
+    }
 }
 
 /// Runs the message loop until the client exits or the connection closes.
@@ -175,6 +240,12 @@ impl ServerState {
 /// notification but `exit` is ignored. The `exit` notification ends the loop.
 /// Every other request is routed through [`ServerState`], and document
 /// notifications may publish diagnostics.
+///
+/// Requests and notifications are dispatched through the resilient wrappers
+/// ([`handle_request_resilient`](ServerState::handle_request_resilient),
+/// [`on_notification_resilient`](ServerState::on_notification_resilient)), so an
+/// unwinding panic in the analysis stack fails a single request or publish
+/// instead of the whole session.
 ///
 /// # Errors
 ///
@@ -203,7 +274,7 @@ pub fn run(connection: Connection, init_params: &InitializeParams) -> anyhow::Re
                 )?;
             }
             Message::Request(request) => {
-                let response = state.handle_request(request);
+                let response = state.handle_request_resilient(request);
                 send(&connection, Message::Response(response))?;
             }
             Message::Notification(notification) if notification.method == Exit::METHOD => {
@@ -212,7 +283,7 @@ pub fn run(connection: Connection, init_params: &InitializeParams) -> anyhow::Re
             // A stray notification after `shutdown` (other than `exit`) is dropped.
             Message::Notification(_) if shutting_down => {}
             Message::Notification(notification) => {
-                for params in state.on_notification(notification) {
+                for params in state.on_notification_resilient(notification) {
                     let published =
                         Notification::new(PublishDiagnostics::METHOD.to_owned(), params);
                     send(&connection, Message::Notification(published))?;
@@ -243,23 +314,94 @@ fn send(connection: &Connection, message: Message) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to send message: {error}"))
 }
 
+/// Runs `f`, containing an unwinding panic and returning `None` in its place.
+///
+/// The process-wide panic hook still runs first, so the panic's message and
+/// backtrace are written to stderr as usual — only the unwind is swallowed, and
+/// only stderr (never stdout, the protocol channel) is touched. `f` borrows the
+/// server state mutably, which is not `UnwindSafe`; asserting it is safe is sound
+/// here because the sole recovery — [`ServerState::rebuild_host`] — discards the
+/// state a panic could have left inconsistent rather than reading it back.
+fn catch<R>(f: impl FnOnce() -> R) -> Option<R> {
+    std::panic::catch_unwind(AssertUnwindSafe(f)).ok()
+}
+
+/// The response to a request whose handler panicked: the analysis stack unwound
+/// and was contained, so this request fails but the session lives on. The
+/// original request id is echoed so the client can match the failure to its call.
+fn panic_response(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        ErrorCode::InternalError as i32,
+        "the request handler panicked and was contained; the server is still running".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+    use std::sync::Arc;
+
     use lsp_server::{Request, RequestId, Response};
     use lsp_types::notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     };
     use lsp_types::request::{HoverRequest, Request as _};
+    use lsp_types::Uri;
 
-    use super::ServerState;
+    use super::{Document, ServerState};
+
+    /// A document that panics the analysis stack: a named constant used as an
+    /// array size hits an unimplemented `todo!` deep in the type-checker (#240).
+    /// It is the most direct in-tree trigger for the message-loop panic boundary;
+    /// if #240 is fixed so this no longer panics, replace it with another
+    /// deterministic panic trigger.
+    const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
 
     fn open(state: &mut ServerState, uri: &str, text: &str) {
+        state.on_notification(did_open_notification(uri, text));
+    }
+
+    fn did_open_notification(uri: &str, text: &str) -> lsp_server::Notification {
         let params = serde_json::json!({
             "textDocument": { "uri": uri, "languageId": "inference", "version": 1, "text": text }
         });
-        let notification =
-            lsp_server::Notification::new(DidOpenTextDocument::METHOD.to_owned(), params);
-        state.on_notification(notification);
+        lsp_server::Notification::new(DidOpenTextDocument::METHOD.to_owned(), params)
+    }
+
+    /// Installs `text` as the overlay for `uri` and tracks the document, without
+    /// computing diagnostics — so a document whose *analysis* panics can be staged
+    /// for a later query without the staging itself unwinding.
+    fn track(state: &mut ServerState, uri: &str, text: &str) {
+        let uri = Uri::from_str(uri).expect("a valid uri");
+        let path = crate::uri::to_path(&uri).expect("a file uri");
+        let text: Arc<str> = text.into();
+        state.host.open_document(&path, Arc::clone(&text));
+        state.documents.insert(
+            uri,
+            Document {
+                path,
+                version: 1,
+                text,
+            },
+        );
+    }
+
+    fn diagnostics_for(state: &mut ServerState, uri: &str) -> Vec<lsp_types::Diagnostic> {
+        let uri = Uri::from_str(uri).expect("a valid uri");
+        crate::handlers::publish_diagnostics_params(state, &uri).diagnostics
+    }
+
+    fn hover_request(id: i32, uri: &str, line: u32, character: u32) -> Request {
+        Request::new(
+            RequestId::from(id),
+            HoverRequest::METHOD.to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character }
+            }),
+        )
     }
 
     fn error_code(response: &Response) -> i32 {
@@ -416,6 +558,100 @@ mod tests {
         assert!(
             state.on_notification(notification).is_empty(),
             "an untitled buffer is not analyzed and publishes nothing"
+        );
+    }
+
+    #[test]
+    fn rebuild_host_reconstructs_tracked_documents() {
+        let mut state = ServerState::new(true);
+        open(
+            &mut state,
+            "file:///inf-test/clean.inf",
+            "fn f() -> i32 { return 1; }",
+        );
+        open(
+            &mut state,
+            "file:///inf-test/broken.inf",
+            "fn g() -> i32 { return x; }",
+        );
+
+        state.rebuild_host();
+
+        // The rebuilt host carries each tracked document's last-seen text, so the
+        // clean file is still clean and the broken one still reports its undeclared
+        // variable — proving the text, not just the path, survives the rebuild.
+        assert!(
+            diagnostics_for(&mut state, "file:///inf-test/clean.inf").is_empty(),
+            "the clean document stays clean after a rebuild"
+        );
+        assert!(
+            !diagnostics_for(&mut state, "file:///inf-test/broken.inf").is_empty(),
+            "the broken document still reports after a rebuild"
+        );
+    }
+
+    #[test]
+    fn handle_request_resilient_contains_a_handler_panic() {
+        let mut state = ServerState::new(true);
+        // Stage both documents without analyzing them (analyzing the panic file
+        // would unwind on its own); the requests below are what must be contained.
+        // Requests never republish, so staging a healthy sibling this way is safe.
+        track(&mut state, "file:///inf-test/panic.inf", PANIC_SOURCE);
+        track(
+            &mut state,
+            "file:///inf-test/ok.inf",
+            "fn f() -> i32 { return 1; }",
+        );
+
+        let response =
+            state.handle_request_resilient(hover_request(1, "file:///inf-test/panic.inf", 1, 25));
+        assert_eq!(
+            error_code(&response),
+            lsp_server::ErrorCode::InternalError as i32,
+            "a panicking handler answers InternalError"
+        );
+        assert_eq!(
+            response.id,
+            RequestId::from(1),
+            "the failed request's own id is echoed back"
+        );
+
+        // A healthy request against another document still succeeds afterward.
+        let good =
+            state.handle_request_resilient(hover_request(2, "file:///inf-test/ok.inf", 0, 3));
+        assert!(
+            good.error.is_none(),
+            "the server still answers after containing a panic"
+        );
+    }
+
+    #[test]
+    fn on_notification_resilient_contains_a_diagnostics_panic_and_recovers() {
+        let mut state = ServerState::new(true);
+        // A healthy document opened before the bad one; the bad open's panic must
+        // not disturb it. (An undeclared variable keeps its diagnostics non-empty.)
+        open(
+            &mut state,
+            "file:///inf-test/ok.inf",
+            "fn g() -> i32 { return x; }",
+        );
+
+        // Opening a document whose diagnostics computation panics publishes nothing
+        // and rebuilds the host rather than tearing down the session.
+        let publishes = state.on_notification_resilient(did_open_notification(
+            "file:///inf-test/panic.inf",
+            PANIC_SOURCE,
+        ));
+        assert!(
+            publishes.is_empty(),
+            "a panic during diagnostics publishes nothing"
+        );
+
+        // The host was rebuilt from the tracked documents, so the healthy document
+        // is still analyzable and still reports its undeclared variable.
+        assert!(
+            !diagnostics_for(&mut state, "file:///inf-test/ok.inf").is_empty(),
+            "the healthy document survives the recovery and is still analyzed"
         );
     }
 }
