@@ -349,11 +349,15 @@ impl TypeInfo {
                 let return_type = ret
                     .map(|r| TypeInfo::from_type_id_with_type_params(arena, r, type_param_names))
                     .unwrap_or_default();
+                let params = param_types
+                    .iter()
+                    .map(source_like_spelling)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Self {
                     kind: TypeInfoKind::Function(format!(
-                        "Function<{}, {}>",
-                        param_types.len(),
-                        return_type.kind
+                        "fn({params}) -> {}",
+                        source_like_spelling(&return_type)
                     )),
                     type_params: vec![],
                 }
@@ -476,6 +480,19 @@ impl TypeInfo {
             SimpleTypeKind::U32 => TypeInfoKind::Number(NumberType::U32),
             SimpleTypeKind::U64 => TypeInfoKind::Number(NumberType::U64),
         }
+    }
+}
+
+/// A source-like spelling of `ty` for embedding in a function-type carrier
+/// (`fn(i32, bool) -> i32`). Built-in scalars use their lowercase source names,
+/// so the carrier reads as it was written rather than as the checker's
+/// capitalized [`Display`] (`Bool`/`Unit`/`String`); every other kind uses its
+/// `Display`, which already reads as source (a struct/enum by its canonical key,
+/// a generic primed, a nested function type by this same spelling).
+fn source_like_spelling(ty: &TypeInfo) -> String {
+    match ty.kind.as_builtin_str() {
+        Some(builtin) => builtin.to_string(),
+        None => ty.to_string(),
     }
 }
 

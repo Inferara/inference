@@ -741,6 +741,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A declared function type parameter (`T'`) resolves to itself under goto/hover instead of falling to the whole function definition
   - An enum variant *declaration* name resolves to itself, like every other declaration name (goto/hover previously covered only function arguments and struct fields)
   - A function-local `const` reference now resolves to its declaration, respecting lexical scope: it is visible only after its declaration point and only within its own function/block, matching the type checker's statement-order registration (a const used before its declaration, or referenced from another function, does not resolve)
+- ide/lsp: goto-definition and hover now agree with what the type checker resolved instead of contradicting it via a syntactic name-scan ([#245])
+  - A free-function call over a same-named struct method resolves to the free function (goto) and shows its signature (hover). The checker records `receiver_struct=None` for a free call, so the by-name search now skips struct methods rather than landing on the method that precedes the free function in the pre-order flatten
+  - A bare imported value resolves only through a braced import that names it (`use m::{MAX}`): a plain `use m;` binds only the namespace, so a bare `MAX` under it is a type error and no longer "resolves" to the first module that happens to export the name. When two imported modules both export a name, goto lands in the one the braced import actually selects
+  - A constant imported through a `pub use` re-export chain (`use mid::{MAX}` where `mid` has `pub use lib::{MAX}`) now resolves to its defining file, the way calls already followed re-exports; the walk guards against re-export cycles
+  - Hovering the leaf of a `::`-qualified type (`lib::T`) resolves through the qualifier into the defining file, matching goto, instead of showing a local same-named type's signature or degrading to the bare name
+  - A function type renders as a source-like `fn(…) -> i32` spelling in hovers and inlays rather than the checker-internal `Function<2, i32>` carrier (parameter count plus return); the checker now builds the source-like carrier when constructing the type's `TypeInfo`. Written `fn(…)` parameter types are dropped by the parser (a pinned AST-parity quirk), so only the return type survives to the spelling
+  - Goto on a local-binding use now reports the whole `let`/`const` statement as its `full_range` (with the name as `focus_range`), matching what landing on the declaration itself reports, instead of a `full_range` equal to just the ident
 
 ### Project Manifest
 
@@ -937,3 +944,4 @@ Initial tagged release.
 [#33]: https://github.com/Inferara/inference/issues/33
 [#246]: https://github.com/Inferara/inference/issues/246
 [#244]: https://github.com/Inferara/inference/issues/244
+[#245]: https://github.com/Inferara/inference/issues/245

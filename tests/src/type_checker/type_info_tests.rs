@@ -1025,8 +1025,8 @@ mod type_info_from_ast {
         let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
-            assert!(sig.contains("Function<0"));
-            assert!(sig.contains("Unit"));
+            // A source-like spelling: no params, unit return in its lowercase form.
+            assert_eq!(sig, "fn() -> unit");
         } else {
             panic!("Expected function type");
         }
@@ -1052,8 +1052,9 @@ mod type_info_from_ast {
         let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
-            assert!(sig.contains("Function<2"));
-            assert!(sig.contains("String"));
+            // The actual parameter types are threaded through, each spelled
+            // source-like (lowercase built-ins), rather than a param count.
+            assert_eq!(sig, "fn(i32, bool) -> string");
         } else {
             panic!("Expected function type");
         }
