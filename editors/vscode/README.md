@@ -141,7 +141,7 @@ A guided setup walkthrough is available via **Get Started: Open Walkthrough...**
 
 ### Environment Variables
 
-- **`INFERENCE_HOME`** - Override default toolchain directory (default: `~/.inference` on Unix, `%LOCALAPPDATA%\Inference` on Windows)
+- **`INFERENCE_HOME`** - Override default toolchain directory (default: `~/.inference` on Linux/macOS, `%APPDATA%\inference` on Windows — the same locations `infs` uses)
 - **`INFS_DIST_SERVER`** - Override distribution server URL (for development/testing)
 
 ## Supported Platforms

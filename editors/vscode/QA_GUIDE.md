@@ -14,6 +14,11 @@
 - Internet connection (for toolchain download tests)
 - Optionally: a second machine or VM for cross-platform testing
 
+> **Managed toolchain root:** unless `INFERENCE_HOME` is set, the managed
+> location is `~/.inference` on Linux/macOS and `%APPDATA%\inference` on
+> Windows (matching `infs`). Steps below write `~/.inference` for brevity —
+> on Windows substitute `%APPDATA%\inference` and `.exe` binary names.
+
 ---
 
 ## Automated Test Coverage
@@ -48,7 +53,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 257 tests pass, 0 failures |
+| 0.4 | `npm test` | All 291 tests pass, 0 failures |
 | 0.5 | `npm run package` | Produces `inference-0.0.5.vsix` without errors (bundled; no `node_modules` inside the VSIX) |
 
 ---
