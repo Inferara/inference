@@ -795,7 +795,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Document symbols (hierarchical or flattened, negotiated from client capabilities), completions (context-aware: struct members only after `.`), and inlay hints annotating every non-det block and `@` binding
   - Full-text document sync (`TextDocumentSyncKind::Full`); UTF-16 position encoding only (the LSP default; no `positionEncoding` negotiation)
   - `file://` URI handling with percent-encoding and Windows drive-letter support
-  - End-to-end test suite (`apps/lsp/tests/e2e.rs`) spawning the real binary over stdio and asserting on raw JSON-RPC across 18 scenarios (handshake, diagnostics lifecycle, hover, goto, cross-file import, document symbols, completion, inlay hints, UTF-16 positions, robustness, shutdown/exit, stdout framing hygiene)
+  - End-to-end test suite (`apps/lsp/tests/e2e.rs`) spawning the real binary over stdio and asserting on raw JSON-RPC across 27 test functions, grouped into twenty-one scenarios (handshake, diagnostics lifecycle, hover, goto, cross-file import, document symbols, completion, inlay hints, UTF-16 positions, robustness, shutdown/exit, stdout framing hygiene)
 - Add the `ide/` crate stack backing the LSP server ([#33])
   - `ide/vfs`: `FileId` path interning plus an open-document content overlay; no file I/O, no path canonicalization
   - `ide/base-db`: `LineIndex` (byte offset ⇄ 0-based line / UTF-16 column) and the `TextRange`/`LineCol`/`FilePosition`/`FileRange` position PODs
@@ -810,7 +810,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ship `inference-lsp` with the managed toolchain ([#33])
   - Release packaging bundles the `inference-lsp` binary inside the existing `infc-<platform>` archives (no new archive names, no manifest-format change), so `infs install` places it in `toolchains/<version>/` automatically
   - `infs` symlinks `inference-lsp` into `$INFERENCE_HOME/bin` next to `infc` when the default toolchain contains it, cleans the stale symlink when switching to a toolchain that predates bundling, marks it executable on Unix, and includes it in PATH-shadowing conflict detection
-  - `infs doctor` gains an appended `inference-lsp` check: `[OK]` with the resolved path when the default toolchain bundles it, `[WARN]` with an upgrade hint when the toolchain predates bundling (never `[FAIL]` — the language server is optional)
+  - `infs doctor` gains an appended `inference-lsp` check: `[OK]` with the resolved path when the default toolchain bundles it, `[WARN]` with an upgrade hint when the toolchain predates bundling — the server's absence is never a `[FAIL]` on its own, though the check still reports `[FAIL]` if platform detection, toolchain-path resolution, or the default-version read fails
 - VS Code extension 0.0.5: built-in LSP client — installing the extension now brings up the language server out of the box ([#33])
   - Starts `inference-lsp` over stdio on activation (new `onLanguage:inference` activation event), resolving the binary via `inference.lsp.path` setting → `$INFERENCE_HOME/bin` → PATH, mirroring the `infs` detection order; silent (log-only) when the binary is absent
   - Auto-starts the server after a toolchain install/update completes, so the first-run flow (install extension → accept toolchain install) needs no reload
