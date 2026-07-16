@@ -812,7 +812,9 @@ fn non_file_uri_is_ignored_without_crashing() {
     client.did_open(&uri, source, 1);
 
     // An untitled buffer is not a file the server can analyze; it publishes
-    // nothing and must not crash. Send it raw (there is no publish to wait for).
+    // nothing and must not crash. Send it raw, then confirm no publish names it —
+    // asserting the *absence* of a publish for the untitled URI, the pattern the
+    // sibling query/fragment test uses, not merely that the server survived.
     client.send_notification(
         "textDocument/didOpen",
         json!({
@@ -823,6 +825,13 @@ fn non_file_uri_is_ignored_without_crashing() {
                 "text": "fn g() {}"
             }
         }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        !published
+            .iter()
+            .any(|(published_uri, _)| published_uri.contains("Untitled-1")),
+        "a non-file URI is not analyzed or published, got {published:?}"
     );
 
     // A subsequent request against the real document still works.
@@ -927,12 +936,26 @@ fn editing_an_imported_file_republishes_open_dependents() {
     );
     let opened_lib = client.did_open(&lib_uri, lib_ok, 1);
     assert!(opened_lib.diagnostics.is_empty(), "lib opens clean");
-    // Drain the republish that opening lib triggered for the still-clean main.
-    client.drain_publishes(Duration::from_millis(500));
+
+    // Opening lib invalidated the still-open dependent main, which the loop
+    // republishes deterministically once it goes idle (issue #247). Consume that
+    // exact republish by waiting for main's publish — a protocol barrier keyed on
+    // message ordering — rather than a fixed wall-clock drain: a straggling clean
+    // republish under CI load can no longer be mistaken for the post-edit publish
+    // asserted below, because it is drained here explicitly.
+    let main_after_lib_open = client.wait_for_publish(&main_uri);
+    assert!(
+        main_after_lib_open.diagnostics.is_empty(),
+        "main is still clean after lib opens, got {:?}",
+        main_after_lib_open.diagnostics
+    );
 
     // Break lib: main now calls a function that no longer exists. The change to
     // lib must produce a fresh publish for the dependent main, without touching
-    // main itself — otherwise the editor keeps rendering main as clean.
+    // main itself — otherwise the editor keeps rendering main as clean. The
+    // dependent's republish is the next publish naming main's URI; `wait_for_publish`
+    // skips the eager lib publish (which names lib) and blocks until main arrives,
+    // so no timer bounds the wait.
     client.send_notification(
         "textDocument/didChange",
         json!({
@@ -940,15 +963,9 @@ fn editing_an_imported_file_republishes_open_dependents() {
             "contentChanges": [ { "text": lib_broken } ],
         }),
     );
-    let after_break = client.drain_publishes(Duration::from_secs(5));
-    let main_broken = after_break
-        .iter()
-        .find(|(uri, _)| uri == &main_uri)
-        .unwrap_or_else(|| {
-            panic!("main.inf was not republished after lib changed: {after_break:?}")
-        });
+    let main_broken = client.wait_for_publish(&main_uri);
     assert!(
-        !main_broken.1.is_empty(),
+        !main_broken.diagnostics.is_empty(),
         "the dependent main.inf is republished with errors"
     );
 
@@ -960,17 +977,11 @@ fn editing_an_imported_file_republishes_open_dependents() {
             "contentChanges": [ { "text": lib_ok } ],
         }),
     );
-    let after_fix = client.drain_publishes(Duration::from_secs(5));
-    let main_fixed = after_fix
-        .iter()
-        .find(|(uri, _)| uri == &main_uri)
-        .unwrap_or_else(|| {
-            panic!("main.inf was not republished after lib was fixed: {after_fix:?}")
-        });
+    let main_fixed = client.wait_for_publish(&main_uri);
     assert!(
-        main_fixed.1.is_empty(),
+        main_fixed.diagnostics.is_empty(),
         "fixing lib clears main's stale errors, got {:?}",
-        main_fixed.1
+        main_fixed.diagnostics
     );
 
     client.shutdown_exit_ok();
@@ -1471,6 +1482,340 @@ fn a_typing_burst_is_coalesced_into_far_fewer_recomputes() {
         !last.1.is_empty(),
         "the last publish reflects the final broken text, got {:?}",
         last.1
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 30. requests after didClose (issue #254) -------------------------------
+
+#[test]
+fn requests_after_did_close_fall_back_to_disk_content() {
+    // VS Code fires hover/definition on a preview-tab close race: a request can
+    // arrive just after didClose. A document backed by a file on disk must answer
+    // against the *disk* text once its overlay is dropped. Disk and buffer diverge
+    // here (different function names) so the fallback is unambiguous.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("request-after-close");
+    let disk_src = "fn disk_fn() -> i32 { let val: i32 = 5; return val; }";
+    let overlay_src = "fn overlay_fn() -> i32 { let ov: i32 = 9; return ov; }";
+    let path = dir.write("main.inf", disk_src);
+    let uri = path_to_uri(&path);
+
+    // While open, documentSymbol reflects the overlay text.
+    client.did_open(&uri, overlay_src, 1);
+    let open_symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(
+        open_symbols["result"][0]["name"],
+        json!("overlay_fn"),
+        "while open, symbols come from the overlay, got {open_symbols}"
+    );
+
+    client.did_close(&uri);
+
+    // documentSymbol now reflects the disk text (the overlay is gone).
+    let closed_symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let symbols = closed_symbols["result"]
+        .as_array()
+        .expect("a symbol array from disk");
+    assert_eq!(symbols.len(), 1, "one disk symbol, got {symbols:?}");
+    assert_eq!(
+        symbols[0]["name"],
+        json!("disk_fn"),
+        "symbols fall back to the disk text after close"
+    );
+
+    // hover resolves against the disk text: the buffer's `ov` is gone, but `val`
+    // exists on disk.
+    let hover = hover_request(&mut client, &uri, pos_at_nth(disk_src, "val", 1));
+    assert!(
+        hover["result"]["contents"]["value"]
+            .as_str()
+            .is_some_and(|v| v.contains("val: i32")),
+        "hover after close resolves against disk content, got {}",
+        hover["result"]["contents"]["value"]
+    );
+
+    // definition against the disk text reaches the disk binding.
+    let def = definition_request(&mut client, &uri, pos_at_nth(disk_src, "val", 1));
+    assert_eq!(def["result"]["uri"], json!(uri), "same-file disk target");
+    assert_eq!(
+        def["result"]["range"]["start"],
+        pos_at(disk_src, "val"),
+        "definition reaches the disk binding name"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn requests_after_did_close_of_a_never_on_disk_document_answer_null() {
+    // The other half: a buffer that never existed on disk (a scratch file, or one
+    // deleted while open). After didClose there is neither an overlay nor a disk
+    // file, so a stale request must answer null — no crash, no fabricated result —
+    // and the server stays alive.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("request-after-close-null");
+    let source = "fn scratch() -> i32 { let val: i32 = 1; return val; }";
+    // A path under the temp dir that is never written to disk.
+    let path = dir.path.join("ghost.inf");
+    let uri = path_to_uri(&path);
+
+    client.did_open(&uri, source, 1);
+    client.did_close(&uri);
+
+    let position = pos_at_nth(source, "val", 1);
+    let hover = hover_request(&mut client, &uri, position.clone());
+    assert_eq!(
+        hover["result"],
+        Value::Null,
+        "hover after close of a never-on-disk doc is null, got {hover}"
+    );
+    let def = definition_request(&mut client, &uri, position);
+    assert_eq!(
+        def["result"],
+        Value::Null,
+        "definition after close of a never-on-disk doc is null, got {def}"
+    );
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(
+        symbols["result"],
+        Value::Null,
+        "documentSymbol after close of a never-on-disk doc is null, got {symbols}"
+    );
+
+    // A subsequent request against a real document still works, proving the server
+    // stayed alive through the stale requests.
+    let live_source = "fn g() -> i32 { return 1; }";
+    let (_dir2, live_uri) = fixture("after-close-null-live", live_source);
+    client.did_open(&live_uri, live_source, 1);
+    let live = hover_request(&mut client, &live_uri, pos_at(live_source, "g("));
+    assert!(
+        live.get("error").is_none(),
+        "the server survived the stale post-close requests"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 31. didChange before didOpen: pin the current handler semantics (#254) ---
+
+#[test]
+fn did_change_before_did_open_silently_starts_tracking_the_document() {
+    // PINNED CURRENT BEHAVIOR (documented, not endorsed): a `didChange` for a URI
+    // the client never sent `didOpen` for is NOT rejected. `handlers::did_change`
+    // interns the path, installs the change text as the overlay, tracks the
+    // document, and publishes diagnostics for it — enrolling a never-opened URI in
+    // future dependents republishes. A stricter server might drop a change to an
+    // unopened document; this one does not. The wire behavior is pinned here so a
+    // deliberate change to it is noticed at review time.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The file exists on disk with clean text, but the change carries broken text
+    // (an undeclared variable). A published diagnostic therefore proves the server
+    // analyzed the change's overlay text, not the clean disk text — i.e. it started
+    // tracking the never-opened document.
+    let (_dir, uri) = fixture("change-before-open", "fn f() -> i32 { return 1; }");
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 3 },
+            "contentChanges": [ { "text": "fn f() -> i32 { return missing_x; }" } ],
+        }),
+    );
+
+    let published = client.wait_for_publish(&uri);
+    assert_eq!(
+        published.version,
+        json!(3),
+        "the never-opened change's version is echoed back"
+    );
+    assert!(
+        !published.diagnostics.is_empty(),
+        "the change text (not the clean disk text) was analyzed and published, got {:?}",
+        published.diagnostics
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 32. percent-encoded URIs round-trip end to end (#254) -------------------
+
+#[test]
+fn percent_encoded_uris_round_trip_through_a_space_and_non_ascii_directory() {
+    // Every fixture path in the suite is otherwise plain ASCII, so the full
+    // percent-encode/decode round-trip is never exercised end to end. Here the
+    // project lives in a directory whose name has a space AND a non-ASCII
+    // character, so the URIs carry `%20` and `%C3%AF`. Three URIs must round-trip:
+    // the didOpen target the client sends, the publishDiagnostics URI the server
+    // echoes, and a cross-file goto target URI the server emits from a path.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("uri-encoding");
+    let entry_source = "use lib;\nfn main() -> i32 { return lib::helper(); }";
+    let lib_source = "pub fn helper() -> i32 { return 7; }";
+    // A subdirectory with a space and `ï`, shared by both files.
+    let entry_path = dir.write("na\u{ef}ve dir/main.inf", entry_source);
+    let lib_path = dir.write("na\u{ef}ve dir/lib.inf", lib_source);
+    let entry_uri = path_to_uri(&entry_path);
+    let lib_uri = path_to_uri(&lib_path);
+
+    // The encoded URI really does carry the escapes, so the round-trip is genuine.
+    assert!(
+        entry_uri.contains("%20") && entry_uri.contains("%C3%AF"),
+        "the entry URI is percent-encoded, got {entry_uri}"
+    );
+
+    // didOpen with the percent-encoded URI resolves the on-disk import cleanly (the
+    // server decodes the URI to a path, resolves `use lib;` in the same directory),
+    // and its publishDiagnostics echoes the same encoded URI back — `did_open`
+    // waits for a publish whose `uri` equals `entry_uri` exactly.
+    let published = client.did_open(&entry_uri, entry_source, 1);
+    assert!(
+        published.diagnostics.is_empty(),
+        "the import resolves under the encoded directory, got {:?}",
+        published.diagnostics
+    );
+
+    // A cross-file goto: the server builds the lib target's URI from its path, which
+    // must round-trip back to the same percent-encoded spelling the client uses.
+    let response = definition_request(&mut client, &entry_uri, pos_at(entry_source, "helper"));
+    let location = &response["result"];
+    assert_eq!(
+        location["uri"],
+        json!(lib_uri),
+        "the cross-file target URI round-trips through the encoded directory, got {location}"
+    );
+    assert_eq!(
+        location["range"]["start"],
+        pos_at(lib_source, "helper"),
+        "the target range is the name in the lib file"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 33. inlayHint honors a bounded sub-document range (#254) ----------------
+
+#[test]
+fn inlay_hint_honors_a_bounded_sub_document_range() {
+    // The #249 clamp test pins only the start side of the window (its end is past
+    // EOF, which clamps to the file end). This pins that the handler honors
+    // `params.range.end` too: a window strictly inside the document must exclude
+    // hints both before its start and at/after its end. A regression that ignored
+    // the end would leak the later blocks' hints.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let (_dir, uri) = fixture("inlay-subrange", NONDET_SOURCE);
+    client.did_open(&uri, NONDET_SOURCE, 1);
+
+    // Window: the `exists` line (line 2) up to the start of the `unique` line
+    // (line 3). Only the two line-2 hints — the `exists` block hint and its `@`
+    // uzumaki — fall in the half-open [start, end).
+    let response = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 2, "character": 0 },
+                "end": { "line": 3, "character": 0 },
+            },
+        }),
+    );
+    let hints = response["result"].as_array().expect("an inlay-hint array");
+
+    assert!(
+        hints.iter().all(|h| h["position"]["line"] == json!(2)),
+        "every returned hint is on the windowed line 2, got {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} at least one path must succeed")),
+        "the exists block hint inside the window is present, got {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} ranges over every value of its type (i32)")),
+        "the exists-line uzumaki hint inside the window is present, got {hints:?}"
+    );
+    assert!(
+        !hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} every path must succeed")),
+        "the forall hint before the window start is excluded, got {hints:?}"
+    );
+    assert!(
+        !hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} exactly one path must succeed")),
+        "the unique hint at/after the window end is excluded, got {hints:?}"
+    );
+    assert_eq!(hints.len(), 2, "only the two windowed line-2 hints, got {hints:?}");
+
+    client.shutdown_exit_ok();
+}
+
+// --- 34. a position past EOF answers null at the wire level (#254) -----------
+
+#[test]
+fn a_position_past_the_last_line_answers_null_for_every_position_request() {
+    // A stale position from rapid typing can name a line beyond the document. The
+    // wire-level contract is a null result — never a crash, never a wrong token:
+    // the offset conversion returns None for an out-of-range line, so hover,
+    // definition, and completion each answer null. (A past-end *column* on a valid
+    // line clamps instead; only a line past the last one is unmappable, which the
+    // ide-layer unit tests cover but no e2e pinned.)
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let source = "fn f() -> i32 { let count: i32 = 5; return count; }";
+    let (_dir, uri) = fixture("past-eof", source);
+    client.did_open(&uri, source, 1);
+
+    let far_past_eof = json!({ "line": 999, "character": 0 });
+
+    let hover = hover_request(&mut client, &uri, far_past_eof.clone());
+    assert_eq!(
+        hover["result"],
+        Value::Null,
+        "hover past the last line is null, got {hover}"
+    );
+    let def = definition_request(&mut client, &uri, far_past_eof.clone());
+    assert_eq!(
+        def["result"],
+        Value::Null,
+        "definition past the last line is null, got {def}"
+    );
+    let completion = completion_request(&mut client, &uri, far_past_eof);
+    assert_eq!(
+        completion["result"],
+        Value::Null,
+        "completion past the last line is null, got {completion}"
+    );
+
+    // The server is still responsive to an in-range request.
+    let good = hover_request(&mut client, &uri, pos_at_nth(source, "count", 1));
+    assert!(
+        good.get("error").is_none(),
+        "the server survived the stale out-of-range positions"
     );
 
     client.shutdown_exit_ok();

@@ -18946,6 +18946,22 @@ function withTimeout(promise, timeoutMs, message, host = { setTimeout, clearTime
   });
 }
 
+// src/lsp/queue.ts
+var SerialQueue = class {
+  /**
+   * Tail of the internal chain the next operation is scheduled after. It is
+   * kept rejection-free (each link ends in `.catch`) so a failed operation
+   * does not poison the chain the following operation awaits.
+   */
+  tail = Promise.resolve();
+  /** Chain `operation` after all previously enqueued ones. */
+  enqueue(operation) {
+    const next = this.tail.then(operation);
+    this.tail = next.catch(() => void 0);
+    return next;
+  }
+};
+
 // src/lsp/resolve.ts
 var path6 = __toESM(require("path"));
 function lspBinaryName(isWindows) {
@@ -18988,11 +19004,9 @@ var LSP_START_TIMEOUT_MS = 3e4;
 var mainChannel;
 var serverChannel;
 var client;
-var queue = Promise.resolve();
+var queue = new SerialQueue();
 function enqueue(operation) {
-  const next = queue.then(operation);
-  queue = next.catch(() => void 0);
-  return next;
+  return queue.enqueue(operation);
 }
 function initializeLspClient(context, outputChannel2) {
   mainChannel = outputChannel2;
