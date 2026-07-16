@@ -627,6 +627,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- Fix `infs doctor` to verify `inference-lsp` where the editor actually resolves it ([#253])
+  - The VS Code extension resolves the language server only through `<INFERENCE_HOME>/bin/inference-lsp` (the managed symlink) and PATH; doctor previously checked the toolchain directory instead, so a toolchain that bundles the server but whose `bin/` link is missing or broken printed a misleading `[OK]` while the extension reported "not found". The check now verifies the symlink exists and resolves, WARNing with `infs default <version>` as the repair when it does not.
+  - The "also on PATH" note no longer fires for infs's own managed `bin/` symlink (which the extension prepends to PATH before running doctor), so it reports only a genuinely separate copy.
+  - The check is driven from `ToolchainPaths::OPTIONAL_MANAGED_BINARIES` rather than a hardcoded name, so a future optional managed binary gains doctor coverage automatically.
 - Add opt-in post-build WASM optimization via Binaryen `wasm-opt`
   - After a successful project-mode `infs build`/`infs run`, when the manifest declares `[build.wasm-opt]`, the external `wasm-opt` binary optimizes `out/main.wasm` in place; absent the table, the pipeline is unchanged
   - Runs only for executable artifacts: proof-mode builds and any `-v` build are always skipped silently, since their WASM can carry non-deterministic opcodes (`forall`/`exists`/`assume`/`unique`/`@` uzumaki) that `wasm-opt` cannot parse
@@ -924,3 +928,4 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#253]: https://github.com/Inferara/inference/issues/253
