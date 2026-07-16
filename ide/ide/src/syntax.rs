@@ -468,3 +468,496 @@ pub(crate) fn resolve_qualified_module(
     }
     file.source_file_id(&segments)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use inference_ast::arena::AstArena;
+    use inference_ast::ids::{IdentId, NodeId, SourceFileId};
+    use inference_ast::nodes::{Ident, Location, SimpleTypeKind, TypeData, TypeNode};
+    use inference_ide_db::{FileAnalysis, RootDatabase};
+
+    use super::{
+        children_of, def_is_public, def_name_ident, find_def_by_name, find_method, method_has_self,
+        resolve_qualified_module, type_children, walk_file,
+    };
+    use crate::test_utils::module_path;
+
+    /// Analyzes `source` as a single entry document and hands back an owned clone
+    /// of the merged arena plus its entry file id. Type checking never mutates the
+    /// arena, so what the syntax helpers read here is exactly the parser's output.
+    fn analyze(source: &str) -> (AstArena, SourceFileId) {
+        let mut db = RootDatabase::default();
+        let path = module_path("main");
+        db.open_document(&path, source);
+        let arena = db.analysis(&path).arena().clone();
+        let entry = arena
+            .source_file_ids()
+            .next()
+            .expect("the entry produces one source file");
+        (arena, entry)
+    }
+
+    /// The absolute path of a nested module file: the last segment names the file
+    /// (`<leaf>.inf`), the earlier segments its parent directories under the test
+    /// root, so `["lib", "geom"]` is `<root>/lib/geom.inf`.
+    fn nested_module_path(segments: &[&str]) -> PathBuf {
+        let (leaf, dirs) = segments.split_last().expect("at least one segment");
+        let mut path = module_path("main");
+        path.pop();
+        for dir in dirs {
+            path.push(dir);
+        }
+        path.push(format!("{leaf}.inf"));
+        path
+    }
+
+    /// The name of every identifier node a full pre-order walk of `file` visits.
+    /// A descent arm that fails to push one of its children drops that child's
+    /// name from this list, so asserting a name is present proves the arm reached
+    /// it.
+    fn walked_idents(arena: &AstArena, file: SourceFileId) -> Vec<String> {
+        let mut names = Vec::new();
+        walk_file(arena, file, &mut |node| {
+            if let NodeId::Ident(id) = node {
+                names.push(arena.ident_name(id).to_string());
+            }
+        });
+        names
+    }
+
+    fn assert_visits(visited: &[String], expected: &[&str]) {
+        for want in expected {
+            assert!(
+                visited.iter().any(|name| name == want),
+                "the walk did not visit `{want}`; visited: {visited:?}"
+            );
+        }
+    }
+
+    /// The qualifier segments of the first `TypeNode::Qualified` reachable in the
+    /// entry file — the shape `resolve_qualified_module` consumes.
+    fn first_qualifier(file: &FileAnalysis, entry: SourceFileId) -> Vec<IdentId> {
+        let arena = file.arena();
+        let mut found: Option<Vec<IdentId>> = None;
+        walk_file(arena, entry, &mut |node| {
+            if let NodeId::Type(ty) = node
+                && let TypeNode::Qualified { qualifier, .. } = &arena[ty].kind
+                && found.is_none()
+            {
+                found = Some(qualifier.clone());
+            }
+        });
+        found.expect("a qualified type in the entry file")
+    }
+
+    // walk_file / children_of descent
+
+    #[test]
+    fn walk_reaches_every_definition_kind_and_argument_form() {
+        // One file exercising each `Def` arm plus the argument forms: a type-only
+        // extern argument, an ignored argument, a `self` receiver, and named
+        // arguments throughout.
+        let source = "external fn ext_probe(WidgetArg) -> GadgetRet;\n\
+struct StructProbe { field_p: i32; fn method_p(self) -> i32 { return self.field_p; } }\n\
+enum ColorProbe { RedV, GreenV, BlueV }\n\
+spec RulesProbe { fn law_probe() -> i32 { return 1; } }\n\
+const LIMIT_PROBE: GaugeTy = REF_PROBE;\n\
+type AliasProbe = TargetTy;\n\
+fn with_ignored(_: IgnoredTy) -> i32 { return 1; }";
+        let (arena, entry) = analyze(source);
+        let idents = walked_idents(&arena, entry);
+        assert_visits(
+            &idents,
+            &[
+                "ext_probe",
+                "WidgetArg",
+                "GadgetRet", // extern fn: name, type-only arg, return
+                "StructProbe",
+                "field_p",
+                "method_p", // struct: name, field, self-method
+                "ColorProbe",
+                "RedV",
+                "GreenV",
+                "BlueV", // enum: name + variants
+                "RulesProbe",
+                "law_probe", // spec: name + nested def
+                "LIMIT_PROBE",
+                "GaugeTy",
+                "REF_PROBE", // constant: name, type, value
+                "AliasProbe",
+                "TargetTy",  // type alias: name + aliased type
+                "IgnoredTy", // ignored-argument type
+            ],
+        );
+    }
+
+    #[test]
+    fn walk_descends_into_assign_loop_if_typedef_and_constdef_statements() {
+        // Each probe identifier appears in exactly one syntactic position, so its
+        // presence pins the arm that had to descend to reach it.
+        let source = "fn stmt_probes() -> i32 {\n\
+assign_l = assign_r;\n\
+loop loop_cond() { loop_body(); }\n\
+loop { plain_loop_body(); break; }\n\
+if if_cond() { then_probe(); } else { else_probe(); }\n\
+if bare_cond() { bare_then(); }\n\
+type LocalAlias = LocalTarget;\n\
+const LOCAL_K: i32 = local_const_val;\n\
+return 1;\n\
+}";
+        let (arena, entry) = analyze(source);
+        let idents = walked_idents(&arena, entry);
+        assert_visits(
+            &idents,
+            &[
+                "assign_l",
+                "assign_r", // assign: left + right
+                "loop_cond",
+                "loop_body",       // loop with condition + body
+                "plain_loop_body", // loop without condition: body only
+                "if_cond",
+                "then_probe",
+                "else_probe", // if/else: condition, then, else
+                "bare_cond",
+                "bare_then", // if without an else block
+                "LocalAlias",
+                "LocalTarget", // local type def: name + aliased type
+                "LOCAL_K",
+                "local_const_val", // local const def: name + value
+            ],
+        );
+    }
+
+    #[test]
+    fn walk_descends_into_call_index_struct_array_and_type_expressions() {
+        let source = "fn expr_probes() -> i32 {\n\
+call_probe(arg_name: arg_value);\n\
+idx_array[idx_index];\n\
+let s: StructTy = StructTy { field_probe: field_value };\n\
+let arr: [i32; 2] = [elem_a, elem_b];\n\
+type_expr_probe i32';\n\
+return 1;\n\
+}";
+        let (arena, entry) = analyze(source);
+        let idents = walked_idents(&arena, entry);
+        assert_visits(
+            &idents,
+            &[
+                "call_probe",
+                "arg_name",
+                "arg_value", // call: callee, named-arg name, arg value
+                "idx_array",
+                "idx_index", // array index: array + index
+                "StructTy",
+                "field_probe",
+                "field_value", // struct literal: name, field, value
+                "elem_a",
+                "elem_b", // array literal elements
+                "type_expr_probe",
+                "i32", // generic name in expr position (Expr::Type + generic)
+            ],
+        );
+    }
+
+    #[test]
+    fn walk_descends_into_array_generic_function_qualified_and_custom_types() {
+        // A function type appears both with a return (`fn() -> FnRetTy`) and
+        // without (`fn()`), exercising the return arm's `Some` and `None` sides.
+        let source = "fn type_probes(\n\
+arr_p: [WidgetElem; 4],\n\
+gen_p: GenBase i32',\n\
+fn_ret_p: fn() -> FnRetTy,\n\
+fn_noret_p: fn(),\n\
+qual_p: qmod::qsub::QLeaf,\n\
+custom_p: CustomTy,\n\
+) -> i32 { return 1; }";
+        let (arena, entry) = analyze(source);
+        let idents = walked_idents(&arena, entry);
+        assert_visits(
+            &idents,
+            &[
+                "WidgetElem", // array type: element (its literal size has no ident)
+                "GenBase",
+                "i32",     // generic type: base + parameter
+                "FnRetTy", // function type: return type
+                "qmod",
+                "qsub",
+                "QLeaf",    // qualified type: qualifier segments + leaf
+                "CustomTy", // custom (bare) type
+            ],
+        );
+
+        // The array size is a bare literal with no identifier, so confirm the
+        // Array arm pushed both the element type and the size expression by
+        // inspecting the node's children directly.
+        let array = arena
+            .types
+            .iter()
+            .find_map(|(id, data)| matches!(data.kind, TypeNode::Array { .. }).then_some(id))
+            .expect("an array type node");
+        assert!(matches!(
+            type_children(&arena, array).as_slice(),
+            [NodeId::Type(_), NodeId::Expr(_)]
+        ));
+    }
+
+    #[test]
+    fn children_of_a_source_file_or_identifier_are_empty() {
+        let (arena, entry) = analyze("fn f() -> i32 { return 1; }");
+        assert!(children_of(&arena, NodeId::SourceFile(entry)).is_empty());
+        let name = def_name_ident(&arena, arena[entry].defs[0]);
+        assert!(children_of(&arena, NodeId::Ident(name)).is_empty());
+    }
+
+    #[test]
+    fn type_children_of_a_qualified_name_yields_qualifier_then_name() {
+        // The parser lowers `a::B` to `TypeNode::Qualified`, never
+        // `TypeNode::QualifiedName`, so this arm is reachable only by building the
+        // node directly.
+        let mut arena = AstArena::default();
+        let loc = Location::default();
+        let qualifier = arena.idents.alloc(Ident {
+            location: loc,
+            name: "modx".to_string(),
+        });
+        let name = arena.idents.alloc(Ident {
+            location: loc,
+            name: "Leaf".to_string(),
+        });
+        let ty = arena.types.alloc(TypeData {
+            location: loc,
+            kind: TypeNode::QualifiedName { qualifier, name },
+        });
+        assert_eq!(
+            type_children(&arena, ty),
+            vec![NodeId::Ident(qualifier), NodeId::Ident(name)]
+        );
+    }
+
+    #[test]
+    fn type_children_of_a_function_type_yields_params_then_return() {
+        // `fn(...)` always lowers to empty parameters (a parity quirk), so the
+        // parameter-descent arm is reachable only by building the node directly.
+        let mut arena = AstArena::default();
+        let loc = Location::default();
+        let p0 = arena.types.alloc(TypeData {
+            location: loc,
+            kind: TypeNode::Simple(SimpleTypeKind::I32),
+        });
+        let p1 = arena.types.alloc(TypeData {
+            location: loc,
+            kind: TypeNode::Simple(SimpleTypeKind::Bool),
+        });
+        let ret = arena.types.alloc(TypeData {
+            location: loc,
+            kind: TypeNode::Simple(SimpleTypeKind::U8),
+        });
+        let ty = arena.types.alloc(TypeData {
+            location: loc,
+            kind: TypeNode::Function {
+                params: vec![p0, p1],
+                ret: Some(ret),
+            },
+        });
+        assert_eq!(
+            type_children(&arena, ty),
+            vec![NodeId::Type(p0), NodeId::Type(p1), NodeId::Type(ret)]
+        );
+    }
+
+    // Small definition helpers
+
+    #[test]
+    fn def_name_ident_names_every_definition_kind() {
+        let source = "fn fn_def() -> i32 { return 1; }\n\
+external fn extern_def(i32) -> i32;\n\
+struct struct_def { f: i32; }\n\
+enum enum_def { Va }\n\
+spec spec_def { fn nested_def() -> i32 { return 1; } }\n\
+const const_def: i32 = 1;\n\
+type type_def = i32;";
+        let (arena, entry) = analyze(source);
+        let names: Vec<&str> = arena[entry]
+            .defs
+            .iter()
+            .map(|&def| arena.ident_name(def_name_ident(&arena, def)))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "fn_def",
+                "extern_def",
+                "struct_def",
+                "enum_def",
+                "spec_def",
+                "const_def",
+                "type_def",
+            ]
+        );
+    }
+
+    #[test]
+    fn def_is_public_reflects_visibility_across_definition_kinds() {
+        let source = "pub fn pub_fn() -> i32 { return 1; }\n\
+fn priv_fn() -> i32 { return 1; }\n\
+pub struct PubStruct { f: i32; }\n\
+struct PrivStruct { f: i32; }\n\
+pub enum PubEnum { Va }\n\
+enum PrivEnum { Vb }\n\
+pub const PUB_C: i32 = 1;\n\
+const PRIV_C: i32 = 1;\n\
+pub type PubT = i32;\n\
+type PrivT = i32;\n\
+external fn extern_priv(i32) -> i32;\n\
+spec spec_priv { fn spec_fn() -> i32 { return 1; } }";
+        let (arena, entry) = analyze(source);
+        let is_public = |name: &str| {
+            let def =
+                find_def_by_name(&arena, entry, name).unwrap_or_else(|| panic!("no def `{name}`"));
+            def_is_public(&arena, def)
+        };
+        for name in ["pub_fn", "PubStruct", "PubEnum", "PUB_C", "PubT"] {
+            assert!(is_public(name), "`{name}` is declared pub");
+        }
+        for name in [
+            "priv_fn",
+            "PrivStruct",
+            "PrivEnum",
+            "PRIV_C",
+            "PrivT",
+            "extern_priv",
+            "spec_priv",
+        ] {
+            assert!(!is_public(name), "`{name}` is not pub");
+        }
+    }
+
+    #[test]
+    fn find_method_finds_struct_methods_and_declines_non_structs() {
+        let source = "struct MethHost { fx: i32; fn get_fx(self) -> i32 { return self.fx; } }\n\
+fn free_fn() -> i32 { return 1; }";
+        let (arena, entry) = analyze(source);
+        let host = find_def_by_name(&arena, entry, "MethHost").expect("struct present");
+        let free = find_def_by_name(&arena, entry, "free_fn").expect("function present");
+        assert!(
+            find_method(&arena, host, "get_fx").is_some(),
+            "the declared method resolves"
+        );
+        assert!(
+            find_method(&arena, host, "absent").is_none(),
+            "an unknown method name does not resolve"
+        );
+        assert!(
+            find_method(&arena, free, "get_fx").is_none(),
+            "a non-struct definition has no methods"
+        );
+    }
+
+    #[test]
+    fn method_has_self_distinguishes_instance_methods_from_the_rest() {
+        let source = "struct SelfHost { fn inst_method(self) -> i32 { return 1; } fn assoc_method() -> i32 { return 2; } }";
+        let (arena, entry) = analyze(source);
+        let inst = find_def_by_name(&arena, entry, "inst_method").expect("instance method present");
+        let assoc = find_def_by_name(&arena, entry, "assoc_method").expect("associated fn present");
+        let host = find_def_by_name(&arena, entry, "SelfHost").expect("struct present");
+        assert!(
+            method_has_self(&arena, inst),
+            "an instance method takes self"
+        );
+        assert!(
+            !method_has_self(&arena, assoc),
+            "an associated fn does not take self"
+        );
+        assert!(
+            !method_has_self(&arena, host),
+            "a non-function definition is not a self-method"
+        );
+    }
+
+    // resolve_qualified_module
+
+    #[test]
+    fn resolve_qualified_module_follows_an_import_binding() {
+        // `lib::T`: the head `lib` matches the `use lib;` binding and the full path
+        // resolves — the common in-loop success.
+        let mut db = RootDatabase::default();
+        let lib = module_path("lib");
+        let main = module_path("main");
+        db.open_document(&lib, "pub struct T { pub v: i32; }");
+        db.open_document(&main, "use lib;\nfn f(x: lib::T) -> i32 { return 0; }");
+        let file = db.analysis(&main);
+        let entry = file.source_file_id(&[]).expect("entry file");
+        let qualifier = first_qualifier(file, entry);
+        assert_eq!(
+            resolve_qualified_module(file, entry, &qualifier),
+            file.source_file_id(&["lib".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_qualified_module_returns_none_when_an_extended_path_names_no_module() {
+        // `lib::missing::T`: the head `lib` matches the import, but the extended
+        // path names no file, so the in-loop lookup fails and the whole-path
+        // fallback fails too.
+        let mut db = RootDatabase::default();
+        let lib = module_path("lib");
+        let main = module_path("main");
+        db.open_document(&lib, "pub struct T { pub v: i32; }");
+        db.open_document(
+            &main,
+            "use lib;\nfn f(x: lib::missing::T) -> i32 { return 0; }",
+        );
+        let file = db.analysis(&main);
+        let entry = file.source_file_id(&[]).expect("entry file");
+        let qualifier = first_qualifier(file, entry);
+        assert!(resolve_qualified_module(file, entry, &qualifier).is_none());
+    }
+
+    #[test]
+    fn resolve_qualified_module_falls_back_to_a_full_source_root_path() {
+        // `lib::geom::Point` written while only `use lib::geom;` is imported: the
+        // import binds `geom`, so the head `lib` matches no binding, yet the whole
+        // qualifier is a real module path — the fallback resolves it.
+        let mut db = RootDatabase::default();
+        let geom = nested_module_path(&["lib", "geom"]);
+        let main = module_path("main");
+        db.open_document(&geom, "pub struct Point { pub v: i32; }");
+        db.open_document(
+            &main,
+            "use lib::geom;\nfn f(x: lib::geom::Point) -> i32 { return 0; }",
+        );
+        let file = db.analysis(&main);
+        let entry = file.source_file_id(&[]).expect("entry file");
+        let qualifier = first_qualifier(file, entry);
+        assert_eq!(
+            resolve_qualified_module(file, entry, &qualifier),
+            file.source_file_id(&["lib".to_string(), "geom".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_qualified_module_returns_none_for_an_unknown_qualifier() {
+        // No import matches the head and the qualifier names no file: the import
+        // loop never runs and the fallback declines.
+        let mut db = RootDatabase::default();
+        let main = module_path("main");
+        db.open_document(&main, "fn f(x: ghost::T) -> i32 { return 0; }");
+        let file = db.analysis(&main);
+        let entry = file.source_file_id(&[]).expect("entry file");
+        let qualifier = first_qualifier(file, entry);
+        assert!(resolve_qualified_module(file, entry, &qualifier).is_none());
+    }
+
+    #[test]
+    fn resolve_qualified_module_rejects_an_empty_qualifier() {
+        // An empty qualifier has no head segment, so resolution declines at once.
+        let mut db = RootDatabase::default();
+        let main = module_path("main");
+        db.open_document(&main, "fn f() -> i32 { return 0; }");
+        let file = db.analysis(&main);
+        let entry = file.source_file_id(&[]).expect("entry file");
+        assert!(resolve_qualified_module(file, entry, &[]).is_none());
+    }
+}

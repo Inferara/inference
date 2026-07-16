@@ -534,4 +534,378 @@ mod tests {
         assert!(!covers(Location::default(), 0));
         assert!(!covers(Location::default(), 5));
     }
+
+    #[test]
+    fn hits_the_name_args_and_return_type_of_an_extern_function() {
+        // An extern function declares a signature but no body, so its descendable
+        // children are the name, the argument, and the return type.
+        let source = "external fn hash(seed: i32) -> i64;";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("hash").unwrap() as u32)
+            .expect("covers the extern function name");
+        assert_eq!(hit_text(&arena, source, &name), "hash");
+
+        let arg = hit_test(&arena, file, source.find("seed").unwrap() as u32)
+            .expect("covers the argument name");
+        assert_eq!(hit_text(&arena, source, &arg), "seed");
+
+        let arg_ty = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the argument type");
+        assert!(matches!(arg_ty.node, NodeId::Type(_)));
+
+        let ret = hit_test(&arena, file, source.find("i64").unwrap() as u32)
+            .expect("covers the return type");
+        assert!(matches!(ret.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &ret), "i64");
+    }
+
+    #[test]
+    fn hits_the_name_and_variants_of_an_enum() {
+        let source = "enum Color { Red, Green, Blue }";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("Color").unwrap() as u32)
+            .expect("covers the enum name");
+        assert_eq!(hit_text(&arena, source, &name), "Color");
+
+        let variant =
+            hit_test(&arena, file, source.find("Green").unwrap() as u32).expect("covers a variant");
+        assert_eq!(hit_text(&arena, source, &variant), "Green");
+        assert!(matches!(variant.node, NodeId::Ident(_)));
+        // A variant sits directly under the enum definition.
+        assert!(matches!(variant.ancestors.first(), Some(NodeId::Def(_))));
+    }
+
+    #[test]
+    fn hits_the_name_and_nested_definition_of_a_spec() {
+        let source = "spec Bank { fn balance() -> i64 { return 0; } }";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("Bank").unwrap() as u32)
+            .expect("covers the spec name");
+        assert_eq!(hit_text(&arena, source, &name), "Bank");
+
+        // Descends through the spec into its nested function's name.
+        let nested = hit_test(&arena, file, source.find("balance").unwrap() as u32)
+            .expect("covers the nested function name");
+        assert_eq!(hit_text(&arena, source, &nested), "balance");
+        // The spec is the outermost ancestor and the nested function's own
+        // definition also appears on the chain, so there are two `Def` ancestors.
+        assert!(matches!(nested.ancestors.first(), Some(NodeId::Def(_))));
+        assert_eq!(
+            nested
+                .ancestors
+                .iter()
+                .filter(|a| matches!(a, NodeId::Def(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn hits_the_name_type_and_value_of_a_constant() {
+        let source = "const MAX: i32 = 100;";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("MAX").unwrap() as u32)
+            .expect("covers the constant name");
+        assert_eq!(hit_text(&arena, source, &name), "MAX");
+
+        let ty = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the constant type");
+        assert!(matches!(ty.node, NodeId::Type(_)));
+
+        let value = hit_test(&arena, file, source.find("100").unwrap() as u32)
+            .expect("covers the constant value");
+        assert_eq!(hit_text(&arena, source, &value), "100");
+    }
+
+    #[test]
+    fn hits_the_name_and_aliased_type_of_a_type_alias() {
+        let source = "type Word = u64;";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("Word").unwrap() as u32)
+            .expect("covers the alias name");
+        assert_eq!(hit_text(&arena, source, &name), "Word");
+
+        let ty = hit_test(&arena, file, source.find("u64").unwrap() as u32)
+            .expect("covers the aliased type");
+        assert!(matches!(ty.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &ty), "u64");
+    }
+
+    #[test]
+    fn hits_the_type_of_an_ignored_argument() {
+        // `_: i32` names no binding, so the type is the argument's only child.
+        let source = "fn f(_: i32) {}";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the ignored argument type");
+        assert!(matches!(hit.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &hit), "i32");
+    }
+
+    #[test]
+    fn hits_the_type_of_a_positional_type_only_argument() {
+        // A bare type in argument position (`i32`, no name) is a type-only
+        // argument; its type is the descent target.
+        let source = "fn f(i32) {}";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the positional type argument");
+        assert!(matches!(hit.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &hit), "i32");
+    }
+
+    #[test]
+    fn hits_both_sides_of_an_assignment() {
+        let source = "fn f() { let mut x: i32 = 0; x = 7; }";
+        let (arena, file) = single_file(source);
+
+        // The assignment's target is the last `x`, distinct from its declaration.
+        let left = hit_test(&arena, file, source.rfind('x').unwrap() as u32)
+            .expect("covers the assignment target");
+        assert_eq!(hit_text(&arena, source, &left), "x");
+
+        let right = hit_test(&arena, file, source.find('7').unwrap() as u32)
+            .expect("covers the assigned value");
+        assert_eq!(hit_text(&arena, source, &right), "7");
+        assert!(right.ancestors.iter().any(|a| matches!(a, NodeId::Stmt(_))));
+    }
+
+    #[test]
+    fn hits_the_condition_of_a_conditional_loop() {
+        let source = "fn f() { let n: i32 = 0; loop n < 3 { break; } }";
+        let (arena, file) = single_file(source);
+        // The condition descends to its own operand identifier.
+        let cond = hit_test(&arena, file, source.find("n < 3").unwrap() as u32)
+            .expect("covers the loop condition");
+        assert_eq!(hit_text(&arena, source, &cond), "n");
+        assert!(cond.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+    }
+
+    #[test]
+    fn hits_the_body_of_an_infinite_loop() {
+        // An infinite loop carries no condition, so descent goes straight through
+        // the body block; the `break` inside it is a childless leaf statement.
+        let source = "fn f() { loop { break; } }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("break").unwrap() as u32)
+            .expect("covers the break inside the loop body");
+        assert!(matches!(hit.node, NodeId::Stmt(_)));
+        assert!(hit.ancestors.iter().any(|a| matches!(a, NodeId::Block(_))));
+    }
+
+    #[test]
+    fn hits_the_condition_and_then_block_of_an_if_without_else() {
+        let source = "fn f() { let ok: bool = true; if ok { let y: i32 = 1; } }";
+        let (arena, file) = single_file(source);
+
+        // The condition is the second `ok`, in the `if` head.
+        let cond = hit_test(&arena, file, source.rfind("ok").unwrap() as u32)
+            .expect("covers the if condition");
+        assert_eq!(hit_text(&arena, source, &cond), "ok");
+
+        // The then-block's inner statement is reachable through the then arm.
+        let then_hit = hit_test(&arena, file, source.find("y:").unwrap() as u32)
+            .expect("covers a statement in the then-block");
+        assert_eq!(hit_text(&arena, source, &then_hit), "y");
+    }
+
+    #[test]
+    fn hits_the_else_block_of_an_if_else() {
+        // `z` lives only in the else-block, so reaching it exercises the else arm.
+        let source = "fn f() { if true { let a: i32 = 1; } else { let z: i32 = 2; } }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find('z').unwrap() as u32)
+            .expect("covers a statement in the else-block");
+        assert_eq!(hit_text(&arena, source, &hit), "z");
+        assert!(hit.ancestors.iter().any(|a| matches!(a, NodeId::Block(_))));
+    }
+
+    #[test]
+    fn hits_a_local_type_definition_statement() {
+        // A local `type X = ..;` is a statement, distinct from a top-level alias.
+        let source = "fn f() { type Small = u8; }";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("Small").unwrap() as u32)
+            .expect("covers the local type name");
+        assert_eq!(hit_text(&arena, source, &name), "Small");
+
+        let ty = hit_test(&arena, file, source.find("u8").unwrap() as u32)
+            .expect("covers the local aliased type");
+        assert!(matches!(ty.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &ty), "u8");
+    }
+
+    #[test]
+    fn hits_a_local_constant_definition_statement() {
+        // A local const lowers to a statement wrapping a constant definition, so
+        // its name is reached through statement → definition → name.
+        let source = "fn f() { const LIMIT: i32 = 8; }";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("LIMIT").unwrap() as u32)
+            .expect("covers the local constant name");
+        assert_eq!(hit_text(&arena, source, &name), "LIMIT");
+        assert!(name.ancestors.iter().any(|a| matches!(a, NodeId::Def(_))));
+
+        let value = hit_test(&arena, file, source.find('8').unwrap() as u32)
+            .expect("covers the local constant value");
+        assert_eq!(hit_text(&arena, source, &value), "8");
+    }
+
+    #[test]
+    fn hits_the_operand_of_a_prefix_unary_expression() {
+        let source = "fn f() -> i32 { return -k; }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find('k').unwrap() as u32)
+            .expect("covers the negated operand");
+        assert_eq!(hit_text(&arena, source, &hit), "k");
+        assert!(hit.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+    }
+
+    #[test]
+    fn hits_the_inner_expression_of_a_parenthesized_expression() {
+        let source = "fn f() -> i32 { return (k); }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find('k').unwrap() as u32)
+            .expect("covers the parenthesized inner expression");
+        assert_eq!(hit_text(&arena, source, &hit), "k");
+    }
+
+    #[test]
+    fn hits_the_name_of_a_named_call_argument() {
+        // `g(limit: 5)`: the argument name is a descent target alongside its value.
+        let source = "fn f() -> i32 { return g(limit: 5); }";
+        let (arena, file) = single_file(source);
+
+        let name = hit_test(&arena, file, source.find("limit").unwrap() as u32)
+            .expect("covers the argument name");
+        assert_eq!(hit_text(&arena, source, &name), "limit");
+        assert!(matches!(name.node, NodeId::Ident(_)));
+        assert!(name.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+
+        let value = hit_test(&arena, file, source.find('5').unwrap() as u32)
+            .expect("covers the argument value");
+        assert_eq!(hit_text(&arena, source, &value), "5");
+    }
+
+    #[test]
+    fn hits_the_array_and_index_of_an_index_access() {
+        let source = "fn f(a: [i32; 4]) -> i32 { return a[2]; }";
+        let (arena, file) = single_file(source);
+
+        let arr = hit_test(&arena, file, source.find("a[2]").unwrap() as u32)
+            .expect("covers the indexed array");
+        assert_eq!(hit_text(&arena, source, &arr), "a");
+
+        let index = hit_test(&arena, file, source.find("2]").unwrap() as u32)
+            .expect("covers the index expression");
+        assert_eq!(hit_text(&arena, source, &index), "2");
+    }
+
+    #[test]
+    fn hits_an_element_of_an_array_literal() {
+        let source = "fn f() { let xs: [i32; 3] = [10, 20, 30]; }";
+        let (arena, file) = single_file(source);
+        let elem = hit_test(&arena, file, source.find("20").unwrap() as u32)
+            .expect("covers an array-literal element");
+        assert_eq!(hit_text(&arena, source, &elem), "20");
+        assert!(elem.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+    }
+
+    #[test]
+    fn hits_the_base_and_parameter_of_a_generic_type() {
+        // `Vec i32'` is a generic type: its base and each type argument are stored
+        // as identifiers under the type node.
+        let source = "fn f(v: Vec i32') {}";
+        let (arena, file) = single_file(source);
+
+        let base = hit_test(&arena, file, source.find("Vec").unwrap() as u32)
+            .expect("covers the generic base");
+        assert_eq!(hit_text(&arena, source, &base), "Vec");
+        assert!(matches!(base.node, NodeId::Ident(_)));
+
+        let param = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the generic type argument");
+        assert_eq!(hit_text(&arena, source, &param), "i32");
+        assert!(matches!(param.node, NodeId::Ident(_)));
+    }
+
+    #[test]
+    fn hits_a_generic_name_used_as_an_expression() {
+        // A generic name in value position lowers to an `Expr::Type` wrapping the
+        // generic type, so descent passes through both an expression and a type
+        // node before reaching the argument identifier.
+        let source = "fn f() -> i32 { return Buf u8'; }";
+        let (arena, file) = single_file(source);
+        let param = hit_test(&arena, file, source.find("u8").unwrap() as u32)
+            .expect("covers the generic argument in expression position");
+        assert_eq!(hit_text(&arena, source, &param), "u8");
+        assert!(param.ancestors.iter().any(|a| matches!(a, NodeId::Expr(_))));
+        assert!(param.ancestors.iter().any(|a| matches!(a, NodeId::Type(_))));
+    }
+
+    #[test]
+    fn hits_the_element_and_size_of_an_array_type() {
+        let source = "fn f(a: [i32; 4]) {}";
+        let (arena, file) = single_file(source);
+
+        let element = hit_test(&arena, file, source.find("i32").unwrap() as u32)
+            .expect("covers the array element type");
+        assert!(matches!(element.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &element), "i32");
+
+        let size = hit_test(&arena, file, source.find('4').unwrap() as u32)
+            .expect("covers the array size expression");
+        assert_eq!(hit_text(&arena, source, &size), "4");
+        assert!(size.ancestors.iter().any(|a| matches!(a, NodeId::Type(_))));
+    }
+
+    #[test]
+    fn hits_the_return_type_of_a_function_type_annotation() {
+        // `fn(i32) -> i64` as a type: the arrow's return type is descendable.
+        let source = "fn f(cb: fn(i32) -> i64) {}";
+        let (arena, file) = single_file(source);
+        let ret = hit_test(&arena, file, source.find("i64").unwrap() as u32)
+            .expect("covers the function type's return type");
+        assert!(matches!(ret.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &ret), "i64");
+        assert!(ret.ancestors.iter().any(|a| matches!(a, NodeId::Type(_))));
+    }
+
+    #[test]
+    fn function_type_without_return_type_is_the_smallest_covering_node() {
+        // A `fn(...)` type with no `->` has a `None` return arm. The parser does
+        // not lower `fn`-type parameters (a pinned quirk), so the annotation has
+        // no descendable children and is itself the smallest covering node.
+        let source = "fn f(cb: fn(i32)) {}";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("fn(i32)").unwrap() as u32)
+            .expect("covers the function type annotation");
+        assert!(matches!(hit.node, NodeId::Type(_)));
+        assert_eq!(hit_text(&arena, source, &hit), "fn(i32)");
+    }
+
+    #[test]
+    fn hits_the_segments_of_a_qualified_type() {
+        // `lib::geom::Point`: every `::`-segment qualifier and the leaf name are
+        // descent targets under the qualified type node.
+        let source = "fn f(p: lib::geom::Point) {}";
+        let (arena, file) = single_file(source);
+
+        let qualifier = hit_test(&arena, file, source.find("geom").unwrap() as u32)
+            .expect("covers a qualifier segment");
+        assert_eq!(hit_text(&arena, source, &qualifier), "geom");
+        assert!(matches!(qualifier.node, NodeId::Ident(_)));
+
+        let leaf = hit_test(&arena, file, source.find("Point").unwrap() as u32)
+            .expect("covers the leaf type name");
+        assert_eq!(hit_text(&arena, source, &leaf), "Point");
+        assert!(matches!(leaf.node, NodeId::Ident(_)));
+    }
 }
