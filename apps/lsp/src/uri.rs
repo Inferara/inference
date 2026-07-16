@@ -75,13 +75,20 @@ fn file_uri_to_path(uri: &str, windows: bool) -> Option<String> {
     if path.starts_with("//") {
         // A `//`-prefixed path is a path-form UNC (empty authority, e.g.
         // `file:////server/share/x`): a network path that triggers SMB I/O on
-        // Windows. Rejected like the remote-authority case.
+        // Windows. Rejected like the remote-authority case. This is a cheap
+        // early exit; the post-decode check below closes the encoded variant.
         return None;
     }
     if has_query_or_fragment(path) {
         return None; // Not a plain document URI; the caller handles it gracefully.
     }
     let decoded = percent_decode(path)?;
+    if decoded.starts_with("//") {
+        // Percent-encoded leading slashes (`file:///%2F%2Fserver/share`) slip
+        // past the raw check above, so the decoded form is re-checked: a UNC
+        // path is rejected regardless of how its slashes were spelled.
+        return None;
+    }
     normalize_path(decoded, windows)
 }
 
@@ -512,6 +519,34 @@ mod tests {
         );
         // Even more leading slashes stay rejected.
         assert_eq!(file_uri_to_path("file://///server/x.inf", POSIX), None);
+    }
+
+    #[test]
+    fn percent_encoded_path_form_unc_is_rejected() {
+        // Percent-encoded leading slashes evade the raw `//` check but decode to
+        // a UNC path, so the decoded form is re-checked and rejected on every
+        // host. Without it the URI would silently normalize to a local path.
+        assert_eq!(
+            file_uri_to_path("file:///%2F%2Fserver/share/x.inf", POSIX),
+            None
+        );
+        assert_eq!(
+            file_uri_to_path("file:///%2F%2Fserver/share/x.inf", WINDOWS),
+            None
+        );
+        // A mixed spelling (one raw, one encoded slash) is rejected too.
+        assert_eq!(file_uri_to_path("file:///%2F/server/x.inf", POSIX), None);
+    }
+
+    #[test]
+    fn single_encoded_slash_inside_a_path_decodes() {
+        // A lone interior `%2F` is an ordinary encoded separator, not a UNC
+        // prefix, so it decodes to a normal absolute path rather than being
+        // rejected by the post-decode `//` guard.
+        assert_eq!(
+            file_uri_to_path("file:///home/a%2Fb.inf", POSIX).as_deref(),
+            Some("/home/a/b.inf")
+        );
     }
 
     #[test]
