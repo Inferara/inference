@@ -730,6 +730,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
 - ide: the resilient project walk (`inference::load_project_resilient`) no longer runs the unreachable-file warning scan at all — `ResilientProjectParse::warnings` is documented always-empty. The scan recursively walked and canonicalized every `.inf` under the source root on every keystroke (and, for a document at a volume root like `/main.inf`, the entire disk) to compute warnings the IDE discards. The fail-fast compiler path (`parse_project`) keeps the scan — it runs once per build, not once per keystroke — so compiler behavior is unchanged ([#33])
 - Extern-import diagnostics (`use { … } from <module>;` binding errors such as an undeclared extern import or an ambiguous extern module) reported from an *imported* file now carry that file's module-path label instead of rendering as if they were in the entry file. Locations are per-file-local, so the missing label made these errors point at wrong positions in the entry file — visible in both the aggregated compiler message and the structured diagnostics the LSP consumes ([#33])
+- VS Code extension: switching or updating the toolchain now restarts a running language server ("Select Toolchain Version", "Update Toolchain", and "Install Toolchain" all restart it on success), so diagnostics/hover/goto immediately reflect the new default toolchain. Previously these commands only ensured the server was started — a no-op while one was running — leaving the old toolchain's `inference-lsp` process serving stale results until a manual "Restart Language Server" or window reload. Restart is a strict superset of the old behavior: the stop phase no-ops when the server is not running ([#250])
 
 ### Project Manifest
 
@@ -924,3 +925,4 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#250]: https://github.com/Inferara/inference/issues/250
