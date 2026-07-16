@@ -43,7 +43,7 @@ pub fn parse_external_module(
         ),
     })?;
 
-    let source = std::fs::read_to_string(&root_path).map_err(|e| AstError::FileReadError {
+    let source = crate::read_source_file(&root_path).map_err(|e| AstError::FileReadError {
         path: root_path.clone(),
         source: e,
     })?;

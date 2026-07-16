@@ -289,8 +289,9 @@ pub mod wasm_link;
 
 pub use errors::InferenceError;
 pub use project::{
-    load_project_resilient, parse_project, DiskLoader, FileLoader, FileParseErrors, ImportProblem,
-    LoadedFile, ProjectParse, ProjectWarning, ResilientProjectParse,
+    load_project_resilient, parse_project, read_source_file, strip_utf8_bom, DiskLoader,
+    FileLoader, FileParseErrors, ImportProblem, LoadedFile, ProjectParse, ProjectWarning,
+    ResilientProjectParse,
 };
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`

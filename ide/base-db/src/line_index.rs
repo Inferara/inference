@@ -41,8 +41,20 @@ pub struct LineIndex {
 impl LineIndex {
     /// Builds the index for `text`, recording the byte offset of every line
     /// start.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `text` is 4 GiB or larger. Line-start offsets are stored as
+    /// `u32`; silently truncating them would break the `partition_point`
+    /// monotonicity `line_col` relies on, so an over-large text is rejected
+    /// explicitly rather than corrupted. LSP documents never approach this bound.
     #[must_use = "constructing a LineIndex is pointless if it is discarded"]
     pub fn new(text: &str) -> Self {
+        assert!(
+            u32::try_from(text.len()).is_ok(),
+            "LineIndex supports source texts up to u32::MAX (4 GiB) bytes; got {} bytes",
+            text.len()
+        );
         let mut line_starts = vec![0u32];
         let bytes = text.as_bytes();
         for (byte_index, &byte) in bytes.iter().enumerate() {
@@ -366,6 +378,21 @@ mod tests {
         assert_eq!(index.offset(lc(1, 0)), Some(6)); // '😀'
         assert_eq!(index.offset(lc(1, 2)), Some(10)); // 'b'
         assert_eq!(index.offset(lc(1, 3)), Some(11)); // end of file
+    }
+
+    #[test]
+    fn leading_bom_occupies_one_utf16_unit_on_line_zero() {
+        // A UTF-8 BOM (U+FEFF: three bytes, one UTF-16 unit) is an ordinary
+        // character to the index — it sits at column 0 and pushes the first real
+        // character to column 1. The disk-ingestion path strips it precisely so
+        // line-0 positions line up with a client that already dropped it (see
+        // `inference::read_source_file`).
+        let with_bom = LineIndex::new("\u{feff}fn");
+        assert_eq!(with_bom.line_col(3), lc(0, 1)); // 'f' after the 3-byte BOM
+        assert_eq!(with_bom.line_col(0), lc(0, 0)); // the BOM itself is column 0
+
+        let stripped = LineIndex::new("fn");
+        assert_eq!(stripped.line_col(0), lc(0, 0)); // 'f' at the start once stripped
     }
 
     #[test]
