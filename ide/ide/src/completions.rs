@@ -116,7 +116,7 @@ fn push_locals(
     items: &mut Vec<CompletionItem>,
 ) {
     let arena = file.arena();
-    let Some(hit) = enclosing_hit(file, entry, offset) else {
+    let Some(hit) = file.enclosing_hit(entry, offset) else {
         return;
     };
     let Some(function) = enclosing_function(arena, &hit) else {
@@ -473,32 +473,6 @@ fn offset_in_comment_or_string(source: &str, offset: u32) -> bool {
         }
     }
     false
-}
-
-/// The hit that locates `offset` within a definition, tolerating a cursor one
-/// byte past the token it is completing.
-///
-/// The one-byte fallback exists only to complete a just-typed identifier, so it
-/// fires only when the byte at `offset - 1` is part of an identifier. A
-/// punctuation byte such as a closing `}` must not pull the cursor back inside
-/// the preceding definition, which would leak that function's params and locals
-/// at file scope.
-fn enclosing_hit(file: &FileAnalysis, entry: SourceFileId, offset: u32) -> Option<NodeHit> {
-    if let Some(hit) = file.hit_test(entry, offset) {
-        return Some(hit);
-    }
-    let back = offset.checked_sub(1)?;
-    let source = file.arena()[entry].source.as_str();
-    if source
-        .as_bytes()
-        .get(back as usize)
-        .copied()
-        .is_some_and(is_ident_byte)
-    {
-        file.hit_test(entry, back)
-    } else {
-        None
-    }
 }
 
 /// Removes exact duplicates while preserving first-seen order (a local and a

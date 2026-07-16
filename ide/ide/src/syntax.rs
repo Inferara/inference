@@ -408,17 +408,19 @@ pub(crate) fn imported_module_paths(arena: &AstArena, entry: SourceFileId) -> Ve
         .collect()
 }
 
-/// The `let` bindings in scope at `offset`: every `VarDef` that is a direct
-/// statement of a block enclosing the offset — a block on the hit's ancestor
-/// chain, or the covering node itself when the offset falls in a block's own gap
-/// — and whose name ends at or before the offset.
+/// The local bindings in scope at `offset`: every `let` or local `const` that is
+/// a direct statement of a block enclosing the offset — a block on the hit's
+/// ancestor chain, or the covering node itself when the offset falls in a block's
+/// own gap — and whose name ends at or before the offset.
 ///
 /// Scoping is lexical: a binding in a sibling block that has already closed is
 /// not in scope (its block is absent from the ancestor chain), and one declared
 /// later in an enclosing block is not yet visible (its name ends after the
-/// offset). Inference forbids shadowing, so a name resolves to at most one
-/// binding here. Sharing this walk keeps goto/hover and completions in agreement
-/// on what is in scope.
+/// offset). A local `const` scopes exactly like a `let` — the type checker
+/// registers it in statement order — so both are gated on the same name-end
+/// bound. Inference forbids shadowing, so a name resolves to at most one binding
+/// here. Sharing this walk keeps goto/hover and completions in agreement on what
+/// is in scope.
 #[must_use]
 pub(crate) fn in_scope_locals(arena: &AstArena, hit: &NodeHit, offset: u32) -> Vec<StmtId> {
     let mut locals = Vec::new();
@@ -427,9 +429,12 @@ pub(crate) fn in_scope_locals(arena: &AstArena, hit: &NodeHit, offset: u32) -> V
             continue;
         };
         for &stmt in &arena[block].stmts {
-            if let Stmt::VarDef { name, .. } = &arena[stmt].kind
-                && arena[*name].location.offset_end <= offset
-            {
+            let name_end = match &arena[stmt].kind {
+                Stmt::VarDef { name, .. } => arena[*name].location.offset_end,
+                Stmt::ConstDef(def) => arena[def_name_ident(arena, *def)].location.offset_end,
+                _ => continue,
+            };
+            if name_end <= offset {
                 locals.push(stmt);
             }
         }

@@ -735,6 +735,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `<module>::` completion context: after a plain-import namespace qualifier, that module's public defs are offered by their bare name — the position where a bare member name is what compiles. An item import binds no namespace, so its module is not offered as a `::` qualifier, and a `::` position never falls back to the keyword/local list
   - Member completions after `.` on a struct defined in another module now drop private methods (the checker rejects `receiver.private_method()` across modules); a same-file receiver keeps its private methods, which are callable there
   - Completions are suppressed inside comments and string literals, decided by the lexer's token spans so quote boundaries are exact, rather than popping the general list into prose an editor auto-triggered on
+- ide/lsp: goto-definition and hover cover five hit-testing gaps, so positions that previously returned nothing now resolve ([#244])
+  - A caret at an identifier's exclusive end — where a double-click or a just-finished keystroke leaves it — now resolves the identifier. `hit_test` covers `start <= offset < end`, so the end position lands on the enclosing call or statement; goto, hover, and the completion locals now share one identifier-biased one-byte-back fallback (`inference_ide_db::enclosing_hit`) that still refuses to pull a caret past a `}` back into the closing definition
+  - `use` directives are hit-testable: goto/hover on any path segment resolves to the module file it names (`lib`, then `lib::geom`), and on a braced item import resolves to that item's public definition in the target module. A `from`-clause external module reference names no source file, so it does not resolve
+  - A declared function type parameter (`T'`) resolves to itself under goto/hover instead of falling to the whole function definition
+  - An enum variant *declaration* name resolves to itself, like every other declaration name (goto/hover previously covered only function arguments and struct fields)
+  - A function-local `const` reference now resolves to its declaration, respecting lexical scope: it is visible only after its declaration point and only within its own function/block, matching the type checker's statement-order registration (a const used before its declaration, or referenced from another function, does not resolve)
 
 ### Project Manifest
 
@@ -930,3 +936,4 @@ Initial tagged release.
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
 [#246]: https://github.com/Inferara/inference/issues/246
+[#244]: https://github.com/Inferara/inference/issues/244

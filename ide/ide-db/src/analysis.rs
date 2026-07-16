@@ -15,7 +15,7 @@ use inference_type_checker::{TypeCheckDiagnostic, TypeCheckOutcome, check_with_d
 use inference_vfs::Vfs;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::hit_test::{NodeHit, hit_test};
+use crate::hit_test::{NodeHit, enclosing_hit, hit_test};
 use crate::loader::VfsLoader;
 use crate::symbols::file_defs;
 
@@ -228,6 +228,13 @@ impl FileAnalysis {
     #[must_use = "the covering node is the reason to call this"]
     pub fn hit_test(&self, file: SourceFileId, offset: u32) -> Option<NodeHit> {
         hit_test(self.arena(), file, offset)
+    }
+
+    /// Like [`FileAnalysis::hit_test`], but resolves a caret one byte past an
+    /// identifier to that identifier. See [`enclosing_hit`].
+    #[must_use = "the covering node is the reason to call this"]
+    pub fn enclosing_hit(&self, file: SourceFileId, offset: u32) -> Option<NodeHit> {
+        enclosing_hit(self.arena(), file, offset)
     }
 
     /// Every definition in `file` in pre-order, including struct methods and
