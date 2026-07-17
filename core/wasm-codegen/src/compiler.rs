@@ -338,13 +338,10 @@ pub(crate) struct Compiler {
     func_array_returns: FxHashMap<FnKey, ArrayReturnInfo>,
     /// Maps function keys to their struct return type metadata.
     func_struct_returns: FxHashMap<FnKey, StructReturnInfo>,
-    /// Name of the function currently being compiled (display form, used for
-    /// diagnostics). The lookup-shaped companion is [`Self::current_fn_key`].
-    current_fn_name: String,
     /// Structured key for the function currently being compiled. Set to
     /// `Some(_)` while entering [`Self::visit_function_definition`] and used
     /// as the lookup key for sret return-emission so we don't have to
-    /// recompute the variant from `current_spec` + `current_fn_name` at every
+    /// recompute the variant from `current_spec` + the function name at every
     /// call site.
     current_fn_key: Option<FnKey>,
     /// Name of the spec that owns the function currently being compiled, if
@@ -354,7 +351,7 @@ pub(crate) struct Compiler {
     current_spec: Option<String>,
     /// Source-root-relative module path of the file whose function is currently
     /// being compiled (empty for the entry file). Set per function alongside
-    /// `current_fn_name`/`current_fn_key`. Lowering reads it to resolve a bare
+    /// `current_fn_key`. Lowering reads it to resolve a bare
     /// struct/enum name in this file to its file-qualified canonical layout key
     /// so two files defining a same-named type get distinct layouts.
     current_module_path: Vec<String>,
@@ -449,7 +446,6 @@ impl Compiler {
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
-            current_fn_name: String::new(),
             current_fn_key: None,
             current_spec: None,
             current_module_path: Vec::new(),
@@ -1045,7 +1041,6 @@ impl Compiler {
         } else {
             raw_name
         };
-        self.current_fn_name.clone_from(&fn_name);
         self.current_fn_key = Some(current_fn_key.clone());
 
         let is_array_return = self.func_array_returns.contains_key(&current_fn_key);
@@ -1317,7 +1312,7 @@ impl Compiler {
             self.loop_ctx.wasm_block_depth += 1;
         }
         for stmt_id in body_stmts {
-            self.lower_statement(arena, stmt_id, ctx);
+            self.lower_statement(arena, stmt_id, ctx, &fn_name);
         }
         if body_nondet_op.is_some() {
             self.loop_ctx.wasm_block_depth -= 1;
@@ -1919,11 +1914,17 @@ impl Compiler {
 
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
-    fn lower_statement(&mut self, arena: &AstArena, stmt_id: StmtId, ctx: &TypedContext) {
+    fn lower_statement(
+        &mut self,
+        arena: &AstArena,
+        stmt_id: StmtId,
+        ctx: &TypedContext,
+        fn_name: &str,
+    ) {
         let stmt_kind = arena[stmt_id].kind.clone();
         match stmt_kind {
             Stmt::Block(block_id) => {
-                self.lower_block(arena, block_id, ctx);
+                self.lower_block(arena, block_id, ctx, fn_name);
             }
             Stmt::Expr(expr_id) => {
                 // The type checker rejects standalone calls to compound-returning
@@ -1952,7 +1953,7 @@ impl Compiler {
             Stmt::Return { expr } => {
                 let sret_local = self.locals_map.get("sret").map(|(idx, _)| *idx);
                 if let Some(sret_idx) = sret_local {
-                    if let Err(e) = self.lower_sret_return(arena, expr, sret_idx, ctx) {
+                    if let Err(e) = self.lower_sret_return(arena, expr, sret_idx, ctx, fn_name) {
                         panic!("sret return lowering failed: {e}");
                     }
                 } else {
@@ -1964,7 +1965,7 @@ impl Compiler {
                 self.func().instruction(&Instruction::Return);
             }
             Stmt::Loop { condition, body } => {
-                self.lower_loop_statement(arena, condition, body, ctx);
+                self.lower_loop_statement(arena, condition, body, ctx, fn_name);
             }
             Stmt::Break => {
                 cov_mark::hit!(wasm_codegen_emit_break);
@@ -1982,7 +1983,7 @@ impl Compiler {
                 then_block,
                 else_block,
             } => {
-                self.lower_if_statement(arena, condition, then_block, else_block, ctx);
+                self.lower_if_statement(arena, condition, then_block, else_block, ctx, fn_name);
             }
             Stmt::VarDef { name, value, .. } => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
@@ -2270,7 +2271,13 @@ impl Compiler {
     }
 
     /// Lowers a block (regular or non-det) to WASM instructions.
-    fn lower_block(&mut self, arena: &AstArena, block_id: BlockId, ctx: &TypedContext) {
+    fn lower_block(
+        &mut self,
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+        fn_name: &str,
+    ) {
         let block = &arena[block_id];
         let opcode = match block.block_kind {
             BlockKind::Forall => Some(FORALL_OPCODE),
@@ -2294,7 +2301,7 @@ impl Compiler {
 
         let stmts = block.stmts.clone();
         for stmt_id in stmts {
-            self.lower_statement(arena, stmt_id, ctx);
+            self.lower_statement(arena, stmt_id, ctx, fn_name);
         }
 
         if opcode.is_some() {
@@ -3113,6 +3120,7 @@ impl Compiler {
         return_expr_id: ExprId,
         sret_idx: u32,
         ctx: &TypedContext,
+        fn_name: &str,
     ) -> Result<(), CodegenError> {
         // sret metadata uses the structured `current_fn_key` so spec-inner
         // and top-level functions / methods with identical bare names look
@@ -3129,10 +3137,7 @@ impl Compiler {
         } else if let Some(return_info) = self.func_struct_returns.get(&self_key).cloned() {
             self.lower_struct_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
         } else {
-            panic!(
-                "sret function '{}' has neither ArrayReturnInfo nor StructReturnInfo",
-                self.current_fn_name
-            );
+            panic!("sret function '{fn_name}' has neither ArrayReturnInfo nor StructReturnInfo");
         }
     }
 
@@ -3365,6 +3370,7 @@ impl Compiler {
         then_block: BlockId,
         else_block: Option<BlockId>,
         ctx: &TypedContext,
+        fn_name: &str,
     ) {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
@@ -3375,7 +3381,7 @@ impl Compiler {
 
         let then_stmts = arena[then_block].stmts.clone();
         for stmt_id in then_stmts {
-            self.lower_statement(arena, stmt_id, ctx);
+            self.lower_statement(arena, stmt_id, ctx, fn_name);
         }
 
         if let Some(else_id) = else_block {
@@ -3383,7 +3389,7 @@ impl Compiler {
             self.func().instruction(&Instruction::Else);
             let else_stmts = arena[else_id].stmts.clone();
             for stmt_id in else_stmts {
-                self.lower_statement(arena, stmt_id, ctx);
+                self.lower_statement(arena, stmt_id, ctx, fn_name);
             }
         }
 
@@ -3422,6 +3428,7 @@ impl Compiler {
         condition: Option<ExprId>,
         body: BlockId,
         ctx: &TypedContext,
+        fn_name: &str,
     ) {
         cov_mark::hit!(wasm_codegen_emit_loop_statement);
 
@@ -3446,7 +3453,7 @@ impl Compiler {
 
         let body_stmts = arena[body].stmts.clone();
         for stmt_id in body_stmts {
-            self.lower_statement(arena, stmt_id, ctx);
+            self.lower_statement(arena, stmt_id, ctx, fn_name);
         }
 
         self.func().instruction(&Instruction::Br(0));

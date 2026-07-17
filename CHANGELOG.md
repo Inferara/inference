@@ -723,6 +723,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - codegen: the WASM code generator's function-body passes now share one statement-descent helper. `pre_scan_locals` (local discovery), `collect_compound_slots` (frame-slot collection), and `body_has_dynamic_array_index` (bounds-check scratch reservation) previously each recursed into `Block`/`If`/`Loop` independently, kept in sync only by convention; a new block-bearing statement kind could be handled by one pass and silently missed by another, corrupting frame layout. Descent is now classified in one place (`nested_blocks`) that both the pure-enumeration walker (`walk_statements`) and the frame-slot pass consult, so the three passes can never disagree about which sub-blocks exist. Purely internal — emitted WASM is byte-identical (the full codegen golden suite passes unmodified) ([#167])
+- codegen: the name of the function being compiled is no longer held as mutable ambient state on the compiler (`Compiler::current_fn_name`). It is now threaded explicitly as a `fn_name: &str` parameter from `visit_function_definition` through the statement-lowering walker (`lower_statement`, `lower_block`, `lower_if_statement`, `lower_loop_statement`) to its sole reader, the sret-return invariant panic in `lower_sret_return`. Removing the implicitly-shared field forecloses a class of stale-read hazards that would surface once method, incremental, or parallel function compilation is added. Purely internal — emitted WASM is byte-identical (the full codegen golden suite passes unmodified) ([#172])
 
 ### Fixed
 
@@ -929,3 +930,4 @@ Initial tagged release.
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
 [#167]: https://github.com/Inferara/inference/issues/167
+[#172]: https://github.com/Inferara/inference/issues/172
