@@ -1,0 +1,13 @@
+// Exercises the `unique` non-deterministic block, which lowers to the
+// `BI_unique` constructor. The verifier library currently has no `BI_unique`
+// (it is commented out in its `datatypes.v`), so this construct is a known
+// emitter-vs-library divergence: the vendored stub declares `BI_unique` with
+// the arity the emitter writes (`block_type -> list basic_instruction -> _`)
+// precisely so the arity stays pinned and current `main` type-checks. See the
+// stub README for the divergence note and the swap-to-real-library follow-up.
+pub fn unique_fn() {
+    unique {
+        let x: i32 = @;
+        assert(x == x);
+    }
+}

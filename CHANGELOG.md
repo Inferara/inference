@@ -508,6 +508,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Add a `coqc` round-trip gate for proof-mode `wasm-to-v` output ([#231])
+  - Every prior `wasm-to-v` test string-matched the emitted `.v` and never type-checked it, so a mis-aritied or renamed Rocq constructor (the [#230] `BI_forall`/`BI_exists` arity class) passed CI and failed only on the paid prover worker
+  - New vendored signature stub `core/wasm-to-v/rocq-stub/` provides the logical library `Wasm` (`bytes`, `numerics`, `datatypes`, `verifier`) as signatures only — no semantics, no proofs — encoding each external declaration with the arity/shape the emitter writes, so a regression becomes a `coqc` type error
+  - New gated test `tests/src/rocq_typecheck.rs` drives the in-process pipeline (parse → type-check → proof-mode codegen → `wasm_to_v`) over a corpus spanning the proof surface — inline and function-body-modifier `forall`/`exists`/`assume`, `unique`, `BI_call`, comparisons, `assert`, and `if`/`loop` control flow — then compiles each generated module against the stub; it rewrites the emitted `(* TODO *)` `Qed.` to `Admitted.` so it checks statements + definitions without requiring proofs to close
+  - Two new corpus fixtures, `tests/test_data/inf/rocq_control_flow.inf` and `rocq_unique.inf`; existing spec fixtures are reused
+  - The test is gated on `coqc` availability (`COQC` override, else `PATH`): it skips with a clear message when absent, and the new `.github/workflows/rocq-typecheck.yml` CI job installs Coq via apt so the gate is real on every PR. Wiring the full private WasmCert-Coq-Essence library into CI needs org secrets and remains a follow-up
 - Add 7 enum codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([pr#187])
   - `enum_variant`: basic variant access, variable declaration, return values
   - `enum_multi`: multiple enum definitions in one module
@@ -924,3 +930,5 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#230]: https://github.com/Inferara/inference/pull/230
+[#231]: https://github.com/Inferara/inference/issues/231
