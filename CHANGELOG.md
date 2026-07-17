@@ -720,6 +720,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
 - compiler: the multi-file project front end parses each reachable file exactly once — the import walk now lowers files directly into the shared arena and reorders them into canonical order afterward via the new `AstArena::canonicalize_source_file_order`; previously discovery parsed every file into a throwaway arena just to read its `use` directives and lowering re-parsed it ([#227])
 
+### Changed
+
+- codegen: the WASM code generator's function-body passes now share one statement-descent helper. `pre_scan_locals` (local discovery), `collect_compound_slots` (frame-slot collection), and `body_has_dynamic_array_index` (bounds-check scratch reservation) previously each recursed into `Block`/`If`/`Loop` independently, kept in sync only by convention; a new block-bearing statement kind could be handled by one pass and silently missed by another, corrupting frame layout. Descent is now classified in one place (`nested_blocks`) that both the pure-enumeration walker (`walk_statements`) and the frame-slot pass consult, so the three passes can never disagree about which sub-blocks exist. Purely internal — emitted WASM is byte-identical (the full codegen golden suite passes unmodified) ([#167])
+
 ### Fixed
 
 - Constructing an array-of-struct value inside a struct field now lowers correctly. A struct literal whose field is an array of structs (e.g. `Grid { cells: [Point { … }, Point { … }] }`) previously panicked in codegen during element-wise store; it now stores each struct element through the same per-element machinery used for top-level array-of-struct locals. The read, write, parameter, and sret-return paths were already correct ([#224])
@@ -924,3 +928,4 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#167]: https://github.com/Inferara/inference/issues/167
