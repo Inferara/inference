@@ -122,6 +122,15 @@ impl FileAnalysis {
         let mut closure_paths: FxHashSet<PathBuf> =
             parse.files.iter().map(|f| f.path.clone()).collect();
         closure_paths.insert(entry.to_path_buf());
+        // A reachable import that exists but fails to read (invalid UTF-8, a lock,
+        // a permission error) leaves no `LoadedFile` and — because the file
+        // exists — no missing-import record either. Its symbols are as absent from
+        // this analysis as a missing file's, yet neither the closure nor the
+        // missing-import widening would otherwise ever invalidate it. Recording
+        // each read-failed path in the closure lets a later `didOpen`/`didChange`
+        // that makes the file readable evict this stale analysis — the non-entry
+        // twin of the unreadable-entry handling above.
+        closure_paths.extend(parse.read_failures);
         let had_missing_import = !parse.import_problems.is_empty();
         let path_by_module: FxHashMap<Vec<String>, PathBuf> = parse
             .files

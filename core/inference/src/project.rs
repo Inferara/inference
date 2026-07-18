@@ -185,6 +185,14 @@ pub struct ResilientProjectParse {
     /// path it was read from. Serves as both the closure file set and the
     /// module-path → path mapping.
     pub files: Vec<LoadedFile>,
+    /// Absolute paths of reachable files that exist but could not be read
+    /// (invalid UTF-8, a lock, a permission error). Such a file is enqueued by
+    /// the walk yet yields no [`LoadedFile`] — its contents never reached the
+    /// parser — and is not a missing import (the file exists), so nothing else
+    /// records its path. Surfacing it lets an IDE invalidate an analysis when the
+    /// file later becomes readable. The fail-fast [`parse_project`] never reaches
+    /// this: it aborts on the first read error.
+    pub read_failures: Vec<PathBuf>,
 }
 
 /// A problem encountered while walking the import closure. Recorded by the walk
@@ -286,6 +294,7 @@ pub fn load_project_resilient(entry: &Path, loader: &dyn FileLoader) -> Resilien
 
     let mut parse_errors = Vec::new();
     let mut import_problems = Vec::new();
+    let mut read_failures = Vec::new();
     for problem in problems {
         match problem {
             WalkProblem::FileParse {
@@ -296,10 +305,14 @@ pub fn load_project_resilient(entry: &Path, loader: &dyn FileLoader) -> Resilien
                 errors,
             }),
             WalkProblem::MissingImport(import) => import_problems.push(import),
-            // A read race (the loader claimed a file exists, then failed to read
-            // it) or an invalid segment (unreachable from valid lexer output)
-            // simply drops the affected file/directive from the closure.
-            WalkProblem::Io { .. } | WalkProblem::InvalidSegment { .. } => {}
+            // The file exists (the walk enqueued it) but could not be read.
+            // It leaves no `LoadedFile`, so surface its path: an IDE folds it
+            // into the analysis closure and re-runs when the file becomes
+            // readable, rather than serving a permanently stale result.
+            WalkProblem::Io { path, .. } => read_failures.push(path),
+            // An invalid segment is unreachable from valid lexer output, so it
+            // simply drops the affected directive from the closure.
+            WalkProblem::InvalidSegment { .. } => {}
         }
     }
 
@@ -319,6 +332,7 @@ pub fn load_project_resilient(entry: &Path, loader: &dyn FileLoader) -> Resilien
         import_problems,
         warnings: Vec::new(),
         files,
+        read_failures,
     }
 }
 
@@ -2519,5 +2533,86 @@ mod tests {
         // The glob syntax error is still surfaced on the entry.
         assert_eq!(parse.parse_errors.len(), 1);
         assert_eq!(parse.parse_errors[0].module_path, Vec::<String>::new());
+    }
+
+    #[test]
+    fn resilient_walk_surfaces_a_reachable_but_unreadable_import() {
+        // A reachable import that exists on disk but fails to read (invalid
+        // UTF-8) yields no `LoadedFile` and is not a missing import (the file
+        // exists). The resilient walk must surface its path in `read_failures`
+        // so an IDE can invalidate an analysis when the file later becomes
+        // readable. Invalid UTF-8 makes `read_to_string` fail deterministically
+        // on every platform, so the file exists for the `is_file` probe yet
+        // cannot be read.
+        let project = TempProject::new("resilient-unreadable-import");
+        let entry = project.write(
+            "main.inf",
+            "use lib;\npub fn main() -> i32 { return 0; }",
+        );
+        let lib_path = project.root.join("lib.inf");
+        std::fs::write(&lib_path, b"\xFF\xFE\xFA").expect("write invalid-UTF-8 lib");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        // The unreadable file is surfaced by path, exactly once.
+        assert_eq!(parse.read_failures, vec![lib_path.clone()]);
+        // It produced no LoadedFile and no missing-import problem.
+        assert!(
+            parse.files.iter().all(|f| f.path != lib_path),
+            "an unreadable file must not appear as a loaded file"
+        );
+        assert!(
+            parse.import_problems.is_empty(),
+            "an existing-but-unreadable file is not a missing import"
+        );
+        // The entry is still lowered and analyzable; the unreadable file is not
+        // in the arena.
+        assert_eq!(resilient_module_paths(&parse), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn fail_fast_walk_still_aborts_on_a_reachable_but_unreadable_import() {
+        // The compiler path must remain byte-identical: a reachable file that
+        // exists but fails to read is a hard `Io` error, aborted on exactly as
+        // before. Surfacing `read_failures` on the resilient path must not leak
+        // into the fail-fast behavior.
+        let project = TempProject::new("fail-fast-unreadable-import");
+        let entry = project.write(
+            "main.inf",
+            "use lib;\npub fn main() -> i32 { return 0; }",
+        );
+        let lib_path = project.root.join("lib.inf");
+        std::fs::write(&lib_path, b"\xFF\xFE\xFA").expect("write invalid-UTF-8 lib");
+
+        let err = parse_project(&entry).expect_err("an unreadable import must error");
+        match err.downcast_ref::<InferenceError>() {
+            Some(InferenceError::Io { path, .. }) => assert_eq!(path, &lib_path),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resilient_walk_still_records_a_readable_import_beside_an_unreadable_one() {
+        // A read failure must not abort the resilient walk: a sibling import that
+        // reads cleanly is still lowered, while only the unreadable one is
+        // surfaced in `read_failures`.
+        let project = TempProject::new("resilient-mixed-read");
+        let entry = project.write(
+            "main.inf",
+            "use bad;\nuse good;\npub fn main() -> i32 { return 0; }",
+        );
+        let bad_path = project.root.join("bad.inf");
+        std::fs::write(&bad_path, b"\xFF\xFE\xFA").expect("write invalid-UTF-8 bad");
+        project.write("good.inf", "pub fn good() -> i32 { return 7; }");
+
+        let parse = load_project_resilient(&entry, &DiskLoader);
+
+        assert_eq!(parse.read_failures, vec![bad_path]);
+        // The good import survived; the bad one did not enter the arena.
+        assert_eq!(
+            resilient_module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["good"])],
+        );
+        assert!(parse.import_problems.is_empty());
     }
 }

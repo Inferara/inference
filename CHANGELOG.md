@@ -807,6 +807,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ide/base-db`: `LineIndex` (byte offset ⇄ 0-based line / UTF-16 column) and the `TextRange`/`LineCol`/`FilePosition`/`FileRange` position PODs
   - `ide/ide-db`: `RootDatabase` with closure-aware analysis invalidation, analyzing every open file as its own project entry; `FileAnalysis` merges parse errors, structured type diagnostics, and analysis findings behind an overlay-then-disk `FileLoader` driving `core/inference`'s shared import-closure walk
   - `ide/ide`: the `AnalysisHost`/`Analysis` feature API — diagnostics, hover, goto-definition, document symbols, completions, and inlay hints, all returned as editor-terminology PODs with no compiler type crossing the boundary
+- Fix a permanently stale IDE analysis when an imported file exists but cannot be read ([#242])
+  - A reachable `use` target that exists on disk yet fails `read_to_string` (invalid UTF-8, a lock, a permission error) left no trace in the importing file's `FileAnalysis`: it was neither a loaded closure file nor a missing import, so no later `didOpen`/`didChange` of that file could ever evict the importing entry's symbol-less analysis
+  - The resilient walk now surfaces read-failed paths (new `ResilientProjectParse::read_failures`), and `FileAnalysis` folds them into its invalidation closure, so making the file readable re-analyzes every open entry that imports it — the non-entry twin of the existing unreadable-entry recovery
+  - The fail-fast compiler path (`parse_project`) is unchanged: it still aborts on the first read error
 - Add structured type-check diagnostics: `inference_type_checker::check_with_diagnostics` (re-exported as `inference::type_check_with_diagnostics`) ([#33])
   - Returns a `TypeCheckOutcome { typed_context, errors: Vec<TypeCheckDiagnostic> }` instead of aggregating errors into one `anyhow::Error` string
   - Lossless: the returned `TypedContext` is fully indexed (symbol table assigned, canonical-key indexes built) even when errors are present, so tooling can still query `lookup_struct`/`lookup_enum`/`call_target`/`get_node_typeinfo` for the parts of the program that did check
@@ -930,5 +934,6 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#242]: https://github.com/Inferara/inference/issues/242
 [#250]: https://github.com/Inferara/inference/issues/250
 [#241]: https://github.com/Inferara/inference/issues/241
