@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { installAndSetDefault } from '../toolchain/versions';
-import { ensureLspStarted } from '../lsp/client';
+import { restartLspClient } from '../lsp/client';
 
 /**
  * Perform a version change (install + set default) with progress UI.
@@ -34,7 +34,14 @@ export async function performVersionChange(
                 );
                 vscode.commands.executeCommand('inference.applyTerminalPath');
                 vscode.commands.executeCommand('inference.runDoctor');
-                void ensureLspStarted();
+                // Restart (not merely ensure-started): a running server
+                // still executes the old toolchain's binary, and stop is a
+                // no-op when the server is not running.
+                restartLspClient().catch((err) =>
+                    outputChannel.appendLine(
+                        `Language server restart failed: ${err}`,
+                    ),
+                );
                 vscode.window
                     .showInformationMessage(
                         `Inference toolchain ${actionVerb.toLowerCase()} to v${version}.`,

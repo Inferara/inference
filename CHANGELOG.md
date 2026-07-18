@@ -627,6 +627,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- Fix `infs doctor` to verify `inference-lsp` where the editor actually resolves it ([#253])
+  - The VS Code extension resolves the language server only through `<INFERENCE_HOME>/bin/inference-lsp` (the managed symlink) and PATH; doctor previously checked the toolchain directory instead, so a toolchain that bundles the server but whose `bin/` link is missing or broken printed a misleading `[OK]` while the extension reported "not found". The check now verifies the symlink exists and resolves, WARNing with `infs default <version>` as the repair when it does not.
+  - The "also on PATH" note no longer fires for infs's own managed `bin/` symlink (which the extension prepends to PATH before running doctor), so it reports only a genuinely separate copy.
+  - The check is driven from `ToolchainPaths::OPTIONAL_MANAGED_BINARIES` rather than a hardcoded name, so a future optional managed binary gains doctor coverage automatically.
 - Add opt-in post-build WASM optimization via Binaryen `wasm-opt`
   - After a successful project-mode `infs build`/`infs run`, when the manifest declares `[build.wasm-opt]`, the external `wasm-opt` binary optimizes `out/main.wasm` in place; absent the table, the pipeline is unchanged
   - Runs only for executable artifacts: proof-mode builds and any `-v` build are always skipped silently, since their WASM can carry non-deterministic opcodes (`forall`/`exists`/`assume`/`unique`/`@` uzumaki) that `wasm-opt` cannot parse
@@ -730,6 +734,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
 - ide: the resilient project walk (`inference::load_project_resilient`) no longer runs the unreachable-file warning scan at all — `ResilientProjectParse::warnings` is documented always-empty. The scan recursively walked and canonicalized every `.inf` under the source root on every keystroke (and, for a document at a volume root like `/main.inf`, the entire disk) to compute warnings the IDE discards. The fail-fast compiler path (`parse_project`) keeps the scan — it runs once per build, not once per keystroke — so compiler behavior is unchanged ([#33])
 - Extern-import diagnostics (`use { … } from <module>;` binding errors such as an undeclared extern import or an ambiguous extern module) reported from an *imported* file now carry that file's module-path label instead of rendering as if they were in the entry file. Locations are per-file-local, so the missing label made these errors point at wrong positions in the entry file — visible in both the aggregated compiler message and the structured diagnostics the LSP consumes ([#33])
+- VS Code extension: switching or updating the toolchain now restarts a running language server ("Select Toolchain Version", "Update Toolchain", and "Install Toolchain" all restart it on success), so diagnostics/hover/goto immediately reflect the new default toolchain. Previously these commands only ensured the server was started — a no-op while one was running — leaving the old toolchain's `inference-lsp` process serving stale results until a manual "Restart Language Server" or window reload. Restart is a strict superset of the old behavior: the stop phase no-ops when the server is not running ([#250])
+- lsp: an unwinding panic in the analysis stack (a `todo!`/`unwrap` in the type-checker or analysis passes, e.g. a named constant used as an array size) no longer kills the whole server session. The message loop now wraps each request and notification in a panic boundary (`std::panic::catch_unwind`): a panicking request is answered with a JSON-RPC `InternalError` carrying its original id, and a panicking notification publishes nothing and rebuilds the analysis host from the tracked open documents so later queries start from consistent state. Every other open document keeps working, and one bad file can no longer crash-loop the server into a permanent outage. Genuinely unrecoverable failures (stack overflow) still abort as before, and the panic message still goes only to stderr, never the stdout protocol channel ([#241])
 
 ### Project Manifest
 
@@ -929,3 +935,5 @@ Initial tagged release.
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
 [#242]: https://github.com/Inferara/inference/issues/242
+[#250]: https://github.com/Inferara/inference/issues/250
+[#241]: https://github.com/Inferara/inference/issues/241
