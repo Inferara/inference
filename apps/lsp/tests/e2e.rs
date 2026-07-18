@@ -27,6 +27,14 @@ const INLAY_KIND_TYPE: i64 = 1;
 // JSON-RPC error codes.
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+
+/// A document whose *analysis* panics: a named constant used as an array size
+/// hits an unimplemented `todo!` deep in the type-checker (#240). It is the most
+/// direct in-tree trigger for the message-loop panic boundary; if #240 is fixed
+/// so this no longer unwinds, replace it with another deterministic panic.
+const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
 
 /// A single-file fixture: an isolated temp dir with `main.inf` written to disk,
 /// plus its `file://` URI. The returned [`TempDir`] must be kept alive for the
@@ -947,6 +955,110 @@ fn query_or_fragment_uri_is_ignored_without_crashing() {
         hover.get("error").is_none(),
         "the server survived the query-bearing open"
     );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 22. an analysis panic is contained, not fatal to the session (#241) ------
+
+#[test]
+fn a_request_whose_analysis_panics_is_answered_internal_error() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The panic file lives on disk but is never opened; a request against it reads
+    // it from disk, analyzes, and unwinds. The message-loop boundary must turn that
+    // into a failed request carrying its own id, not a dead process.
+    let (_dir, panic_uri) = fixture("panic-request", PANIC_SOURCE);
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-request-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_SOURCE, "arr"));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INTERNAL_ERROR),
+        "a request whose analysis panics is answered InternalError, got {response}"
+    );
+
+    // The server still answers a well-formed request against a healthy document.
+    let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server stays responsive after containing the panic, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-didopen-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    // Opening the panic file computes its diagnostics on the loop thread, which
+    // unwinds. The notification boundary contains it: nothing is published for the
+    // file (so we must not wait on a publish that never comes), and the session
+    // lives on. Sent raw for that reason.
+    let (_dir, panic_uri) = fixture("panic-didopen", PANIC_SOURCE);
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": panic_uri,
+                "languageId": "inference",
+                "version": 1,
+                "text": PANIC_SOURCE,
+            }
+        }),
+    );
+
+    // The healthy document is still served after the panicking open.
+    let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server survived the panicking didOpen and still answers, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-loop-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    // The amplification the issue describes: a client that crashes and auto-restarts
+    // re-sends didOpen for the same bad file. Each didOpen unwinds during diagnostics;
+    // every one must be contained, and the healthy document stay answerable across all
+    // of them — otherwise one bad file becomes a permanent LSP outage.
+    let (_dir, panic_uri) = fixture("panic-loop", PANIC_SOURCE);
+    for version in 1..=5 {
+        client.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": panic_uri,
+                    "languageId": "inference",
+                    "version": version,
+                    "text": PANIC_SOURCE,
+                }
+            }),
+        );
+        let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+        assert!(
+            hover.get("error").is_none(),
+            "the server is still alive after panicking didOpen #{version}, got {hover}"
+        );
+    }
 
     client.shutdown_exit_ok();
 }
