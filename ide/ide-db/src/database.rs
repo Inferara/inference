@@ -20,19 +20,24 @@ use crate::analysis::FileAnalysis;
 /// A keystroke in one buffer must not force every other open buffer to
 /// re-analyze. Each [`FileAnalysis`] records the absolute paths of every file in
 /// its import closure, so a content change to path `P` invalidates only the
-/// analyses whose closure contains `P`.
+/// analyses whose closure contains `P`. The recorded closure is wider than the
+/// files that loaded cleanly: it also holds the entry itself and any reachable
+/// file that exists but could not be read (invalid UTF-8, a lock, a permission
+/// error), so a later event that makes such a file readable still invalidates the
+/// analyses computed without it.
 ///
-/// One extra case: opening a path that had **no overlay content before** can
-/// satisfy an import that was missing, but a missing import is not in any closure
-/// (there is no file to record). So an open that newly makes overlay content
-/// available additionally invalidates every analysis that recorded an unresolved
-/// import. Keying this on the overlay (not on whether the path was ever interned)
-/// is what makes a `didClose` then `didOpen` re-fire: interning survives a close,
-/// but the overlay does not. This is a deliberately coarse over-approximation —
-/// it may recompute an analysis whose specific missing import is unrelated to the
-/// new file — chosen because it is simple and always correct. Files that appear
-/// on disk without being opened are not observed (there is no filesystem watch in
-/// v1).
+/// One remaining case the closure cannot cover: opening a path that had **no
+/// overlay content before** can satisfy an import that was *missing* — and a
+/// missing import names no file on disk, so there is no path to record in any
+/// closure. So an open that newly makes overlay content available additionally
+/// invalidates every analysis that recorded an unresolved import. Keying this on
+/// the overlay (not on whether the path was ever interned) is what makes a
+/// `didClose` then `didOpen` re-fire: interning survives a close, but the overlay
+/// does not. This is a deliberately coarse over-approximation — it may recompute
+/// an analysis whose specific missing import is unrelated to the new file — but an
+/// over-recompute only wastes work and never serves a stale result. Files that
+/// appear on disk without being opened are not observed (there is no filesystem
+/// watch in v1).
 ///
 /// # Path identity
 ///

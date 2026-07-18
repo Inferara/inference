@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use inference_ide_db::{NodeId, RootDatabase, Severity};
+use inference_ide_db::{FileAnalysis, NodeId, RootDatabase, Severity};
 
 /// A throwaway source tree under the system temp dir, removed on drop.
 struct TempTree {
@@ -39,6 +39,19 @@ impl TempTree {
         dest
     }
 
+    /// Writes raw `bytes` to `<root>/<relative>`, creating parent directories, and
+    /// returns the absolute path. Planting invalid UTF-8 makes the file exist for
+    /// an `is_file` probe yet fail `read_to_string` deterministically on every
+    /// platform — a reachable-but-unreadable import.
+    fn write_bytes(&self, relative: &str, bytes: &[u8]) -> PathBuf {
+        let dest = self.root.join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).expect("create source parent dir");
+        }
+        std::fs::write(&dest, bytes).expect("write source bytes");
+        dest
+    }
+
     /// The absolute path a relative source name would occupy, without writing it.
     fn path(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
@@ -49,6 +62,18 @@ impl Drop for TempTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// Whether the analysis's merged arena contains a closure file at `module_path`
+/// that defines a top-level item named `name`. Used to assert that an imported
+/// file's symbols are present (or absent) in an analysis without re-querying the
+/// database while a borrow is live.
+fn closure_defines(analysis: &FileAnalysis, module_path: &[String], name: &str) -> bool {
+    let arena = analysis.arena();
+    arena
+        .source_files()
+        .filter(|sf| sf.module_path == module_path)
+        .any(|sf| sf.defs.iter().any(|&d| arena.def_name(d) == name))
 }
 
 /// The definition names of the closure file named by `module_path`, in order.
@@ -454,6 +479,147 @@ fn analysis_of_an_unreadable_entry_recovers_after_didopen() {
     assert!(
         db.analysis(&entry).generation() > before_change,
         "didChange of the entry must recompute"
+    );
+}
+
+#[test]
+fn analysis_of_an_unreadable_import_recovers_after_didopen() {
+    // The non-entry twin of the unreadable-entry case. `main.inf` imports `lib`;
+    // `lib.inf` exists on disk but is invalid UTF-8, so `read_to_string` fails.
+    // The import is not "missing" (the file exists) and leaves no `LoadedFile`, so
+    // before the fix nothing recorded lib's path and no later event could evict
+    // main's stale, symbol-less analysis.
+    let tree = TempTree::new("unreadable-import-didopen");
+    let src = "use lib;\npub fn main() -> i32 { return lib::seven(); }";
+    let entry = tree.write("main.inf", src);
+    let lib = tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let lib_mod = vec!["lib".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            !closure_defines(analysis, &lib_mod, "seven"),
+            "an unreadable import contributes no symbols"
+        );
+        analysis.generation()
+    };
+
+    // `didOpen` supplies valid text for the previously-unreadable import; main's
+    // stale analysis must recompute and now see lib's symbols.
+    db.open_document(&lib, "pub fn seven() -> i32 { return 7; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first_gen,
+        "didOpen of the unreadable import must recompute main ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "seven"),
+        "the recomputed analysis must see the now-readable import's symbols"
+    );
+}
+
+#[test]
+fn analysis_of_an_unreadable_import_recovers_after_didchange() {
+    // Recovery must also fire on `didChange`, which the closure mechanism covers
+    // but the missing-import widening would not: a change carries
+    // `newly_available == false`, so only a closure hit can invalidate. `lib` is
+    // unreadable on disk with no overlay, and the change is the first event to
+    // supply valid content for it — proving the closure records the read-failed
+    // path rather than relying on the overlay-availability widening.
+    let tree = TempTree::new("unreadable-import-didchange");
+    let src = "use lib;\npub fn main() -> i32 { return lib::seven(); }";
+    let entry = tree.write("main.inf", src);
+    let lib = tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let lib_mod = vec!["lib".to_string()];
+    let before_change = db.analysis(&entry).generation();
+    assert!(
+        !closure_defines(db.analysis(&entry), &lib_mod, "seven"),
+        "the import is unreadable before the change"
+    );
+
+    db.change_document(&lib, "pub fn seven() -> i32 { return 7; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > before_change,
+        "didChange of the unreadable import must recompute main ({before_change} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "seven"),
+        "the recomputed analysis must see the changed import's symbols"
+    );
+}
+
+#[test]
+fn analysis_recovers_when_a_transitively_unreadable_import_becomes_readable() {
+    // The read-failed file need not be a direct import. `main` imports `a`, `a`
+    // imports `b`, and only `b.inf` is unreadable. The walk enqueues `b` while
+    // analyzing `main`, so `b`'s read-failed path must land in main's closure and
+    // a later `didOpen` of `b` must re-analyze `main`.
+    let tree = TempTree::new("unreadable-import-transitive");
+    let main_src = "use a;\npub fn main() -> i32 { return a::mid(); }";
+    let entry = tree.write("main.inf", main_src);
+    tree.write(
+        "a.inf",
+        "use b;\npub fn mid() -> i32 { return b::deep(); }",
+    );
+    let b = tree.write_bytes("b.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, main_src);
+
+    let b_mod = vec!["b".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            !closure_defines(analysis, &b_mod, "deep"),
+            "the transitively-unreadable file contributes no symbols"
+        );
+        analysis.generation()
+    };
+
+    db.open_document(&b, "pub fn deep() -> i32 { return 42; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first_gen,
+        "didOpen of a transitively-unreadable import must recompute main ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &b_mod, "deep"),
+        "the recomputed analysis must see the now-readable transitive import"
+    );
+}
+
+#[test]
+fn opening_an_unrelated_file_does_not_invalidate_an_unreadable_import_analysis() {
+    // The negative: recording the read-failed path in the closure must stay
+    // precise. Only an event touching that exact path invalidates; an unrelated
+    // file's `didOpen` must not — the read failure is not folded into
+    // `had_missing_import`, so it does not trigger the coarse missing-import
+    // widening.
+    let tree = TempTree::new("unreadable-import-unrelated");
+    let src = "use lib;\npub fn main() -> i32 { return 0; }";
+    let entry = tree.write("main.inf", src);
+    tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let first_gen = db.analysis(&entry).generation();
+
+    // A file outside main's closure — neither the entry, an import, nor the
+    // unreadable file — must not disturb main's memoized analysis.
+    let unrelated = tree.path("unrelated.inf");
+    db.open_document(&unrelated, "pub fn other() {}");
+    assert_eq!(
+        db.analysis(&entry).generation(),
+        first_gen,
+        "an unrelated file's didOpen must not recompute an unreadable-import analysis"
     );
 }
 
