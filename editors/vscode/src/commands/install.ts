@@ -8,7 +8,7 @@ import {
 } from '../toolchain/installation';
 import { runDoctor } from '../toolchain/doctor';
 import { updateStatusBar } from '../ui/statusBar';
-import { ensureLspStarted } from '../lsp/client';
+import { restartLspClient } from '../lsp/client';
 
 /** Guard against concurrent install attempts. */
 let installing = false;
@@ -56,7 +56,14 @@ export function registerInstallCommand(
                 updateStatusBar(statusBarItem, doctorResult);
                 vscode.commands.executeCommand('inference.refreshConfigView');
                 vscode.commands.executeCommand('inference.applyTerminalPath');
-                void ensureLspStarted();
+                // Restart (not merely ensure-started): a PATH-resolved
+                // server may still be running the pre-install binary, and
+                // stop is a no-op when the server is not running.
+                restartLspClient().catch((err) =>
+                    outputChannel.appendLine(
+                        `Language server restart failed: ${err}`,
+                    ),
+                );
 
                 notifyInstallSuccess(result.version, result.doctorWarnings);
             } catch (err) {

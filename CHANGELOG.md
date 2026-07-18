@@ -627,6 +627,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- Fix `infs doctor` to verify `inference-lsp` where the editor actually resolves it ([#253])
+  - The VS Code extension resolves the language server only through `<INFERENCE_HOME>/bin/inference-lsp` (the managed symlink) and PATH; doctor previously checked the toolchain directory instead, so a toolchain that bundles the server but whose `bin/` link is missing or broken printed a misleading `[OK]` while the extension reported "not found". The check now verifies the symlink exists and resolves, WARNing with `infs default <version>` as the repair when it does not.
+  - The "also on PATH" note no longer fires for infs's own managed `bin/` symlink (which the extension prepends to PATH before running doctor), so it reports only a genuinely separate copy.
+  - The check is driven from `ToolchainPaths::OPTIONAL_MANAGED_BINARIES` rather than a hardcoded name, so a future optional managed binary gains doctor coverage automatically.
 - Add opt-in post-build WASM optimization via Binaryen `wasm-opt`
   - After a successful project-mode `infs build`/`infs run`, when the manifest declares `[build.wasm-opt]`, the external `wasm-opt` binary optimizes `out/main.wasm` in place; absent the table, the pipeline is unchanged
   - Runs only for executable artifacts: proof-mode builds and any `-v` build are always skipped silently, since their WASM can carry non-deterministic opcodes (`forall`/`exists`/`assume`/`unique`/`@` uzumaki) that `wasm-opt` cannot parse
@@ -735,6 +739,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `<module>::` completion context: after a plain-import namespace qualifier, that module's public defs are offered by their bare name — the position where a bare member name is what compiles. An item import binds no namespace, so its module is not offered as a `::` qualifier, and a `::` position never falls back to the keyword/local list
   - Member completions after `.` on a struct defined in another module now drop private methods (the checker rejects `receiver.private_method()` across modules); a same-file receiver keeps its private methods, which are callable there
   - Completions are suppressed inside comments and string literals, decided by the lexer's token spans so quote boundaries are exact, rather than popping the general list into prose an editor auto-triggered on
+- VS Code extension: switching or updating the toolchain now restarts a running language server ("Select Toolchain Version", "Update Toolchain", and "Install Toolchain" all restart it on success), so diagnostics/hover/goto immediately reflect the new default toolchain. Previously these commands only ensured the server was started — a no-op while one was running — leaving the old toolchain's `inference-lsp` process serving stale results until a manual "Restart Language Server" or window reload. Restart is a strict superset of the old behavior: the stop phase no-ops when the server is not running ([#250])
+- lsp: an unwinding panic in the analysis stack (a `todo!`/`unwrap` in the type-checker or analysis passes, e.g. a named constant used as an array size) no longer kills the whole server session. The message loop now wraps each request and notification in a panic boundary (`std::panic::catch_unwind`): a panicking request is answered with a JSON-RPC `InternalError` carrying its original id, and a panicking notification publishes nothing and rebuilds the analysis host from the tracked open documents so later queries start from consistent state. Every other open document keeps working, and one bad file can no longer crash-loop the server into a permanent outage. Genuinely unrecoverable failures (stack overflow) still abort as before, and the panic message still goes only to stderr, never the stdout protocol channel ([#241])
 
 ### Project Manifest
 
@@ -806,6 +812,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ide/base-db`: `LineIndex` (byte offset ⇄ 0-based line / UTF-16 column) and the `TextRange`/`LineCol`/`FilePosition`/`FileRange` position PODs
   - `ide/ide-db`: `RootDatabase` with closure-aware analysis invalidation, analyzing every open file as its own project entry; `FileAnalysis` merges parse errors, structured type diagnostics, and analysis findings behind an overlay-then-disk `FileLoader` driving `core/inference`'s shared import-closure walk
   - `ide/ide`: the `AnalysisHost`/`Analysis` feature API — diagnostics, hover, goto-definition, document symbols, completions, and inlay hints, all returned as editor-terminology PODs with no compiler type crossing the boundary
+- Fix a permanently stale IDE analysis when an imported file exists but cannot be read ([#242])
+  - A reachable `use` target that exists on disk yet fails `read_to_string` (invalid UTF-8, a lock, a permission error) left no trace in the importing file's `FileAnalysis`: it was neither a loaded closure file nor a missing import, so no later `didOpen`/`didChange` of that file could ever evict the importing entry's symbol-less analysis
+  - The resilient walk now surfaces read-failed paths (new `ResilientProjectParse::read_failures`), and `FileAnalysis` folds them into its invalidation closure, so making the file readable re-analyzes every open entry that imports it — the non-entry twin of the existing unreadable-entry recovery
+  - The fail-fast compiler path (`parse_project`) is unchanged: it still aborts on the first read error
 - Add structured type-check diagnostics: `inference_type_checker::check_with_diagnostics` (re-exported as `inference::type_check_with_diagnostics`) ([#33])
   - Returns a `TypeCheckOutcome { typed_context, errors: Vec<TypeCheckDiagnostic> }` instead of aggregating errors into one `anyhow::Error` string
   - Lossless: the returned `TypedContext` is fully indexed (symbol table assigned, canonical-key indexes built) even when errors are present, so tooling can still query `lookup_struct`/`lookup_enum`/`call_target`/`get_node_typeinfo` for the parts of the program that did check
@@ -930,3 +940,6 @@ Initial tagged release.
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
 [#246]: https://github.com/Inferara/inference/issues/246
+[#242]: https://github.com/Inferara/inference/issues/242
+[#250]: https://github.com/Inferara/inference/issues/250
+[#241]: https://github.com/Inferara/inference/issues/241
