@@ -86,7 +86,7 @@ assert_eq!(vfs.path(main), PathBuf::from("/project/src/main.inf"));
 | `Vfs::intern(&Path) -> FileId` | Interns a path (idempotent) |
 | `Vfs::file_id(&Path) -> Option<FileId>` | Looks up an already-interned path without allocating a new id |
 | `Vfs::path(FileId) -> &Path` | Resolves an id back to its path |
-| `Vfs::set_contents(FileId, impl Into<Arc<str>>)` | Installs or replaces overlay text (`didOpen` / `didChange`) |
+| `Vfs::set_contents(FileId, Arc<str>)` | Installs or replaces overlay text (`didOpen` / `didChange`) |
 | `Vfs::remove_contents(FileId)` | Drops overlay text, a no-op if absent (`didClose`) |
 | `Vfs::contents(FileId) -> Option<Arc<str>>` | Reads current overlay text, if the document is open |
 | `Vfs::contents_of_path(&Path) -> Option<Arc<str>>` | Same, addressed by path instead of id |

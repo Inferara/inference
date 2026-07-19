@@ -18,8 +18,8 @@ apps/lsp            (this crate)
   |  URI <-> Path, byte offset <-> LSP Position conversion
   v
 ide/ide              AnalysisHost / Analysis: feature API, editor-terminology PODs
-  |
-  v
+  |             \
+  v              \-> core/ast, core/type-checker (AST node/id types, type-info and error types)
 ide/ide-db           RootDatabase: per-open-file FileAnalysis, closure-aware invalidation
   |             \
   v              \-> core/inference, core/analysis, core/type-checker, core/ast, core/parser
@@ -29,10 +29,19 @@ ide/base-db          LineIndex, TextRange, LineCol, FilePosition, FileRange
 ide/vfs              FileId interning + open-document overlay (no file I/O)
 ```
 
-Only `ide-db` depends on the compiler crates; `apps/lsp` and `ide/ide` never
-name a compiler type. A change to a compiler internal (a new AST node kind, a
-new type-checker error variant) is therefore contained to `ide-db` unless it
-also needs a new editor-facing feature.
+`apps/lsp` itself names no compiler type — its only dependency into this stack
+is `ide/ide` (`inference-ide`). But the compiler surface is not confined to
+`ide-db`: `ide-db` depends on the full set (`inference`, `inference-analysis`,
+`inference-ast`, `inference-parser`, `inference-type-checker`), and `ide/ide`
+*also* depends directly on `inference-ast` and `inference-type-checker` —
+`goto_definition`, `completions`, `diagnostics`, `document_symbols`, `hover`,
+`inlay_hints`, `syntax`, and `type_render` all import AST node/id types or
+type-checker type-info/error types to shape their editor-facing results. So a
+change to an AST node's shape or a type-checker error/type-info variant can
+touch `ide/ide` directly, not just `ide-db`; a change confined to
+`inference-parser` or `inference-analysis` internals (nothing `ide/ide` names
+changes shape) stays contained to `ide-db`. `apps/lsp` is insulated from all of
+this either way — it only ever calls `ide/ide`'s editor-terminology API.
 
 ## Why Single-Threaded
 
@@ -130,6 +139,18 @@ protocol stream — and is asserted directly by an end-to-end test (below).
   cannot catch it; the mitigation is headroom, not isolation. An input deep
   enough to exhaust even 64 MiB would still abort — bounding the recursion in
   the shared pipeline (out of scope for this crate) would be the complete fix.
+
+- **An unwinding analysis panic is contained, not fatal.** An ordinary panic in
+  the analysis stack (a `todo!` or `unwrap` in the type-checker or analysis
+  passes) *unwinds* — unlike a stack overflow — so the message loop catches it:
+  each request and notification is dispatched inside `std::panic::catch_unwind`.
+  A panicking request is answered with a JSON-RPC `InternalError` carrying its
+  original id; a panicking notification publishes nothing and rebuilds the
+  analysis host from the tracked open documents, so the session continues from
+  consistent state instead of aborting and letting the client crash-loop the
+  server into a permanent outage. The panic still reaches stderr through the
+  default hook (never stdout, the protocol channel). This is the recoverable
+  counterpart to the stack-overflow case above.
 
 - **A malformed transport frame is fatal.** `lsp-server`'s stdio reader treats
   any framing or body parse failure — an empty body (`Content-Length: 0`), a
