@@ -630,6 +630,18 @@ pub enum TypeCheckError {
     )]
     InvalidArraySize { size: String, location: Location },
 
+    /// A named constant used where an array size is expected: `let a: [i32; N]`.
+    ///
+    /// Only integer literals are accepted as array sizes today; resolving a
+    /// constant here needs compile-time constant evaluation (tracked by #79),
+    /// which is not yet implemented. Reported instead of the former `todo!` panic
+    /// (#240); the location points at the size identifier so the fix — write a
+    /// literal — is anchored where it applies.
+    #[error(
+        "{location}: array size must be an integer literal; named constant `{name}` is not yet supported as an array size"
+    )]
+    NonLiteralArraySize { name: String, location: Location },
+
     /// A required field is missing from a struct literal.
     #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
     MissingStructField {
@@ -794,6 +806,7 @@ impl TypeCheckError {
             | TypeCheckError::AssignToImmutable { location, .. }
             | TypeCheckError::VariableShadowed { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
+            | TypeCheckError::NonLiteralArraySize { location, .. }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
             | TypeCheckError::DuplicateStructField { location, .. }
@@ -1484,6 +1497,18 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: invalid array size `0`; must be a positive integer that fits in 32 bits"
+        );
+    }
+
+    #[test]
+    fn display_non_literal_array_size() {
+        let err = TypeCheckError::NonLiteralArraySize {
+            name: "N".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array size must be an integer literal; named constant `N` is not yet supported as an array size"
         );
     }
 

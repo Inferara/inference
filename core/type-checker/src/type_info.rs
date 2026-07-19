@@ -388,6 +388,19 @@ impl TypeInfo {
         matches!(self.kind, TypeInfoKind::Array(_, _))
     }
 
+    /// Whether this type is an array whose declared size was rejected.
+    ///
+    /// A `0` element count is never a valid array length; it is the sentinel
+    /// recorded when the size expression was not a positive literal — a named
+    /// constant, or a zero or out-of-range literal — and the precise cause has
+    /// already been diagnosed where the annotation was validated. Callers use
+    /// this to suppress follow-on mismatch errors that would otherwise stack
+    /// onto an already-ill-formed type.
+    #[must_use]
+    pub fn has_rejected_array_size(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Array(_, 0))
+    }
+
     #[must_use]
     pub fn is_bool(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Bool)
@@ -497,16 +510,21 @@ fn source_like_spelling(ty: &TypeInfo) -> String {
 }
 
 /// Extracts the array size from an expression stored in the arena.
+///
+/// This conversion is total: every array node yields a `u32` and none panic, so
+/// building a `TypeInfo` never aborts the compiler or the IDE analysis. Only an
+/// integer literal carries a real size; every other size expression (a named
+/// constant such as `[i32; N]`, an out-of-range literal, or the synthesized size
+/// of a malformed `[T]`) collapses to `0`, a sentinel that is never a valid array
+/// length. The accompanying diagnostic is raised separately by the type checker's
+/// [`validate_array_size`], which sees the original expression and reports the
+/// precise cause (`NonLiteralArraySize` for a constant, `InvalidArraySize` for a
+/// bad literal). Resolving a constant here needs compile-time evaluation (#79).
+///
+/// [`validate_array_size`]: crate::type_checker
 fn extract_array_size_from_arena(arena: &AstArena, size_expr_id: inference_ast::ids::ExprId) -> u32 {
-    let expr_data = &arena[size_expr_id];
-    if let Expr::NumberLiteral { value } = &expr_data.kind {
+    if let Expr::NumberLiteral { value } = &arena[size_expr_id].kind {
         return value.parse::<u32>().unwrap_or(0);
-    }
-    if let Expr::Identifier(ident_id) = &expr_data.kind {
-        todo!(
-            "Constant identifiers for array sizes not yet implemented: {}",
-            arena[*ident_id].name
-        );
     }
     0
 }

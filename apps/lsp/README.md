@@ -84,6 +84,13 @@ capability, and the server replies with a nested `DocumentSymbol` tree when the
 client supports it or a flattened `SymbolInformation` list (each carrying its
 enclosing symbol's name as `containerName`) when it does not.
 
+Hover content format is negotiated too: `server::hover_markdown_support` reads
+`initialize`'s `textDocument.hover.contentFormat`. A client that lists formats
+but omits `markdown` gets plain-text hover — the `ide` layer's Markdown reduced
+to text (code fences dropped, inline-code backticks removed) so a plaintext-only
+client never renders fences and backticks literally. A client that advertises no
+`contentFormat` keeps the historical Markdown default.
+
 ## Message Loop
 
 `server::ServerState` holds the `AnalysisHost` plus a map of open documents
@@ -101,9 +108,19 @@ The shutdown handshake is handled in the loop rather than delegated to
 `lsp-server`'s `Connection::handle_shutdown` (which consumes the next message
 itself and turns anything but `exit` into a fatal protocol error): a `shutdown`
 request is answered and flips a `shutting_down` flag, after which every further
-request is answered with `InvalidRequest` (`-32600`, the spec's behaviour for a
-request received between `shutdown` and `exit`) and every notification but
-`exit` is dropped, until `exit` ends the loop.
+request — including a *repeated* `shutdown` — is answered with `InvalidRequest`
+(`-32600`, the spec's behaviour for a request received between `shutdown` and
+`exit`) and every notification but `exit` is dropped, until `exit` ends the loop.
+A mid-session `initialize` (the client may send it only once) is likewise
+answered `InvalidRequest`, not the misleading `MethodNotFound` an unknown method
+gets.
+
+The `initialize` handshake itself is driven through `server::initialize`
+(`initialize_start` / `initialize_finish`) rather than `lsp-server`'s convenience
+`Connection::initialize`, so the client's `InitializeParams` are validated
+*before* the handshake completes: a wrongly-typed field fails the initialize
+request with an `InvalidParams` error instead of aborting the process after the
+handshake, and the initialize result carries `serverInfo` (name and version).
 
 A single document notification republishes **every** open document, not just
 the notified one. Editing one file can invalidate another open document whose
@@ -161,6 +178,16 @@ protocol stream — and is asserted directly by an end-to-end test (below).
   replacing `Connection::stdio()` with a vendored reader; rust-analyzer accepts
   the same limitation on `lsp-server`, and a well-behaved client does not emit
   malformed frames, so this is documented rather than worked around.
+
+- **An oversized `Content-Length` is unbounded.** The same `lsp-server` reader
+  pre-allocates the body buffer directly from the `Content-Length` header
+  (`buf.resize(size, 0)`) with no upper bound, so a header claiming a huge length
+  makes the reader allocate that much before it ever inspects the body — an
+  OOM-abort angle adjacent to the malformed-frame limitation above. This is
+  upstream framing owned by the reader thread, with no clean seam on stdio to
+  cap it without vendoring `Connection::stdio()` (out of scope, same as above), so
+  the bound is documented rather than enforced. A well-behaved client does not
+  send oversized frames.
 
 ## URI Handling
 
@@ -244,10 +271,10 @@ instead of stalling the run; fixtures live in per-test unique temp
 directories, never at a filesystem root and never inside the repo, so the
 suite is parallel-safe.
 
-The suite is organized into twenty-one scenarios:
+The suite is organized into these scenarios:
 
 1. **Initialize handshake** — the exact capability set is advertised, no
-   `positionEncoding` is negotiated, no `serverInfo` is sent
+   `positionEncoding` is negotiated, and `serverInfo` (name + version) is sent
 2. **`didOpen` on a clean file** — publishes an empty diagnostics set
 3. **`didOpen` with a syntax error** — publishes a `"syntax"` diagnostic
 4. **`didChange` fixing the error** — diagnostics clear
@@ -282,6 +309,20 @@ The suite is organized into twenty-one scenarios:
     `InvalidRequest` (`-32600`), and the server still exits cleanly on `exit`
 21. **Query/fragment URI** — a `file://` URI carrying a query is ignored, never
     interned as a garbage path, and the server stays responsive
+22. **Contained analysis panic** — a `didOpen`/request whose analysis unwinds is
+    contained (published nothing / `InternalError`) and the session lives on
+23. **Second shutdown** — a repeated `shutdown` is answered `InvalidRequest`, not
+    a second `null` success
+24. **Malformed initialize params** — a wrongly-typed `initialize` field fails the
+    initialize *request* with an error, not the process after the handshake
+25. **Repeated initialize** — a mid-session `initialize` is answered
+    `InvalidRequest`, not the misleading `MethodNotFound`
+26. **Plaintext-only hover** — a client that omits Markdown from
+    `hover.contentFormat` gets plain-text hover with no fences or backticks
+27. **Inlay range clamp** — an inlay-hint request whose end is past EOF clamps to
+    the file end and honors the window, rather than returning every hint
+28. **`didClose` of an unmappable URI** — publishes nothing (no empty set, no
+    dependents sweep), mirroring `didOpen`
 
 Unit tests for the protocol-adjacent logic live alongside their modules:
 `capabilities.rs` (the advertised JSON shape), `convert.rs` (every PDO ⇄

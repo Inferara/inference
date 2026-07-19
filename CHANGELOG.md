@@ -772,6 +772,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Goto on a local-binding use now reports the whole `let`/`const` statement as its `full_range` (with the name as `focus_range`), matching what landing on the declaration itself reports, instead of a `full_range` equal to just the ident
 - VS Code extension: switching or updating the toolchain now restarts a running language server ("Select Toolchain Version", "Update Toolchain", and "Install Toolchain" all restart it on success), so diagnostics/hover/goto immediately reflect the new default toolchain. Previously these commands only ensured the server was started — a no-op while one was running — leaving the old toolchain's `inference-lsp` process serving stale results until a manual "Restart Language Server" or window reload. Restart is a strict superset of the old behavior: the stop phase no-ops when the server is not running ([#250])
 - lsp: an unwinding panic in the analysis stack (a `todo!`/`unwrap` in the type-checker or analysis passes, e.g. a named constant used as an array size) no longer kills the whole server session. The message loop now wraps each request and notification in a panic boundary (`std::panic::catch_unwind`): a panicking request is answered with a JSON-RPC `InternalError` carrying its original id, and a panicking notification publishes nothing and rebuilds the analysis host from the tracked open documents so later queries start from consistent state. Every other open document keeps working, and one bad file can no longer crash-loop the server into a permanent outage. Genuinely unrecoverable failures (stack overflow) still abort as before, and the panic message still goes only to stderr, never the stdout protocol channel ([#241])
+- lsp: LSP 3.17 protocol-conformance polish across the initialize/shutdown lifecycle and a few request handlers ([#249])
+  - A repeated `shutdown` (and any request received after `shutdown`) is now answered `InvalidRequest` instead of a second `null` success: the `shutting_down` guard arm precedes the `shutdown` arm in the message loop
+  - `InitializeParams` is validated *during* the handshake (via `initialize_start`/`initialize_finish`) instead of after `Connection::initialize` completes it, so a wrongly-typed field (e.g. a fractional `processId`) fails the initialize *request* with an `InvalidParams` error rather than aborting the process post-handshake
+  - The initialize result now carries `serverInfo` (the crate name and version, from `env!` metadata), which clients surface in logs and crash reports; `lsp-server` 0.8's `Connection::initialize` hard-codes a body without it
+  - A mid-session `initialize` request is answered `InvalidRequest` ("the server is already initialized") instead of the misleading `MethodNotFound` "unsupported request: initialize"
+  - Hover honors `textDocument.hover.contentFormat`: a client that does not list `markdown` now receives `PlainText` hover content (code fences dropped and inline-code backticks removed; a `*` inside a code example is preserved) instead of Markdown rendered literally
+  - An inlay-hint request range whose end is past EOF now clamps to the file end (new `LineIndex::offset_clamped`, extending the existing character clamp to the line dimension) instead of disabling the clip entirely and returning hints outside the requested window
+  - `didClose` for a URI this server cannot map to a file publishes nothing — no empty diagnostics set under the garbage URI and no dependents republish — mirroring `didOpen`, which already ignores such URIs
+  - An oversized `Content-Length` (unbounded pre-allocation in `lsp-server` 0.8's `read_msg_text`) is documented in the crate's known-limitations note alongside the existing malformed-frame limitation; it is upstream framing owned by the reader thread with no clean stdio seam to bound without vendoring the transport
+- type-checker: a named constant used as an array size (`let a: [i32; N] = …`) is now reported as a diagnostic instead of aborting the compiler and the IDE analysis with a `todo!` panic ([#240])
+  - `extract_array_size_from_arena` is total again: a non-literal or out-of-range size collapses to a `0` sentinel rather than panicking, so building a `TypeInfo` never unwinds
+  - `validate_array_size` raises the diagnostic — a named constant is `NonLiteralArraySize` ("array size must be an integer literal; named constant `N` is not yet supported…", located at the size identifier), a zero or out-of-range literal stays `InvalidArraySize`
+  - Both the fail-fast (`build_typed_context`) and lossless (`check_with_diagnostics`) entry points surface it as an ordinary diagnostic; the size-`0` sentinel no longer cascades a spurious array-literal-size or variable/return type mismatch, so the reproduction reports exactly one error
+  - The [#241] message-loop panic-boundary tests, which had used this exact panic as their trigger, now inject a deliberate panic through a debug-only server seam (`INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR`, invisible in release builds) instead
+  - Compile-time constant evaluation of array sizes remains future work (#79)
 
 ### Project Manifest
 
@@ -990,3 +1005,5 @@ Initial tagged release.
 [#242]: https://github.com/Inferara/inference/issues/242
 [#250]: https://github.com/Inferara/inference/issues/250
 [#241]: https://github.com/Inferara/inference/issues/241
+[#240]: https://github.com/Inferara/inference/issues/240
+[#249]: https://github.com/Inferara/inference/issues/249
