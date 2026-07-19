@@ -1724,11 +1724,10 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
                     let value_type = self.infer_expression(expr, ctx);
-                    // A declared return array whose size was rejected carries the `0`
-                    // sentinel (already reported by `validate_array_size`); comparing a
-                    // real return value against it would only add a confusing second
-                    // error, so the mismatch is skipped for it.
-                    let size_rejected = matches!(return_type.kind, TypeInfoKind::Array(_, 0));
+                    // Comparing a real return value against a declared return array
+                    // whose size was already rejected would only add a confusing
+                    // second error, so the mismatch is skipped for it.
+                    let size_rejected = return_type.has_rejected_array_size();
                     if !size_rejected && *return_type != value_type.clone().unwrap_or_default() {
                         self.push_error(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
@@ -1790,13 +1789,10 @@ impl TypeChecker {
                 let target_type = self
                     .symbol_table
                     .resolve_custom_type(TypeInfo::from_type_id_with_type_params(arena, ty, &tp));
-                // A declared array whose size did not resolve to a positive literal
-                // (a named constant, or a zero/out-of-range literal) carries the `0`
-                // size sentinel and has already been reported by
-                // `validate_array_size`. The initializer-consistency checks below
-                // would only stack follow-on errors onto that already-ill-formed
-                // type, so they are skipped for it.
-                let size_rejected = matches!(target_type.kind, TypeInfoKind::Array(_, 0));
+                // The initializer-consistency checks below would only stack
+                // follow-on errors onto a declared array whose size was already
+                // rejected, so they are skipped for it.
+                let size_rejected = target_type.has_rejected_array_size();
                 if let Some(expr_id) = value {
                     let expr_kind = ctx.arena()[expr_id].kind.clone();
                     if let Expr::NumberLiteral { .. } = expr_kind

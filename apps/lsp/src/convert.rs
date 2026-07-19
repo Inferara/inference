@@ -154,7 +154,7 @@ pub(crate) fn symbol_information(
 /// A hover rendered in `format`. A client that did not advertise Markdown in its
 /// `textDocument.hover.contentFormat` gets [`MarkupKind::PlainText`], for which
 /// the `ide` layer's Markdown is reduced to plain text (see [`plain_text`]) so
-/// fences and backticks are not rendered literally.
+/// fence delimiters and inline-code markers are not rendered literally.
 pub(crate) fn hover(index: &ide::LineIndex, hover: ide::Hover, format: MarkupKind) -> Hover {
     let value = match format {
         MarkupKind::PlainText => plain_text(&hover.contents_markdown),
@@ -172,22 +172,30 @@ pub(crate) fn hover(index: &ide::LineIndex, hover: ide::Hover, format: MarkupKin
 /// Reduces the limited Markdown the `ide` layer emits — fenced code blocks and
 /// inline code — to plain text for a client that accepts only plain text.
 ///
-/// Fence delimiter lines (`` ``` ``) are dropped and inline-code backticks
-/// removed; every other character is preserved verbatim, so a `*` inside a code
-/// example (a multiplication, say) survives rather than being mistaken for
-/// emphasis and stripped.
+/// Fence delimiter lines (`` ``` ``) are dropped. Outside a fence, inline-code
+/// backticks are removed; inside one, the body is emitted verbatim, so a
+/// backtick that is part of the code example itself survives. Every other
+/// character is preserved either way, so a `*` inside a code example (a
+/// multiplication, say) survives rather than being mistaken for emphasis and
+/// stripped.
 fn plain_text(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     let mut wrote_line = false;
+    let mut in_fence = false;
     for line in markdown.lines() {
         if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
             continue;
         }
         if wrote_line {
             out.push('\n');
         }
         wrote_line = true;
-        out.extend(line.chars().filter(|&ch| ch != '`'));
+        if in_fence {
+            out.push_str(line);
+        } else {
+            out.extend(line.chars().filter(|&ch| ch != '`'));
+        }
     }
     out
 }
@@ -542,6 +550,28 @@ mod tests {
             "inline-code backticks are removed, emphasis asterisks preserved: {:?}",
             markup.value
         );
+    }
+
+    #[test]
+    fn plaintext_hover_keeps_a_backtick_that_belongs_to_the_code_example() {
+        let index = index("fn f() {}");
+        // Inline code in the prose, and a fenced body whose own backtick is part
+        // of the example rather than a Markdown marker.
+        let markdown = "Compare with `eq`\n\n```inference\nlet tick = \"`\";\n```";
+        let converted = hover(
+            &index,
+            ide::Hover {
+                contents_markdown: markdown.to_owned(),
+                range: ide::TextRange { start: 0, end: 1 },
+            },
+            MarkupKind::PlainText,
+        );
+        let HoverContents::Markup(markup) = converted.contents else {
+            panic!("hover contents are markup");
+        };
+        // Fence delimiters gone, the blank line between prose and example kept,
+        // inline-code backticks stripped, the fenced body verbatim.
+        assert_eq!(markup.value, "Compare with eq\n\nlet tick = \"`\";");
     }
 
     #[test]

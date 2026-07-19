@@ -388,6 +388,19 @@ impl TypeInfo {
         matches!(self.kind, TypeInfoKind::Array(_, _))
     }
 
+    /// Whether this type is an array whose declared size was rejected.
+    ///
+    /// A `0` element count is never a valid array length; it is the sentinel
+    /// recorded when the size expression was not a positive literal — a named
+    /// constant, or a zero or out-of-range literal — and the precise cause has
+    /// already been diagnosed where the annotation was validated. Callers use
+    /// this to suppress follow-on mismatch errors that would otherwise stack
+    /// onto an already-ill-formed type.
+    #[must_use]
+    pub fn has_rejected_array_size(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Array(_, 0))
+    }
+
     #[must_use]
     pub fn is_bool(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Bool)
