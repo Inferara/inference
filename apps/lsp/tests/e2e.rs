@@ -25,6 +25,7 @@ const KIND_STRUCT: i64 = 23;
 const INLAY_KIND_TYPE: i64 = 1;
 
 // JSON-RPC error codes.
+const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
@@ -113,10 +114,20 @@ fn initialize_advertises_the_v1_capabilities() {
     assert!(triggers.contains(&json!(".")), "`.` is a trigger");
     assert!(triggers.contains(&json!(":")), "`:` is a trigger");
 
-    // No position encoding is negotiated, so the client keeps the UTF-16 default;
-    // lsp-server 0.8 attaches no serverInfo.
+    // No position encoding is negotiated, so the client keeps the UTF-16 default.
     assert!(capabilities.get("positionEncoding").is_none());
-    assert!(result.get("serverInfo").is_none(), "no serverInfo declared");
+
+    // serverInfo carries the server's name and version, which clients surface in
+    // logs and crash reports.
+    let server_info = &result["serverInfo"];
+    assert_eq!(
+        server_info["name"], json!("inference-lsp"),
+        "serverInfo names the server, got {result}"
+    );
+    assert!(
+        server_info["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "serverInfo carries a non-empty version, got {result}"
+    );
 
     client.shutdown_exit_ok();
 }
@@ -1059,6 +1070,217 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
             "the server is still alive after panicking didOpen #{version}, got {hover}"
         );
     }
+
+    client.shutdown_exit_ok();
+}
+
+// --- 23. a second shutdown is answered InvalidRequest (#249 item 1) -----------
+
+#[test]
+fn a_second_shutdown_is_answered_invalid_request() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The first shutdown succeeds with a null result.
+    client.shutdown();
+
+    // A second shutdown is a request received after `shutdown`, so the spec says it
+    // errors with InvalidRequest rather than being answered a second null success.
+    let response = client.request("shutdown", Value::Null);
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_REQUEST),
+        "a repeated shutdown is InvalidRequest, got {response}"
+    );
+
+    // The server still exits cleanly on `exit`.
+    client.exit();
+    let status = client.wait_for_exit();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the server exits cleanly after rejecting the second shutdown"
+    );
+}
+
+// --- 24. malformed initialize params fail the initialize request (#249 item 2) -
+
+#[test]
+fn malformed_initialize_params_fail_the_initialize_request() {
+    let mut client = LspClient::spawn();
+
+    // `processId` is declared `Option<u32>`; a fractional value cannot deserialize.
+    // The failure must fail the initialize *request* with an error response, not
+    // deserialize after the handshake and abort the process with no answer.
+    let response = client.initialize_raw(json!({
+        "processId": 1.5,
+        "rootUri": Value::Null,
+        "capabilities": {},
+    }));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_PARAMS),
+        "malformed initialize params fail the initialize request, got {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "a failed initialize carries no result, got {response}"
+    );
+
+    // The server tears the session down cleanly once the client sends `exit`.
+    client.exit();
+    let status = client.wait_for_exit();
+    assert!(
+        status.success(),
+        "the server exits cleanly after failing initialize, got {status:?}"
+    );
+}
+
+// --- 25. a mid-session initialize is InvalidRequest, not MethodNotFound (item 6) -
+
+#[test]
+fn a_repeated_initialize_is_answered_invalid_request() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // `initialize` may be sent only once. A second one mid-session is a protocol
+    // error answered InvalidRequest — not the misleading MethodNotFound that a
+    // generic unknown-method fallthrough would report.
+    let response = client.initialize_raw(json!({ "capabilities": {} }));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_REQUEST),
+        "a repeated initialize is InvalidRequest, got {response}"
+    );
+    assert_ne!(
+        response["error"]["code"],
+        json!(METHOD_NOT_FOUND),
+        "specifically not MethodNotFound"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 26. a plaintext-only client gets plaintext hover (#249 item 3) -----------
+
+#[test]
+fn a_plaintext_only_client_receives_plaintext_hover() {
+    let mut client = LspClient::spawn();
+    // The client advertises only plaintext hover content — no markdown.
+    client.initialize(json!({
+        "textDocument": { "hover": { "contentFormat": ["plaintext"] } }
+    }));
+
+    let source = "fn f() -> i32 { let count: i32 = 5; return count; }";
+    let (_dir, uri) = fixture("hover-plaintext", source);
+    client.did_open(&uri, source, 1);
+
+    let response = hover_request(&mut client, &uri, pos_at_nth(source, "count", 1));
+    let contents = &response["result"]["contents"];
+    assert_eq!(
+        contents["kind"],
+        json!("plaintext"),
+        "a plaintext-only client gets plaintext hover, got {contents}"
+    );
+    let value = contents["value"].as_str().expect("a hover value");
+    assert!(
+        value.contains("count: i32"),
+        "the type still renders, got {value:?}"
+    );
+    assert!(
+        !value.contains('`'),
+        "no backticks are rendered literally, got {value:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 27. an inlay range with an out-of-range end is clamped, not disabled (item 4) -
+
+#[test]
+fn inlay_hint_range_with_an_out_of_range_end_is_clamped_to_the_window() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let (_dir, uri) = fixture("inlay-clamp", NONDET_SOURCE);
+    client.did_open(&uri, NONDET_SOURCE, 1);
+
+    // The window starts at the `exists` line (line 2) and ends far past EOF. An
+    // out-of-range end must *clamp* to the file end, keeping the valid start — so
+    // the window is honored and the `forall` hints on line 1 stay excluded. The
+    // bug returned every hint by disabling the clip entirely.
+    let response = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 2, "character": 0 },
+                "end": { "line": 999, "character": 0 },
+            },
+        }),
+    );
+    let hints = response["result"].as_array().expect("an inlay-hint array");
+
+    assert!(
+        hints
+            .iter()
+            .all(|h| h["position"]["line"].as_i64().is_some_and(|line| line >= 2)),
+        "every returned hint is inside the clamped window (line >= 2), got {hints:?}"
+    );
+    assert!(
+        !hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} every path must succeed")),
+        "the forall hints on line 1 are excluded, got {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} at least one path must succeed")),
+        "the exists hint inside the window is present, got {hints:?}"
+    );
+    // exists + unique + assume block hints, plus the exists `@` uzumaki hint.
+    assert_eq!(hints.len(), 4, "only the windowed hints, got {hints:?}");
+
+    client.shutdown_exit_ok();
+}
+
+// --- 28. didClose of an unmappable URI publishes nothing (#249 item 5) --------
+
+#[test]
+fn did_close_of_an_unmappable_uri_publishes_nothing() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+    let source = "fn f() -> i32 { return 1; }";
+    let (_dir, uri) = fixture("close-unmappable", source);
+    client.did_open(&uri, source, 1);
+
+    // Closing a URI this server cannot map to a file must publish nothing — no
+    // empty diagnostics set under the garbage URI, and no dependents sweep that
+    // would republish the real open document. Send it raw and confirm no publish
+    // names it (the assert-no-publish pattern).
+    client.send_notification(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": "untitled:Untitled-1" } }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        !published
+            .iter()
+            .any(|(published_uri, _)| published_uri.contains("Untitled-1")),
+        "an unmappable close publishes nothing under its URI, got {published:?}"
+    );
+    assert!(
+        published.is_empty(),
+        "an unmappable close triggers no dependents republish either, got {published:?}"
+    );
+
+    // A subsequent request against the real document still works.
+    let hover = hover_request(&mut client, &uri, pos_at(source, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server survived the unmappable close"
+    );
 
     client.shutdown_exit_ok();
 }

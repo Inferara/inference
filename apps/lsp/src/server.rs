@@ -21,13 +21,20 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest,
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Initialize, InlayHintRequest,
     Request as _, Shutdown,
 };
-use lsp_types::{InitializeParams, PublishDiagnosticsParams, Uri};
+use lsp_types::{InitializeParams, MarkupKind, PublishDiagnosticsParams, Uri};
 use rustc_hash::FxHashMap;
 
-use crate::handlers;
+use crate::{capabilities, handlers};
+
+/// The server name reported in the initialize result's `serverInfo` (the crate
+/// name), which clients surface in their logs and crash reports.
+const SERVER_NAME: &str = env!("CARGO_PKG_NAME");
+/// The server version reported in the initialize result's `serverInfo` (the crate
+/// version).
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A document the editor has opened, with the path the analysis host knows it by
 /// and the last version the editor reported (echoed back in published
@@ -42,22 +49,52 @@ pub(crate) struct Document {
     pub(crate) text: Arc<str>,
 }
 
+/// The client capabilities this server negotiates once during initialize and then
+/// consults while answering requests.
+#[derive(Clone, Copy)]
+pub(crate) struct NegotiatedCapabilities {
+    /// The client accepts the hierarchical document-symbol response; when it does
+    /// not, symbols are flattened to `SymbolInformation`.
+    pub(crate) hierarchical_symbols: bool,
+    /// The client accepts Markdown hover content; when it does not, hover contents
+    /// are emitted as plain text (no code fences or backticks).
+    pub(crate) hover_markdown: bool,
+}
+
+impl NegotiatedCapabilities {
+    /// Reads the negotiated bits out of the client's `initialize` capabilities,
+    /// defaulting each to the LSP fallback when the client is silent.
+    fn from_init_params(init_params: &InitializeParams) -> Self {
+        Self {
+            hierarchical_symbols: hierarchical_symbol_support(init_params),
+            hover_markdown: hover_markdown_support(init_params),
+        }
+    }
+
+    /// The markup kind to render hover contents in for this client.
+    pub(crate) fn hover_format(self) -> MarkupKind {
+        if self.hover_markdown {
+            MarkupKind::Markdown
+        } else {
+            MarkupKind::PlainText
+        }
+    }
+}
+
 /// The analysis host plus per-document bookkeeping. Feature queries and
 /// diagnostics are answered against this; the transport is elsewhere.
 pub(crate) struct ServerState {
     pub(crate) host: AnalysisHost,
     pub(crate) documents: FxHashMap<Uri, Document>,
-    /// Whether the client accepts the hierarchical document-symbol response; when
-    /// it does not, symbols are flattened to `SymbolInformation`.
-    pub(crate) hierarchical_symbols: bool,
+    pub(crate) capabilities: NegotiatedCapabilities,
 }
 
 impl ServerState {
-    pub(crate) fn new(hierarchical_symbols: bool) -> Self {
+    pub(crate) fn new(capabilities: NegotiatedCapabilities) -> Self {
         Self {
             host: AnalysisHost::default(),
             documents: FxHashMap::default(),
-            hierarchical_symbols,
+            capabilities,
         }
     }
 
@@ -104,6 +141,15 @@ impl ServerState {
             self.dispatch::<DocumentSymbolRequest>(request, handlers::document_symbol)
         } else if request.method == InlayHintRequest::METHOD {
             self.dispatch::<InlayHintRequest>(request, handlers::inlay_hint)
+        } else if request.method == Initialize::METHOD {
+            // `initialize` is a once-per-session lifecycle request; the handshake
+            // already consumed the only valid one, so a second is InvalidRequest —
+            // not the misleading MethodNotFound the generic arm below would give.
+            Response::new_err(
+                request.id,
+                ErrorCode::InvalidRequest as i32,
+                "the server is already initialized".to_owned(),
+            )
         } else {
             Response::new_err(
                 request.id,
@@ -243,17 +289,79 @@ impl ServerState {
     }
 }
 
+/// Runs the initialize handshake, answering the `initialize` request directly so a
+/// malformed `InitializeParams` fails *that request* instead of aborting the
+/// process after the handshake has already completed.
+///
+/// `lsp-server`'s convenience `Connection::initialize` returns the raw params and
+/// hard-codes the result body, so the caller can only deserialize *after* the
+/// handshake and cannot attach `serverInfo`. This drives `initialize_start` /
+/// `initialize_finish` instead: the params are validated first, and only a valid
+/// `initialize` completes the handshake — with `serverInfo` (name and version)
+/// attached. A malformed one is answered with an `InvalidParams` error and the
+/// session ends without ever entering the message loop.
+///
+/// Returns the negotiated params on success, or `None` when initialize failed (the
+/// error response has already been sent, and the client is expected to `exit`).
+///
+/// # Errors
+///
+/// Returns an error if the handshake cannot be driven to completion — the
+/// connection dropped, or a message could not be written.
+pub fn initialize(connection: &Connection) -> anyhow::Result<Option<InitializeParams>> {
+    let (id, params) = connection.initialize_start()?;
+    let init_params: InitializeParams = match serde_json::from_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            send(
+                connection,
+                Message::Response(Response::new_err(
+                    id,
+                    ErrorCode::InvalidParams as i32,
+                    format!("invalid initialize params: {error}"),
+                )),
+            )?;
+            drain_until_exit(connection);
+            return Ok(None);
+        }
+    };
+
+    let result = serde_json::json!({
+        "capabilities": capabilities::server_capabilities(),
+        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+    });
+    connection.initialize_finish(id, result)?;
+    Ok(Some(init_params))
+}
+
+/// Drains messages until the client sends `exit` or closes the connection.
+///
+/// Used after a failed `initialize`: it keeps the process alive long enough for
+/// the error response to be written, and keeps a receiver on the channel so the
+/// transport's reader thread is never left blocked forwarding into it.
+fn drain_until_exit(connection: &Connection) {
+    for message in &connection.receiver {
+        if matches!(&message, Message::Notification(n) if n.method == Exit::METHOD) {
+            return;
+        }
+    }
+}
+
 /// Runs the message loop until the client exits or the connection closes.
 ///
 /// The shutdown handshake is handled inline rather than delegated to
 /// `lsp-server`'s `Connection::handle_shutdown`, which consumes the next message
 /// itself and turns anything but `exit` into a fatal protocol error. Instead, a
 /// `shutdown` request is answered and flips a `shutting_down` flag; while it is
-/// set, every further request is answered with `InvalidRequest` (the spec's
-/// behaviour for requests received between `shutdown` and `exit`) and every
-/// notification but `exit` is ignored. The `exit` notification ends the loop.
-/// Every other request is routed through [`ServerState`], and document
-/// notifications may publish diagnostics.
+/// set, every further request — including a repeated `shutdown` — is answered with
+/// `InvalidRequest` (the spec's behaviour for requests received between `shutdown`
+/// and `exit`) and every notification but `exit` is ignored. The `exit`
+/// notification ends the loop. Every other request is routed through
+/// [`ServerState`], and document notifications may publish diagnostics.
+///
+/// The `shutting_down` guard precedes the `shutdown` arm so a *second* `shutdown`
+/// is rejected like any other post-shutdown request rather than answered a second
+/// `null` success.
 ///
 /// Requests and notifications are dispatched through the resilient wrappers
 /// ([`handle_request_resilient`](ServerState::handle_request_resilient),
@@ -264,22 +372,15 @@ impl ServerState {
 /// # Errors
 ///
 /// Returns an error if a message cannot be written to the transport.
-pub fn run(connection: Connection, init_params: &InitializeParams) -> anyhow::Result<()> {
-    let mut state = ServerState::new(hierarchical_symbol_support(init_params));
+pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::Result<()> {
+    let mut state = ServerState::new(NegotiatedCapabilities::from_init_params(init_params));
     let mut shutting_down = false;
 
     for message in &connection.receiver {
         match message {
-            Message::Request(request) if request.method == Shutdown::METHOD => {
-                shutting_down = true;
-                send(
-                    &connection,
-                    Message::Response(Response::new_ok(request.id, ())),
-                )?;
-            }
             Message::Request(request) if shutting_down => {
                 send(
-                    &connection,
+                    connection,
                     Message::Response(Response::new_err(
                         request.id,
                         ErrorCode::InvalidRequest as i32,
@@ -287,9 +388,16 @@ pub fn run(connection: Connection, init_params: &InitializeParams) -> anyhow::Re
                     )),
                 )?;
             }
+            Message::Request(request) if request.method == Shutdown::METHOD => {
+                shutting_down = true;
+                send(
+                    connection,
+                    Message::Response(Response::new_ok(request.id, ())),
+                )?;
+            }
             Message::Request(request) => {
                 let response = state.handle_request_resilient(request);
-                send(&connection, Message::Response(response))?;
+                send(connection, Message::Response(response))?;
             }
             Message::Notification(notification) if notification.method == Exit::METHOD => {
                 return Ok(());
@@ -300,7 +408,7 @@ pub fn run(connection: Connection, init_params: &InitializeParams) -> anyhow::Re
                 for params in state.on_notification_resilient(notification) {
                     let published =
                         Notification::new(PublishDiagnostics::METHOD.to_owned(), params);
-                    send(&connection, Message::Notification(published))?;
+                    send(connection, Message::Notification(published))?;
                 }
             }
             Message::Response(_) => {}
@@ -319,6 +427,22 @@ fn hierarchical_symbol_support(init_params: &InitializeParams) -> bool {
         .and_then(|text_document| text_document.document_symbol.as_ref())
         .and_then(|document_symbol| document_symbol.hierarchical_document_symbol_support)
         .unwrap_or(false)
+}
+
+/// Whether the client accepts Markdown hover content.
+///
+/// The client's `textDocument.hover.contentFormat` lists the formats it supports,
+/// most-preferred first. A client that lists formats but omits Markdown wants
+/// plain text; a client that advertises no `contentFormat` at all keeps the
+/// historical Markdown default.
+fn hover_markdown_support(init_params: &InitializeParams) -> bool {
+    init_params
+        .capabilities
+        .text_document
+        .as_ref()
+        .and_then(|text_document| text_document.hover.as_ref())
+        .and_then(|hover| hover.content_format.as_ref())
+        .is_none_or(|formats| formats.contains(&MarkupKind::Markdown))
 }
 
 fn send(connection: &Connection, message: Message) -> anyhow::Result<()> {
@@ -361,10 +485,20 @@ mod tests {
     use lsp_types::notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     };
-    use lsp_types::request::{HoverRequest, Request as _};
+    use lsp_types::request::{HoverRequest, Initialize, Request as _};
     use lsp_types::Uri;
 
-    use super::{Document, ServerState};
+    use super::{Document, NegotiatedCapabilities, ServerState};
+
+    /// A client that supports everything this server negotiates. The individual
+    /// tests here do not depend on the negotiated bits (those are exercised by the
+    /// `convert`/`handlers` and e2e tests), so they share one fully-capable client.
+    fn full_client() -> NegotiatedCapabilities {
+        NegotiatedCapabilities {
+            hierarchical_symbols: true,
+            hover_markdown: true,
+        }
+    }
 
     /// A document that panics the analysis stack: a named constant used as an
     /// array size hits an unimplemented `todo!` deep in the type-checker (#240).
@@ -425,7 +559,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn unknown_request_is_method_not_found() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         let request = Request::new(
             RequestId::from(1),
             "textDocument/rename".to_owned(),
@@ -439,8 +573,27 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
     }
 
     #[test]
+    fn a_repeated_initialize_request_is_invalid_request() {
+        // The handshake consumed the one valid `initialize`; a second one arriving
+        // mid-session is a protocol error (InvalidRequest), not the misleading
+        // MethodNotFound the generic unknown-method arm would report.
+        let mut state = ServerState::new(full_client());
+        let request = Request::new(
+            RequestId::from(1),
+            Initialize::METHOD.to_owned(),
+            serde_json::json!({ "capabilities": {} }),
+        );
+        let response = state.handle_request(request);
+        assert_eq!(
+            error_code(&response),
+            lsp_server::ErrorCode::InvalidRequest as i32,
+            "a second initialize is InvalidRequest"
+        );
+    }
+
+    #[test]
     fn malformed_params_are_invalid_params_and_leave_the_server_usable() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         open(
             &mut state,
             "file:///inf-test/main.inf",
@@ -478,7 +631,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn did_open_broken_source_publishes_a_diagnostic() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         let params = serde_json::json!({
             "textDocument": {
                 "uri": "file:///inf-test/broken.inf",
@@ -502,7 +655,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn a_notification_republishes_every_open_document() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         open(
             &mut state,
             "file:///inf-test/a.inf",
@@ -537,7 +690,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn did_close_publishes_an_empty_set() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         open(
             &mut state,
             "file:///inf-test/main.inf",
@@ -558,8 +711,31 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
     }
 
     #[test]
+    fn did_close_of_an_unmappable_uri_publishes_nothing() {
+        // A URI this server cannot map to a file was never opened or tracked, so
+        // closing it must publish nothing — not an empty diagnostics set under a
+        // garbage URI, and no dependents republish — mirroring `did_open`, which
+        // already ignores such URIs. An open document is present to prove the sweep
+        // over other documents is *not* triggered by the unmappable close.
+        let mut state = ServerState::new(full_client());
+        open(
+            &mut state,
+            "file:///inf-test/main.inf",
+            "fn f() -> i32 { return 1; }",
+        );
+
+        let params = serde_json::json!({ "textDocument": { "uri": "untitled:Untitled-1" } });
+        let notification =
+            lsp_server::Notification::new(DidCloseTextDocument::METHOD.to_owned(), params);
+        assert!(
+            state.on_notification(notification).is_empty(),
+            "closing an unmappable URI publishes nothing at all"
+        );
+    }
+
+    #[test]
     fn non_file_uri_is_ignored_on_open() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         let params = serde_json::json!({
             "textDocument": {
                 "uri": "untitled:Untitled-1",
@@ -578,7 +754,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn rebuild_host_reconstructs_tracked_documents() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         open(
             &mut state,
             "file:///inf-test/clean.inf",
@@ -607,7 +783,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn handle_request_resilient_contains_a_handler_panic_and_rebuilds_the_host() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         // Stage both documents without analyzing them (analyzing the panic file
         // would unwind on its own); the request below is what must be contained.
         // Requests never republish, so staging a healthy sibling this way is safe.
@@ -654,7 +830,7 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 
     #[test]
     fn on_notification_resilient_contains_a_diagnostics_panic_and_recovers() {
-        let mut state = ServerState::new(true);
+        let mut state = ServerState::new(full_client());
         // A healthy document opened before the bad one; the bad open's panic must
         // not disturb it. (An undeclared variable keeps its diagnostics non-empty.)
         open(
