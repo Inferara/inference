@@ -140,6 +140,18 @@ protocol stream — and is asserted directly by an end-to-end test (below).
   enough to exhaust even 64 MiB would still abort — bounding the recursion in
   the shared pipeline (out of scope for this crate) would be the complete fix.
 
+- **An unwinding analysis panic is contained, not fatal.** An ordinary panic in
+  the analysis stack (a `todo!` or `unwrap` in the type-checker or analysis
+  passes) *unwinds* — unlike a stack overflow — so the message loop catches it:
+  each request and notification is dispatched inside `std::panic::catch_unwind`.
+  A panicking request is answered with a JSON-RPC `InternalError` carrying its
+  original id; a panicking notification publishes nothing and rebuilds the
+  analysis host from the tracked open documents, so the session continues from
+  consistent state instead of aborting and letting the client crash-loop the
+  server into a permanent outage. The panic still reaches stderr through the
+  default hook (never stdout, the protocol channel). This is the recoverable
+  counterpart to the stack-overflow case above.
+
 - **A malformed transport frame is fatal.** `lsp-server`'s stdio reader treats
   any framing or body parse failure — an empty body (`Content-Length: 0`), a
   non-JSON body, or an unparsable `Content-Length` — as fatal to the connection.

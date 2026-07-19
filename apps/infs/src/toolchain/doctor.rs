@@ -121,7 +121,7 @@ pub fn run_all_checks() -> Vec<DoctorCheck> {
         checks.push(ambiguity);
     }
     checks.push(crate::commands::wasm_opt::doctor_check());
-    checks.push(check_inference_lsp());
+    checks.extend(check_optional_managed_binaries());
     checks
 }
 
@@ -314,70 +314,143 @@ pub fn check_resolution_ambiguity() -> Option<DoctorCheck> {
     ))
 }
 
-/// Checks whether the managed `inference-lsp` language server is available.
+/// Checks every optional managed binary (currently just `inference-lsp`)
+/// listed in [`ToolchainPaths::OPTIONAL_MANAGED_BINARIES`].
 ///
-/// Newer toolchain archives bundle the LSP server alongside `infc`, so the
-/// managed copy lands in the default toolchain directory (and is symlinked
-/// into `bin/`). The VS Code extension resolves the server through a PATH tier
-/// as well, so any `inference-lsp` also visible on `PATH` is noted on the same
-/// line.
+/// Iterating the list rather than hardcoding a single name means a future
+/// optional binary gains doctor coverage automatically. One [`DoctorCheck`]
+/// is produced per binary, in declaration order, so the VS Code extension's
+/// append-only line-parsing contract stays stable.
 ///
-/// Statuses, chosen so `infs doctor` still exits zero when the optional server
+/// The check mirrors how the editor actually resolves the binary. The VS Code
+/// extension looks only at `<INFERENCE_HOME>/bin/<binary>` (the managed
+/// symlink) and then `PATH`; it never reads the toolchain directory directly.
+/// So verifying that the toolchain *bundles* the binary is not enough — the
+/// `bin/` symlink must also exist and resolve.
+///
+/// Statuses, chosen so `infs doctor` still exits zero when an optional binary
 /// is simply absent:
-/// - **OK** — the default toolchain bundles the server; the resolved path is
-///   reported, with a PATH hit appended when one exists.
+/// - **OK** — the default toolchain bundles the binary and the `bin/` symlink
+///   resolves; the linked path is reported, with a separate PATH copy appended
+///   when one exists outside the managed `bin/` directory.
 /// - **OK** — no default toolchain is set at all (deferring to
 ///   [`check_default_toolchain`], which owns that diagnosis).
+/// - **Warning** — the toolchain bundles the binary but the `bin/` link is
+///   missing or broken, so the editor cannot find it; the message names
+///   `infs default <version>` as the repair.
 /// - **Warning** — a default toolchain is set but predates the bundling; the
 ///   message hints at upgrading and notes any PATH fallback.
 #[must_use]
-pub fn check_inference_lsp() -> DoctorCheck {
+pub fn check_optional_managed_binaries() -> Vec<DoctorCheck> {
     let Ok(platform) = Platform::detect() else {
-        return DoctorCheck::error("inference-lsp", "Cannot detect platform");
+        return ToolchainPaths::OPTIONAL_MANAGED_BINARIES
+            .iter()
+            .map(|name| DoctorCheck::error(*name, "Cannot detect platform"))
+            .collect();
     };
-    let binary_with_ext = format!("inference-lsp{}", platform.executable_extension());
-    let path_hit = which::which(&binary_with_ext).ok();
+    let ext = platform.executable_extension();
 
     let Ok(paths) = ToolchainPaths::new() else {
-        return DoctorCheck::error("inference-lsp", "Cannot determine toolchain paths");
+        return ToolchainPaths::OPTIONAL_MANAGED_BINARIES
+            .iter()
+            .map(|name| DoctorCheck::error(*name, "Cannot determine toolchain paths"))
+            .collect();
     };
 
-    inference_lsp_check(&paths, &binary_with_ext, path_hit.as_deref())
+    ToolchainPaths::OPTIONAL_MANAGED_BINARIES
+        .iter()
+        .map(|name| {
+            let binary_with_ext = format!("{name}{ext}");
+            let path_hit = which::which(&binary_with_ext).ok();
+            optional_binary_check(name, &paths, &binary_with_ext, path_hit.as_deref())
+        })
+        .collect()
 }
 
-/// Pure decision logic for [`check_inference_lsp`], separated from the
-/// environment reads (platform, PATH, toolchain root) so every branch is
+/// Returns `true` when `hit` lives directly in the managed `bin/` directory,
+/// i.e. it is `infs`'s own symlink rather than a genuinely separate copy.
+///
+/// The comparison is on the parent directory so the symlink target (which
+/// points into `toolchains/`) is never followed. Paths are canonicalized when
+/// both sides exist so that home-directory symlinks do not produce a spurious
+/// mismatch; otherwise a plain comparison is used (the common case in tests,
+/// where the directory need not exist on disk).
+fn hit_is_managed_symlink(hit: &Path, managed_bin: &Path) -> bool {
+    let Some(parent) = hit.parent() else {
+        return false;
+    };
+    match (parent.canonicalize(), managed_bin.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => parent == managed_bin,
+    }
+}
+
+/// Pure decision logic for [`check_optional_managed_binaries`], separated from
+/// the environment reads (platform, PATH, toolchain root) so every branch is
 /// unit-testable with a `ToolchainPaths` rooted at a temp directory.
-fn inference_lsp_check(
+///
+/// `name` is the display name for the check (the binary base name without the
+/// platform extension); `binary_with_ext` carries the extension used for the
+/// on-disk lookups.
+fn optional_binary_check(
+    name: &str,
     paths: &ToolchainPaths,
     binary_with_ext: &str,
     path_hit: Option<&Path>,
 ) -> DoctorCheck {
     let default_version = match paths.get_default_version() {
         Ok(Some(v)) => v,
-        Ok(None) => return DoctorCheck::ok("inference-lsp", "No toolchain installed"),
+        Ok(None) => return DoctorCheck::ok(name, "No toolchain installed"),
         Err(e) => {
-            return DoctorCheck::error("inference-lsp", format!("Cannot read default version: {e}"));
+            return DoctorCheck::error(name, format!("Cannot read default version: {e}"));
+        }
+    };
+
+    // A PATH hit inside the managed bin directory is infs's own symlink, which
+    // the extension already prepends to PATH before invoking doctor — noting it
+    // as a "separate copy" would be misleading. Only report a copy elsewhere.
+    let external_hit = path_hit.filter(|hit| !hit_is_managed_symlink(hit, &paths.bin));
+    let append_path_note = |message: &mut String, phrasing: &str| {
+        if let Some(hit) = external_hit {
+            let _ = write!(message, "; {phrasing} {}", hit.display());
         }
     };
 
     let binary_path = paths.binary_path(&default_version, binary_with_ext);
-    if binary_path.exists() {
-        let mut message = format!("Found at {}", binary_path.display());
-        if let Some(hit) = path_hit {
-            let _ = write!(message, "; also on PATH at {}", hit.display());
-        }
-        DoctorCheck::ok("inference-lsp", message)
-    } else {
+    if !binary_path.exists() {
         let mut message = format!(
-            "toolchain {default_version} does not include inference-lsp; \
-             install a newer toolchain to add the language server"
+            "toolchain {default_version} does not include {name}; \
+             install a newer toolchain to add it"
         );
-        if let Some(hit) = path_hit {
-            let _ = write!(message, "; a copy is available on PATH at {}", hit.display());
-        }
-        DoctorCheck::warning("inference-lsp", message)
+        append_path_note(&mut message, "a copy is available on PATH at");
+        return DoctorCheck::warning(name, message);
     }
+
+    // The toolchain bundles the binary, but the editor resolves it through the
+    // bin/ symlink (or PATH) — never the toolchain directory. Verify the link
+    // exists and resolves; exists() is false for a dangling symlink, while
+    // symlink_metadata() succeeds even when the target is missing.
+    let symlink_path = paths.symlink_path(binary_with_ext);
+    let link_present = symlink_path.symlink_metadata().is_ok();
+    let link_resolves = symlink_path.exists();
+
+    if link_resolves {
+        let mut message = format!("Linked at {}", symlink_path.display());
+        append_path_note(&mut message, "also on PATH at");
+        return DoctorCheck::ok(name, message);
+    }
+
+    let broken_or_missing = if link_present {
+        format!("the bin/ link at {} is broken", symlink_path.display())
+    } else {
+        format!("it is not linked into bin/ at {}", symlink_path.display())
+    };
+    let mut message = format!(
+        "toolchain {default_version} bundles {name} but {broken_or_missing}; \
+         run 'infs default {default_version}' to repair it"
+    );
+    append_path_note(&mut message, "a copy is available on PATH at");
+    DoctorCheck::warning(name, message)
 }
 
 #[cfg(test)]
@@ -411,11 +484,12 @@ mod tests {
     #[test]
     fn run_all_checks_returns_expected_count() {
         let checks = run_all_checks();
-        // Base checks: infs, platform, toolchain dir, default toolchain,
-        // infc, resolved infc, wasm-opt, inference-lsp. Ambiguity check is
-        // conditional (0 or 1).
+        // Fixed checks: infs, platform, toolchain dir, default toolchain,
+        // infc, resolved infc, wasm-opt. Then one check per optional managed
+        // binary. The ambiguity check is conditional (0 or 1).
+        let base = 7 + ToolchainPaths::OPTIONAL_MANAGED_BINARIES.len();
         assert!(
-            checks.len() == 8 || checks.len() == 9,
+            checks.len() == base || checks.len() == base + 1,
             "unexpected check count: {}",
             checks.len()
         );
@@ -522,81 +596,131 @@ mod tests {
         format!("inference-lsp{ext}")
     }
 
-    #[test]
-    fn check_inference_lsp_returns_valid_doctor_check() {
-        let check = check_inference_lsp();
-        assert_eq!(check.name, "inference-lsp");
-        assert!(!check.message.is_empty());
-        assert!(
-            check.status == DoctorCheckStatus::Ok
-                || check.status == DoctorCheckStatus::Warning
-                || check.status == DoctorCheckStatus::Error
-        );
-    }
-
-    #[test]
-    fn inference_lsp_check_ok_when_no_default_toolchain() {
-        let temp_dir = std::env::temp_dir().join("infs_test_lsp_no_default");
+    /// Builds a `ToolchainPaths` rooted at a fresh, empty temp directory named
+    /// after the calling test, so parallel tests never collide.
+    fn fresh_paths(tag: &str) -> (std::path::PathBuf, ToolchainPaths) {
+        let temp_dir = std::env::temp_dir().join(format!("infs_test_doctor_{tag}"));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
         let paths = ToolchainPaths::with_root(temp_dir.clone());
+        (temp_dir, paths)
+    }
 
-        let check = inference_lsp_check(&paths, &lsp_binary_name(), None);
+    /// Installs the optional binary into `toolchains/<version>/` and sets it as
+    /// the default, mimicking a toolchain archive that bundles the server.
+    fn install_bundled(paths: &ToolchainPaths, version: &str, binary: &str) {
+        std::fs::create_dir_all(paths.toolchain_dir(version)).unwrap();
+        std::fs::write(paths.binary_path(version, binary), b"lsp").unwrap();
+        paths.set_default_version(version).unwrap();
+    }
+
+    #[test]
+    fn check_optional_managed_binaries_covers_every_entry() {
+        let checks = check_optional_managed_binaries();
+        assert_eq!(
+            checks.len(),
+            ToolchainPaths::OPTIONAL_MANAGED_BINARIES.len(),
+            "one check must be produced per optional managed binary"
+        );
+        for (check, expected) in checks
+            .iter()
+            .zip(ToolchainPaths::OPTIONAL_MANAGED_BINARIES)
+        {
+            assert_eq!(&check.name, expected);
+            assert!(!check.message.is_empty());
+            assert!(matches!(
+                check.status,
+                DoctorCheckStatus::Ok | DoctorCheckStatus::Warning | DoctorCheckStatus::Error
+            ));
+        }
+    }
+
+    #[test]
+    fn optional_binary_check_ok_when_no_default_toolchain() {
+        let (temp_dir, paths) = fresh_paths("lsp_no_default");
+
+        let check = optional_binary_check("inference-lsp", &paths, &lsp_binary_name(), None);
         assert_eq!(check.status, DoctorCheckStatus::Ok);
         assert_eq!(check.message, "No toolchain installed");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn inference_lsp_check_ok_when_toolchain_bundles_server() {
-        let temp_dir = std::env::temp_dir().join("infs_test_lsp_present");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+    fn optional_binary_check_ok_when_bundled_and_linked() {
+        let (temp_dir, paths) = fresh_paths("lsp_linked");
         let binary = lsp_binary_name();
+        install_bundled(&paths, "0.2.0", &binary);
 
-        std::fs::create_dir_all(paths.toolchain_dir("0.2.0")).unwrap();
-        std::fs::write(paths.binary_path("0.2.0", &binary), b"lsp").unwrap();
-        paths.set_default_version("0.2.0").unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+        std::os::unix::fs::symlink(
+            paths.binary_path("0.2.0", &binary),
+            paths.symlink_path(&binary),
+        )
+        .unwrap();
 
-        let check = inference_lsp_check(&paths, &binary, None);
+        let check = optional_binary_check("inference-lsp", &paths, &binary, None);
         assert_eq!(check.status, DoctorCheckStatus::Ok);
-        assert!(check.message.starts_with("Found at"));
+        assert!(check.message.starts_with("Linked at"));
         assert!(!check.message.contains("also on PATH"));
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
-    fn inference_lsp_check_notes_path_hit_when_present() {
-        let temp_dir = std::env::temp_dir().join("infs_test_lsp_present_path");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+    fn optional_binary_check_warns_when_bundled_but_link_missing() {
+        let (temp_dir, paths) = fresh_paths("lsp_link_missing");
         let binary = lsp_binary_name();
+        install_bundled(&paths, "0.2.0", &binary);
 
-        std::fs::create_dir_all(paths.toolchain_dir("0.2.0")).unwrap();
-        std::fs::write(paths.binary_path("0.2.0", &binary), b"lsp").unwrap();
-        paths.set_default_version("0.2.0").unwrap();
+        // Toolchain has the server, but bin/ was never linked (the exact
+        // rollout state the issue describes).
+        let check = optional_binary_check("inference-lsp", &paths, &binary, None);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains("not linked into bin/"));
+        assert!(
+            check.message.contains("infs default 0.2.0"),
+            "remediation hint must name the healing command: {}",
+            check.message
+        );
 
-        let hit = Path::new("/usr/local/bin/inference-lsp");
-        let check = inference_lsp_check(&paths, &binary, Some(hit));
-        assert_eq!(check.status, DoctorCheckStatus::Ok);
-        assert!(check.message.contains("also on PATH at /usr/local/bin/inference-lsp"));
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_binary_check_warns_when_bundled_but_link_broken() {
+        let (temp_dir, paths) = fresh_paths("lsp_link_broken");
+        let binary = lsp_binary_name();
+        install_bundled(&paths, "0.2.0", &binary);
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+        std::os::unix::fs::symlink(
+            temp_dir.join("gone_binary"),
+            paths.symlink_path(&binary),
+        )
+        .unwrap();
+
+        let check = optional_binary_check("inference-lsp", &paths, &binary, None);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains("is broken"));
+        assert!(
+            check.message.contains("infs default 0.2.0"),
+            "remediation hint must name the healing command: {}",
+            check.message
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
-    fn inference_lsp_check_warns_when_toolchain_predates_bundling() {
-        let temp_dir = std::env::temp_dir().join("infs_test_lsp_absent");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
-
-        // Default toolchain exists but does not bundle inference-lsp.
+    fn optional_binary_check_warns_when_toolchain_predates_bundling() {
+        let (temp_dir, paths) = fresh_paths("lsp_predates");
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
 
-        let check = inference_lsp_check(&paths, &lsp_binary_name(), None);
+        let check = optional_binary_check("inference-lsp", &paths, &lsp_binary_name(), None);
         assert_eq!(check.status, DoctorCheckStatus::Warning);
         assert!(check.message.contains("does not include inference-lsp"));
         assert!(check.message.contains("0.1.0"));
@@ -604,20 +728,108 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn inference_lsp_check_warns_but_notes_path_fallback() {
-        let temp_dir = std::env::temp_dir().join("infs_test_lsp_absent_path");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+    fn optional_binary_check_predates_bundling_ignores_symlink_state() {
+        // A stale valid symlink from an earlier bundled toolchain must not
+        // mask the fact that the *current* default lacks the binary.
+        let (temp_dir, paths) = fresh_paths("lsp_predates_stale_link");
+        let binary = lsp_binary_name();
+        std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
+        paths.set_default_version("0.1.0").unwrap();
 
+        let stale_target = temp_dir.join("stale_lsp");
+        std::fs::write(&stale_target, b"stale").unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+        std::os::unix::fs::symlink(&stale_target, paths.symlink_path(&binary)).unwrap();
+
+        let check = optional_binary_check("inference-lsp", &paths, &binary, None);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains("does not include inference-lsp"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn optional_binary_check_notes_external_path_copy() {
+        let (temp_dir, paths) = fresh_paths("lsp_external_copy");
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
 
         let hit = Path::new("/opt/tools/inference-lsp");
-        let check = inference_lsp_check(&paths, &lsp_binary_name(), Some(hit));
+        let check = optional_binary_check("inference-lsp", &paths, &lsp_binary_name(), Some(hit));
         assert_eq!(check.status, DoctorCheckStatus::Warning);
-        assert!(check.message.contains("does not include inference-lsp"));
         assert!(check.message.contains("a copy is available on PATH at /opt/tools/inference-lsp"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn optional_binary_check_excludes_managed_bin_from_path_note() {
+        // The extension prepends <INFERENCE_HOME>/bin to PATH, so a PATH hit
+        // that resolves to infs's own symlink is not a separate copy and must
+        // not be reported as one.
+        let (temp_dir, paths) = fresh_paths("lsp_managed_excluded");
+        let binary = lsp_binary_name();
+        std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
+        paths.set_default_version("0.1.0").unwrap();
+
+        let managed_hit = paths.symlink_path(&binary);
+        let check =
+            optional_binary_check("inference-lsp", &paths, &binary, Some(managed_hit.as_path()));
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(
+            !check.message.contains("on PATH"),
+            "managed symlink must be excluded from the PATH-copy note: {}",
+            check.message
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_binary_check_ok_notes_external_path_copy() {
+        let (temp_dir, paths) = fresh_paths("lsp_linked_external");
+        let binary = lsp_binary_name();
+        install_bundled(&paths, "0.2.0", &binary);
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+        std::os::unix::fs::symlink(
+            paths.binary_path("0.2.0", &binary),
+            paths.symlink_path(&binary),
+        )
+        .unwrap();
+
+        let hit = Path::new("/usr/local/bin/inference-lsp");
+        let check = optional_binary_check("inference-lsp", &paths, &binary, Some(hit));
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.message.starts_with("Linked at"));
+        assert!(check.message.contains("also on PATH at /usr/local/bin/inference-lsp"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_binary_check_ok_excludes_managed_symlink_from_path_note() {
+        // Healthy install: the PATH hit *is* the managed symlink. The OK line
+        // must not imply a duplicate copy exists.
+        let (temp_dir, paths) = fresh_paths("lsp_linked_managed_excluded");
+        let binary = lsp_binary_name();
+        install_bundled(&paths, "0.2.0", &binary);
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+        let managed = paths.symlink_path(&binary);
+        std::os::unix::fs::symlink(paths.binary_path("0.2.0", &binary), &managed).unwrap();
+
+        let check = optional_binary_check("inference-lsp", &paths, &binary, Some(managed.as_path()));
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(
+            !check.message.contains("also on PATH"),
+            "managed symlink must be excluded from the PATH-copy note: {}",
+            check.message
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
