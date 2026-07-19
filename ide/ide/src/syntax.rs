@@ -469,6 +469,72 @@ pub(crate) fn resolve_qualified_module(
     file.source_file_id(&segments)
 }
 
+/// The source-root-relative path segments of each **plain** (namespace-binding)
+/// `use` directive in `entry`: a file import `use a::b;` yields `["a", "b"]`.
+///
+/// Item imports (`use a::b::{c};`) and `from`-clause extern imports are excluded,
+/// because neither binds a namespace: the first binds `c` bare, the second binds
+/// an external symbol. Only a plain import makes its trailing segment usable as a
+/// `::` qualifier, so only these paths anchor namespace resolution.
+fn plain_import_paths(arena: &AstArena, entry: SourceFileId) -> Vec<Vec<String>> {
+    arena[entry]
+        .directives
+        .iter()
+        .filter_map(|directive| {
+            let Directive::Use(use_directive) = directive;
+            if use_directive.braced || use_directive.from.is_some() {
+                return None;
+            }
+            Some(
+                use_directive
+                    .segments
+                    .iter()
+                    .map(|&segment| arena.ident_name(segment).to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Resolves the `::`-qualifier `segments` typed before a completion cursor to the
+/// module they name, trusting only **plain** namespace-binding imports.
+///
+/// A qualifier resolves two ways, both requiring a plain import so the result is
+/// code the type checker accepts:
+///
+/// - by *binding*: its head names a plain import's trailing segment (`use a::b;`
+///   binds `b`, so `b::…` resolves), and any further segments descend into
+///   submodules;
+/// - by *anchored full path*: the qualifier is itself a source-root path that a
+///   plain import is a prefix of (`use a::b;` anchors `a::b::…`), so it is
+///   addressable as written.
+///
+/// An item import `use a::b::{c};` binds `c` bare and no namespace, so it never
+/// anchors a `::` qualifier — offering `b::…` through it would suggest code that
+/// does not compile.
+#[must_use]
+pub(crate) fn resolve_plain_import_namespace(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    segments: &[String],
+) -> Option<SourceFileId> {
+    let (head, rest) = segments.split_first()?;
+    let plain = plain_import_paths(file.arena(), entry);
+    for path in &plain {
+        if path.last().map(String::as_str) == Some(head.as_str()) {
+            let mut full = path.clone();
+            full.extend(rest.iter().cloned());
+            if let Some(sfid) = file.source_file_id(&full) {
+                return Some(sfid);
+            }
+        }
+    }
+    if plain.iter().any(|path| segments.starts_with(path.as_slice())) {
+        return file.source_file_id(segments);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
