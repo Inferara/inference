@@ -1417,3 +1417,157 @@ mod array_return_call_position {
         );
     }
 }
+
+/// A named constant used as an array size (`[i32; N]`) once hit a `todo!` deep in
+/// the type checker and aborted the compiler and the IDE analysis (#240). It must
+/// now surface as an ordinary diagnostic on both the fail-fast and the lossless
+/// entry points — never a panic — while compile-time constant evaluation of array
+/// sizes remains future work (#79).
+mod non_literal_array_size {
+    use super::*;
+    use inference_type_checker::check_with_diagnostics;
+    use inference_type_checker::errors::TypeCheckError;
+
+    /// The issue's exact reproduction.
+    const REPRO: &str = "const N: i32 = 3;\n\
+fn main() -> i32 {\n\
+    let arr: [i32; N] = [1, 2, 3];\n\
+    let i: i32 = 0;\n\
+    return arr[i];\n\
+}";
+
+    /// Type-checks `source` through the lossless entry point, returning the
+    /// structured diagnostics. Reaching this return at all proves the checker did
+    /// not unwind on the input.
+    fn diagnostics(source: &str) -> Vec<TypeCheckError> {
+        let arena = build_ast(source.to_string());
+        check_with_diagnostics(arena)
+            .errors
+            .into_iter()
+            .map(|d| d.error)
+            .collect()
+    }
+
+    /// Asserts `source` yields exactly one `NonLiteralArraySize` naming `name`, and
+    /// returns its `(start_line, start_column)` so the caller can pin the span.
+    fn single_non_literal_size(source: &str, name: &str) -> (u32, u32) {
+        let errors = diagnostics(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one diagnostic, got: {errors:?}"
+        );
+        match &errors[0] {
+            TypeCheckError::NonLiteralArraySize { name: got, location } => {
+                assert_eq!(got, name, "diagnostic names the size identifier");
+                (location.start_line, location.start_column)
+            }
+            other => panic!("expected NonLiteralArraySize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repro_reports_one_diagnostic_and_never_panics() {
+        // The whole point of #240: the lossless path returns rather than unwinding.
+        let (line, column) = single_non_literal_size(REPRO, "N");
+        // The span points at the `N` in `[i32; N]` on line 3 (the `\`-continued
+        // string literal strips each line's leading indentation, so `N` sits at
+        // column 16 of `let arr: [i32; N] = [1, 2, 3];`).
+        assert_eq!((line, column), (3, 16), "span points at the size identifier");
+    }
+
+    #[test]
+    fn repro_fail_fast_path_is_an_error_not_a_panic() {
+        let arena = build_ast(REPRO.to_string());
+        let result = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena);
+        let message = result
+            .err()
+            .expect("named-constant array size is rejected")
+            .to_string();
+        assert!(
+            message.contains("array size must be an integer literal"),
+            "fail-fast error carries the diagnostic: {message}"
+        );
+        assert!(
+            message.contains('N'),
+            "fail-fast error names the constant: {message}"
+        );
+        assert!(
+            !message.contains("type mismatch"),
+            "no cascading size-0 mismatch is reported: {message}"
+        );
+    }
+
+    #[test]
+    fn lossless_path_returns_a_partial_context() {
+        // The context is still handed back (populated as far as recovery allowed) so
+        // the IDE can keep answering queries on the parts that did check, rather than
+        // getting nothing. Returning here at all proves the checker did not unwind.
+        let arena = build_ast(REPRO.to_string());
+        let outcome = check_with_diagnostics(arena);
+        assert_eq!(outcome.errors.len(), 1, "one diagnostic on the lossless path");
+        assert!(
+            !outcome.typed_context.function_def_ids().is_empty(),
+            "the whole-program tables are still built in the partial context"
+        );
+    }
+
+    #[test]
+    fn named_constant_in_let_binding() {
+        let source = "const N: i32 = 3;\nfn f() -> i32 { let a: [i32; N] = [1, 2, 3]; return a[0]; }";
+        let (line, _column) = single_non_literal_size(source, "N");
+        assert_eq!(line, 2, "the diagnostic sits on the let binding's type");
+    }
+
+    #[test]
+    fn named_constant_in_parameter_position() {
+        let source = "const N: i32 = 3;\nfn f(a: [i32; N]) -> i32 { return a[0]; }";
+        let (line, _column) = single_non_literal_size(source, "N");
+        assert_eq!(line, 2, "the diagnostic sits on the parameter's type");
+    }
+
+    #[test]
+    fn named_constant_in_return_position() {
+        let source = "const N: i32 = 3;\n\
+fn f() -> [i32; N] { let a: [i32; 3] = [1, 2, 3]; return a; }";
+        // Exactly one diagnostic: the size rejection, with no cascading return-type
+        // mismatch against the size-0 sentinel.
+        single_non_literal_size(source, "N");
+    }
+
+    #[test]
+    fn undefined_identifier_as_size_is_reported_as_a_size_error() {
+        // An identifier in size position is diagnosed as an unsupported size, not as
+        // an undeclared variable — the size expression is never inferred as a value.
+        let source = "fn f() -> i32 { let a: [i32; UNDEF] = [1, 2, 3]; return a[0]; }";
+        single_non_literal_size(source, "UNDEF");
+    }
+
+    #[test]
+    fn out_of_range_literal_size_is_invalid_array_size_not_a_panic() {
+        // The sibling defect the issue flagged: an out-of-range literal must report a
+        // real diagnostic rather than silently becoming a zero-sized array.
+        let source = "fn f() -> i32 { let a: [i32; 5000000000] = [1]; return a[0]; }";
+        let errors = diagnostics(source);
+        assert_eq!(errors.len(), 1, "one diagnostic, got: {errors:?}");
+        assert!(
+            matches!(errors[0], TypeCheckError::InvalidArraySize { .. }),
+            "an out-of-range literal is InvalidArraySize, got {:?}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn zero_literal_size_still_reports_invalid_array_size() {
+        // Regression guard: the size-0 sentinel suppression must not swallow the
+        // genuine zero-size rejection.
+        let source = "fn f() -> i32 { let a: [i32; 0] = []; return 0; }";
+        let errors = diagnostics(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, TypeCheckError::InvalidArraySize { .. })),
+            "a literal-zero size is still rejected, got: {errors:?}"
+        );
+    }
+}

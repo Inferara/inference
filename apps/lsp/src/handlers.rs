@@ -22,6 +22,7 @@ use crate::{convert, uri};
 pub(crate) fn hover(state: &mut ServerState, params: HoverParams) -> Option<Hover> {
     let position = params.text_document_position_params;
     let path = uri::to_path(&position.text_document.uri)?;
+    crate::server::analysis_panic_seam(&path);
     let index = state.host.analysis().line_index(&path)?;
     let offset = convert::offset(&index, position.position)?;
     let format = state.capabilities.hover_format();
@@ -220,6 +221,7 @@ pub(crate) fn publish_diagnostics_params(
     };
     let path = document.path.clone();
     let version = document.version;
+    crate::server::analysis_panic_seam(&path);
 
     let diagnostics = match state.host.analysis().line_index(&path) {
         Some(index) => state
