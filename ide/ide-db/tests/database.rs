@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use inference_ide_db::{NodeId, RootDatabase, Severity};
+use inference_ide_db::{FileAnalysis, NodeId, RootDatabase, Severity};
 
 /// A throwaway source tree under the system temp dir, removed on drop.
 struct TempTree {
@@ -39,6 +39,19 @@ impl TempTree {
         dest
     }
 
+    /// Writes raw `bytes` to `<root>/<relative>`, creating parent directories, and
+    /// returns the absolute path. Planting invalid UTF-8 makes the file exist for
+    /// an `is_file` probe yet fail `read_to_string` deterministically on every
+    /// platform — a reachable-but-unreadable import.
+    fn write_bytes(&self, relative: &str, bytes: &[u8]) -> PathBuf {
+        let dest = self.root.join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).expect("create source parent dir");
+        }
+        std::fs::write(&dest, bytes).expect("write source bytes");
+        dest
+    }
+
     /// The absolute path a relative source name would occupy, without writing it.
     fn path(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
@@ -49,6 +62,18 @@ impl Drop for TempTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// Whether the analysis's merged arena contains a closure file at `module_path`
+/// that defines a top-level item named `name`. Used to assert that an imported
+/// file's symbols are present (or absent) in an analysis without re-querying the
+/// database while a borrow is live.
+fn closure_defines(analysis: &FileAnalysis, module_path: &[String], name: &str) -> bool {
+    let arena = analysis.arena();
+    arena
+        .source_files()
+        .filter(|sf| sf.module_path == module_path)
+        .any(|sf| sf.defs.iter().any(|&d| arena.def_name(d) == name))
 }
 
 /// The definition names of the closure file named by `module_path`, in order.
@@ -457,6 +482,147 @@ fn analysis_of_an_unreadable_entry_recovers_after_didopen() {
     );
 }
 
+#[test]
+fn analysis_of_an_unreadable_import_recovers_after_didopen() {
+    // The non-entry twin of the unreadable-entry case. `main.inf` imports `lib`;
+    // `lib.inf` exists on disk but is invalid UTF-8, so `read_to_string` fails.
+    // The import is not "missing" (the file exists) and leaves no `LoadedFile`, so
+    // before the fix nothing recorded lib's path and no later event could evict
+    // main's stale, symbol-less analysis.
+    let tree = TempTree::new("unreadable-import-didopen");
+    let src = "use lib;\npub fn main() -> i32 { return lib::seven(); }";
+    let entry = tree.write("main.inf", src);
+    let lib = tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let lib_mod = vec!["lib".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            !closure_defines(analysis, &lib_mod, "seven"),
+            "an unreadable import contributes no symbols"
+        );
+        analysis.generation()
+    };
+
+    // `didOpen` supplies valid text for the previously-unreadable import; main's
+    // stale analysis must recompute and now see lib's symbols.
+    db.open_document(&lib, "pub fn seven() -> i32 { return 7; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first_gen,
+        "didOpen of the unreadable import must recompute main ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "seven"),
+        "the recomputed analysis must see the now-readable import's symbols"
+    );
+}
+
+#[test]
+fn analysis_of_an_unreadable_import_recovers_after_didchange() {
+    // Recovery must also fire on `didChange`, which the closure mechanism covers
+    // but the missing-import widening would not: a change carries
+    // `newly_available == false`, so only a closure hit can invalidate. `lib` is
+    // unreadable on disk with no overlay, and the change is the first event to
+    // supply valid content for it — proving the closure records the read-failed
+    // path rather than relying on the overlay-availability widening.
+    let tree = TempTree::new("unreadable-import-didchange");
+    let src = "use lib;\npub fn main() -> i32 { return lib::seven(); }";
+    let entry = tree.write("main.inf", src);
+    let lib = tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let lib_mod = vec!["lib".to_string()];
+    let before_change = db.analysis(&entry).generation();
+    assert!(
+        !closure_defines(db.analysis(&entry), &lib_mod, "seven"),
+        "the import is unreadable before the change"
+    );
+
+    db.change_document(&lib, "pub fn seven() -> i32 { return 7; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > before_change,
+        "didChange of the unreadable import must recompute main ({before_change} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "seven"),
+        "the recomputed analysis must see the changed import's symbols"
+    );
+}
+
+#[test]
+fn analysis_recovers_when_a_transitively_unreadable_import_becomes_readable() {
+    // The read-failed file need not be a direct import. `main` imports `a`, `a`
+    // imports `b`, and only `b.inf` is unreadable. The walk enqueues `b` while
+    // analyzing `main`, so `b`'s read-failed path must land in main's closure and
+    // a later `didOpen` of `b` must re-analyze `main`.
+    let tree = TempTree::new("unreadable-import-transitive");
+    let main_src = "use a;\npub fn main() -> i32 { return a::mid(); }";
+    let entry = tree.write("main.inf", main_src);
+    tree.write(
+        "a.inf",
+        "use b;\npub fn mid() -> i32 { return b::deep(); }",
+    );
+    let b = tree.write_bytes("b.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, main_src);
+
+    let b_mod = vec!["b".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            !closure_defines(analysis, &b_mod, "deep"),
+            "the transitively-unreadable file contributes no symbols"
+        );
+        analysis.generation()
+    };
+
+    db.open_document(&b, "pub fn deep() -> i32 { return 42; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first_gen,
+        "didOpen of a transitively-unreadable import must recompute main ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &b_mod, "deep"),
+        "the recomputed analysis must see the now-readable transitive import"
+    );
+}
+
+#[test]
+fn opening_an_unrelated_file_does_not_invalidate_an_unreadable_import_analysis() {
+    // The negative: recording the read-failed path in the closure must stay
+    // precise. Only an event touching that exact path invalidates; an unrelated
+    // file's `didOpen` must not — the read failure is not folded into
+    // `had_missing_import`, so it does not trigger the coarse missing-import
+    // widening.
+    let tree = TempTree::new("unreadable-import-unrelated");
+    let src = "use lib;\npub fn main() -> i32 { return 0; }";
+    let entry = tree.write("main.inf", src);
+    tree.write_bytes("lib.inf", b"\xFF\xFE\xFA");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, src);
+
+    let first_gen = db.analysis(&entry).generation();
+
+    // A file outside main's closure — neither the entry, an import, nor the
+    // unreadable file — must not disturb main's memoized analysis.
+    let unrelated = tree.path("unrelated.inf");
+    db.open_document(&unrelated, "pub fn other() {}");
+    assert_eq!(
+        db.analysis(&entry).generation(),
+        first_gen,
+        "an unrelated file's didOpen must not recompute an unreadable-import analysis"
+    );
+}
+
 // Partial semantics: a broken program still answers
 
 #[test]
@@ -610,4 +776,278 @@ fn file_defs_covers_struct_methods_spec_fns_and_constants() {
         .map(|&d| analysis.arena().def_name(d))
         .collect();
     assert_eq!(names, vec!["N", "P", "get", "S", "prop"]);
+}
+
+// Per-entry source root (issue #243): a non-entry file opened standalone must
+// resolve its imports against the project's real source root, not its own
+// directory.
+
+/// A minimal valid `Inference.toml`, enough for manifest discovery to treat the
+/// directory as a project root (`[package]` with `name` and `version`).
+const MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+
+#[test]
+fn subdirectory_file_resolves_imports_against_manifest_source_root() {
+    // The exact issue-#243 repro under a manifest: opening `src/lib/a.inf`
+    // standalone must resolve its `use lib::b;` against `<root>/src` (the source
+    // root the compiler uses), reaching `<root>/src/lib/b.inf` rather than the
+    // nonexistent `<root>/src/lib/lib/b.inf` an own-directory root would probe.
+    let tree = TempTree::new("manifest-subdir");
+    tree.write("Inference.toml", MANIFEST);
+    tree.write("src/main.inf", "use lib::a;\npub fn main() -> i32 { return 0; }");
+    let a = tree.write("src/lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("src/lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // As if the user navigated into the file and the editor opened it.
+    db.open_document(&a, "use lib::b;\npub fn a() {}");
+
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.import_problems().is_empty(),
+        "lib::b must resolve against the manifest source root, got: {:?}",
+        analysis.import_problems()
+    );
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    assert!(
+        closure_defines(analysis, &b_mod, "seven"),
+        "symbols from lib/b.inf must be visible in the standalone analysis"
+    );
+}
+
+#[test]
+fn nested_manifest_nearest_wins_for_source_root() {
+    // Two manifests: an outer one at the tree root and a nearer one at `sub/`.
+    // Opening `sub/src/lib/a.inf` must use the nearest manifest's source root
+    // (`<root>/sub/src`); the outer manifest's `<root>/src` would not contain
+    // `lib/b.inf` and would report a false missing import.
+    let tree = TempTree::new("manifest-nested");
+    tree.write("Inference.toml", MANIFEST);
+    tree.write("sub/Inference.toml", MANIFEST);
+    let a = tree.write("sub/src/lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("sub/src/lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.import_problems().is_empty(),
+        "the nearest manifest's source root must resolve lib::b, got: {:?}",
+        analysis.import_problems()
+    );
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    assert!(closure_defines(analysis, &b_mod, "seven"));
+}
+
+#[test]
+fn file_outside_manifest_src_falls_through_to_own_directory() {
+    // A file under the project root but outside its `src` source tree is not
+    // governed by the manifest source root, so resolution falls through to the
+    // file's own directory. Here `use dep;` resolves against `<root>/scratch`,
+    // where `dep.inf` sits — proving the manifest tier declined (its `<root>/src`
+    // root would not find `dep`).
+    let tree = TempTree::new("manifest-outside-src");
+    tree.write("Inference.toml", MANIFEST);
+    let a = tree.write("scratch/a.inf", "use dep;\npub fn a() {}");
+    tree.write("scratch/dep.inf", "pub fn d() {}");
+    let mut db = RootDatabase::default();
+
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.import_problems().is_empty(),
+        "own-directory resolution must resolve the sibling import, got: {:?}",
+        analysis.import_problems()
+    );
+    let dep_mod = vec!["dep".to_string()];
+    assert!(closure_defines(analysis, &dep_mod, "d"));
+}
+
+#[test]
+fn closure_fallback_reuses_an_analyzed_entrys_source_root() {
+    // No manifest. The project entry `main.inf` is analyzed first, pulling
+    // `lib/a.inf` and `lib/b.inf` into its closure against `<root>`. Opening
+    // `lib/a.inf` standalone then reuses that root (it is in main's closure), so
+    // `use lib::b;` resolves to `<root>/lib/b.inf` — the closure fallback tier.
+    let tree = TempTree::new("closure-donor");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // Memoize the entry's analysis so its closure is available to donate.
+    assert!(
+        db.analysis(&main).import_problems().is_empty(),
+        "the entry resolves its whole closure against its own directory"
+    );
+
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.import_problems().is_empty(),
+        "lib/a.inf must reuse the entry's source root, got: {:?}",
+        analysis.import_problems()
+    );
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    assert!(closure_defines(analysis, &b_mod, "seven"));
+}
+
+#[test]
+fn closure_fallback_does_not_reuse_an_unrelated_entrys_root() {
+    // The negative of the closure fallback: an analyzed entry whose closure does
+    // not contain the file must not donate its root. `other.inf` is a lone entry;
+    // opening `lib/a.inf` (absent from other's closure) must fall through to
+    // own-directory resolution, where `use lib::b;` cannot be found.
+    let tree = TempTree::new("closure-unrelated");
+    let other = tree.write("other.inf", "pub fn other() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // Memoize the unrelated entry's analysis.
+    let _ = db.analysis(&other).generation();
+
+    let analysis = db.analysis(&a);
+    assert_eq!(
+        analysis.import_problems().len(),
+        1,
+        "an unrelated entry must not donate its source root"
+    );
+    assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
+}
+
+#[test]
+fn standalone_subdirectory_file_without_manifest_uses_own_directory() {
+    // Tier 3, pinned: with no manifest and nothing else analyzed, a subdirectory
+    // file is analyzed against its own directory. A source-root-relative import
+    // then cannot resolve — the pre-#243 fallback the manifest and closure tiers
+    // improve upon. Kept to guard the tier ordering (own directory is last).
+    let tree = TempTree::new("own-dir-standalone");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    let analysis = db.analysis(&a);
+    assert_eq!(
+        analysis.import_problems().len(),
+        1,
+        "an own-directory root cannot resolve a source-root-relative import"
+    );
+    assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
+}
+
+#[test]
+fn didchange_under_manifest_root_invalidates_and_recovers() {
+    // Invalidation must work under the manifest-derived root: opening
+    // `src/lib/a.inf` pulls `src/lib/b.inf` into its closure, so a `didChange` of
+    // `b.inf` (a different directory of the same project) must evict a.inf's
+    // analysis, and the recompute must still resolve against the manifest root.
+    let tree = TempTree::new("manifest-invalidation");
+    tree.write("Inference.toml", MANIFEST);
+    tree.write("src/main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("src/lib/a.inf", "use lib::b;\npub fn a() {}");
+    let b = tree.write("src/lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&a, "use lib::b;\npub fn a() {}");
+
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&a);
+        assert!(
+            analysis.import_problems().is_empty(),
+            "lib::b resolves under the manifest root before the change"
+        );
+        assert!(closure_defines(analysis, &b_mod, "seven"));
+        analysis.generation()
+    };
+
+    db.change_document(&b, "pub fn seven() -> i32 { return 8; }");
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.generation() > first_gen,
+        "a change to a closure file must recompute a.inf ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        analysis.import_problems().is_empty() && closure_defines(analysis, &b_mod, "seven"),
+        "the recompute must still resolve lib::b under the manifest root"
+    );
+}
+
+#[test]
+fn closure_donor_root_survives_shared_dep_change_when_dependent_reanalyzes_first() {
+    // No manifest. The project entry `main.inf` pulls `lib/a.inf` and the shared
+    // `lib/b.inf` into its closure against `<root>`; analyzing `lib/a.inf`
+    // standalone then adopts that root via the closure-donor tier. A change to the
+    // shared `lib/b.inf` evicts BOTH main's analysis (the donor) and a.inf's in one
+    // call. Re-analyzing a.inf *before* main leaves no memoized donor — yet the
+    // adopted root must survive the donor's eviction, or `use lib::b;` falls back to
+    // a.inf's own directory and reports a false missing import (the pre-fix bug).
+    let tree = TempTree::new("closure-donor-survives-shared-change");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    let b = tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // Memoize the entry so its closure can donate, then adopt its root for a.inf.
+    assert!(db.analysis(&main).import_problems().is_empty());
+    let b_mod = vec!["lib".to_string(), "b".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&a);
+        assert!(
+            analysis.import_problems().is_empty(),
+            "lib/a.inf adopts the entry's source root, got: {:?}",
+            analysis.import_problems()
+        );
+        analysis.generation()
+    };
+
+    // The shared-dependency change evicts both the donor and a.inf.
+    db.change_document(&b, "pub fn seven() -> i32 { return 8; }");
+
+    // Re-analyze a.inf first: the donor is gone, so only the sticky adopted root
+    // keeps lib::b resolving.
+    let analysis = db.analysis(&a);
+    assert!(
+        analysis.generation() > first_gen,
+        "the shared-dependency change must recompute a.inf ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        analysis.import_problems().is_empty(),
+        "the adopted root must survive the donor's eviction, got: {:?}",
+        analysis.import_problems()
+    );
+    assert!(
+        closure_defines(analysis, &b_mod, "seven"),
+        "lib/b.inf's symbols must remain visible after the recompute"
+    );
+}
+
+#[test]
+fn closing_a_document_drops_its_sticky_source_root() {
+    // The sticky root must not outlive the open document. `lib/a.inf` adopts the
+    // entry `main.inf`'s root via the closure-donor tier; closing a.inf evicts its
+    // analysis and, because a.inf is in main's closure, main's too — so no donor
+    // remains. Re-analyzing a.inf must then re-resolve from scratch, falling to its
+    // own directory (where `use lib::b;` cannot be found) rather than serving the
+    // dropped adopted root.
+    let tree = TempTree::new("close-drops-sticky-root");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    assert!(db.analysis(&main).import_problems().is_empty());
+    assert!(
+        db.analysis(&a).import_problems().is_empty(),
+        "lib/a.inf adopts the entry's source root before the close"
+    );
+
+    db.close_document(&a);
+
+    let analysis = db.analysis(&a);
+    assert_eq!(
+        analysis.import_problems().len(),
+        1,
+        "with the sticky root dropped and no donor left, lib::b cannot resolve"
+    );
+    assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
 }

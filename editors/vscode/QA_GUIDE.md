@@ -363,5 +363,5 @@ the cases below need a live extension host (F5) and a built `inference-lsp` bina
 | 13.13 | **Custom path:** set `inference.lsp.path` to a valid binary | Server restarts using that path; Output shows `(settings)` as the source | |
 | 13.14 | **Invalid custom path (no fallback):** set `inference.lsp.path` to a nonexistent path while managed/PATH binaries exist | Server stops and does NOT fall back; Output logs the path is not executable; no notification | |
 | 13.15 | Ctrl+Shift+P > "Inference: Restart Language Server" | Server stops and starts; fresh `Language server started` line in Output | |
-| 13.16 | **Update pickup:** after "Inference: Update Toolchain" replaces the managed binary, run the restart command | Server restarts on the new binary version | |
+| 13.16 | **Toolchain switch pickup:** with the server running, run "Inference: Update Toolchain" or "Inference: Select Toolchain Version" and let it succeed | Server restarts automatically on the new toolchain's binary WITHOUT a manual restart or window reload (Output shows "Language server stopped." then a fresh `Language server started: ...`) | |
 | 13.17 | Close VS Code / reload window | No orphan `inference-lsp` processes remain (check with `ps`/Task Manager) | |

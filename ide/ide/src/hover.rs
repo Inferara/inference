@@ -2,14 +2,15 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, SourceFileId};
-use inference_ast::nodes::{ArgKind, Def, Expr};
+use inference_ast::nodes::{ArgKind, Def, Directive, Expr};
 use inference_ide_db::{FileAnalysis, NodeHit, TextRange};
 use inference_type_checker::type_info::TypeInfo;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::nondet_docs::{UZUMAKI_HOVER, block_hover, block_keyword};
 use crate::syntax::{
-    def_name_ident, def_signature, find_def_by_name, find_method, is_call_callee, text_range,
+    def_is_public, def_name_ident, def_signature, find_def_by_name, find_method, is_call_callee,
+    text_range,
 };
 use crate::type_render::render_type;
 
@@ -28,7 +29,7 @@ pub(crate) fn hover(file: &FileAnalysis, offset: u32) -> Option<Hover> {
     let arena = file.arena();
     let ctx = file.typed_context();
     let entry = file.source_file_id(&[])?;
-    let hit = file.hit_test(entry, offset)?;
+    let hit = file.enclosing_hit(entry, offset)?;
 
     if let Some(hover) = nondet_keyword_hover(arena, &hit, offset) {
         return Some(hover);
@@ -95,11 +96,14 @@ fn hover_ident(
     let parent = hit.ancestors.last().copied();
     let grandparent = hit.ancestors.iter().rev().nth(1).copied();
 
+    // An identifier with no ancestors is a `use`-directive segment or item (see
+    // `hit_test`); every definition-tree identifier carries its owning node.
     let contents = match parent {
         Some(NodeId::Def(def)) => ident_in_def(arena, entry, def, ident)?,
         Some(NodeId::Expr(expr)) => ident_in_expr(file, entry, expr, ident, grandparent)?,
         Some(NodeId::Type(_)) => type_name_signature(file, entry, ident),
         Some(NodeId::Stmt(stmt)) => ident_in_stmt(arena, ctx, stmt, ident)?,
+        None => ident_in_directive(file, entry, ident)?,
         _ => return None,
     };
     Some(Hover {
@@ -108,7 +112,8 @@ fn hover_ident(
     })
 }
 
-/// The def's own name (→ its signature) or one of its params/fields (→ its type).
+/// The def's own name (→ its signature), a declared type parameter or enum
+/// variant (→ itself), or one of its params/fields (→ its type).
 fn ident_in_def(
     arena: &AstArena,
     entry: SourceFileId,
@@ -117,6 +122,12 @@ fn ident_in_def(
 ) -> Option<String> {
     if def_name_ident(arena, def) == ident {
         return def_signature(arena, entry, def).map(|sig| code_block(&sig));
+    }
+    // A declared type parameter names itself; show it in its source spelling.
+    if let Def::Function { type_params, .. } = &arena[def].kind
+        && type_params.contains(&ident)
+    {
+        return Some(code_block(&format!("{}'", arena.ident_name(ident))));
     }
     match &arena[def].kind {
         Def::Function { args, .. } | Def::ExternFunction { args, .. } => {
@@ -134,6 +145,15 @@ fn ident_in_def(
             let field = fields.iter().find(|field| field.name == ident)?;
             let type_info = TypeInfo::from_type_id(arena, field.ty);
             Some(named_type(arena.ident_name(ident), &type_info))
+        }
+        // A variant declaration names itself; show it qualified by its enum.
+        Def::Enum { name, variants, .. } => {
+            let variant = variants.iter().copied().find(|&variant| variant == ident)?;
+            Some(code_block(&format!(
+                "{}::{}",
+                arena.ident_name(*name),
+                arena.ident_name(variant)
+            )))
         }
         _ => None,
     }
@@ -178,6 +198,42 @@ fn ident_in_expr(
         }
         _ => None,
     }
+}
+
+/// The hover for a `use`-directive identifier: a path segment shows the module it
+/// names, a braced item import shows the resolved definition's signature. A
+/// segment or item that names no source module or `pub` definition has no hover.
+fn ident_in_directive(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    ident: IdentId,
+) -> Option<String> {
+    let arena = file.arena();
+    for directive in &arena[entry].directives {
+        let Directive::Use(use_directive) = directive;
+        if let Some(index) = use_directive.segments.iter().position(|&s| s == ident) {
+            let module_path: Vec<String> = use_directive.segments[..=index]
+                .iter()
+                .map(|&segment| arena.ident_name(segment).to_string())
+                .collect();
+            file.source_file_id(&module_path)?;
+            return Some(code_block(&format!("module {}", module_path.join("::"))));
+        }
+        if use_directive.imported_types.contains(&ident) {
+            let module_path: Vec<String> = use_directive
+                .segments
+                .iter()
+                .map(|&segment| arena.ident_name(segment).to_string())
+                .collect();
+            let sfid = file.source_file_id(&module_path)?;
+            let def = find_def_by_name(arena, sfid, arena.ident_name(ident))?;
+            if !def_is_public(arena, def) {
+                return None;
+            }
+            return def_signature(arena, sfid, def).map(|sig| code_block(&sig));
+        }
+    }
+    None
 }
 
 /// A `let name: T` / `type name = …` binding: the declared name's type.
@@ -421,5 +477,61 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
     fn hover_whitespace_between_definitions_is_none() {
         let source = "fn a() { return; }   fn b() { return; }";
         assert!(hover_at(source, at(source, "   ") + 1).is_none());
+    }
+
+    // --- caret at the exclusive end of an identifier (issue #244) ---
+
+    #[test]
+    fn hover_at_the_word_end_of_a_local_use_shows_its_type() {
+        let source = "fn f() -> i32 { let value: i32 = 1; return value; }";
+        let word_end = at(source, "value; }") + "value".len() as u32;
+        let hover = hover_at(source, word_end).expect("hover at the word end");
+        assert_eq!(hover.contents_markdown, "```inference\nvalue: i32\n```");
+    }
+
+    // --- hover on a `use` directive (issue #244) ---
+
+    #[test]
+    fn hover_plain_use_segment_names_the_module() {
+        let entry = "use lib;\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let hover = host
+            .analysis()
+            .hover(&path, at(entry, "lib"))
+            .expect("hover on the use segment");
+        assert_eq!(hover.contents_markdown, "```inference\nmodule lib\n```");
+    }
+
+    #[test]
+    fn hover_braced_item_import_shows_the_definition_signature() {
+        let entry = "use lib::{helper};\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let hover = host
+            .analysis()
+            .hover(&path, at(entry, "helper"))
+            .expect("hover on the braced item");
+        assert_eq!(
+            hover.contents_markdown,
+            "```inference\npub fn helper() -> i32\n```"
+        );
+    }
+
+    // --- declared type parameter and enum variant (issue #244) ---
+
+    #[test]
+    fn hover_type_parameter_declaration_shows_it() {
+        let source = "fn id T'(x: i32) -> i32 { return x; }";
+        let hover = hover_at(source, at(source, "T'")).expect("hover on the type parameter");
+        assert_eq!(hover.contents_markdown, "```inference\nT'\n```");
+    }
+
+    #[test]
+    fn hover_enum_variant_declaration_shows_it_qualified() {
+        let source = "enum Color { Red, Green }\nfn f() -> i32 { return 0; }";
+        let hover =
+            hover_at(source, at(source, "Red")).expect("hover on the variant declaration");
+        assert_eq!(hover.contents_markdown, "```inference\nColor::Red\n```");
     }
 }
