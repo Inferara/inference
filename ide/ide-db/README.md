@@ -101,7 +101,7 @@ what guarantees the compiler and the IDE can never disagree about which files a
 program imports — there is exactly one resolution algorithm, parameterized
 over where bytes come from.
 
-`FileAnalysis::compute` builds the loader, calls `load_project_resilient`
+`FileAnalysis::compute` builds the loader, calls `load_project_resilient_with_root`
 (which never fails fast — every file is parsed resiliently and every problem,
 from a broken import to a syntax error, is collected as data rather than
 aborting), then type-checks the merged arena losslessly with

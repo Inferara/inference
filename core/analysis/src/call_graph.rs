@@ -337,6 +337,42 @@ fn type_name_of(arena: &AstArena, expr: ExprId) -> Option<String> {
     }
 }
 
+/// The parser's error-recovery sentinel. Every unparseable top-level construct
+/// lowers to a placeholder `fn <error> { }`, and a recovered struct or spec name
+/// is synthesized the same way (see the parser's `create_error_definition` and
+/// `lower_name_or_error`). A [`FnKey`] built from such a definition carries this
+/// marker in one of its identity segments, which is how [`resolve_adjacency`]
+/// tells a benign resilient-path collision from a genuine identity break.
+const PARSE_RECOVERY_MARKER: &str = "<error>";
+
+/// Whether any identity segment of `key` is the parser's error-recovery
+/// placeholder — i.e. the key came from a parse-recovered definition, struct, or
+/// spec rather than a real one. The defining `module_path` is filesystem-derived
+/// and never synthesized by recovery, so only the name/struct/spec segments are
+/// inspected. Such keys legitimately collide on the resilient IDE path and are
+/// exempt from the duplicate-key tripwire in [`resolve_adjacency`].
+fn is_parse_recovered(key: &FnKey) -> bool {
+    match key {
+        FnKey::Free { name, .. } => name == PARSE_RECOVERY_MARKER,
+        FnKey::Method {
+            struct_name, name, ..
+        } => struct_name == PARSE_RECOVERY_MARKER || name == PARSE_RECOVERY_MARKER,
+        FnKey::SpecFree { spec, name, .. } => {
+            spec == PARSE_RECOVERY_MARKER || name == PARSE_RECOVERY_MARKER
+        }
+        FnKey::SpecMethod {
+            spec,
+            struct_name,
+            name,
+            ..
+        } => {
+            spec == PARSE_RECOVERY_MARKER
+                || struct_name == PARSE_RECOVERY_MARKER
+                || name == PARSE_RECOVERY_MARKER
+        }
+    }
+}
+
 /// Resolves each node's edges into a directed adjacency list of node indices,
 /// paired with the call-site location of the edge.
 ///
@@ -348,24 +384,44 @@ fn type_name_of(arena: &AstArena, expr: ExprId) -> Option<String> {
 /// (`Free`) target distinct nodes. If no candidate names an existing node the
 /// edge is dropped, so callers can never manufacture a false edge.
 pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>> {
-    // Build the key → index map, keeping the first node on a duplicate key.
+    // Build the key → index map, keeping the first node on a duplicate key and
+    // tripping a debug-build assertion on a duplicate that is *not* the product of
+    // parse recovery.
     //
     // On the fail-fast compiler path `FnKey` is injective: the type checker
     // rejects genuine duplicate definitions before analysis runs, so no two nodes
-    // share a key and this map is a plain bijection — the branch that discards a
-    // later duplicate is never taken, and A035/A036 outputs on valid programs are
-    // unchanged. The IDE resilient path has no such guarantee: error recovery
-    // lowers every unparseable top-level construct to an `<error>` placeholder
-    // function (a single stray `forall { }` lowers to two), and a program caught
-    // mid-edit can momentarily name the same function twice, so distinct nodes can
-    // carry the same key. Keeping the first node is a deterministic, total
+    // share a key and this map is a plain bijection. A duplicate that survives to
+    // here on that path is an upstream identity break — two real functions folded
+    // to one key — which is exactly the same-named-type / canonical-key bug class
+    // this repo has shipped (#63): a recursive function's self-edge can resolve to
+    // the wrong same-keyed node, masking the cycle from A035/A036. That warrants a
+    // loud failure in debug builds, so the tripwire fires unless the offending key
+    // is parse-recovered.
+    //
+    // The IDE resilient path has no injectivity guarantee, and its duplicates are
+    // benign: error recovery lowers every unparseable top-level construct to an
+    // `<error>` placeholder function (a single stray `forall { }` lowers to two),
+    // and a program caught mid-edit can momentarily name the same function twice,
+    // so distinct nodes legitimately carry the same key. Such a key always carries
+    // the parser's recovery marker, so [`is_parse_recovered`] exempts it.
+    //
+    // Either way the first node wins: keeping it is a deterministic, total
     // degradation — an already-broken program may have a self-edge resolve to the
     // wrong same-keyed node, at worst making A035/A036 miss a diagnostic on code
-    // that does not yet compile. That is never a false positive, and never a panic
-    // that would abort the analysis (or, in debug builds, the whole LSP process).
+    // that does not yet compile. That is never a false positive, and in release
+    // never a panic that would abort the analysis (or the whole LSP process).
     let mut index: HashMap<&FnKey, usize> = HashMap::with_capacity(nodes.len());
     for (i, n) in nodes.iter().enumerate() {
-        index.entry(&n.key).or_insert(i);
+        if let Some(&existing) = index.get(&n.key) {
+            debug_assert!(
+                is_parse_recovered(&n.key),
+                "duplicate call-graph key `{}` at node {i} (already node {existing}); \
+                 FnKey must be injective or A035/A036 may miss a self-edge",
+                n.key
+            );
+            continue;
+        }
+        index.insert(&n.key, i);
     }
 
     nodes
@@ -564,12 +620,13 @@ mod tests {
 
     /// The IDE resilient path can present two nodes under the same `FnKey`: a
     /// single stray `forall { }` lowers to two `<error>` placeholder functions,
-    /// and a program mid-edit can name the same function twice. Building the
-    /// adjacency must not panic; it keeps the first same-keyed node
-    /// deterministically, so an edge naming that key resolves to it and every
-    /// other node still yields a row.
+    /// and a program mid-edit can name the same function twice. Because the key
+    /// carries the parser's recovery marker, the duplicate-key tripwire is
+    /// suppressed in *every* build — even debug — so building the adjacency must
+    /// not panic; it keeps the first same-keyed node deterministically, so an edge
+    /// naming that key resolves to it and every other node still yields a row.
     #[test]
-    fn adjacency_keeps_first_node_on_duplicate_key() {
+    fn adjacency_tolerates_duplicate_recovered_key() {
         let dup_key = || FnKey::free_in(Vec::new(), "<error>");
         let nodes = vec![
             node(dup_key(), vec![]),
@@ -585,6 +642,124 @@ mod tests {
             adj[2],
             vec![(0, loc())],
             "an edge naming the duplicated key resolves to the first same-keyed node"
+        );
+    }
+
+    /// `is_parse_recovered` must catch the recovery marker in *every* recoverable
+    /// identity segment the parser can synthesize — all eight across the four
+    /// variants: `Free.name`; `Method.struct_name` / `Method.name`;
+    /// `SpecFree.spec` / `SpecFree.name`; and `SpecMethod.spec` /
+    /// `SpecMethod.struct_name` / `SpecMethod.name`. Each positive case leaves the
+    /// other segments real so a branch that silently stopped inspecting one of
+    /// them regresses here. A fully real key is rejected, and the `module_path`
+    /// qualifier is filesystem-derived and never counts, even if a segment
+    /// literally spells the marker.
+    #[test]
+    fn parse_recovered_predicate_matches_every_synthesized_segment() {
+        // Free.name
+        assert!(is_parse_recovered(&FnKey::free_in(Vec::new(), "<error>")));
+        // Method.struct_name and Method.name
+        assert!(is_parse_recovered(&FnKey::method_in(
+            path(&["a"]),
+            "<error>",
+            "m"
+        )));
+        assert!(is_parse_recovered(&FnKey::method_in(
+            path(&["a"]),
+            "T",
+            "<error>"
+        )));
+        // SpecFree.spec and SpecFree.name
+        assert!(is_parse_recovered(&FnKey::spec_free_folded(
+            &[],
+            "<error>",
+            "f"
+        )));
+        assert!(is_parse_recovered(&FnKey::spec_free_folded(
+            &[],
+            "S",
+            "<error>"
+        )));
+        // SpecMethod.spec, SpecMethod.struct_name, and SpecMethod.name
+        assert!(is_parse_recovered(&FnKey::spec_method_folded(
+            &[],
+            "<error>",
+            "T",
+            "m"
+        )));
+        assert!(is_parse_recovered(&FnKey::spec_method_folded(
+            &[],
+            "S",
+            "<error>",
+            "m"
+        )));
+        assert!(is_parse_recovered(&FnKey::spec_method_folded(
+            &[],
+            "S",
+            "T",
+            "<error>"
+        )));
+
+        assert!(!is_parse_recovered(&FnKey::free_in(path(&["a"]), "real")));
+        assert!(!is_parse_recovered(&FnKey::method_in(
+            path(&["a"]),
+            "T",
+            "m"
+        )));
+        assert!(!is_parse_recovered(&FnKey::spec_free_folded(&[], "S", "f")));
+        assert!(!is_parse_recovered(&FnKey::spec_method_folded(
+            &[], "S", "T", "m"
+        )));
+        assert!(
+            !is_parse_recovered(&FnKey::free_in(path(&["<error>"]), "real")),
+            "a filesystem-derived module segment is not a recovery marker"
+        );
+    }
+
+    /// A genuine duplicate — two *real* functions folded to one `FnKey` — is the
+    /// #63 identity-bug class the tripwire guards: a recursive self-edge could
+    /// resolve to the wrong same-keyed node and mask a cycle from A035/A036. In
+    /// debug builds the `debug_assert` must fire. Gated to debug builds (the
+    /// assert is compiled out in release) and catching the unwind rather than
+    /// using `#[should_panic]` (banned); the panic hook is left untouched so no
+    /// process-global state is mutated (mirrors the parser's
+    /// `advance_guard_panics_on_stuck_loop`).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn adjacency_tripwire_fires_on_genuine_duplicate_in_debug() {
+        let dup_key = || FnKey::free_in(path(&["lib"]), "collide");
+        let result = std::panic::catch_unwind(|| {
+            let nodes = vec![node(dup_key(), vec![]), node(dup_key(), vec![])];
+            resolve_adjacency(&nodes)
+        });
+        assert!(
+            result.is_err(),
+            "a genuine (non-recovered) duplicate FnKey must trip the debug tripwire"
+        );
+    }
+
+    /// In release builds the tripwire is compiled out, so even a genuine duplicate
+    /// must degrade gracefully: no panic, first node wins deterministically, and
+    /// every node still yields an adjacency row. Gated to release builds because
+    /// the same input panics in debug (see the tripwire test above).
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn adjacency_keeps_first_on_genuine_duplicate_in_release() {
+        let dup_key = || FnKey::free_in(path(&["lib"]), "collide");
+        let nodes = vec![
+            node(dup_key(), vec![]),
+            node(dup_key(), vec![]),
+            node(
+                FnKey::free_in(Vec::new(), "caller"),
+                vec![free_edge("collide", path(&["lib"]))],
+            ),
+        ];
+        let adj = resolve_adjacency(&nodes);
+        assert_eq!(adj.len(), 3, "every node yields an adjacency row");
+        assert_eq!(
+            adj[2],
+            vec![(0, loc())],
+            "the first same-keyed node wins deterministically"
         );
     }
 
