@@ -25,16 +25,31 @@ const KIND_STRUCT: i64 = 23;
 const INLAY_KIND_TYPE: i64 = 1;
 
 // JSON-RPC error codes.
+const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+// Only the debug-only panic-boundary test asserts on this code.
+#[cfg(debug_assertions)]
 const INTERNAL_ERROR: i64 = -32603;
 
-/// A document whose *analysis* panics: a named constant used as an array size
-/// hits an unimplemented `todo!` deep in the type-checker (#240). It is the most
-/// direct in-tree trigger for the message-loop panic boundary; if #240 is fixed
-/// so this no longer unwinds, replace it with another deterministic panic.
-const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
-fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
+/// The environment variable that arms the server's debug-only analysis-panic seam,
+/// and the path marker the panic-boundary tests arm it with. Only the panic-trigger
+/// fixture's path carries the marker, so a healthy `main.inf` sibling in the same
+/// session analyzes normally. Gated on `debug_assertions` with the tests that use
+/// them: the server's seam is a no-op in release builds, so these have no meaning
+/// there.
+#[cfg(debug_assertions)]
+const PANIC_ENV: &str = "INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR";
+#[cfg(debug_assertions)]
+const PANIC_PATH_MARKER: &str = "panic-trigger";
+
+/// A well-formed document whose *path* (not its contents) makes the armed server
+/// seam force a deterministic analysis panic — the trigger the message-loop panic
+/// boundary (#241) needs without depending on a specific compiler bug. The former
+/// in-tree trigger (a named constant as an array size) became an ordinary
+/// diagnostic once #240 was fixed, so the panic is now injected by the seam.
+#[cfg(debug_assertions)]
+const PANIC_DOC_SOURCE: &str = "fn main() -> i32 { return 0; }";
 
 /// A single-file fixture: an isolated temp dir with `main.inf` written to disk,
 /// plus its `file://` URI. The returned [`TempDir`] must be kept alive for the
@@ -43,6 +58,18 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i];
 fn fixture(tag: &str, source: &str) -> (TempDir, String) {
     let dir = TempDir::new(tag);
     let path = dir.write("main.inf", source);
+    let uri = path_to_uri(&path);
+    (dir, uri)
+}
+
+/// A fixture whose document path carries [`PANIC_PATH_MARKER`], so an armed server
+/// forces a deterministic analysis panic for it (see [`PANIC_DOC_SOURCE`]). The
+/// file is named `panic-trigger.inf` rather than `main.inf` so the marker matches
+/// only this document, never a healthy sibling in the same temp-dir tag.
+#[cfg(debug_assertions)]
+fn panic_fixture(tag: &str) -> (TempDir, String) {
+    let dir = TempDir::new(tag);
+    let path = dir.write("panic-trigger.inf", PANIC_DOC_SOURCE);
     let uri = path_to_uri(&path);
     (dir, uri)
 }
@@ -113,10 +140,20 @@ fn initialize_advertises_the_v1_capabilities() {
     assert!(triggers.contains(&json!(".")), "`.` is a trigger");
     assert!(triggers.contains(&json!(":")), "`:` is a trigger");
 
-    // No position encoding is negotiated, so the client keeps the UTF-16 default;
-    // lsp-server 0.8 attaches no serverInfo.
+    // No position encoding is negotiated, so the client keeps the UTF-16 default.
     assert!(capabilities.get("positionEncoding").is_none());
-    assert!(result.get("serverInfo").is_none(), "no serverInfo declared");
+
+    // serverInfo carries the server's name and version, which clients surface in
+    // logs and crash reports.
+    let server_info = &result["serverInfo"];
+    assert_eq!(
+        server_info["name"], json!("inference-lsp"),
+        "serverInfo names the server, got {result}"
+    );
+    assert!(
+        server_info["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "serverInfo carries a non-empty version, got {result}"
+    );
 
     client.shutdown_exit_ok();
 }
@@ -329,6 +366,28 @@ fn goto_definition_reaches_a_same_file_function() {
     client.shutdown_exit_ok();
 }
 
+#[test]
+fn goto_definition_at_the_word_end_of_a_call_reaches_the_definition() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The caret is at the exclusive end of the callee name (just before `(`),
+    // where a double-click or just-finished keystroke leaves it. The raw offset
+    // lands on the call expression, not the identifier, so this exercises the
+    // shared one-byte-back fallback over the wire (issue #244).
+    let source = "fn caller() -> i32 { return produce(); }\nfn produce() -> i32 { return 7; }";
+    let (_dir, uri) = fixture("goto-word-end", source);
+    client.did_open(&uri, source, 1);
+
+    let response = definition_request(&mut client, &uri, pos_after(source, "produce"));
+    let location = &response["result"];
+    assert_eq!(location["uri"], json!(uri), "same-file target");
+    // The call's word-end resolves to the callee definition, not the call site.
+    assert_eq!(location["range"]["start"], pos_at_nth(source, "produce", 1));
+
+    client.shutdown_exit_ok();
+}
+
 // --- 9. cross-file: import a sibling on disk ---------------------------------
 
 #[test]
@@ -529,6 +588,42 @@ fn m(p: P) -> i32 { return p.; }";
     assert!(
         !labels.iter().any(|l| l == "fn"),
         "keywords are excluded after a dot: {labels:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn completion_after_a_module_qualifier_offers_bare_pub_defs() {
+    // The `::` trigger context: after `lib::`, the target module's public defs are
+    // offered by their bare name (the form that compiles there), while a private
+    // def and the general keyword list are not (issue #246).
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("complete-qualified");
+    let entry_source = "use lib;\nfn main() -> i32 { return lib::; }";
+    let lib_source = "pub fn helper() -> i32 { return 7; }\nfn secret() -> i32 { return 1; }";
+    let entry_path = dir.write("main.inf", entry_source);
+    dir.write("lib.inf", lib_source);
+    let entry_uri = path_to_uri(&entry_path);
+
+    // The incomplete `lib::` produces a syntax diagnostic; consume it.
+    client.did_open(&entry_uri, entry_source, 1);
+
+    let response = completion_request(&mut client, &entry_uri, pos_after(entry_source, "lib::"));
+    let labels = completion_labels(&response);
+    assert!(
+        labels.iter().any(|l| l == "helper"),
+        "the module's pub def is offered bare: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "secret"),
+        "a private def is not offered after `::`: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "fn"),
+        "keywords are wrong after `::`: {labels:?}"
     );
 
     client.shutdown_exit_ok();
@@ -960,21 +1055,27 @@ fn query_or_fragment_uri_is_ignored_without_crashing() {
 }
 
 // --- 22. an analysis panic is contained, not fatal to the session (#241) ------
+//
+// These three tests drive the server's debug-only analysis-panic seam, which is a
+// no-op in release builds; they are compiled and run only under `debug_assertions`
+// (the standard `cargo test` runs debug).
 
+#[cfg(debug_assertions)]
 #[test]
 fn a_request_whose_analysis_panics_is_answered_internal_error() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     // The panic file lives on disk but is never opened; a request against it reads
-    // it from disk, analyzes, and unwinds. The message-loop boundary must turn that
-    // into a failed request carrying its own id, not a dead process.
-    let (_dir, panic_uri) = fixture("panic-request", PANIC_SOURCE);
+    // it from disk, analyzes, and unwinds (the armed seam fires on its path). The
+    // message-loop boundary must turn that into a failed request carrying its own
+    // id, not a dead process.
+    let (_dir, panic_uri) = panic_fixture("panic-request");
     let healthy = "fn f() -> i32 { return 1; }";
     let (_healthy_dir, healthy_uri) = fixture("panic-request-healthy", healthy);
     client.did_open(&healthy_uri, healthy, 1);
 
-    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_SOURCE, "arr"));
+    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_DOC_SOURCE, "main"));
     assert_eq!(
         response["error"]["code"],
         json!(INTERNAL_ERROR),
@@ -991,9 +1092,10 @@ fn a_request_whose_analysis_panics_is_answered_internal_error() {
     client.shutdown_exit_ok();
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     let healthy = "fn f() -> i32 { return 1; }";
@@ -1001,10 +1103,10 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
     client.did_open(&healthy_uri, healthy, 1);
 
     // Opening the panic file computes its diagnostics on the loop thread, which
-    // unwinds. The notification boundary contains it: nothing is published for the
-    // file (so we must not wait on a publish that never comes), and the session
-    // lives on. Sent raw for that reason.
-    let (_dir, panic_uri) = fixture("panic-didopen", PANIC_SOURCE);
+    // unwinds (the armed seam fires on its path). The notification boundary contains
+    // it: nothing is published for the file (so we must not wait on a publish that
+    // never comes), and the session lives on. Sent raw for that reason.
+    let (_dir, panic_uri) = panic_fixture("panic-didopen");
     client.send_notification(
         "textDocument/didOpen",
         json!({
@@ -1012,7 +1114,7 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
                 "uri": panic_uri,
                 "languageId": "inference",
                 "version": 1,
-                "text": PANIC_SOURCE,
+                "text": PANIC_DOC_SOURCE,
             }
         }),
     );
@@ -1027,9 +1129,10 @@ fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
     client.shutdown_exit_ok();
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
-    let mut client = LspClient::spawn();
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
     client.initialize_default(true);
 
     let healthy = "fn f() -> i32 { return 1; }";
@@ -1040,7 +1143,7 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
     // re-sends didOpen for the same bad file. Each didOpen unwinds during diagnostics;
     // every one must be contained, and the healthy document stay answerable across all
     // of them — otherwise one bad file becomes a permanent LSP outage.
-    let (_dir, panic_uri) = fixture("panic-loop", PANIC_SOURCE);
+    let (_dir, panic_uri) = panic_fixture("panic-loop");
     for version in 1..=5 {
         client.send_notification(
             "textDocument/didOpen",
@@ -1049,7 +1152,7 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
                     "uri": panic_uri,
                     "languageId": "inference",
                     "version": version,
-                    "text": PANIC_SOURCE,
+                    "text": PANIC_DOC_SOURCE,
                 }
             }),
         );
@@ -1059,6 +1162,243 @@ fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
             "the server is still alive after panicking didOpen #{version}, got {hover}"
         );
     }
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn named_constant_array_size_publishes_a_diagnostic_over_the_wire() {
+    // The #240 fix seen end-to-end: the source that used to `todo!`-panic the
+    // analysis (a named constant as an array size) now type-checks into an ordinary
+    // diagnostic. The server is spawned *without* the panic seam armed, so opening
+    // the file must publish a normal diagnostic instead of crashing the session.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let source = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
+    let (_dir, uri) = fixture("const-array-size", source);
+    let published = client.did_open(&uri, source, 1);
+    assert!(
+        published
+            .diagnostics
+            .iter()
+            .filter_map(|d| d["message"].as_str())
+            .any(|message| message.contains("array size must be an integer literal")),
+        "the named-constant array size is published as a diagnostic, got {:?}",
+        published.diagnostics
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 23. a second shutdown is answered InvalidRequest (#249 item 1) -----------
+
+#[test]
+fn a_second_shutdown_is_answered_invalid_request() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The first shutdown succeeds with a null result.
+    client.shutdown();
+
+    // A second shutdown is a request received after `shutdown`, so the spec says it
+    // errors with InvalidRequest rather than being answered a second null success.
+    let response = client.request("shutdown", Value::Null);
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_REQUEST),
+        "a repeated shutdown is InvalidRequest, got {response}"
+    );
+
+    // The server still exits cleanly on `exit`.
+    client.exit();
+    let status = client.wait_for_exit();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the server exits cleanly after rejecting the second shutdown"
+    );
+}
+
+// --- 24. malformed initialize params fail the initialize request (#249 item 2) -
+
+#[test]
+fn malformed_initialize_params_fail_the_initialize_request() {
+    let mut client = LspClient::spawn();
+
+    // `processId` is declared `Option<u32>`; a fractional value cannot deserialize.
+    // The failure must fail the initialize *request* with an error response, not
+    // deserialize after the handshake and abort the process with no answer.
+    let response = client.initialize_raw(json!({
+        "processId": 1.5,
+        "rootUri": Value::Null,
+        "capabilities": {},
+    }));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_PARAMS),
+        "malformed initialize params fail the initialize request, got {response}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "a failed initialize carries no result, got {response}"
+    );
+
+    // The server tears the session down cleanly once the client sends `exit`.
+    client.exit();
+    let status = client.wait_for_exit();
+    assert!(
+        status.success(),
+        "the server exits cleanly after failing initialize, got {status:?}"
+    );
+}
+
+// --- 25. a mid-session initialize is InvalidRequest, not MethodNotFound (item 6) -
+
+#[test]
+fn a_repeated_initialize_is_answered_invalid_request() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // `initialize` may be sent only once. A second one mid-session is a protocol
+    // error answered InvalidRequest — not the misleading MethodNotFound that a
+    // generic unknown-method fallthrough would report.
+    let response = client.initialize_raw(json!({ "capabilities": {} }));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INVALID_REQUEST),
+        "a repeated initialize is InvalidRequest, got {response}"
+    );
+    assert_ne!(
+        response["error"]["code"],
+        json!(METHOD_NOT_FOUND),
+        "specifically not MethodNotFound"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 26. a plaintext-only client gets plaintext hover (#249 item 3) -----------
+
+#[test]
+fn a_plaintext_only_client_receives_plaintext_hover() {
+    let mut client = LspClient::spawn();
+    // The client advertises only plaintext hover content — no markdown.
+    client.initialize(json!({
+        "textDocument": { "hover": { "contentFormat": ["plaintext"] } }
+    }));
+
+    let source = "fn f() -> i32 { let count: i32 = 5; return count; }";
+    let (_dir, uri) = fixture("hover-plaintext", source);
+    client.did_open(&uri, source, 1);
+
+    let response = hover_request(&mut client, &uri, pos_at_nth(source, "count", 1));
+    let contents = &response["result"]["contents"];
+    assert_eq!(
+        contents["kind"],
+        json!("plaintext"),
+        "a plaintext-only client gets plaintext hover, got {contents}"
+    );
+    let value = contents["value"].as_str().expect("a hover value");
+    assert!(
+        value.contains("count: i32"),
+        "the type still renders, got {value:?}"
+    );
+    assert!(
+        !value.contains('`'),
+        "no backticks are rendered literally, got {value:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 27. an inlay range with an out-of-range end is clamped, not disabled (item 4) -
+
+#[test]
+fn inlay_hint_range_with_an_out_of_range_end_is_clamped_to_the_window() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let (_dir, uri) = fixture("inlay-clamp", NONDET_SOURCE);
+    client.did_open(&uri, NONDET_SOURCE, 1);
+
+    // The window starts at the `exists` line (line 2) and ends far past EOF. An
+    // out-of-range end must *clamp* to the file end, keeping the valid start — so
+    // the window is honored and the `forall` hints on line 1 stay excluded. The
+    // bug returned every hint by disabling the clip entirely.
+    let response = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 2, "character": 0 },
+                "end": { "line": 999, "character": 0 },
+            },
+        }),
+    );
+    let hints = response["result"].as_array().expect("an inlay-hint array");
+
+    assert!(
+        hints
+            .iter()
+            .all(|h| h["position"]["line"].as_i64().is_some_and(|line| line >= 2)),
+        "every returned hint is inside the clamped window (line >= 2), got {hints:?}"
+    );
+    assert!(
+        !hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} every path must succeed")),
+        "the forall hints on line 1 are excluded, got {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|h| h["label"] == json!("\u{25B8} at least one path must succeed")),
+        "the exists hint inside the window is present, got {hints:?}"
+    );
+    // exists + unique + assume block hints, plus the exists `@` uzumaki hint.
+    assert_eq!(hints.len(), 4, "only the windowed hints, got {hints:?}");
+
+    client.shutdown_exit_ok();
+}
+
+// --- 28. didClose of an unmappable URI publishes nothing (#249 item 5) --------
+
+#[test]
+fn did_close_of_an_unmappable_uri_publishes_nothing() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+    let source = "fn f() -> i32 { return 1; }";
+    let (_dir, uri) = fixture("close-unmappable", source);
+    client.did_open(&uri, source, 1);
+
+    // Closing a URI this server cannot map to a file must publish nothing — no
+    // empty diagnostics set under the garbage URI, and no dependents sweep that
+    // would republish the real open document. Send it raw and confirm no publish
+    // names it (the assert-no-publish pattern).
+    client.send_notification(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": "untitled:Untitled-1" } }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        !published
+            .iter()
+            .any(|(published_uri, _)| published_uri.contains("Untitled-1")),
+        "an unmappable close publishes nothing under its URI, got {published:?}"
+    );
+    assert!(
+        published.is_empty(),
+        "an unmappable close triggers no dependents republish either, got {published:?}"
+    );
+
+    // A subsequent request against the real document still works.
+    let hover = hover_request(&mut client, &uri, pos_at(source, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server survived the unmappable close"
+    );
 
     client.shutdown_exit_ok();
 }

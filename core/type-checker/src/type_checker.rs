@@ -1400,27 +1400,41 @@ impl TypeChecker {
         }
     }
 
-    /// Validates that an array type annotation has a valid size (positive, fits in u32).
+    /// Validates that an array type annotation has a valid size.
     ///
-    /// Reports `InvalidArraySize` if the size is zero (sentinel from parse failure)
-    /// or if the literal text cannot be parsed as a positive u32.
+    /// A literal size must be a positive `u32`; zero or an out-of-range value is
+    /// reported as `InvalidArraySize` against the whole array type. A named
+    /// constant (`[i32; N]`) is reported as `NonLiteralArraySize` against the size
+    /// identifier itself, since compile-time constant evaluation of array sizes is
+    /// not yet implemented (#79) — this is the diagnostic that replaces the former
+    /// `todo!` panic (#240). Any other size expression is unreachable from accepted
+    /// syntax (the parser rejects arithmetic in size position) and is left to the
+    /// `0` sentinel [`TypeInfo::from_type_id`](crate::type_info::TypeInfo) records.
     fn validate_array_size(
         &mut self,
         arena: &AstArena,
         size_expr_id: ExprId,
         type_location: Location,
     ) {
-        let expr_data = &arena[size_expr_id];
-        if let Expr::NumberLiteral { value } = &expr_data.kind {
-            match value.parse::<u32>() {
-                Ok(1..) => {}
-                Ok(0) | Err(_) => {
-                    self.push_error_dedup(TypeCheckError::InvalidArraySize {
-                        size: value.clone(),
-                        location: type_location,
-                    });
+        match &arena[size_expr_id].kind {
+            Expr::NumberLiteral { value } => {
+                let value = value.clone();
+                match value.parse::<u32>() {
+                    Ok(1..) => {}
+                    Ok(0) | Err(_) => {
+                        self.push_error_dedup(TypeCheckError::InvalidArraySize {
+                            size: value,
+                            location: type_location,
+                        });
+                    }
                 }
             }
+            Expr::Identifier(ident_id) => {
+                let name = arena[*ident_id].name.clone();
+                let location = arena[size_expr_id].location;
+                self.push_error(TypeCheckError::NonLiteralArraySize { name, location });
+            }
+            _ => {}
         }
     }
 
@@ -1710,7 +1724,11 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
                     let value_type = self.infer_expression(expr, ctx);
-                    if *return_type != value_type.clone().unwrap_or_default() {
+                    // Comparing a real return value against a declared return array
+                    // whose size was already rejected would only add a confusing
+                    // second error, so the mismatch is skipped for it.
+                    let size_rejected = return_type.has_rejected_array_size();
+                    if !size_rejected && *return_type != value_type.clone().unwrap_or_default() {
                         self.push_error(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
                             found: value_type.unwrap_or_default(),
@@ -1771,10 +1789,10 @@ impl TypeChecker {
                 let target_type = self
                     .symbol_table
                     .resolve_custom_type(TypeInfo::from_type_id_with_type_params(arena, ty, &tp));
-                // Validate array size if applicable
-                if let TypeNode::Array { size, .. } = &arena[ty].kind {
-                    self.validate_array_size(ctx.arena(), *size, ctx.arena()[ty].location);
-                }
+                // The initializer-consistency checks below would only stack
+                // follow-on errors onto a declared array whose size was already
+                // rejected, so they are skipped for it.
+                let size_rejected = target_type.has_rejected_array_size();
                 if let Some(expr_id) = value {
                     let expr_kind = ctx.arena()[expr_id].kind.clone();
                     if let Expr::NumberLiteral { .. } = expr_kind
@@ -1797,7 +1815,7 @@ impl TypeChecker {
                     if let Expr::ArrayLiteral { elements } = &expr_kind
                         && let TypeInfoKind::Array(ref elem_type, expected_size) = target_type.kind
                     {
-                        if elements.len() != expected_size as usize {
+                        if !size_rejected && elements.len() != expected_size as usize {
                             self.push_error(TypeCheckError::ArrayLiteralSizeMismatch {
                                 expected: expected_size,
                                 actual: elements.len(),
@@ -1827,6 +1845,7 @@ impl TypeChecker {
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
                     } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
+                        && !size_rejected
                         && self.symbol_table.resolve_custom_type(init_type.clone())
                             != target_type
                     {

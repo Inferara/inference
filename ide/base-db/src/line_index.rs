@@ -41,8 +41,20 @@ pub struct LineIndex {
 impl LineIndex {
     /// Builds the index for `text`, recording the byte offset of every line
     /// start.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `text` is 4 GiB or larger. Line-start offsets are stored as
+    /// `u32`; silently truncating them would break the `partition_point`
+    /// monotonicity `line_col` relies on, so an over-large text is rejected
+    /// explicitly rather than corrupted. LSP documents never approach this bound.
     #[must_use = "constructing a LineIndex is pointless if it is discarded"]
     pub fn new(text: &str) -> Self {
+        assert!(
+            u32::try_from(text.len()).is_ok(),
+            "LineIndex supports source texts up to u32::MAX (4 GiB) bytes; got {} bytes",
+            text.len()
+        );
         let mut line_starts = vec![0u32];
         let bytes = text.as_bytes();
         for (byte_index, &byte) in bytes.iter().enumerate() {
@@ -117,6 +129,26 @@ impl LineIndex {
             byte_offset += ch.len_utf8() as u32;
         }
         Some(line_end as u32)
+    }
+
+    /// Converts a [`LineCol`] into a byte offset, clamping a position past the end
+    /// of the file to the file's end rather than failing.
+    ///
+    /// Where [`offset`](Self::offset) returns `None` for a line past EOF, this
+    /// clamps the whole position to the text length — the end of the file — which
+    /// extends the character clamp `offset` already applies within a line to the
+    /// line dimension too. The result is always a valid offset, so a caller that
+    /// wants a window honored — an inlay-hint request range whose end sits one line
+    /// past EOF — clamps to the file's end instead of discarding the window.
+    #[must_use = "the converted offset is the reason to call this"]
+    pub fn offset_clamped(&self, line_col: LineCol) -> u32 {
+        let last_line = self.line_starts.len() - 1;
+        if line_col.line as usize > last_line {
+            return self.text.len() as u32;
+        }
+        // The line is in range, so `offset` clamps the character and yields `Some`;
+        // the text length is a defensive fallback that keeps this total.
+        self.offset(line_col).unwrap_or(self.text.len() as u32)
     }
 
     /// Exclusive byte offset of the end of a line's content.
@@ -366,6 +398,46 @@ mod tests {
         assert_eq!(index.offset(lc(1, 0)), Some(6)); // '😀'
         assert_eq!(index.offset(lc(1, 2)), Some(10)); // 'b'
         assert_eq!(index.offset(lc(1, 3)), Some(11)); // end of file
+    }
+
+    #[test]
+    fn offset_clamped_clamps_an_out_of_range_line_to_the_file_end() {
+        let index = LineIndex::new("ab\ncd");
+        // In-range positions behave exactly like `offset`.
+        assert_eq!(index.offset_clamped(lc(0, 0)), 0);
+        assert_eq!(index.offset_clamped(lc(1, 1)), 4); // between 'c' and 'd'
+        assert_eq!(index.offset_clamped(lc(1, 2)), 5); // end of the last line
+        // A character past a valid line still clamps to that line's end.
+        assert_eq!(index.offset_clamped(lc(0, 99)), 2);
+        // A line past EOF clamps to the file end, where `offset` returns `None`.
+        assert_eq!(index.offset(lc(2, 0)), None);
+        assert_eq!(index.offset_clamped(lc(2, 0)), 5);
+        // A wildly out-of-range line clamps the same way.
+        assert_eq!(index.offset_clamped(lc(9999, 4)), 5);
+    }
+
+    #[test]
+    fn offset_clamped_on_a_trailing_newline_clamps_to_the_empty_last_line() {
+        // Line starts: [0, 4]; the last line is the empty line after the '\n'.
+        let index = LineIndex::new("abc\n");
+        assert_eq!(index.offset_clamped(lc(1, 0)), 4);
+        // A line past the empty last line clamps back to it, not to line 0.
+        assert_eq!(index.offset_clamped(lc(5, 0)), 4);
+    }
+
+    #[test]
+    fn leading_bom_occupies_one_utf16_unit_on_line_zero() {
+        // A UTF-8 BOM (U+FEFF: three bytes, one UTF-16 unit) is an ordinary
+        // character to the index — it sits at column 0 and pushes the first real
+        // character to column 1. The disk-ingestion path strips it precisely so
+        // line-0 positions line up with a client that already dropped it (see
+        // `inference::read_source_file`).
+        let with_bom = LineIndex::new("\u{feff}fn");
+        assert_eq!(with_bom.line_col(3), lc(0, 1)); // 'f' after the 3-byte BOM
+        assert_eq!(with_bom.line_col(0), lc(0, 0)); // the BOM itself is column 0
+
+        let stripped = LineIndex::new("fn");
+        assert_eq!(stripped.line_col(0), lc(0, 0)); // 'f' at the start once stripped
     }
 
     #[test]

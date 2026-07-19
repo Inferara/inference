@@ -22,10 +22,12 @@ use crate::{convert, uri};
 pub(crate) fn hover(state: &mut ServerState, params: HoverParams) -> Option<Hover> {
     let position = params.text_document_position_params;
     let path = uri::to_path(&position.text_document.uri)?;
+    crate::server::analysis_panic_seam(&path);
     let index = state.host.analysis().line_index(&path)?;
     let offset = convert::offset(&index, position.position)?;
+    let format = state.capabilities.hover_format();
     let hover = state.host.analysis().hover(&path, offset)?;
-    Some(convert::hover(&index, hover))
+    Some(convert::hover(&index, hover, format))
 }
 
 pub(crate) fn goto_definition(
@@ -98,7 +100,7 @@ pub(crate) fn document_symbol(
     let index = state.host.analysis().line_index(&path)?;
     let symbols = state.host.analysis().document_symbols(&path);
 
-    if state.hierarchical_symbols {
+    if state.capabilities.hierarchical_symbols {
         let nested = symbols
             .into_iter()
             .map(|symbol| convert::document_symbol(&index, symbol))
@@ -134,11 +136,11 @@ pub(crate) fn inlay_hint(
 ) -> Option<Vec<InlayHint>> {
     let path = uri::to_path(&params.text_document.uri)?;
     let index = state.host.analysis().line_index(&path)?;
-    let clip = convert::text_range(&index, params.range);
+    let clip = convert::text_range_clamped(&index, params.range);
     let hints = state
         .host
         .analysis()
-        .inlay_hints(&path, clip)
+        .inlay_hints(&path, Some(clip))
         .into_iter()
         .map(|hint| convert::inlay_hint(&index, hint))
         .collect();
@@ -190,9 +192,11 @@ pub(crate) fn did_close(
     params: DidCloseTextDocumentParams,
 ) -> Option<PublishDiagnosticsParams> {
     let uri = params.text_document.uri;
-    if let Some(path) = uri::to_path(&uri) {
-        state.host.close_document(&path);
-    }
+    // A URI this server never mapped to a file was never opened or tracked, so
+    // closing it clears nothing: publish no empty set and trigger no dependents
+    // sweep, matching `did_open`'s "no diagnostics for an unmappable URI".
+    let path = uri::to_path(&uri)?;
+    state.host.close_document(&path);
     state.documents.remove(&uri);
     // Publish an empty set so the editor clears any diagnostics it was showing.
     Some(PublishDiagnosticsParams {
@@ -217,6 +221,7 @@ pub(crate) fn publish_diagnostics_params(
     };
     let path = document.path.clone();
     let version = document.version;
+    crate::server::analysis_panic_seam(&path);
 
     let diagnostics = match state.host.analysis().line_index(&path) {
         Some(index) => state

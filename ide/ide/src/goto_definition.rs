@@ -8,13 +8,14 @@ use std::path::PathBuf;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, SourceFileId, StmtId, TypeId};
-use inference_ast::nodes::{ArgKind, Def, Expr, Location, Stmt, TypeNode};
+use inference_ast::nodes::{ArgKind, Def, Directive, Expr, Location, Stmt, TypeNode, Visibility};
 use inference_ide_db::{FileAnalysis, NodeHit, TextRange};
 use inference_type_checker::type_info::TypeInfoKind;
+use rustc_hash::FxHashSet;
 
 use crate::syntax::{
-    def_is_public, def_name_ident, enclosing_function, find_def_by_name, find_method,
-    imported_module_paths, in_scope_locals, is_call_callee, resolve_qualified_module, text_range,
+    def_is_public, def_name_ident, enclosing_function, find_def_by_name, find_free_def_by_name,
+    find_method, in_scope_locals, is_call_callee, resolve_qualified_module, text_range,
 };
 
 /// A place a definition lives: the file's path, the whole declaration's range,
@@ -34,17 +35,22 @@ pub struct NavigationTarget {
 #[must_use]
 pub(crate) fn goto_definition(file: &FileAnalysis, offset: u32) -> Option<Vec<NavigationTarget>> {
     let entry = file.source_file_id(&[])?;
-    let hit = file.hit_test(entry, offset)?;
+    let hit = file.enclosing_hit(entry, offset)?;
     let NodeId::Ident(ident) = hit.node else {
         return None;
     };
     let grandparent = hit.ancestors.iter().rev().nth(1).copied();
-    let target = match hit.ancestors.last().copied()? {
-        NodeId::Expr(expr) => goto_in_expr(file, entry, &hit, expr, ident, grandparent, offset)?,
-        NodeId::Type(type_id) => goto_in_type(file, entry, type_id, ident)?,
-        NodeId::Def(def) => goto_in_def(file, entry, def, ident)?,
-        NodeId::Stmt(stmt) => goto_in_stmt(file, entry, stmt, ident)?,
-        _ => return None,
+    // An identifier with no ancestors is a `use`-directive segment or item (see
+    // `hit_test`); every definition-tree identifier carries its owning node.
+    let target = match hit.ancestors.last().copied() {
+        Some(NodeId::Expr(expr)) => {
+            goto_in_expr(file, entry, &hit, expr, ident, grandparent, offset)?
+        }
+        Some(NodeId::Type(type_id)) => goto_in_type(file, entry, type_id, ident)?,
+        Some(NodeId::Def(def)) => goto_in_def(file, entry, def, ident)?,
+        Some(NodeId::Stmt(stmt)) => goto_in_stmt(file, entry, stmt, ident)?,
+        None => goto_in_directive(file, entry, ident)?,
+        Some(_) => return None,
     };
     Some(vec![target])
 }
@@ -92,8 +98,8 @@ fn goto_in_expr(
                 return goto_call(file, expr);
             }
             let name = arena.ident_name(ident);
-            if let Some(local) = resolve_local(file, hit, name, offset) {
-                return nav_at_ident(file, entry, arena[local].location, local);
+            if let Some((full, focus)) = resolve_local(file, hit, name, offset) {
+                return nav_at_ident(file, entry, full, focus);
             }
             goto_value_def(file, entry, name)
         }
@@ -132,13 +138,25 @@ fn goto_in_expr(
     }
 }
 
-/// The declaration of a local (param or `let`) named `name` visible at `offset`,
-/// resolved syntactically: params first, then the in-scope `let` binding whose
-/// name matches. Only bindings whose enclosing block encloses the use site are
-/// considered (via [`in_scope_locals`]), so a binding in an already-closed
-/// sibling block does not resolve here. Inference forbids shadowing, so a name
+/// The declaration of a local (param, `let`, or local `const`) named `name`
+/// visible at `offset`, resolved syntactically: params first, then the in-scope
+/// binding whose name matches. Only bindings whose enclosing block encloses the
+/// use site are considered (via [`in_scope_locals`]), so a binding in an
+/// already-closed sibling block does not resolve here, and a `const` declared
+/// after the use is not yet in scope. Inference forbids shadowing, so a name
 /// resolves to at most one declaration; the nearest before the use is returned.
-fn resolve_local(file: &FileAnalysis, hit: &NodeHit, name: &str, offset: u32) -> Option<IdentId> {
+///
+/// Returns the declaration's `(full_range, focus_ident)`: the whole `let` or
+/// `const` statement paired with its name ident, and — for a parameter, which
+/// has no enclosing statement — the parameter ident for both. Using the whole
+/// statement as the full range makes a use-site navigation carry the same
+/// [`NavigationTarget::full_range`] as landing on the declaration itself.
+fn resolve_local(
+    file: &FileAnalysis,
+    hit: &NodeHit,
+    name: &str,
+    offset: u32,
+) -> Option<(Location, IdentId)> {
     let arena = file.arena();
     let function = enclosing_function(arena, hit)?;
     if let Def::Function { args, .. } = &arena[function].kind {
@@ -146,7 +164,7 @@ fn resolve_local(file: &FileAnalysis, hit: &NodeHit, name: &str, offset: u32) ->
             if let ArgKind::Named { name: param, .. } = &arg.kind
                 && arena.ident_name(*param) == name
             {
-                return Some(*param);
+                return Some((arena[*param].location, *param));
             }
         }
     }
@@ -155,11 +173,14 @@ fn resolve_local(file: &FileAnalysis, hit: &NodeHit, name: &str, offset: u32) ->
         .into_iter()
         .filter_map(|stmt| match &arena[stmt].kind {
             Stmt::VarDef { name: declared, .. } if arena.ident_name(*declared) == name => {
-                Some(*declared)
+                Some((arena[stmt].location, *declared))
+            }
+            Stmt::ConstDef(def) if arena.def_name(*def) == name => {
+                Some((arena[*def].location, def_name_ident(arena, *def)))
             }
             _ => None,
         })
-        .max_by_key(|&declared| arena[declared].location.offset_end)
+        .max_by_key(|&(_, declared)| arena[declared].location.offset_end)
 }
 
 /// The definition a call resolves to (free function or method), via the checker's
@@ -170,17 +191,28 @@ fn goto_call(file: &FileAnalysis, callee: ExprId) -> Option<NavigationTarget> {
     let target = file.typed_context().call_target(callee)?;
     let sfid = file.source_file_id(&target.module_path)?;
     let def = match &target.receiver_struct {
+        // `receiver_struct` is `Some` only for a method or associated function, so
+        // resolve it through the struct; `None` means the checker resolved a free
+        // function, so restrict the search to non-method defs (a same-named method
+        // must not hijack it).
         Some(struct_name) => {
             let struct_def = find_def_by_name(arena, sfid, struct_name)?;
             find_method(arena, struct_def, &target.name)?
         }
-        None => find_def_by_name(arena, sfid, &target.name)?,
+        None => find_free_def_by_name(arena, sfid, &target.name)?,
     };
     nav_for_def(file, sfid, def)
 }
 
-/// A top-level definition (function or constant) used as a value: same file
-/// first, then a `pub` definition of a directly-imported module.
+/// A top-level definition (function or constant) used as a bare value: the entry
+/// file first, then the module a selective import binds the name through.
+///
+/// A bare value name is reachable only where the type checker would accept it:
+/// defined in the entry file, or named by a braced import (`use m::{NAME}`). A
+/// plain `use m;` binds only the namespace — a bare `NAME` under it is a type
+/// error — so it is never consulted here. The import's target module may itself
+/// re-export the name (`pub use lib::{NAME}`), so the search follows re-export
+/// directives to the defining file, guarding against re-export cycles.
 fn goto_value_def(
     file: &FileAnalysis,
     entry: SourceFileId,
@@ -190,14 +222,64 @@ fn goto_value_def(
     if let Some(def) = find_def_by_name(arena, entry, name) {
         return nav_for_def(file, entry, def);
     }
-    for module_path in imported_module_paths(arena, entry) {
-        let Some(sfid) = file.source_file_id(&module_path) else {
+    for directive in &arena[entry].directives {
+        let Directive::Use(use_directive) = directive;
+        if !use_directive.braced
+            || !use_directive
+                .imported_types
+                .iter()
+                .any(|&id| arena.ident_name(id) == name)
+        {
+            continue;
+        }
+        let module_path = segment_module_path(arena, &use_directive.segments);
+        let Some(module) = file.source_file_id(&module_path) else {
             continue;
         };
-        if let Some(def) = find_def_by_name(arena, sfid, name)
-            && def_is_public(arena, def)
-        {
+        let mut visited = FxHashSet::default();
+        if let Some((sfid, def)) = resolve_exported_value(file, module, name, &mut visited) {
             return nav_for_def(file, sfid, def);
+        }
+    }
+    None
+}
+
+/// The `pub` definition named `name` that `module` exports, following
+/// `pub use`-re-export chains to the defining file. `visited` breaks re-export
+/// cycles: a module already on the path is not re-entered, so a mutual
+/// `pub use` between two files terminates with `None` instead of recursing
+/// forever.
+fn resolve_exported_value(
+    file: &FileAnalysis,
+    module: SourceFileId,
+    name: &str,
+    visited: &mut FxHashSet<SourceFileId>,
+) -> Option<(SourceFileId, DefId)> {
+    if !visited.insert(module) {
+        return None;
+    }
+    let arena = file.arena();
+    if let Some(def) = find_def_by_name(arena, module, name)
+        && def_is_public(arena, def)
+    {
+        return Some((module, def));
+    }
+    for directive in &arena[module].directives {
+        let Directive::Use(use_directive) = directive;
+        if !matches!(use_directive.vis, Visibility::Public)
+            || !use_directive.braced
+            || !use_directive
+                .imported_types
+                .iter()
+                .any(|&id| arena.ident_name(id) == name)
+        {
+            continue;
+        }
+        let module_path = segment_module_path(arena, &use_directive.segments);
+        if let Some(target) = file.source_file_id(&module_path)
+            && let Some(found) = resolve_exported_value(file, target, name, visited)
+        {
+            return Some(found);
         }
     }
     None
@@ -352,6 +434,12 @@ fn goto_in_def(
     if def_name_ident(arena, def) == ident {
         return nav_for_def(file, entry, def);
     }
+    // A declared type parameter names itself, like every other declaration.
+    if let Def::Function { type_params, .. } = &arena[def].kind
+        && type_params.contains(&ident)
+    {
+        return nav_at_ident(file, entry, arena[ident].location, ident);
+    }
     match &arena[def].kind {
         Def::Function { args, .. } | Def::ExternFunction { args, .. } => {
             for arg in args {
@@ -367,8 +455,65 @@ fn goto_in_def(
             let field = fields.iter().find(|field| field.name == ident)?;
             nav_at_ident(file, entry, arena[field.name].location, field.name)
         }
+        // A variant declaration name resolves to itself.
+        Def::Enum { variants, .. } => {
+            let variant = variants.iter().copied().find(|&variant| variant == ident)?;
+            nav_at_ident(file, entry, arena[variant].location, variant)
+        }
         _ => None,
     }
+}
+
+/// The definition a `use`-directive identifier names: a path segment resolves to
+/// the module file it addresses (`lib` or `geom` in `use lib::geom;`), a braced
+/// item import to that item's `pub` definition in the target module (`add` in
+/// `use arith::{add};`). A `from`-clause module reference names an external
+/// `.wasm` module with no source file, so it does not resolve here.
+fn goto_in_directive(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    ident: IdentId,
+) -> Option<NavigationTarget> {
+    let arena = file.arena();
+    for directive in &arena[entry].directives {
+        let Directive::Use(use_directive) = directive;
+        if let Some(index) = use_directive.segments.iter().position(|&s| s == ident) {
+            let module_path = segment_module_path(arena, &use_directive.segments[..=index]);
+            let sfid = file.source_file_id(&module_path)?;
+            return nav_for_source_file(file, sfid);
+        }
+        if use_directive.imported_types.contains(&ident) {
+            let module_path = segment_module_path(arena, &use_directive.segments);
+            let sfid = file.source_file_id(&module_path)?;
+            let def = find_def_by_name(arena, sfid, arena.ident_name(ident))?;
+            if !def_is_public(arena, def) {
+                return None;
+            }
+            return nav_for_def(file, sfid, def);
+        }
+    }
+    None
+}
+
+/// The source-root-relative module path named by directive path `segments`.
+fn segment_module_path(arena: &AstArena, segments: &[IdentId]) -> Vec<String> {
+    segments
+        .iter()
+        .map(|&segment| arena.ident_name(segment).to_string())
+        .collect()
+}
+
+/// Navigates to the top of a module file: its whole span, focused at its start.
+fn nav_for_source_file(file: &FileAnalysis, sfid: SourceFileId) -> Option<NavigationTarget> {
+    let full = file.arena()[sfid].location;
+    Some(NavigationTarget {
+        path: path_of(file, sfid)?,
+        full_range: text_range(full),
+        focus_range: TextRange {
+            start: full.offset_start,
+            end: full.offset_start,
+        },
+    })
 }
 
 fn goto_in_stmt(
@@ -391,7 +536,7 @@ mod tests {
     #![allow(clippy::cast_possible_truncation)]
 
     use crate::NavigationTarget;
-    use crate::test_utils::{at, module_path, nth, single, with_lib};
+    use crate::test_utils::{at, module_path, nested_module_path, nth, project, single, with_lib};
 
     fn goto(source: &str, offset: u32) -> Option<Vec<NavigationTarget>> {
         let (mut host, path) = single(source);
@@ -579,5 +724,271 @@ return z + inner;\n\
         let target = targets.remove(0);
         assert_eq!(target.path, module_path("lib"));
         assert_eq!(target.focus_range.start, at(lib, "helper"));
+    }
+
+    // --- caret at the exclusive end of an identifier (issue #244) ---
+
+    #[test]
+    fn goto_at_the_word_end_of_a_call_reaches_the_definition() {
+        // The caret sits at the callee name's exclusive end (just before `(`),
+        // where a double-click leaves it; goto must still resolve the function.
+        let source = "fn produce() -> i32 { return 7; }\n\
+fn caller() -> i32 { return produce(); }";
+        let word_end = at(source, "produce();") + "produce".len() as u32;
+        let target = one(source, word_end);
+        assert_eq!(target.focus_range.start, at(source, "produce"));
+    }
+
+    #[test]
+    fn goto_at_the_word_end_of_a_local_use_reaches_its_declaration() {
+        let source = "fn f() -> i32 { let value: i32 = 1; return value; }";
+        let word_end = at(source, "value; }") + "value".len() as u32;
+        let target = one(source, word_end);
+        assert_eq!(target.focus_range.start, at(source, "value: i32"));
+    }
+
+    // --- goto on a `use` directive (issue #244) ---
+
+    #[test]
+    fn goto_plain_use_segment_reaches_the_module_file() {
+        let entry = "use lib;\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let target = host
+            .analysis()
+            .goto_definition(&path, at(entry, "lib"))
+            .expect("a target for the use segment")
+            .remove(0);
+        assert_eq!(target.path, module_path("lib"));
+        assert_eq!(target.focus_range.start, 0, "focus is the top of the module file");
+    }
+
+    #[test]
+    fn goto_braced_item_import_reaches_its_definition() {
+        let entry = "use lib::{helper};\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let target = host
+            .analysis()
+            .goto_definition(&path, at(entry, "helper"))
+            .expect("a target for the braced item")
+            .remove(0);
+        assert_eq!(target.path, module_path("lib"));
+        assert_eq!(target.focus_range.start, at(lib, "helper"));
+    }
+
+    #[test]
+    fn goto_braced_item_import_that_is_private_or_absent_does_not_resolve() {
+        // A braced item that names no `pub` definition in the target is not a
+        // reachable import, so goto declines rather than teleporting into it.
+        let entry = "use lib::{secret, ghost};\nfn main() -> i32 { return 0; }";
+        let lib = "fn secret() -> i32 { return 1; }";
+        let (mut host, path) = with_lib(entry, lib);
+        assert!(
+            host.analysis()
+                .goto_definition(&path, at(entry, "secret"))
+                .is_none(),
+            "a private item is not importable"
+        );
+        assert!(
+            host.analysis()
+                .goto_definition(&path, at(entry, "ghost"))
+                .is_none(),
+            "an absent item resolves to nothing"
+        );
+    }
+
+    #[test]
+    fn goto_nested_use_segments_reach_their_modules() {
+        let entry = "use lib::geom;\nfn main() -> i32 { return 0; }";
+        let geom = "pub struct Point { x: i32; }";
+        let (mut host, path) = project(&[(&["main"], entry), (&["lib", "geom"], geom)]);
+        // The trailing `geom` segment names lib/geom.inf.
+        let target = host
+            .analysis()
+            .goto_definition(&path, at(entry, "geom"))
+            .expect("a target for the nested segment")
+            .remove(0);
+        assert_eq!(target.path, nested_module_path(&["lib", "geom"]));
+        assert_eq!(target.focus_range.start, 0);
+        // The head `lib` names a directory with no file of its own here, so goto
+        // on it declines rather than guessing.
+        assert!(
+            host.analysis()
+                .goto_definition(&path, at(entry, "lib"))
+                .is_none(),
+            "a directory-only namespace segment has no module file"
+        );
+    }
+
+    // --- declared type parameter resolves to itself (issue #244) ---
+
+    #[test]
+    fn goto_type_parameter_declaration_reaches_itself() {
+        let source = "fn id T'(x: i32) -> i32 { return x; }";
+        let target = one(source, at(source, "T'"));
+        assert_eq!(target.focus_range.start, at(source, "T'"));
+    }
+
+    // --- enum variant declaration resolves to itself (issue #244) ---
+
+    #[test]
+    fn goto_enum_variant_declaration_reaches_itself() {
+        let source = "enum Color { Red, Green }\nfn f() -> i32 { return 0; }";
+        let target = one(source, at(source, "Red"));
+        assert_eq!(target.focus_range.start, at(source, "Red"));
+    }
+
+    // --- function-local consts (issue #244) ---
+
+    #[test]
+    fn goto_local_const_use_after_declaration_reaches_the_const() {
+        let source = "fn f() -> i32 { const LIMIT: i32 = 8; return LIMIT; }";
+        let target = one(source, at(source, "return LIMIT") + "return ".len() as u32);
+        assert_eq!(target.focus_range.start, at(source, "LIMIT: i32"));
+    }
+
+    #[test]
+    fn goto_local_const_use_before_declaration_does_not_resolve() {
+        // Statement-order scoping: a const declared after the use is not yet in
+        // scope, matching the type checker, so goto must not resolve it.
+        let source = "fn f() -> i32 { let x: i32 = MAX; const MAX: i32 = 9; return x; }";
+        assert!(
+            goto(source, at(source, "= MAX") + "= ".len() as u32).is_none(),
+            "a const used before its declaration is out of scope"
+        );
+    }
+
+    #[test]
+    fn goto_local_const_in_a_nested_block_resolves_within_it() {
+        let source =
+            "fn f(c: bool) -> i32 { if c { const INNER: i32 = 3; return INNER; } return 0; }";
+        let target = one(source, at(source, "return INNER") + "return ".len() as u32);
+        assert_eq!(target.focus_range.start, at(source, "INNER: i32"));
+    }
+
+    #[test]
+    fn goto_local_const_from_another_function_does_not_resolve() {
+        // A local const is visible only within its own function.
+        let source = "fn a() -> i32 { const K: i32 = 1; return K; }\n\
+fn b() -> i32 { return K; }";
+        let use_in_b = nth(source, "return K", 1) + "return ".len() as u32;
+        assert!(
+            goto(source, use_in_b).is_none(),
+            "a local const is invisible outside its function"
+        );
+    }
+
+    // --- checker-agreeing resolution (issue #245) ---
+
+    // A struct method and a free function share the name `get`; the call
+    // `get()` resolves (the checker records `receiver_struct=None`) to the free
+    // function, whose declaration has empty parentheses.
+    const FREE_OVER_METHOD: &str =
+        "struct S { v: i32; fn get(self) -> i32 { return self.v; } }\n\
+fn get() -> i32 { return 7; }\n\
+fn caller() -> i32 { return get(); }";
+
+    #[test]
+    fn goto_free_call_over_a_same_named_method_reaches_the_free_fn() {
+        // Pre-fix the by-name search walked struct methods too and returned
+        // `S::get` (which precedes the free `get` in the pre-order flatten).
+        let target = one(FREE_OVER_METHOD, at(FREE_OVER_METHOD, "get();"));
+        assert_eq!(
+            target.focus_range.start,
+            at(FREE_OVER_METHOD, "fn get() -> i32") + "fn ".len() as u32,
+            "the free function, not the same-named method"
+        );
+    }
+
+    #[test]
+    fn goto_bare_value_resolves_only_through_the_braced_import_that_names_it() {
+        // Both modules export `MAX`; the bare `MAX` is imported from `other`, so
+        // goto must land there — never in `lib` merely because a plain `use lib;`
+        // precedes the braced import in source order.
+        let entry = "use lib;\nuse other::{MAX};\nfn main() -> i32 { return MAX; }";
+        let lib = "pub const MAX: i32 = 1;";
+        let other = "pub const MAX: i32 = 2;";
+        let (mut host, path) = project(&[
+            (&["main"], entry),
+            (&["lib"], lib),
+            (&["other"], other),
+        ]);
+        let target = host
+            .analysis()
+            .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
+            .expect("the imported constant resolves")
+            .remove(0);
+        assert_eq!(target.path, module_path("other"));
+        assert_eq!(target.focus_range.start, at(other, "MAX"));
+    }
+
+    #[test]
+    fn goto_bare_value_never_imported_under_a_plain_use_does_not_resolve() {
+        // A plain `use lib;` binds only the namespace, so a bare `MAX` is a type
+        // error; goto must decline rather than teleport into `lib`.
+        let entry = "use lib;\nfn main() -> i32 { return MAX; }";
+        let lib = "pub const MAX: i32 = 1;";
+        let (mut host, path) = with_lib(entry, lib);
+        assert!(
+            host.analysis()
+                .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
+                .is_none(),
+            "a bare name a plain import never bound does not resolve"
+        );
+    }
+
+    #[test]
+    fn goto_bare_value_through_a_pub_use_reexport_reaches_the_origin() {
+        // `mid` re-exports `MAX` from `lib` with `pub use`; the entry imports it
+        // from `mid`. goto must follow the re-export to `lib`, where it is defined.
+        let entry = "use mid::{MAX};\nfn main() -> i32 { return MAX; }";
+        let mid = "pub use lib::{MAX};";
+        let lib = "pub const MAX: i32 = 99;";
+        let (mut host, path) = project(&[
+            (&["main"], entry),
+            (&["mid"], mid),
+            (&["lib"], lib),
+        ]);
+        let target = host
+            .analysis()
+            .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
+            .expect("the re-exported constant resolves to its origin")
+            .remove(0);
+        assert_eq!(target.path, module_path("lib"));
+        assert_eq!(target.focus_range.start, at(lib, "MAX"));
+    }
+
+    #[test]
+    fn goto_bare_value_through_a_reexport_cycle_terminates_with_none() {
+        // `a` and `b` re-export `MAX` from each other and neither defines it. The
+        // cycle guard must make goto decline rather than recurse forever.
+        let entry = "use a::{MAX};\nfn main() -> i32 { return MAX; }";
+        let a = "pub use b::{MAX};";
+        let b = "pub use a::{MAX};";
+        let (mut host, path) =
+            project(&[(&["main"], entry), (&["a"], a), (&["b"], b)]);
+        assert!(
+            host.analysis()
+                .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
+                .is_none(),
+            "a re-export cycle with no definition resolves to nothing"
+        );
+    }
+
+    #[test]
+    fn goto_local_use_and_declaration_agree_on_full_range() {
+        // The use-site and the declaration-site navigate to the same target, so
+        // their `full_range` (the whole `let` statement) must match; pre-fix the
+        // use-site returned only the ident as its full range.
+        let source = "fn f() -> i32 { let value: i32 = 1; return value; }";
+        let use_site = one(source, at(source, "return value") + "return ".len() as u32);
+        let decl_site = one(source, at(source, "value: i32"));
+        assert_eq!(use_site.full_range, decl_site.full_range);
+        assert_eq!(use_site.focus_range, decl_site.focus_range);
+        assert_ne!(
+            use_site.full_range, use_site.focus_range,
+            "the full range spans the whole let statement, not just the ident"
+        );
     }
 }
