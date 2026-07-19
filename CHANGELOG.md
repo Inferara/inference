@@ -738,6 +738,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
 - ide: the resilient project walk (`inference::load_project_resilient`) no longer runs the unreachable-file warning scan at all — `ResilientProjectParse::warnings` is documented always-empty. The scan recursively walked and canonicalized every `.inf` under the source root on every keystroke (and, for a document at a volume root like `/main.inf`, the entire disk) to compute warnings the IDE discards. The fail-fast compiler path (`parse_project`) keeps the scan — it runs once per build, not once per keystroke — so compiler behavior is unchanged ([#33])
 - Extern-import diagnostics (`use { … } from <module>;` binding errors such as an undeclared extern import or an ambiguous extern module) reported from an *imported* file now carry that file's module-path label instead of rendering as if they were in the entry file. Locations are per-file-local, so the missing label made these errors point at wrong positions in the entry file — visible in both the aggregated compiler message and the structured diagnostics the LSP consumes ([#33])
+- tests: `core/inference` project tests no longer collide on their temp directory under parallel load. The `TempProject` test helper named directories `inference-project-<tag>-<pid>-<nanos>`; two tests sharing a tag in one process (e.g. the two `self-import` tests) could land in the same directory when the coarse system clock returned equal nanoseconds, making each see the other's `main.inf` and spuriously fail the "no duplicate `main` module" assertion. The suffix now appends a process-wide `AtomicU64` sequence counter, so same-tag directories are always distinct regardless of clock resolution ([#270])
 - lsp: `file:` URI-to-path mapping now normalizes so one on-disk file interns under one spelling, closing a set of file-identity edge cases that keyed separate documents or reached outside the local disk ([#248])
   - Dot segments (`.` / `..`) are removed lexically after percent-decoding, so `file:///a/../b.inf` and `file:///b.inf` name one document instead of two (stale/duplicate analyses). Normalization is purely textual — a `..` crossing a symlink is resolved by name, not by following the link
   - Path-form UNC paths (empty authority with a `//` path, e.g. `file:////server/share/x.inf`) are rejected like a remote authority instead of decoding to `//server/…`, which is SMB network I/O on Windows
@@ -962,6 +963,7 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#270]: https://github.com/Inferara/inference/issues/270
 [#248]: https://github.com/Inferara/inference/issues/248
 [#246]: https://github.com/Inferara/inference/issues/246
 [#244]: https://github.com/Inferara/inference/issues/244

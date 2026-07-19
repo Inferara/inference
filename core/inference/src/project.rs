@@ -970,14 +970,21 @@ mod tests {
         root: PathBuf,
     }
 
+    /// Monotonic within the process, so two `TempProject::new` calls sharing a
+    /// `tag` — even in the same coarse-clock nanosecond under parallel load —
+    /// never resolve to the same directory. The clock/pid components stay only
+    /// to keep names human-readable and distinct across processes ([#270]).
+    static TEMP_PROJECT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     impl TempProject {
         fn new(tag: &str) -> Self {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
+            let seq = TEMP_PROJECT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "inference-project-{tag}-{}-{nanos}",
+                "inference-project-{tag}-{}-{nanos}-{seq}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&root).expect("create temp project root");
@@ -1009,6 +1016,37 @@ mod tests {
             .source_files()
             .map(|sf| sf.module_path.clone())
             .collect()
+    }
+
+    /// Regression guard for [#270]: two `TempProject::new` calls sharing a tag
+    /// must resolve to different directories even when the coarse system clock
+    /// reports the same nanosecond. The process-wide sequence counter makes this
+    /// deterministic, so the assertion cannot flake. The kept-alive vector also
+    /// proves the roots do not alias on disk (each `create_dir_all` succeeds and
+    /// a later `TempProject` never observes an earlier one's `main.inf`).
+    #[test]
+    fn same_tag_yields_distinct_temp_dirs() {
+        use std::collections::HashSet;
+
+        let projects: Vec<TempProject> = (0..256).map(|_| TempProject::new("collision")).collect();
+
+        let roots: HashSet<&Path> = projects.iter().map(|p| p.root.as_path()).collect();
+        assert_eq!(
+            roots.len(),
+            projects.len(),
+            "same-tag temp dirs must all be distinct"
+        );
+
+        // Write a marker into every root, then confirm each root sees only its
+        // own marker — direct evidence the directories never alias.
+        for (i, project) in projects.iter().enumerate() {
+            project.write("main.inf", &format!("pub fn main() -> i32 {{ return {i}; }}"));
+        }
+        for (i, project) in projects.iter().enumerate() {
+            let contents = std::fs::read_to_string(project.root.join("main.inf"))
+                .expect("marker file readable");
+            assert_eq!(contents, format!("pub fn main() -> i32 {{ return {i}; }}"));
+        }
     }
 
     #[test]
