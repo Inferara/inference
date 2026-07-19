@@ -280,17 +280,43 @@ pub fn parse_project(entry: &Path) -> anyhow::Result<ProjectParse> {
 /// none, matching how a bare filename resolves relative to the working
 /// directory). Unreachable-file warnings and missing-import suggestions are
 /// computed against the filesystem, matching [`parse_project`].
+///
+/// Use [`load_project_resilient_with_root`] to resolve imports against a source
+/// root other than `entry`'s parent — the IDE does this to analyze a non-entry
+/// file opened standalone against its project's real source root.
 pub fn load_project_resilient(entry: &Path, loader: &dyn FileLoader) -> ResilientProjectParse {
     let src_root = entry
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
 
+    load_project_resilient_with_root(entry, &src_root, loader)
+}
+
+/// Like [`load_project_resilient`], but resolves path-form imports against an
+/// explicit `src_root` rather than `entry`'s parent directory.
+///
+/// Import paths are source-root-relative for every file in a closure — the
+/// compiler compiles one entry and resolves every `use a::b;` against that one
+/// root. When an editor opens a non-entry file on its own, resolving its imports
+/// against the opened file's own directory probes the wrong locations (e.g.
+/// `<root>/lib/lib/b.inf` for a `use lib::b;` written inside `<root>/lib/a.inf`),
+/// producing false missing-import diagnostics on a program the compiler accepts.
+/// Passing the project's real source root — derived from the nearest manifest, or
+/// reused from an already-analyzed entry's closure — makes the IDE resolve
+/// exactly as the compiler would. `entry` stays the file being analyzed; only the
+/// root every path-form `use` resolves against changes. When `src_root` is
+/// `entry`'s parent directory this is identical to [`load_project_resilient`].
+pub fn load_project_resilient_with_root(
+    entry: &Path,
+    src_root: &Path,
+    loader: &dyn FileLoader,
+) -> ResilientProjectParse {
     let WalkOutcome {
         arena,
         files,
         problems,
-    } = resolve_closure(entry, &src_root, loader, true);
+    } = resolve_closure(entry, src_root, loader, true);
 
     let mut parse_errors = Vec::new();
     let mut import_problems = Vec::new();

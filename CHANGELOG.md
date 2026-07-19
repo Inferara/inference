@@ -820,6 +820,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A reachable `use` target that exists on disk yet fails `read_to_string` (invalid UTF-8, a lock, a permission error) left no trace in the importing file's `FileAnalysis`: it was neither a loaded closure file nor a missing import, so no later `didOpen`/`didChange` of that file could ever evict the importing entry's symbol-less analysis
   - The resilient walk now surfaces read-failed paths (new `ResilientProjectParse::read_failures`), and `FileAnalysis` folds them into its invalidation closure, so making the file readable re-analyzes every open entry that imports it — the non-entry twin of the existing unreadable-entry recovery
   - The fail-fast compiler path (`parse_project`) is unchanged: it still aborts on the first read error
+- Fix false missing-import diagnostics when a non-entry file of a multi-directory project is opened standalone ([#243])
+  - Path-form imports resolve relative to a project's single source root, but `RootDatabase` analyzed each open file against its own directory, so opening `src/lib/a.inf` resolved its `use lib::b;` to the nonexistent `src/lib/lib/b.inf` — a false "file not found" squiggle (plus missing symbols) on a file the compiler accepts
+  - Each open file's analysis source root is now resolved in three tiers: the nearest ancestor `Inference.toml` manifest's source root (`<manifest_dir>/src`, matching how `infs` compiles `src/main.inf`); failing that, the source root of an already-analyzed entry whose import closure contains the file; failing that, the file's own directory (the previous behavior)
+  - New `inference::manifest_source_root` (module `inference::manifest`) performs the manifest walk-up, and `inference::load_project_resilient_with_root` resolves a closure against an explicit source root; invalidation is unchanged — a `didChange` in another directory of the same project still evicts and recomputes correctly under the new root
+  - v1 limitation: there is no filesystem watch, so a manifest created or edited after a file was opened is not observed until that file's analysis is recomputed for another reason
 - Add structured type-check diagnostics: `inference_type_checker::check_with_diagnostics` (re-exported as `inference::type_check_with_diagnostics`) ([#33])
   - Returns a `TypeCheckOutcome { typed_context, errors: Vec<TypeCheckDiagnostic> }` instead of aggregating errors into one `anyhow::Error` string
   - Lossless: the returned `TypedContext` is fully indexed (symbol table assigned, canonical-key indexes built) even when errors are present, so tooling can still query `lookup_struct`/`lookup_enum`/`call_target`/`get_node_typeinfo` for the parts of the program that did check
@@ -943,6 +948,8 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#242]: https://github.com/Inferara/inference/issues/242
+[#243]: https://github.com/Inferara/inference/issues/243
 [#239]: https://github.com/Inferara/inference/pull/239
 [#255]: https://github.com/Inferara/inference/issues/255
 [#246]: https://github.com/Inferara/inference/issues/246

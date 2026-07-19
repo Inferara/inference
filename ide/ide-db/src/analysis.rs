@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use inference::{FileParseErrors, ImportProblem, LoadedFile, load_project_resilient};
+use inference::{FileParseErrors, ImportProblem, LoadedFile, load_project_resilient_with_root};
 use inference_analysis::errors::{LabeledDiagnostic, Severity};
 use inference_analysis::rules::all_rules;
 use inference_ast::arena::AstArena;
@@ -93,6 +93,10 @@ pub struct FileAnalysis {
     /// Always includes the entry path itself, even when the entry could not be
     /// read, so any event touching the entry can invalidate this analysis.
     closure_paths: FxHashSet<PathBuf>,
+    /// The source root this analysis resolved imports against. Recorded so the
+    /// database can reuse it for another file this closure covers (the closure
+    /// fallback in `RootDatabase`'s source-root resolution).
+    src_root: PathBuf,
     /// Whether any import went unresolved, so a newly-opened file might fix it.
     had_missing_import: bool,
     /// Monotonic stamp identifying this computation, so tests (and callers) can
@@ -101,15 +105,21 @@ pub struct FileAnalysis {
 }
 
 impl FileAnalysis {
-    /// Analyzes `entry` as its own project entry, reading its import closure
-    /// through `vfs` (overlay first, then disk).
+    /// Analyzes `entry` as its own project entry, resolving its import closure
+    /// against `src_root` and reading it through `vfs` (overlay first, then disk).
+    ///
+    /// `src_root` is the directory every path-form `use` in the closure resolves
+    /// against — the project's real source root, not necessarily `entry`'s parent
+    /// directory — so a non-entry file opened standalone resolves its imports
+    /// exactly as the compiler would. The database derives it (see
+    /// [`RootDatabase`](crate::RootDatabase)) and records it on the result.
     ///
     /// `generation` stamps the result; the database bumps it on every compute so
     /// a recompute is observable.
     #[must_use = "the computed analysis must be stored to be of any use"]
-    pub(crate) fn compute(vfs: &Vfs, entry: &Path, generation: u64) -> Self {
+    pub(crate) fn compute(vfs: &Vfs, entry: &Path, src_root: &Path, generation: u64) -> Self {
         let loader = VfsLoader::new(vfs);
-        let parse = load_project_resilient(entry, &loader);
+        let parse = load_project_resilient_with_root(entry, src_root, &loader);
 
         // The entry is always part of its own closure, even when its read failed
         // and the resilient walk recorded no `LoadedFile` for it (an unreadable
@@ -157,6 +167,7 @@ impl FileAnalysis {
             findings,
             files,
             closure_paths,
+            src_root: src_root.to_path_buf(),
             had_missing_import,
             generation,
         }
@@ -249,6 +260,12 @@ impl FileAnalysis {
     /// Whether `path` is one of the files in this analysis's closure.
     pub(crate) fn closure_contains(&self, path: &Path) -> bool {
         self.closure_paths.contains(path)
+    }
+
+    /// The source root this analysis resolved its imports against, so the
+    /// database can reuse it for another file this closure covers.
+    pub(crate) fn source_root(&self) -> &Path {
+        &self.src_root
     }
 
     /// Whether any import in this analysis went unresolved.
