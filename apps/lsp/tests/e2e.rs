@@ -329,6 +329,28 @@ fn goto_definition_reaches_a_same_file_function() {
     client.shutdown_exit_ok();
 }
 
+#[test]
+fn goto_definition_at_the_word_end_of_a_call_reaches_the_definition() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The caret is at the exclusive end of the callee name (just before `(`),
+    // where a double-click or just-finished keystroke leaves it. The raw offset
+    // lands on the call expression, not the identifier, so this exercises the
+    // shared one-byte-back fallback over the wire (issue #244).
+    let source = "fn caller() -> i32 { return produce(); }\nfn produce() -> i32 { return 7; }";
+    let (_dir, uri) = fixture("goto-word-end", source);
+    client.did_open(&uri, source, 1);
+
+    let response = definition_request(&mut client, &uri, pos_after(source, "produce"));
+    let location = &response["result"];
+    assert_eq!(location["uri"], json!(uri), "same-file target");
+    // The call's word-end resolves to the callee definition, not the call site.
+    assert_eq!(location["range"]["start"], pos_at_nth(source, "produce", 1));
+
+    client.shutdown_exit_ok();
+}
+
 // --- 9. cross-file: import a sibling on disk ---------------------------------
 
 #[test]

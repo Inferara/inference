@@ -743,6 +743,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `<module>::` completion context: after a plain-import namespace qualifier, that module's public defs are offered by their bare name — the position where a bare member name is what compiles. An item import binds no namespace, so its module is not offered as a `::` qualifier, and a `::` position never falls back to the keyword/local list
   - Member completions after `.` on a struct defined in another module now drop private methods (the checker rejects `receiver.private_method()` across modules); a same-file receiver keeps its private methods, which are callable there
   - Completions are suppressed inside comments and string literals, decided by the lexer's token spans so quote boundaries are exact, rather than popping the general list into prose an editor auto-triggered on
+- ide/lsp: goto-definition and hover cover five hit-testing gaps, so positions that previously returned nothing now resolve ([#244])
+  - A caret at an identifier's exclusive end — where a double-click or a just-finished keystroke leaves it — now resolves the identifier. `hit_test` covers `start <= offset < end`, so the end position lands on the enclosing call or statement; goto, hover, and the completion locals now share one identifier-biased one-byte-back fallback (`inference_ide_db::enclosing_hit`) that still refuses to pull a caret past a `}` back into the closing definition
+  - `use` directives are hit-testable: goto/hover on any path segment resolves to the module file it names (`lib`, then `lib::geom`), and on a braced item import resolves to that item's public definition in the target module. A `from`-clause external module reference names no source file, so it does not resolve
+  - A declared function type parameter (`T'`) resolves to itself under goto/hover instead of falling to the whole function definition
+  - An enum variant *declaration* name resolves to itself, like every other declaration name (goto/hover previously covered only function arguments and struct fields)
+  - A function-local `const` reference now resolves to its declaration, respecting lexical scope: it is visible only after its declaration point and only within its own function/block, matching the type checker's statement-order registration (a const used before its declaration, or referenced from another function, does not resolve)
 - VS Code extension: switching or updating the toolchain now restarts a running language server ("Select Toolchain Version", "Update Toolchain", and "Install Toolchain" all restart it on success), so diagnostics/hover/goto immediately reflect the new default toolchain. Previously these commands only ensured the server was started — a no-op while one was running — leaving the old toolchain's `inference-lsp` process serving stale results until a manual "Restart Language Server" or window reload. Restart is a strict superset of the old behavior: the stop phase no-ops when the server is not running ([#250])
 - lsp: an unwinding panic in the analysis stack (a `todo!`/`unwrap` in the type-checker or analysis passes, e.g. a named constant used as an array size) no longer kills the whole server session. The message loop now wraps each request and notification in a panic boundary (`std::panic::catch_unwind`): a panicking request is answered with a JSON-RPC `InternalError` carrying its original id, and a panicking notification publishes nothing and rebuilds the analysis host from the tracked open documents so later queries start from consistent state. Every other open document keeps working, and one bad file can no longer crash-loop the server into a permanent outage. Genuinely unrecoverable failures (stack overflow) still abort as before, and the panic message still goes only to stderr, never the stdout protocol channel ([#241])
 
@@ -948,6 +954,8 @@ Initial tagged release.
 [#227]: https://github.com/Inferara/inference/issues/227
 [#217]: https://github.com/Inferara/inference/issues/217
 [#33]: https://github.com/Inferara/inference/issues/33
+[#246]: https://github.com/Inferara/inference/issues/246
+[#244]: https://github.com/Inferara/inference/issues/244
 [#242]: https://github.com/Inferara/inference/issues/242
 [#243]: https://github.com/Inferara/inference/issues/243
 [#239]: https://github.com/Inferara/inference/pull/239
