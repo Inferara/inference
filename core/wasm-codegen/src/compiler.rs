@@ -402,6 +402,34 @@ pub(crate) struct Compiler {
     bounds_check_scratch_local: Option<u32>,
 }
 
+/// The nested blocks a statement introduces, classified by how a frame-layout
+/// pass must combine allocations discovered inside them.
+///
+/// This is the shape produced by [`Compiler::nested_blocks`] — the single place
+/// that knows which statement kinds carry sub-blocks. Every pass that walks a
+/// function body (local discovery, frame-slot collection, dynamic-index
+/// detection) descends through that classifier, so a newly added block-bearing
+/// statement kind is taught to the compiler exactly once and can never be
+/// handled by one pass but missed by another. That divergence is the
+/// frame-layout corruption hazard behind issue #167: an array seen by the
+/// slot-collection pass but not the local-numbering pass (or vice versa)
+/// silently mislays the frame.
+enum NestedBlocks {
+    /// The statement introduces no nested block.
+    None,
+    /// A single nested block whose allocations accumulate into the enclosing
+    /// frame — a bare `{ … }` block or a `loop` body.
+    Sequential(BlockId),
+    /// The mutually-exclusive arms of an `if`. Because at most one arm executes,
+    /// a frame-layout pass may overlay the arms in the same region so that only
+    /// the largest arm counts toward the enclosing frame; a local-numbering
+    /// pass, by contrast, still gives every arm distinct WASM locals.
+    Alternatives {
+        then_block: BlockId,
+        else_block: Option<BlockId>,
+    },
+}
+
 impl Compiler {
     /// Creates a new compiler instance for building a WASM module.
     pub(crate) fn new(module_name: &str) -> Self {
@@ -1339,7 +1367,69 @@ impl Compiler {
         Ok(())
     }
 
+    /// Classifies the nested blocks a statement introduces.
+    ///
+    /// `Block`, `Loop`, and `If` are the only statement kinds that carry
+    /// sub-blocks today, and this is the one match that names them. When a
+    /// future block-bearing statement kind is added (e.g. `match` arms),
+    /// extending it here updates every function-body walker at once — see
+    /// [`NestedBlocks`].
+    fn nested_blocks(stmt: &Stmt) -> NestedBlocks {
+        match stmt {
+            Stmt::Block(inner) => NestedBlocks::Sequential(*inner),
+            Stmt::Loop { body, .. } => NestedBlocks::Sequential(*body),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => NestedBlocks::Alternatives {
+                then_block: *then_block,
+                else_block: *else_block,
+            },
+            _ => NestedBlocks::None,
+        }
+    }
+
+    /// Visits every statement in `block_id` and its nested blocks in traversal
+    /// order (each statement before its children; `if` arms in `then`/`else`
+    /// order), invoking `visit` on each.
+    ///
+    /// Descent is driven entirely by [`Self::nested_blocks`], so this walker
+    /// enumerates exactly the statements every other body pass sees. It is a
+    /// pure enumeration: the arms of an `if` are visited in sequence like any
+    /// other block, so it fits passes whose per-statement state is monotonic
+    /// (local numbering, dynamic-index detection). A pass that must treat the
+    /// arms specially — overlaying their frame slots — drives
+    /// [`Self::nested_blocks`] directly instead; see
+    /// [`Self::collect_compound_slots`].
+    fn walk_statements(
+        arena: &AstArena,
+        block_id: BlockId,
+        visit: &mut impl FnMut(&AstArena, StmtId),
+    ) {
+        for &stmt_id in &arena[block_id].stmts {
+            visit(arena, stmt_id);
+            match Self::nested_blocks(&arena[stmt_id].kind) {
+                NestedBlocks::None => {}
+                NestedBlocks::Sequential(block) => Self::walk_statements(arena, block, visit),
+                NestedBlocks::Alternatives {
+                    then_block,
+                    else_block,
+                } => {
+                    Self::walk_statements(arena, then_block, visit);
+                    if let Some(else_block) = else_block {
+                        Self::walk_statements(arena, else_block, visit);
+                    }
+                }
+            }
+        }
+    }
+
     /// Pre-scans the function body to discover all local variable declarations.
+    ///
+    /// Each declaration is assigned the next monotonically increasing WASM local
+    /// index; the arms of an `if` do not reuse indices, so the pure enumeration
+    /// of [`Self::walk_statements`] reproduces the intended numbering directly.
     fn pre_scan_locals(
         arena: &AstArena,
         block_id: BlockId,
@@ -1347,8 +1437,7 @@ impl Compiler {
         locals_map: &mut FxHashMap<String, (u32, ValType)>,
         local_idx: &mut u32,
     ) {
-        let block = &arena[block_id];
-        for &stmt_id in &block.stmts {
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
             match &arena[stmt_id].kind {
                 Stmt::ConstDef(const_def_id) => {
                     if let Def::Constant { name, .. } = &arena[*const_def_id].kind {
@@ -1392,25 +1481,9 @@ impl Compiler {
                     );
                     *local_idx += 1;
                 }
-                Stmt::Block(inner_block_id) => {
-                    Self::pre_scan_locals(arena, *inner_block_id, ctx, locals_map, local_idx);
-                }
-                Stmt::If {
-                    then_block,
-                    else_block,
-                    ..
-                } => {
-                    Self::pre_scan_locals(arena, *then_block, ctx, locals_map, local_idx);
-                    if let Some(else_id) = else_block {
-                        Self::pre_scan_locals(arena, *else_id, ctx, locals_map, local_idx);
-                    }
-                }
-                Stmt::Loop { body, .. } => {
-                    Self::pre_scan_locals(arena, *body, ctx, locals_map, local_idx);
-                }
                 _ => {}
             }
-        }
+        });
     }
 
     /// Returns `true` if the function body contains at least one *dynamic* array
@@ -1424,13 +1497,19 @@ impl Compiler {
     /// build, while a dynamic index — even through an immutable-`self` method
     /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
     ///
-    /// The walk mirrors [`Self::pre_scan_locals`]' block descent (regular,
-    /// `if`/`else`, `loop`, and non-det blocks all flow through `Stmt::Block`)
-    /// and additionally descends into every sub-expression so nested forms such
-    /// as `m[i][j]`, `arr[idx].x`, and indices inside calls are not missed.
+    /// Block descent is delegated to [`Self::walk_statements`] so that this pass
+    /// visits exactly the same statements as local discovery and frame-slot
+    /// collection; the per-statement closure only inspects each statement's own
+    /// sub-expressions (including `if`/`loop` conditions), descending into them
+    /// so nested forms such as `m[i][j]`, `arr[idx].x`, and indices inside calls
+    /// are not missed. The closure short-circuits once a dynamic index is found.
     fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
-        arena[block_id].stmts.iter().any(|&stmt_id| {
-            match &arena[stmt_id].kind {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
                 Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
                     Self::expr_has_dynamic_array_index(arena, *e)
                 }
@@ -1441,27 +1520,16 @@ impl Compiler {
                 Stmt::VarDef { value, .. } => value
                     .as_ref()
                     .is_some_and(|&v| Self::expr_has_dynamic_array_index(arena, v)),
-                Stmt::Block(inner) => Self::body_has_dynamic_array_index(arena, *inner),
-                Stmt::If {
-                    condition,
-                    then_block,
-                    else_block,
-                } => {
+                Stmt::If { condition, .. } => {
                     Self::expr_has_dynamic_array_index(arena, *condition)
-                        || Self::body_has_dynamic_array_index(arena, *then_block)
-                        || else_block
-                            .as_ref()
-                            .is_some_and(|&e| Self::body_has_dynamic_array_index(arena, e))
                 }
-                Stmt::Loop { condition, body } => {
-                    condition
-                        .as_ref()
-                        .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c))
-                        || Self::body_has_dynamic_array_index(arena, *body)
-                }
-                Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
-            }
-        })
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c)),
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+            };
+        });
+        found
     }
 
     /// Recursively reports whether `expr_id` (or any sub-expression) is an
@@ -1750,6 +1818,14 @@ impl Compiler {
     ///
     /// Enum types are intentionally excluded — they are pure i32 scalars with no
     /// linear memory footprint, so they do not need frame slots.
+    ///
+    /// Block descent is shared with the other body passes through
+    /// [`Self::nested_blocks`]; only the frame-offset accounting is specific to
+    /// this pass, so it cannot be expressed by the pure enumeration of
+    /// [`Self::walk_statements`]. Sequential blocks accumulate their allocations
+    /// into the enclosing frame. The arms of an `if` are mutually exclusive, so
+    /// the `else` arm reuses the region the `then` arm occupied and the
+    /// enclosing frame grows by only the larger of the two.
     fn collect_compound_slots(
         arena: &AstArena,
         block_id: BlockId,
@@ -1759,8 +1835,7 @@ impl Compiler {
         current_offset: &mut u32,
         module_path: &[String],
     ) -> Result<(), CodegenError> {
-        let block = &arena[block_id];
-        for &stmt_id in &block.stmts {
+        for &stmt_id in &arena[block_id].stmts {
             match &arena[stmt_id].kind {
                 Stmt::VarDef { name, .. } => {
                     let type_info = ctx
@@ -1794,59 +1869,49 @@ impl Compiler {
                         )?;
                     }
                 }
-                Stmt::Block(inner_block_id) => {
-                    Self::collect_compound_slots(
-                        arena,
-                        *inner_block_id,
-                        ctx,
-                        array_offsets,
-                        struct_offsets,
-                        current_offset,
-                        module_path,
-                    )?;
-                }
-                Stmt::If {
-                    then_block,
-                    else_block,
-                    ..
-                } => {
-                    let saved_offset = *current_offset;
-                    Self::collect_compound_slots(
-                        arena,
-                        *then_block,
-                        ctx,
-                        array_offsets,
-                        struct_offsets,
-                        current_offset,
-                        module_path,
-                    )?;
-                    let then_end = *current_offset;
-                    if let Some(else_id) = else_block {
-                        *current_offset = saved_offset;
+                other => match Self::nested_blocks(other) {
+                    NestedBlocks::None => {}
+                    NestedBlocks::Sequential(block) => {
                         Self::collect_compound_slots(
                             arena,
-                            *else_id,
+                            block,
                             ctx,
                             array_offsets,
                             struct_offsets,
                             current_offset,
                             module_path,
                         )?;
-                        *current_offset = (*current_offset).max(then_end);
                     }
-                }
-                Stmt::Loop { body, .. } => {
-                    Self::collect_compound_slots(
-                        arena,
-                        *body,
-                        ctx,
-                        array_offsets,
-                        struct_offsets,
-                        current_offset,
-                        module_path,
-                    )?;
-                }
-                _ => {}
+                    NestedBlocks::Alternatives {
+                        then_block,
+                        else_block,
+                    } => {
+                        let saved_offset = *current_offset;
+                        Self::collect_compound_slots(
+                            arena,
+                            then_block,
+                            ctx,
+                            array_offsets,
+                            struct_offsets,
+                            current_offset,
+                            module_path,
+                        )?;
+                        let then_end = *current_offset;
+                        if let Some(else_block) = else_block {
+                            *current_offset = saved_offset;
+                            Self::collect_compound_slots(
+                                arena,
+                                else_block,
+                                ctx,
+                                array_offsets,
+                                struct_offsets,
+                                current_offset,
+                                module_path,
+                            )?;
+                            *current_offset = (*current_offset).max(then_end);
+                        }
+                    }
+                },
             }
         }
         Ok(())
@@ -5233,5 +5298,202 @@ mod tests {
             );
         }
         assert!(compiler.current_spec.is_none());
+    }
+
+    /// Tests for the shared function-body descent ([`Compiler::nested_blocks`]
+    /// and [`Compiler::walk_statements`]). These guard the single source of
+    /// truth that keeps local discovery and frame-slot collection from
+    /// desynchronizing (#167): if the descent ever drops a nested block or a
+    /// statement kind, every pass built on it drops the same one, and these
+    /// tests fail first — before a mislaid array can corrupt a frame layout.
+    mod body_walk {
+        use super::*;
+        use inference_ast::arena::AstArena;
+        use inference_ast::ids::{BlockId, ExprId, StmtId};
+        use inference_ast::nodes::{
+            BlockData, BlockKind, Expr, ExprData, Ident, Location, SimpleTypeKind, Stmt, StmtData,
+            TypeData, TypeNode,
+        };
+
+        fn leaf(arena: &mut AstArena) -> StmtId {
+            arena.stmts.alloc(StmtData {
+                location: Location::default(),
+                kind: Stmt::Break,
+            })
+        }
+
+        fn block(arena: &mut AstArena, stmts: Vec<StmtId>) -> BlockId {
+            arena.blocks.alloc(BlockData {
+                location: Location::default(),
+                block_kind: BlockKind::Regular,
+                stmts,
+            })
+        }
+
+        fn cond(arena: &mut AstArena) -> ExprId {
+            arena.exprs.alloc(ExprData {
+                location: Location::default(),
+                kind: Expr::BoolLiteral { value: true },
+            })
+        }
+
+        fn stmt(arena: &mut AstArena, kind: Stmt) -> StmtId {
+            arena.stmts.alloc(StmtData {
+                location: Location::default(),
+                kind,
+            })
+        }
+
+        /// [`Compiler::walk_statements`] must visit every statement of a
+        /// nesting-heavy body exactly once, each container before its children,
+        /// `then` before `else`, and an `else`-less `if` descending only its
+        /// `then` arm. This visitation order is what every body pass inherits,
+        /// so pinning it pins the order slot and local indices are assigned in.
+        #[test]
+        fn walk_statements_visits_every_statement_in_traversal_order() {
+            let mut arena = AstArena::default();
+
+            let top_leaf = leaf(&mut arena);
+
+            let inner_leaf = leaf(&mut arena);
+            let inner_block = block(&mut arena, vec![inner_leaf]);
+            let block_stmt = stmt(&mut arena, Stmt::Block(inner_block));
+
+            let then_leaf = leaf(&mut arena);
+            let then_block = block(&mut arena, vec![then_leaf]);
+            let else_leaf = leaf(&mut arena);
+            let else_block = block(&mut arena, vec![else_leaf]);
+            let if_cond = cond(&mut arena);
+            let if_stmt = stmt(
+                &mut arena,
+                Stmt::If {
+                    condition: if_cond,
+                    then_block,
+                    else_block: Some(else_block),
+                },
+            );
+
+            let loop_leaf = leaf(&mut arena);
+            let loop_body = block(&mut arena, vec![loop_leaf]);
+            let loop_stmt = stmt(
+                &mut arena,
+                Stmt::Loop {
+                    condition: None,
+                    body: loop_body,
+                },
+            );
+
+            let elseless_leaf = leaf(&mut arena);
+            let elseless_then = block(&mut arena, vec![elseless_leaf]);
+            let elseless_cond = cond(&mut arena);
+            let elseless_if = stmt(
+                &mut arena,
+                Stmt::If {
+                    condition: elseless_cond,
+                    then_block: elseless_then,
+                    else_block: None,
+                },
+            );
+
+            let body = block(
+                &mut arena,
+                vec![top_leaf, block_stmt, if_stmt, loop_stmt, elseless_if],
+            );
+
+            let mut visited = Vec::new();
+            Compiler::walk_statements(&arena, body, &mut |_, stmt_id| visited.push(stmt_id));
+
+            assert_eq!(
+                visited,
+                vec![
+                    top_leaf,
+                    block_stmt,
+                    inner_leaf,
+                    if_stmt,
+                    then_leaf,
+                    else_leaf,
+                    loop_stmt,
+                    loop_leaf,
+                    elseless_if,
+                    elseless_leaf,
+                ],
+                "walk must visit each statement once, container before children, then before else",
+            );
+        }
+
+        /// [`Compiler::nested_blocks`] is the one match naming every
+        /// block-bearing statement kind. Each block-bearing kind must classify
+        /// with the blocks it actually carries, and every other kind as `None`,
+        /// so that no pass silently skips a sub-block.
+        #[test]
+        fn nested_blocks_classifies_each_statement_kind() {
+            let mut arena = AstArena::default();
+            let a = block(&mut arena, vec![]);
+            let b = block(&mut arena, vec![]);
+            let c = cond(&mut arena);
+
+            assert!(
+                matches!(Compiler::nested_blocks(&Stmt::Block(a)), NestedBlocks::Sequential(x) if x == a),
+                "a bare block descends into its single inner block",
+            );
+            assert!(
+                matches!(
+                    Compiler::nested_blocks(&Stmt::Loop { condition: None, body: a }),
+                    NestedBlocks::Sequential(x) if x == a
+                ),
+                "a loop descends into its body",
+            );
+
+            match Compiler::nested_blocks(&Stmt::If {
+                condition: c,
+                then_block: a,
+                else_block: Some(b),
+            }) {
+                NestedBlocks::Alternatives {
+                    then_block,
+                    else_block,
+                } => {
+                    assert_eq!(then_block, a);
+                    assert_eq!(else_block, Some(b));
+                }
+                _ => panic!("an if with an else classifies as two alternative arms"),
+            }
+
+            match Compiler::nested_blocks(&Stmt::If {
+                condition: c,
+                then_block: a,
+                else_block: None,
+            }) {
+                NestedBlocks::Alternatives {
+                    then_block,
+                    else_block,
+                } => {
+                    assert_eq!(then_block, a);
+                    assert_eq!(else_block, None);
+                }
+                _ => panic!("an else-less if still classifies as an alternative (single arm)"),
+            }
+
+            let type_name = arena.idents.alloc(Ident {
+                location: Location::default(),
+                name: "T".to_string(),
+            });
+            let type_id = arena.types.alloc(TypeData {
+                location: Location::default(),
+                kind: TypeNode::Simple(SimpleTypeKind::I32),
+            });
+            for leaf_kind in [
+                Stmt::Break,
+                Stmt::TypeDef {
+                    name: type_name,
+                    ty: type_id,
+                },
+            ] {
+                assert!(
+                    matches!(Compiler::nested_blocks(&leaf_kind), NestedBlocks::None),
+                    "a statement carrying no sub-block must classify as None",
+                );
+            }
+        }
     }
 }
