@@ -16,16 +16,17 @@ describe('settings schema (QA Section 8)', () => {
     const properties = contributes.configuration.properties;
     const settingKeys = Object.keys(properties);
 
-    it('has exactly 5 settings', () => {
-        assert.strictEqual(settingKeys.length, 5);
+    it('has exactly 6 settings', () => {
+        assert.strictEqual(settingKeys.length, 6);
     });
 
-    it('contains inference.path, inference.autoInstall, inference.checkForUpdates, inference.lsp.enabled, inference.lsp.path', () => {
+    it('contains inference.path, inference.autoInstall, inference.checkForUpdates, inference.lsp.enabled, inference.lsp.path, inference-lsp.trace.server', () => {
         assert.ok(settingKeys.includes('inference.path'));
         assert.ok(settingKeys.includes('inference.autoInstall'));
         assert.ok(settingKeys.includes('inference.checkForUpdates'));
         assert.ok(settingKeys.includes('inference.lsp.enabled'));
         assert.ok(settingKeys.includes('inference.lsp.path'));
+        assert.ok(settingKeys.includes('inference-lsp.trace.server'));
     });
 
     it('inference.path has type=string and default=""', () => {
@@ -57,6 +58,21 @@ describe('settings schema (QA Section 8)', () => {
         assert.strictEqual(setting.type, 'string');
         assert.strictEqual(setting.default, '');
         assert.strictEqual(setting.scope, 'machine');
+    });
+
+    it('inference-lsp.trace.server is the standard protocol-trace knob: string enum off/messages/verbose, default off, window scope', () => {
+        const setting = properties['inference-lsp.trace.server'];
+        assert.strictEqual(setting.type, 'string');
+        assert.deepStrictEqual(setting.enum, ['off', 'messages', 'verbose']);
+        assert.strictEqual(setting.default, 'off');
+        assert.strictEqual(setting.scope, 'window');
+    });
+
+    it('inference-lsp.trace.server matches the LanguageClient id so vscode-languageclient picks it up', () => {
+        // vscode-languageclient reads `<clientId>.trace.server`; the client
+        // is constructed with id 'inference-lsp' in src/lsp/client.ts.
+        const traceKeys = settingKeys.filter((k) => k.endsWith('.trace.server'));
+        assert.deepStrictEqual(traceKeys, ['inference-lsp.trace.server']);
     });
 });
 
@@ -104,7 +120,7 @@ describe('runtime dependencies', () => {
 describe('walkthrough schema (QA Section 7)', () => {
     const walkthroughs: Array<{
         id: string;
-        steps: Array<{ id: string; title: string }>;
+        steps: Array<{ id: string; title: string; description: string }>;
     }> = contributes.walkthroughs;
 
     it('has exactly 1 walkthrough', () => {
@@ -127,5 +143,19 @@ describe('walkthrough schema (QA Section 7)', () => {
             'inference.walkthrough.createProject',
             'inference.walkthrough.build',
         ]);
+    });
+
+    it('createProject step instructs saving as .inf (language-server features are file-scheme only)', () => {
+        const step = walkthroughs[0].steps.find(
+            (s) => s.id === 'inference.walkthrough.createProject',
+        );
+        assert.ok(step);
+        assert.match(step.description, /save/i);
+        assert.match(step.description, /\.inf/);
+        assert.ok(
+            step.description.includes(
+                'command:workbench.action.files.newUntitledFile',
+            ),
+        );
     });
 });
