@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     LanguageClient,
@@ -159,7 +160,7 @@ async function doStart(): Promise<void> {
             );
         } else {
             mainChannel?.info(
-                `Language server not started: inference-lsp not found (searched ${inferenceHome()}/bin and PATH). Install or update the toolchain to enable it.`,
+                `Language server not started: inference-lsp not found (searched ${path.join(inferenceHome(), 'bin')} and PATH). Install or update the toolchain to enable it.`,
             );
         }
         return;

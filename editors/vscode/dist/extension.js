@@ -34,8 +34,24 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/toolchain/home.ts
-function inferenceHome() {
-  return process.env["INFERENCE_HOME"] || path.join(os2.homedir(), ".inference");
+function inferenceHome(env4 = process.env, platform2 = process.platform) {
+  const override = env4["INFERENCE_HOME"];
+  if (override) {
+    return override;
+  }
+  if (platform2 === "win32") {
+    const appData = env4["APPDATA"];
+    if (appData) {
+      return path.win32.join(appData, "inference");
+    }
+    return path.win32.join(
+      os2.homedir(),
+      "AppData",
+      "Roaming",
+      "inference"
+    );
+  }
+  return path.posix.join(os2.homedir(), ".inference");
 }
 var os2, path;
 var init_home = __esm({
@@ -3211,7 +3227,7 @@ var require_main = __commonJS({
     exports2.createMessageConnection = exports2.createServerSocketTransport = exports2.createClientSocketTransport = exports2.createServerPipeTransport = exports2.createClientPipeTransport = exports2.generateRandomPipeName = exports2.StreamMessageWriter = exports2.StreamMessageReader = exports2.SocketMessageWriter = exports2.SocketMessageReader = exports2.PortMessageWriter = exports2.PortMessageReader = exports2.IPCMessageWriter = exports2.IPCMessageReader = void 0;
     var ril_1 = require_ril();
     ril_1.default.install();
-    var path8 = require("path");
+    var path9 = require("path");
     var os4 = require("os");
     var crypto_1 = require("crypto");
     var net_1 = require("net");
@@ -3347,9 +3363,9 @@ var require_main = __commonJS({
       }
       let result;
       if (XDG_RUNTIME_DIR) {
-        result = path8.join(XDG_RUNTIME_DIR, `vscode-ipc-${randomSuffix}.sock`);
+        result = path9.join(XDG_RUNTIME_DIR, `vscode-ipc-${randomSuffix}.sock`);
       } else {
-        result = path8.join(os4.tmpdir(), `vscode-${randomSuffix}.sock`);
+        result = path9.join(os4.tmpdir(), `vscode-${randomSuffix}.sock`);
       }
       const limit = safeIpcPathLengths.get(process.platform);
       if (limit !== void 0 && result.length > limit) {
@@ -9432,16 +9448,18 @@ var require_brace_expansion = __commonJS({
     }
     function expand(str, max, isTop) {
       var expansions = [];
-      var m = balanced("{", "}", str);
-      if (!m) return [str];
-      var pre = m.pre;
-      var post = m.post.length ? expand(m.post, max, false) : [""];
-      if (/\$$/.test(m.pre)) {
-        for (var k = 0; k < post.length && k < max; k++) {
-          var expansion = pre + "{" + m.body + "}" + post[k];
-          expansions.push(expansion);
+      for (; ; ) {
+        const m = balanced("{", "}", str);
+        if (!m) return [str];
+        const pre = m.pre;
+        if (/\$$/.test(m.pre)) {
+          const post2 = m.post.length ? expand(m.post, max, false) : [""];
+          for (let k2 = 0; k2 < post2.length && k2 < max; k2++) {
+            const expansion2 = pre + "{" + m.body + "}" + post2[k2];
+            expansions.push(expansion2);
+          }
+          return expansions;
         }
-      } else {
         var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
         var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
         var isSequence = isNumericSequence || isAlphaSequence;
@@ -9449,10 +9467,12 @@ var require_brace_expansion = __commonJS({
         if (!isSequence && !isOptions) {
           if (m.post.match(/,(?!,).*\}/)) {
             str = m.pre + "{" + m.body + escClose + m.post;
-            return expand(str, max, true);
+            isTop = true;
+            continue;
           }
           return [str];
         }
+        const post = m.post.length ? expand(m.post, max, false) : [""];
         var n;
         if (isSequence) {
           n = m.body.split(/\.\./);
@@ -9515,8 +9535,8 @@ var require_brace_expansion = __commonJS({
               expansions.push(expansion);
           }
         }
+        return expansions;
       }
-      return expansions;
     }
   }
 });
@@ -9532,8 +9552,8 @@ var require_minimatch = __commonJS({
       return new Minimatch(pattern, options).match(p);
     };
     module2.exports = minimatch;
-    var path8 = require_path();
-    minimatch.sep = path8.sep;
+    var path9 = require_path();
+    minimatch.sep = path9.sep;
     var GLOBSTAR = /* @__PURE__ */ Symbol("globstar **");
     minimatch.GLOBSTAR = GLOBSTAR;
     var expand = require_brace_expansion();
@@ -10139,8 +10159,8 @@ var require_minimatch = __commonJS({
         if (this.empty) return f === "";
         if (f === "/" && partial) return true;
         const options = this.options;
-        if (path8.sep !== "/") {
-          f = f.split(path8.sep).join("/");
+        if (path9.sep !== "/") {
+          f = f.split(path9.sep).join("/");
         }
         f = f.split(slashSplit);
         this.debug(this.pattern, "split", f);
@@ -11865,13 +11885,13 @@ var require_configuration = __commonJS({
         });
       }
       extractSettingsInformation(keys) {
-        function ensurePath(config, path8) {
+        function ensurePath(config, path9) {
           let current = config;
-          for (let i = 0; i < path8.length - 1; i++) {
-            let obj = current[path8[i]];
+          for (let i = 0; i < path9.length - 1; i++) {
+            let obj = current[path9[i]];
             if (!obj) {
               obj = /* @__PURE__ */ Object.create(null);
-              current[path8[i]] = obj;
+              current[path9[i]] = obj;
             }
             current = obj;
           }
@@ -11889,8 +11909,8 @@ var require_configuration = __commonJS({
             config = vscode_1.workspace.getConfiguration(void 0, resource).get(key);
           }
           if (config) {
-            let path8 = keys[i].split(".");
-            ensurePath(result, path8)[path8[path8.length - 1]] = toJSONObject(config);
+            let path9 = keys[i].split(".");
+            ensurePath(result, path9)[path9[path9.length - 1]] = toJSONObject(config);
           }
         }
         return result;
@@ -14457,13 +14477,13 @@ var require_fileOperations = __commonJS({
       async filter(event, prop) {
         const fileMatches = await Promise.all(event.files.map(async (item) => {
           const uri = prop(item);
-          const path8 = uri.fsPath.replace(/\\/g, "/");
+          const path9 = uri.fsPath.replace(/\\/g, "/");
           for (const filters of this._filters.values()) {
             for (const filter of filters) {
               if (filter.scheme !== void 0 && filter.scheme !== uri.scheme) {
                 continue;
               }
-              if (filter.matcher.match(path8)) {
+              if (filter.matcher.match(path9)) {
                 if (filter.kind === void 0) {
                   return true;
                 }
@@ -14477,7 +14497,7 @@ var require_fileOperations = __commonJS({
                 }
               } else if (filter.kind === proto.FileOperationPatternKind.folder) {
                 const fileType = await _FileOperationFeature.getFileType(uri);
-                if (fileType === code.FileType.Directory && filter.matcher.match(`${path8}/`)) {
+                if (fileType === code.FileType.Directory && filter.matcher.match(`${path9}/`)) {
                   return true;
                 }
               }
@@ -17453,20 +17473,22 @@ var require_range = __commonJS({
       return comp;
     };
     var isX = (id) => !id || id.toLowerCase() === "x" || id === "*";
+    var invalidXRangeOrder = (M, m, p) => isX(M) && !isX(m) || isX(m) && p && !isX(p);
     var replaceTildes = (comp, options) => {
       return comp.trim().split(/\s+/).map((c) => replaceTilde(c, options)).join(" ");
     };
     var replaceTilde = (comp, options) => {
       const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE];
+      const z = options.includePrerelease ? "-0" : "";
       return comp.replace(r, (_, M, m, p, pr) => {
         debug("tilde", comp, _, M, m, p, pr);
         let ret;
         if (isX(M)) {
           ret = "";
         } else if (isX(m)) {
-          ret = `>=${M}.0.0 <${+M + 1}.0.0-0`;
+          ret = `>=${M}.0.0${z} <${+M + 1}.0.0-0`;
         } else if (isX(p)) {
-          ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0-0`;
+          ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0-0`;
         } else if (pr) {
           debug("replaceTilde pr", pr);
           ret = `>=${M}.${m}.${p}-${pr} <${M}.${+m + 1}.0-0`;
@@ -17512,9 +17534,9 @@ var require_range = __commonJS({
           debug("no pr");
           if (M === "0") {
             if (m === "0") {
-              ret = `>=${M}.${m}.${p}${z} <${M}.${m}.${+p + 1}-0`;
+              ret = `>=${M}.${m}.${p} <${M}.${m}.${+p + 1}-0`;
             } else {
-              ret = `>=${M}.${m}.${p}${z} <${M}.${+m + 1}.0-0`;
+              ret = `>=${M}.${m}.${p} <${M}.${+m + 1}.0-0`;
             }
           } else {
             ret = `>=${M}.${m}.${p} <${+M + 1}.0.0-0`;
@@ -17533,6 +17555,9 @@ var require_range = __commonJS({
       const r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE];
       return comp.replace(r, (ret, gtlt, M, m, p, pr) => {
         debug("xRange", comp, ret, gtlt, M, m, p, pr);
+        if (invalidXRangeOrder(M, m, p)) {
+          return comp;
+        }
         const xM = isX(M);
         const xm = xM || isX(m);
         const xp = xm || isX(p);
@@ -17720,7 +17745,7 @@ var require_main4 = __commonJS({
     exports2.SettingMonitor = exports2.LanguageClient = exports2.TransportKind = void 0;
     var cp2 = require("child_process");
     var fs5 = require("fs");
-    var path8 = require("path");
+    var path9 = require("path");
     var vscode_1 = require("vscode");
     var Is = require_is();
     var client_1 = require_client();
@@ -18138,18 +18163,18 @@ var require_main4 = __commonJS({
         });
       }
       _getRuntimePath(runtime, serverWorkingDirectory) {
-        if (path8.isAbsolute(runtime)) {
+        if (path9.isAbsolute(runtime)) {
           return runtime;
         }
         const mainRootPath = this._mainGetRootPath();
         if (mainRootPath !== void 0) {
-          const result = path8.join(mainRootPath, runtime);
+          const result = path9.join(mainRootPath, runtime);
           if (fs5.existsSync(result)) {
             return result;
           }
         }
         if (serverWorkingDirectory !== void 0) {
-          const result = path8.join(serverWorkingDirectory, runtime);
+          const result = path9.join(serverWorkingDirectory, runtime);
           if (fs5.existsSync(result)) {
             return result;
           }
@@ -18242,7 +18267,7 @@ __export(extension_exports, {
 });
 module.exports = __toCommonJS(extension_exports);
 var vscode11 = __toESM(require("vscode"));
-var path7 = __toESM(require("path"));
+var path8 = __toESM(require("path"));
 
 // src/toolchain/platform.ts
 var os = __toESM(require("os"));
@@ -18885,6 +18910,7 @@ function updateStatusBar(item, result) {
 }
 
 // src/lsp/client.ts
+var path7 = __toESM(require("path"));
 var vscode3 = __toESM(require("vscode"));
 var import_node = __toESM(require_node3());
 init_home();
@@ -19041,7 +19067,7 @@ async function doStart() {
       );
     } else {
       mainChannel?.info(
-        `Language server not started: inference-lsp not found (searched ${inferenceHome()}/bin and PATH). Install or update the toolchain to enable it.`
+        `Language server not started: inference-lsp not found (searched ${path7.join(inferenceHome(), "bin")} and PATH). Install or update the toolchain to enable it.`
       );
     }
     return;
@@ -20131,7 +20157,7 @@ function deactivate() {
   return stopLspClient();
 }
 function applyTerminalPath(context) {
-  const binDir = path7.join(inferenceHome(), "bin");
+  const binDir = path8.join(inferenceHome(), "bin");
   const sep = process.platform === "win32" ? ";" : ":";
   const env4 = context.environmentVariableCollection;
   env4.prepend("PATH", binDir + sep);
