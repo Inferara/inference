@@ -6,6 +6,8 @@
 //! (a non-`file` scheme, an untitled buffer) yields a null result and no
 //! diagnostics, never a panic.
 
+use std::sync::Arc;
+
 use inference_ide as ide;
 use lsp_types::{
     CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
@@ -149,12 +151,14 @@ pub(crate) fn did_open(
 ) -> Option<PublishDiagnosticsParams> {
     let document = params.text_document;
     let path = uri::to_path(&document.uri)?;
-    state.host.open_document(&path, document.text);
+    let text: Arc<str> = document.text.into();
+    state.host.open_document(&path, Arc::clone(&text));
     state.documents.insert(
         document.uri.clone(),
         Document {
             path,
             version: document.version,
+            text,
         },
     );
     Some(publish_diagnostics_params(state, &document.uri))
@@ -168,11 +172,16 @@ pub(crate) fn did_change(
     let version = params.text_document.version;
     let path = uri::to_path(&uri)?;
     // Full-text sync: the last content change carries the whole new document.
-    let text = params.content_changes.into_iter().next_back()?.text;
-    state.host.change_document(&path, text);
-    state
-        .documents
-        .insert(uri.clone(), Document { path, version });
+    let text: Arc<str> = params.content_changes.into_iter().next_back()?.text.into();
+    state.host.change_document(&path, Arc::clone(&text));
+    state.documents.insert(
+        uri.clone(),
+        Document {
+            path,
+            version,
+            text,
+        },
+    );
     Some(publish_diagnostics_params(state, &uri))
 }
 
