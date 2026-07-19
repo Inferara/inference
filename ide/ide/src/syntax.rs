@@ -312,6 +312,46 @@ pub(crate) fn find_def_by_name(arena: &AstArena, file: SourceFileId, name: &str)
         .find(|&def| arena.def_name(def) == name)
 }
 
+/// The first non-method definition in `file` named `name`, or `None`.
+///
+/// Struct methods are excluded from the search, so a call the type checker
+/// resolved to a *free* function — its [`CallTarget::receiver_struct`] is `None`
+/// — never lands on a same-named method that happens to precede it in the
+/// pre-order flatten. Top-level and spec-nested definitions are searched, which
+/// is exactly [`find_def_by_name`]'s coverage minus the struct-method arm.
+///
+/// [`CallTarget::receiver_struct`]: inference_type_checker::typed_context::CallTarget::receiver_struct
+#[must_use]
+pub(crate) fn find_free_def_by_name(
+    arena: &AstArena,
+    file: SourceFileId,
+    name: &str,
+) -> Option<DefId> {
+    non_method_defs(arena, file)
+        .into_iter()
+        .find(|&def| arena.def_name(def) == name)
+}
+
+/// Every definition in `file` in pre-order, excluding struct methods (which are
+/// reachable only as `receiver.method()` or `Struct::assoc()`, never as a free
+/// name). Spec-nested definitions are kept.
+fn non_method_defs(arena: &AstArena, file: SourceFileId) -> Vec<DefId> {
+    let mut defs = Vec::new();
+    for &def in &arena[file].defs {
+        collect_non_method_def(arena, def, &mut defs);
+    }
+    defs
+}
+
+fn collect_non_method_def(arena: &AstArena, def: DefId, out: &mut Vec<DefId>) {
+    out.push(def);
+    if let Def::Spec { defs, .. } = &arena[def].kind {
+        for &nested in defs {
+            collect_non_method_def(arena, nested, out);
+        }
+    }
+}
+
 /// A method named `name` defined directly on the struct `struct_def`, or `None`.
 #[must_use]
 pub(crate) fn find_method(arena: &AstArena, struct_def: DefId, name: &str) -> Option<DefId> {
