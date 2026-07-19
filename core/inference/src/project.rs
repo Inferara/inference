@@ -34,6 +34,35 @@ use crate::errors::InferenceError;
 /// File extension of an Inference source file.
 const SOURCE_EXTENSION: &str = "inf";
 
+/// The UTF-8 byte-order mark (U+FEFF) some editors prepend to a file.
+const UTF8_BOM: char = '\u{feff}';
+
+/// Reads a source file from disk as UTF-8, stripping a single leading UTF-8 BOM.
+///
+/// This is the one disk-ingestion point shared by the compiler's [`DiskLoader`]
+/// and the IDE's overlay-then-disk loader, so the two never disagree about the
+/// bytes of a file the editor has not opened. LSP clients strip the BOM from the
+/// buffers they send, so a closure file read straight from disk must strip it too
+/// — otherwise every line-0 position is off by one UTF-16 unit against the
+/// client's view and the lexer reports a spurious error at the file start.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error if the file cannot be read.
+pub fn read_source_file(path: &Path) -> std::io::Result<String> {
+    Ok(strip_utf8_bom(std::fs::read_to_string(path)?))
+}
+
+/// Removes a single leading UTF-8 BOM from `text`, if present. A BOM-free string
+/// is returned untouched (no reallocation).
+#[must_use = "the stripped text is the return value, not an in-place edit"]
+pub fn strip_utf8_bom(mut text: String) -> String {
+    if text.starts_with(UTF8_BOM) {
+        text.drain(..UTF8_BOM.len_utf8());
+    }
+    text
+}
+
 /// Maximum edit distance at which a sibling filename is offered as a
 /// "did you mean" suggestion for a missing import.
 const SUGGESTION_MAX_DISTANCE: usize = 2;
@@ -62,8 +91,8 @@ pub trait FileLoader {
 }
 
 /// A [`FileLoader`] backed directly by the filesystem, used by the compiler
-/// front end. Existence is a plain `is_file` probe and reads go straight to
-/// `std::fs`.
+/// front end. Existence is a plain `is_file` probe and reads go through
+/// [`read_source_file`], which strips a leading UTF-8 BOM.
 #[derive(Debug, Default)]
 pub struct DiskLoader;
 
@@ -73,7 +102,7 @@ impl FileLoader for DiskLoader {
     }
 
     fn read(&self, path: &Path) -> std::io::Result<String> {
-        std::fs::read_to_string(path)
+        read_source_file(path)
     }
 }
 
@@ -992,6 +1021,47 @@ mod tests {
         assert_eq!(module_paths(&parse), vec![Vec::<String>::new()]);
         assert!(parse.arena.source_files().next().unwrap().is_entry());
         assert!(parse.warnings.is_empty());
+    }
+
+    #[test]
+    fn strip_utf8_bom_removes_only_a_leading_bom() {
+        assert_eq!(strip_utf8_bom("\u{feff}hello".to_owned()), "hello");
+        // A BOM-free string is returned untouched.
+        assert_eq!(strip_utf8_bom("hello".to_owned()), "hello");
+        // Only the first BOM is stripped; a second is kept as content.
+        assert_eq!(strip_utf8_bom("\u{feff}\u{feff}x".to_owned()), "\u{feff}x");
+        // A BOM that is not leading is ordinary content.
+        assert_eq!(strip_utf8_bom("a\u{feff}b".to_owned()), "a\u{feff}b");
+        assert_eq!(strip_utf8_bom(String::new()), "");
+    }
+
+    #[test]
+    fn entry_file_with_utf8_bom_parses_cleanly() {
+        // A leading UTF-8 BOM is stripped at the disk-ingestion seam, so the entry
+        // parses without the spurious lexer error the raw U+FEFF would provoke.
+        let project = TempProject::new("bom-entry");
+        let entry = project.write("main.inf", "\u{feff}pub fn main() -> i32 { return 0; }");
+
+        let parse = parse_project(&entry).expect("a BOM-prefixed entry parses");
+
+        assert_eq!(module_paths(&parse), vec![Vec::<String>::new()]);
+        assert!(parse.arena.source_files().next().unwrap().is_entry());
+    }
+
+    #[test]
+    fn imported_file_with_utf8_bom_parses_cleanly() {
+        // The BOM strip applies to every reachable closure file, not just the
+        // entry, so an imported module carrying one also parses cleanly.
+        let project = TempProject::new("bom-import");
+        let entry = project.write("main.inf", "use lib;\npub fn main() -> i32 { return 0; }");
+        project.write("lib.inf", "\u{feff}pub fn helper() -> i32 { return 1; }");
+
+        let parse = parse_project(&entry).expect("a BOM-prefixed import parses");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![Vec::<String>::new(), vec!["lib".to_string()]]
+        );
     }
 
     #[test]
