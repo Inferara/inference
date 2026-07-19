@@ -366,6 +366,28 @@ fn goto_definition_reaches_a_same_file_function() {
     client.shutdown_exit_ok();
 }
 
+#[test]
+fn goto_definition_at_the_word_end_of_a_call_reaches_the_definition() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The caret is at the exclusive end of the callee name (just before `(`),
+    // where a double-click or just-finished keystroke leaves it. The raw offset
+    // lands on the call expression, not the identifier, so this exercises the
+    // shared one-byte-back fallback over the wire (issue #244).
+    let source = "fn caller() -> i32 { return produce(); }\nfn produce() -> i32 { return 7; }";
+    let (_dir, uri) = fixture("goto-word-end", source);
+    client.did_open(&uri, source, 1);
+
+    let response = definition_request(&mut client, &uri, pos_after(source, "produce"));
+    let location = &response["result"];
+    assert_eq!(location["uri"], json!(uri), "same-file target");
+    // The call's word-end resolves to the callee definition, not the call site.
+    assert_eq!(location["range"]["start"], pos_at_nth(source, "produce", 1));
+
+    client.shutdown_exit_ok();
+}
+
 // --- 9. cross-file: import a sibling on disk ---------------------------------
 
 #[test]
@@ -566,6 +588,42 @@ fn m(p: P) -> i32 { return p.; }";
     assert!(
         !labels.iter().any(|l| l == "fn"),
         "keywords are excluded after a dot: {labels:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn completion_after_a_module_qualifier_offers_bare_pub_defs() {
+    // The `::` trigger context: after `lib::`, the target module's public defs are
+    // offered by their bare name (the form that compiles there), while a private
+    // def and the general keyword list are not (issue #246).
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("complete-qualified");
+    let entry_source = "use lib;\nfn main() -> i32 { return lib::; }";
+    let lib_source = "pub fn helper() -> i32 { return 7; }\nfn secret() -> i32 { return 1; }";
+    let entry_path = dir.write("main.inf", entry_source);
+    dir.write("lib.inf", lib_source);
+    let entry_uri = path_to_uri(&entry_path);
+
+    // The incomplete `lib::` produces a syntax diagnostic; consume it.
+    client.did_open(&entry_uri, entry_source, 1);
+
+    let response = completion_request(&mut client, &entry_uri, pos_after(entry_source, "lib::"));
+    let labels = completion_labels(&response);
+    assert!(
+        labels.iter().any(|l| l == "helper"),
+        "the module's pub def is offered bare: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "secret"),
+        "a private def is not offered after `::`: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "fn"),
+        "keywords are wrong after `::`: {labels:?}"
     );
 
     client.shutdown_exit_ok();

@@ -1,15 +1,16 @@
 //! Type and documentation shown when hovering a position in a document.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, SourceFileId};
-use inference_ast::nodes::{ArgKind, Def, Expr};
+use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, SourceFileId, TypeId};
+use inference_ast::nodes::{ArgKind, Def, Directive, Expr, TypeNode};
 use inference_ide_db::{FileAnalysis, NodeHit, TextRange};
 use inference_type_checker::type_info::TypeInfo;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::nondet_docs::{UZUMAKI_HOVER, block_hover, block_keyword};
 use crate::syntax::{
-    def_name_ident, def_signature, find_def_by_name, find_method, is_call_callee, text_range,
+    def_is_public, def_name_ident, def_signature, find_def_by_name, find_free_def_by_name,
+    find_method, is_call_callee, resolve_qualified_module, text_range,
 };
 use crate::type_render::render_type;
 
@@ -28,7 +29,7 @@ pub(crate) fn hover(file: &FileAnalysis, offset: u32) -> Option<Hover> {
     let arena = file.arena();
     let ctx = file.typed_context();
     let entry = file.source_file_id(&[])?;
-    let hit = file.hit_test(entry, offset)?;
+    let hit = file.enclosing_hit(entry, offset)?;
 
     if let Some(hover) = nondet_keyword_hover(arena, &hit, offset) {
         return Some(hover);
@@ -95,11 +96,14 @@ fn hover_ident(
     let parent = hit.ancestors.last().copied();
     let grandparent = hit.ancestors.iter().rev().nth(1).copied();
 
+    // An identifier with no ancestors is a `use`-directive segment or item (see
+    // `hit_test`); every definition-tree identifier carries its owning node.
     let contents = match parent {
         Some(NodeId::Def(def)) => ident_in_def(arena, entry, def, ident)?,
         Some(NodeId::Expr(expr)) => ident_in_expr(file, entry, expr, ident, grandparent)?,
-        Some(NodeId::Type(_)) => type_name_signature(file, entry, ident),
+        Some(NodeId::Type(type_id)) => type_ident_signature(file, entry, type_id, ident),
         Some(NodeId::Stmt(stmt)) => ident_in_stmt(arena, ctx, stmt, ident)?,
+        None => ident_in_directive(file, entry, ident)?,
         _ => return None,
     };
     Some(Hover {
@@ -108,7 +112,8 @@ fn hover_ident(
     })
 }
 
-/// The def's own name (→ its signature) or one of its params/fields (→ its type).
+/// The def's own name (→ its signature), a declared type parameter or enum
+/// variant (→ itself), or one of its params/fields (→ its type).
 fn ident_in_def(
     arena: &AstArena,
     entry: SourceFileId,
@@ -117,6 +122,12 @@ fn ident_in_def(
 ) -> Option<String> {
     if def_name_ident(arena, def) == ident {
         return def_signature(arena, entry, def).map(|sig| code_block(&sig));
+    }
+    // A declared type parameter names itself; show it in its source spelling.
+    if let Def::Function { type_params, .. } = &arena[def].kind
+        && type_params.contains(&ident)
+    {
+        return Some(code_block(&format!("{}'", arena.ident_name(ident))));
     }
     match &arena[def].kind {
         Def::Function { args, .. } | Def::ExternFunction { args, .. } => {
@@ -134,6 +145,15 @@ fn ident_in_def(
             let field = fields.iter().find(|field| field.name == ident)?;
             let type_info = TypeInfo::from_type_id(arena, field.ty);
             Some(named_type(arena.ident_name(ident), &type_info))
+        }
+        // A variant declaration names itself; show it qualified by its enum.
+        Def::Enum { name, variants, .. } => {
+            let variant = variants.iter().copied().find(|&variant| variant == ident)?;
+            Some(code_block(&format!(
+                "{}::{}",
+                arena.ident_name(*name),
+                arena.ident_name(variant)
+            )))
         }
         _ => None,
     }
@@ -180,6 +200,42 @@ fn ident_in_expr(
     }
 }
 
+/// The hover for a `use`-directive identifier: a path segment shows the module it
+/// names, a braced item import shows the resolved definition's signature. A
+/// segment or item that names no source module or `pub` definition has no hover.
+fn ident_in_directive(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    ident: IdentId,
+) -> Option<String> {
+    let arena = file.arena();
+    for directive in &arena[entry].directives {
+        let Directive::Use(use_directive) = directive;
+        if let Some(index) = use_directive.segments.iter().position(|&s| s == ident) {
+            let module_path: Vec<String> = use_directive.segments[..=index]
+                .iter()
+                .map(|&segment| arena.ident_name(segment).to_string())
+                .collect();
+            file.source_file_id(&module_path)?;
+            return Some(code_block(&format!("module {}", module_path.join("::"))));
+        }
+        if use_directive.imported_types.contains(&ident) {
+            let module_path: Vec<String> = use_directive
+                .segments
+                .iter()
+                .map(|&segment| arena.ident_name(segment).to_string())
+                .collect();
+            let sfid = file.source_file_id(&module_path)?;
+            let def = find_def_by_name(arena, sfid, arena.ident_name(ident))?;
+            if !def_is_public(arena, def) {
+                return None;
+            }
+            return def_signature(arena, sfid, def).map(|sig| code_block(&sig));
+        }
+    }
+    None
+}
+
 /// A `let name: T` / `type name = …` binding: the declared name's type.
 fn ident_in_stmt(
     arena: &AstArena,
@@ -215,12 +271,59 @@ fn callee_signature(file: &FileAnalysis, callee: ExprId) -> Option<String> {
     let target = ctx.call_target(callee)?;
     let sfid = file.source_file_id(&target.module_path)?;
     let def = match &target.receiver_struct {
+        // A `Some` receiver is a method or associated function; `None` is a free
+        // function, so its signature must come from a non-method def — never a
+        // same-named method's `fn get(self) -> …` shown for a free `fn get()`.
         Some(struct_name) => {
             let struct_def = find_def_by_name(arena, sfid, struct_name)?;
             find_method(arena, struct_def, &target.name)?
         }
-        None => find_def_by_name(arena, sfid, &target.name)?,
+        None => find_free_def_by_name(arena, sfid, &target.name)?,
     };
+    def_signature(arena, sfid, def).map(|sig| code_block(&sig))
+}
+
+/// The signature shown for a type-position identifier. A `::`-qualified type
+/// (`lib::T`) resolves through its qualifier to the module that defines it —
+/// exactly as goto does — so the qualifier is honored rather than dropped in
+/// favor of a same-named local type; a bare type name falls through to
+/// [`type_name_signature`].
+fn type_ident_signature(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    type_id: TypeId,
+    ident: IdentId,
+) -> String {
+    let arena = file.arena();
+    let qualifier = match &arena[type_id].kind {
+        TypeNode::Qualified { qualifier, name } if *name == ident => Some(qualifier.clone()),
+        TypeNode::QualifiedName { qualifier, name } if *name == ident => Some(vec![*qualifier]),
+        _ => None,
+    };
+    if let Some(qualifier) = qualifier
+        && let Some(signature) = qualified_member_signature(file, entry, &qualifier, ident)
+    {
+        return signature;
+    }
+    type_name_signature(file, entry, ident)
+}
+
+/// The signature of the definition named `leaf` in the module addressed by a
+/// reference's `::`-qualifier segments (`lib::T`), or `None` when the qualifier
+/// names no module or the target is not a visible `pub` definition. Mirrors
+/// goto's `goto_module_member`.
+fn qualified_member_signature(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    qualifier: &[IdentId],
+    leaf: IdentId,
+) -> Option<String> {
+    let arena = file.arena();
+    let sfid = resolve_qualified_module(file, entry, qualifier)?;
+    let def = find_def_by_name(arena, sfid, arena.ident_name(leaf))?;
+    if sfid != entry && !def_is_public(arena, def) {
+        return None;
+    }
     def_signature(arena, sfid, def).map(|sig| code_block(&sig))
 }
 
@@ -421,5 +524,136 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
     fn hover_whitespace_between_definitions_is_none() {
         let source = "fn a() { return; }   fn b() { return; }";
         assert!(hover_at(source, at(source, "   ") + 1).is_none());
+    }
+
+    // --- caret at the exclusive end of an identifier (issue #244) ---
+
+    #[test]
+    fn hover_at_the_word_end_of_a_local_use_shows_its_type() {
+        let source = "fn f() -> i32 { let value: i32 = 1; return value; }";
+        let word_end = at(source, "value; }") + "value".len() as u32;
+        let hover = hover_at(source, word_end).expect("hover at the word end");
+        assert_eq!(hover.contents_markdown, "```inference\nvalue: i32\n```");
+    }
+
+    // --- hover on a `use` directive (issue #244) ---
+
+    #[test]
+    fn hover_plain_use_segment_names_the_module() {
+        let entry = "use lib;\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let hover = host
+            .analysis()
+            .hover(&path, at(entry, "lib"))
+            .expect("hover on the use segment");
+        assert_eq!(hover.contents_markdown, "```inference\nmodule lib\n```");
+    }
+
+    #[test]
+    fn hover_braced_item_import_shows_the_definition_signature() {
+        let entry = "use lib::{helper};\nfn main() -> i32 { return 0; }";
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let (mut host, path) = with_lib(entry, lib);
+        let hover = host
+            .analysis()
+            .hover(&path, at(entry, "helper"))
+            .expect("hover on the braced item");
+        assert_eq!(
+            hover.contents_markdown,
+            "```inference\npub fn helper() -> i32\n```"
+        );
+    }
+
+    // --- declared type parameter and enum variant (issue #244) ---
+
+    #[test]
+    fn hover_type_parameter_declaration_shows_it() {
+        let source = "fn id T'(x: i32) -> i32 { return x; }";
+        let hover = hover_at(source, at(source, "T'")).expect("hover on the type parameter");
+        assert_eq!(hover.contents_markdown, "```inference\nT'\n```");
+    }
+
+    #[test]
+    fn hover_enum_variant_declaration_shows_it_qualified() {
+        let source = "enum Color { Red, Green }\nfn f() -> i32 { return 0; }";
+        let hover =
+            hover_at(source, at(source, "Red")).expect("hover on the variant declaration");
+        assert_eq!(hover.contents_markdown, "```inference\nColor::Red\n```");
+    }
+
+    // --- checker-agreeing resolution (issue #245) ---
+
+    #[test]
+    fn hover_free_call_over_a_same_named_method_shows_the_free_signature() {
+        // A struct method and a free function share the name `get`. The call
+        // `get()` is a free call, so hover must show the free `fn get() -> i32`,
+        // not the method's `fn get(self) -> i32`.
+        let source = "struct S { v: i32; fn get(self) -> i32 { return self.v; } }\n\
+fn get() -> i32 { return 7; }\n\
+fn caller() -> i32 { return get(); }";
+        let hover = hover_at(source, at(source, "get();")).expect("hover on the free call");
+        assert_eq!(
+            hover.contents_markdown,
+            "```inference\nfn get() -> i32\n```"
+        );
+    }
+
+    #[test]
+    fn hover_qualified_type_leaf_matches_the_goto_target() {
+        // Hovering the `T` of `lib::T` must resolve through the qualifier into
+        // lib.inf — the same file goto lands in — not a bare-name degradation or
+        // a local same-named struct.
+        let entry = "use lib;\nfn main() -> i32 { let t: lib::T = lib::mk(); return t.v; }\n";
+        let lib = "pub struct T { v: i32; }\npub fn mk() -> T { return T { v: 1 }; }\n";
+        let (mut host, path) = with_lib(entry, lib);
+        let offset = at(entry, "lib::T") + "lib::".len() as u32;
+        let hover = host
+            .analysis()
+            .hover(&path, offset)
+            .expect("hover on the qualified type leaf");
+        assert!(
+            hover.contents_markdown.contains("struct T"),
+            "resolves the imported struct, got {}",
+            hover.contents_markdown
+        );
+    }
+
+    #[test]
+    fn hover_qualified_type_leaf_ignores_a_local_same_named_struct() {
+        // A local `T` (a different kind) exists too; hovering the qualified
+        // `lib::T` must still resolve the imported struct through the qualifier,
+        // not degrade to the local same-named definition.
+        let entry =
+            "use lib;\nenum T { Local }\nfn main() -> i32 { let t: lib::T = lib::mk(); return t.v; }\n";
+        let lib = "pub struct T { v: i32; }\npub fn mk() -> T { return T { v: 1 }; }\n";
+        let (mut host, path) = with_lib(entry, lib);
+        let offset = at(entry, "lib::T") + "lib::".len() as u32;
+        let hover = host
+            .analysis()
+            .hover(&path, offset)
+            .expect("hover on the qualified type leaf");
+        assert!(
+            hover.contents_markdown.contains("struct T"),
+            "shows the imported struct; got {}",
+            hover.contents_markdown
+        );
+        assert!(
+            !hover.contents_markdown.contains("enum"),
+            "must not degrade to the local same-named enum; got {}",
+            hover.contents_markdown
+        );
+    }
+
+    #[test]
+    fn hover_function_type_parameter_shows_a_source_like_spelling() {
+        // A function-typed parameter hovers as the source-like `fn(…) -> i32`,
+        // never the checker-internal `Function<0, i32>` carrier. The parser drops
+        // `fn(…)` parameter types (a pinned AST-parity quirk), so the written
+        // params do not survive to the hover — the return type does — which is the
+        // clearest form the available data allows.
+        let source = "fn apply(f: fn(i32, bool) -> i32) -> i32 { return 0; }";
+        let hover = hover_at(source, at(source, "f: fn")).expect("hover on the fn-typed param");
+        assert_eq!(hover.contents_markdown, "```inference\nf: fn() -> i32\n```");
     }
 }
