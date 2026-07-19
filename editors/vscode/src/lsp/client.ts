@@ -16,7 +16,8 @@ import { lspActionForConfigChange, resolveLspBinary } from './resolve';
  * A single LanguageClient instance is managed at module level. All lifecycle
  * operations (start/stop/restart) are serialized through an internal promise
  * queue so overlapping triggers (activation, configuration changes, the
- * restart command, post-install retries) cannot race each other.
+ * restart command, post-install/toolchain-switch restarts) cannot race each
+ * other.
  *
  * When the server binary cannot be found the client stays stopped QUIETLY:
  * a line is written to the main Inference output channel, but no user-facing
@@ -79,22 +80,6 @@ export function restartLspClient(): Promise<void> {
     return enqueue(async () => {
         await doStop();
         await doStart();
-    });
-}
-
-/**
- * Start the language client if it is not running yet. Called after a
- * successful toolchain install/update so the server comes up without a
- * window reload. Never rejects; failures are logged.
- */
-export function ensureLspStarted(): Promise<void> {
-    return enqueue(async () => {
-        if (client) {
-            return;
-        }
-        await doStart();
-    }).catch((err) => {
-        mainChannel?.error(`Language server start failed: ${err}`);
     });
 }
 

@@ -11,7 +11,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, ExprId, NodeId, SourceFileId, StmtId, TypeId};
-use inference_ast::nodes::{ArgData, ArgKind, Def, Expr, Location, Stmt, TypeNode};
+use inference_ast::nodes::{ArgData, ArgKind, Def, Directive, Expr, Location, Stmt, TypeNode};
 
 /// The result of a position → node hit-test.
 ///
@@ -31,13 +31,25 @@ pub struct NodeHit {
 }
 
 /// Returns the smallest node in `file` whose source range covers `offset`, with
-/// its ancestor chain, or `None` when no definition in `file` covers `offset`
+/// its ancestor chain, or `None` when no node in `file` covers `offset`
 /// (whitespace between definitions, or a position past the last one).
 ///
 /// `offset` is a byte offset local to `file`. `offset_end` is exclusive, so the
 /// last byte of a token is covered but the byte immediately after it is not.
+///
+/// Both the file's definitions and its `use` directives are covered: a hit on a
+/// directive's path segment or braced item import returns that identifier with an
+/// empty ancestor chain, since a directive is not itself an arena node. An empty
+/// ancestor chain on an [`NodeId::Ident`] therefore uniquely marks a directive
+/// identifier — a definition-tree identifier always carries its owning definition
+/// as an ancestor.
 #[must_use = "the covering node is the reason to call this"]
 pub fn hit_test(arena: &AstArena, file: SourceFileId, offset: u32) -> Option<NodeHit> {
+    def_hit(arena, file, offset).or_else(|| directive_hit(arena, file, offset))
+}
+
+/// The covering node found by descending `file`'s own definition tree.
+fn def_hit(arena: &AstArena, file: SourceFileId, offset: u32) -> Option<NodeHit> {
     // HARD INVARIANT: only this file's own definitions. See the module docs.
     let mut current = arena[file]
         .defs
@@ -58,6 +70,70 @@ pub fn hit_test(arena: &AstArena, file: SourceFileId, offset: u32) -> Option<Nod
         node: current,
         ancestors,
     })
+}
+
+/// The `use`-directive identifier covering `offset`: a path segment (`lib` or
+/// `geom` in `use lib::geom;`) or a braced item import (`add` in
+/// `use arith::{add};`). Both are arena-backed identifiers with real locations, so
+/// goto/hover on any part of a `use` directive resolves. The hit carries no
+/// ancestors — a directive has no arena node to stand in as one.
+fn directive_hit(arena: &AstArena, file: SourceFileId, offset: u32) -> Option<NodeHit> {
+    for directive in &arena[file].directives {
+        let Directive::Use(use_directive) = directive;
+        let segments = use_directive.segments.iter();
+        let items = use_directive.imported_types.iter();
+        for &ident in segments.chain(items) {
+            if covers(arena.node_location(NodeId::Ident(ident)), offset) {
+                return Some(NodeHit {
+                    node: NodeId::Ident(ident),
+                    ancestors: Vec::new(),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Like [`hit_test`], but tolerant of a caret one byte past the identifier it
+/// names — the position a double-click or just-finished keystroke leaves the
+/// caret in.
+///
+/// [`hit_test`] covers `start <= offset < end`, so a caret at an identifier's
+/// exclusive end lands on whatever encloses it (a call expression, a statement)
+/// rather than the identifier. This retries one byte back, but only when that byte
+/// is part of an identifier and the retry actually lands on one — so a caret just
+/// past a `}` never pulls back into the closing definition, and a caret already on
+/// an identifier is returned unchanged. Features that dispatch on an identifier
+/// (goto-definition, hover, the completion locals) share this so the caret at a
+/// name's end resolves that name.
+#[must_use = "the covering node is the reason to call this"]
+pub fn enclosing_hit(arena: &AstArena, file: SourceFileId, offset: u32) -> Option<NodeHit> {
+    let direct = hit_test(arena, file, offset);
+    if matches!(&direct, Some(hit) if matches!(hit.node, NodeId::Ident(_))) {
+        return direct;
+    }
+    let back = offset.checked_sub(1)?;
+    let is_ident = arena[file]
+        .source
+        .as_bytes()
+        .get(back as usize)
+        .copied()
+        .is_some_and(is_ident_byte);
+    if !is_ident {
+        return direct;
+    }
+    let back_hit = hit_test(arena, file, back);
+    if matches!(&back_hit, Some(hit) if matches!(hit.node, NodeId::Ident(_))) {
+        return back_hit;
+    }
+    // One byte back was inside a token but not an identifier the descent reached;
+    // keep the direct hit when there is one, else whatever the retry covered.
+    direct.or(back_hit)
+}
+
+/// Whether `byte` can appear inside an identifier (ASCII alphanumeric or `_`).
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 /// Among the direct children of `node`, the one with the smallest source range
@@ -106,12 +182,16 @@ fn def_children(arena: &AstArena, id: DefId) -> Vec<NodeId> {
     match &arena[id].kind {
         Def::Function {
             name,
+            type_params,
             args,
             returns,
             body,
             ..
         } => {
             out.push(NodeId::Ident(*name));
+            for &type_param in type_params {
+                out.push(NodeId::Ident(type_param));
+            }
             arg_children(args, &mut out);
             if let Some(ret) = returns {
                 out.push(NodeId::Type(*ret));
@@ -907,5 +987,134 @@ mod tests {
             .expect("covers the leaf type name");
         assert_eq!(hit_text(&arena, source, &leaf), "Point");
         assert!(matches!(leaf.node, NodeId::Ident(_)));
+    }
+
+    // --- enclosing_hit: caret one byte past an identifier (issue #244) ---
+
+    #[test]
+    fn enclosing_hit_covers_the_boundary_triple_of_a_multi_byte_identifier() {
+        // A double-click or a just-typed name leaves the caret at the identifier's
+        // exclusive end; all three of start, last byte, and exclusive end must
+        // resolve to the identifier.
+        let source = "fn f() -> i32 { return target(); }";
+        let (arena, file) = single_file(source);
+        let start = source.find("target").unwrap() as u32;
+        let end = start + "target".len() as u32;
+        for offset in [start, end - 1, end] {
+            let hit = enclosing_hit(&arena, file, offset).expect("covers target");
+            assert!(
+                matches!(hit.node, NodeId::Ident(_)),
+                "offset {offset} -> {:?}",
+                hit.node
+            );
+            assert_eq!(hit_text(&arena, source, &hit), "target");
+        }
+        // Plain hit_test misses the exclusive end: it lands on the call expression.
+        let direct = hit_test(&arena, file, end).expect("something covers the `(`");
+        assert_ne!(hit_text(&arena, source, &direct), "target");
+    }
+
+    #[test]
+    fn enclosing_hit_covers_the_boundary_of_a_one_byte_identifier() {
+        // For a length-1 name the start and last byte coincide; the exclusive end
+        // is the byte after it, which the fallback must still reach.
+        let source = "fn f(a: i32) -> i32 { return a; }";
+        let (arena, file) = single_file(source);
+        let start = source.rfind('a').unwrap() as u32;
+        for offset in [start, start + 1] {
+            let hit = enclosing_hit(&arena, file, offset).expect("covers a");
+            assert!(matches!(hit.node, NodeId::Ident(_)));
+            assert_eq!(hit_text(&arena, source, &hit), "a");
+        }
+    }
+
+    #[test]
+    fn enclosing_hit_past_a_closing_brace_does_not_pull_into_the_definition() {
+        // One byte past `}` is file scope; the previous byte is punctuation, so the
+        // identifier-biased fallback must not fire and leak the function's interior.
+        let source = "fn f() -> i32 { return v; }";
+        let (arena, file) = single_file(source);
+        let brace = source.rfind('}').unwrap() as u32;
+        assert!(enclosing_hit(&arena, file, brace + 1).is_none());
+    }
+
+    #[test]
+    fn enclosing_hit_on_an_identifier_returns_it_unchanged() {
+        // When the caret is already on an identifier, no fallback is needed.
+        let source = "fn f() -> i32 { return abc; }";
+        let (arena, file) = single_file(source);
+        let offset = source.find("abc").unwrap() as u32;
+        let hit = enclosing_hit(&arena, file, offset).expect("covers abc");
+        assert_eq!(hit_text(&arena, source, &hit), "abc");
+    }
+
+    // --- use directives are hit-testable (issue #244) ---
+
+    #[test]
+    fn hits_the_segment_of_a_plain_use_directive() {
+        let source = "use lib;\nfn f() -> i32 { return 0; }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("lib").unwrap() as u32)
+            .expect("covers the use segment");
+        assert!(matches!(hit.node, NodeId::Ident(_)));
+        assert_eq!(hit_text(&arena, source, &hit), "lib");
+        assert!(
+            hit.ancestors.is_empty(),
+            "a directive identifier carries no ancestors"
+        );
+    }
+
+    #[test]
+    fn hits_each_segment_of_a_multi_segment_use_directive() {
+        let source = "use lib::geom;\nfn f() -> i32 { return 0; }";
+        let (arena, file) = single_file(source);
+        for segment in ["lib", "geom"] {
+            let hit = hit_test(&arena, file, source.find(segment).unwrap() as u32)
+                .expect("covers a segment");
+            assert!(matches!(hit.node, NodeId::Ident(_)));
+            assert_eq!(hit_text(&arena, source, &hit), segment);
+        }
+    }
+
+    #[test]
+    fn hits_the_segment_and_braced_items_of_an_item_import() {
+        let source = "use arith::{add, sub};\nfn f() -> i32 { return 0; }";
+        let (arena, file) = single_file(source);
+        for name in ["arith", "add", "sub"] {
+            let hit = hit_test(&arena, file, source.find(name).unwrap() as u32)
+                .expect("covers a directive identifier");
+            assert!(matches!(hit.node, NodeId::Ident(_)));
+            assert_eq!(hit_text(&arena, source, &hit), name);
+            assert!(hit.ancestors.is_empty());
+        }
+    }
+
+    #[test]
+    fn enclosing_hit_reaches_a_use_segment_at_its_exclusive_end() {
+        // The caret just past a directive segment (before the `;`) still resolves
+        // it, since directives share the identifier-biased fallback.
+        let source = "use lib;\nfn f() -> i32 { return 0; }";
+        let (arena, file) = single_file(source);
+        let end = (source.find("lib").unwrap() + "lib".len()) as u32;
+        let hit = enclosing_hit(&arena, file, end).expect("covers the segment end");
+        assert_eq!(hit_text(&arena, source, &hit), "lib");
+    }
+
+    // --- declared type parameters are hit-testable (issue #244) ---
+
+    #[test]
+    fn hits_a_declared_type_parameter() {
+        // `T'` marks a type parameter; the `'` is a separate token, so the ident
+        // spans just `T`.
+        let source = "fn id T'(x: i32) -> i32 { return x; }";
+        let (arena, file) = single_file(source);
+        let hit = hit_test(&arena, file, source.find("T'").unwrap() as u32)
+            .expect("covers the type parameter");
+        assert!(matches!(hit.node, NodeId::Ident(_)));
+        assert_eq!(hit_text(&arena, source, &hit), "T");
+        assert!(
+            matches!(hit.ancestors.last(), Some(NodeId::Def(_))),
+            "a type parameter sits directly under its function"
+        );
     }
 }

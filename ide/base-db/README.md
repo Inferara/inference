@@ -55,9 +55,11 @@ they are — no reference into an arena, no lifetime.
 ## `LineIndex`
 
 `LineIndex::new(text: &str)` builds the index once by recording the byte offset
-where every line starts (splitting on `'\n'`; a `'\r'` before it is *not* a line
-terminator on its own and stays part of the preceding line's content). From
-then on:
+where every line starts. Lines are split on the LSP 3.17 end-of-line set —
+`'\n'`, `'\r\n'`, and a lone `'\r'` — so a classic-Mac or mixed-EOL file gets
+the same line count a conformant LSP client would compute (a `'\r\n'` pair
+counts as one terminator, at its `'\n'`); none of these terminators remain in
+the line content they end. From then on:
 
 - `line_col(offset: u32) -> LineCol` converts a byte offset to a line/UTF-16
   column. An offset past the end of the text clamps to the end position; an
@@ -100,7 +102,8 @@ assert_eq!(index.offset(LineCol { line: 1, character: 11 }), Some(offset));
 
 Unit tests live inline in `line_index.rs` and `lib.rs`. `line_index.rs` covers:
 empty text, no trailing newline, a trailing newline producing an empty final
-line, consecutive newlines, `\r` staying inside its line's content, two- and
+line, consecutive newlines, CRLF as a single line terminator, a lone `\r`
+starting a new line (and consecutive lone `\r`s as empty lines), two- and
 three-byte UTF-8 characters that are one UTF-16 unit, four-byte astral
 characters that are a UTF-16 surrogate pair (`😀`, `𝔘`), multi-byte content
 spanning several lines, and a round-trip property test that every char-boundary

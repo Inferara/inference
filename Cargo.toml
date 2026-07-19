@@ -61,6 +61,7 @@ inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+toml = "1.1.2"
 cov-mark = { version = "2.2.0", default-features = false }
 leb128 = "0.2.6"
 rustc-hash = "2.1.2"

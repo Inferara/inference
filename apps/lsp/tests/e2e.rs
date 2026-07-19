@@ -27,6 +27,14 @@ const INLAY_KIND_TYPE: i64 = 1;
 // JSON-RPC error codes.
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+
+/// A document whose *analysis* panics: a named constant used as an array size
+/// hits an unimplemented `todo!` deep in the type-checker (#240). It is the most
+/// direct in-tree trigger for the message-loop panic boundary; if #240 is fixed
+/// so this no longer unwinds, replace it with another deterministic panic.
+const PANIC_SOURCE: &str = "const N: i32 = 3;\n\
+fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; let i: i32 = 0; return arr[i]; }";
 
 /// A single-file fixture: an isolated temp dir with `main.inf` written to disk,
 /// plus its `file://` URI. The returned [`TempDir`] must be kept alive for the
@@ -321,6 +329,28 @@ fn goto_definition_reaches_a_same_file_function() {
     client.shutdown_exit_ok();
 }
 
+#[test]
+fn goto_definition_at_the_word_end_of_a_call_reaches_the_definition() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The caret is at the exclusive end of the callee name (just before `(`),
+    // where a double-click or just-finished keystroke leaves it. The raw offset
+    // lands on the call expression, not the identifier, so this exercises the
+    // shared one-byte-back fallback over the wire (issue #244).
+    let source = "fn caller() -> i32 { return produce(); }\nfn produce() -> i32 { return 7; }";
+    let (_dir, uri) = fixture("goto-word-end", source);
+    client.did_open(&uri, source, 1);
+
+    let response = definition_request(&mut client, &uri, pos_after(source, "produce"));
+    let location = &response["result"];
+    assert_eq!(location["uri"], json!(uri), "same-file target");
+    // The call's word-end resolves to the callee definition, not the call site.
+    assert_eq!(location["range"]["start"], pos_at_nth(source, "produce", 1));
+
+    client.shutdown_exit_ok();
+}
+
 // --- 9. cross-file: import a sibling on disk ---------------------------------
 
 #[test]
@@ -521,6 +551,42 @@ fn m(p: P) -> i32 { return p.; }";
     assert!(
         !labels.iter().any(|l| l == "fn"),
         "keywords are excluded after a dot: {labels:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn completion_after_a_module_qualifier_offers_bare_pub_defs() {
+    // The `::` trigger context: after `lib::`, the target module's public defs are
+    // offered by their bare name (the form that compiles there), while a private
+    // def and the general keyword list are not (issue #246).
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("complete-qualified");
+    let entry_source = "use lib;\nfn main() -> i32 { return lib::; }";
+    let lib_source = "pub fn helper() -> i32 { return 7; }\nfn secret() -> i32 { return 1; }";
+    let entry_path = dir.write("main.inf", entry_source);
+    dir.write("lib.inf", lib_source);
+    let entry_uri = path_to_uri(&entry_path);
+
+    // The incomplete `lib::` produces a syntax diagnostic; consume it.
+    client.did_open(&entry_uri, entry_source, 1);
+
+    let response = completion_request(&mut client, &entry_uri, pos_after(entry_source, "lib::"));
+    let labels = completion_labels(&response);
+    assert!(
+        labels.iter().any(|l| l == "helper"),
+        "the module's pub def is offered bare: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "secret"),
+        "a private def is not offered after `::`: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "fn"),
+        "keywords are wrong after `::`: {labels:?}"
     );
 
     client.shutdown_exit_ok();
@@ -947,6 +1013,110 @@ fn query_or_fragment_uri_is_ignored_without_crashing() {
         hover.get("error").is_none(),
         "the server survived the query-bearing open"
     );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 22. an analysis panic is contained, not fatal to the session (#241) ------
+
+#[test]
+fn a_request_whose_analysis_panics_is_answered_internal_error() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // The panic file lives on disk but is never opened; a request against it reads
+    // it from disk, analyzes, and unwinds. The message-loop boundary must turn that
+    // into a failed request carrying its own id, not a dead process.
+    let (_dir, panic_uri) = fixture("panic-request", PANIC_SOURCE);
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-request-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    let response = hover_request(&mut client, &panic_uri, pos_at(PANIC_SOURCE, "arr"));
+    assert_eq!(
+        response["error"]["code"],
+        json!(INTERNAL_ERROR),
+        "a request whose analysis panics is answered InternalError, got {response}"
+    );
+
+    // The server still answers a well-formed request against a healthy document.
+    let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server stays responsive after containing the panic, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn a_didopen_whose_diagnostics_panic_does_not_kill_the_server() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-didopen-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    // Opening the panic file computes its diagnostics on the loop thread, which
+    // unwinds. The notification boundary contains it: nothing is published for the
+    // file (so we must not wait on a publish that never comes), and the session
+    // lives on. Sent raw for that reason.
+    let (_dir, panic_uri) = fixture("panic-didopen", PANIC_SOURCE);
+    client.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": panic_uri,
+                "languageId": "inference",
+                "version": 1,
+                "text": PANIC_SOURCE,
+            }
+        }),
+    );
+
+    // The healthy document is still served after the panicking open.
+    let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server survived the panicking didOpen and still answers, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn repeated_didopen_of_a_panicking_document_never_kills_the_server() {
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let healthy = "fn f() -> i32 { return 1; }";
+    let (_healthy_dir, healthy_uri) = fixture("panic-loop-healthy", healthy);
+    client.did_open(&healthy_uri, healthy, 1);
+
+    // The amplification the issue describes: a client that crashes and auto-restarts
+    // re-sends didOpen for the same bad file. Each didOpen unwinds during diagnostics;
+    // every one must be contained, and the healthy document stay answerable across all
+    // of them — otherwise one bad file becomes a permanent LSP outage.
+    let (_dir, panic_uri) = fixture("panic-loop", PANIC_SOURCE);
+    for version in 1..=5 {
+        client.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": panic_uri,
+                    "languageId": "inference",
+                    "version": version,
+                    "text": PANIC_SOURCE,
+                }
+            }),
+        );
+        let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy, "f("));
+        assert!(
+            hover.get("error").is_none(),
+            "the server is still alive after panicking didOpen #{version}, got {hover}"
+        );
+    }
 
     client.shutdown_exit_ok();
 }
