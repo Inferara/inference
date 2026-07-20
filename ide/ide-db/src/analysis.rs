@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use inference::{FileParseErrors, ImportProblem, LoadedFile, load_project_resilient_with_root};
+use inference_project_model::{
+    FileParseErrors, ImportProblem, LoadedFile, load_project_resilient_with_root,
+};
 use inference_analysis::errors::{LabeledDiagnostic, Severity};
 use inference_analysis::rules::all_rules;
 use inference_ast::arena::AstArena;

@@ -96,7 +96,13 @@ impl AnalysisHost {
 /// A borrowed view over the host that answers feature queries for a document.
 ///
 /// Each method names its document by path and takes `&mut self` because the
-/// document's analysis is computed lazily and cached on first use.
+/// document's analysis is computed lazily and cached on first use — a read
+/// mutates the [`RootDatabase`] to memoize its result. That is why the borrow is
+/// `&'a mut RootDatabase` rather than shared: it is correct for the
+/// single-threaded LSP main loop, but it forecloses request cancellation and
+/// parallel reads, which would need a `RootDatabase` that memoizes behind shared
+/// interior mutability. Adopting Salsa (issue #157) is the planned path to that;
+/// until then this constraint is deliberate and load-bearing.
 pub struct Analysis<'a> {
     db: &'a mut RootDatabase,
 }

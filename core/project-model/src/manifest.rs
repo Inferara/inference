@@ -11,10 +11,10 @@
 //! This module gives ide-db just enough to derive that root: walk up to the
 //! nearest manifest, confirm it is a well-formed Inference manifest, and return
 //! `<manifest_dir>/src` when the opened file lives under it. It deliberately does
-//! not model the whole manifest — issue #256 will extract a shared project-model
-//! crate, at which point `infs` and this helper can converge on one
-//! implementation. Until then this small piece keeps the IDE and CLI agreeing on
-//! what a manifest means without ide-db depending on `apps/infs`.
+//! not model the whole manifest — `infs` owns the full `InferenceToml`, and a
+//! future change can let `infs` and this helper converge on one implementation.
+//! Until then this small piece keeps the IDE and CLI agreeing on what a manifest
+//! means without ide-db depending on `apps/infs`.
 //!
 //! # v1 limitation
 //!

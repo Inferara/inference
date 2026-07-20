@@ -247,6 +247,7 @@ The generated Rocq code can be used with the Rocq proof assistant to verify prog
 
 This crate is a thin orchestration layer delegating to specialized crates:
 
+- **[`inference_project_model`]** - Shared project front end (import-closure walk, `FileLoader` seam, manifest discovery); its items — `parse_project`, `load_project_resilient`, `InferenceError`, `manifest_source_root`, … — are re-exported here so consumers reach them as `inference::…`. It is a leaf crate the IDE stack also depends on directly, which is what keeps that stack from linking this backend.
 - **[`inference_ast`]** - Arena-based AST data model
 - **[`inference_parser`]** - Lexer + recursive-descent parser
 - **[`inference_type_checker`]** - Bidirectional type checking with error recovery

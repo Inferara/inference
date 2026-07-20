@@ -203,13 +203,6 @@ pub struct ResilientProjectParse {
     pub parse_errors: Vec<FileParseErrors>,
     /// `use` imports that did not resolve to a file.
     pub import_problems: Vec<ImportProblem>,
-    /// Always empty. The resilient walk does not scan the source tree for
-    /// unreachable files: that scan enumerates and canonicalizes every `.inf`
-    /// under the source root — work an editor would repeat on every keystroke,
-    /// growing with the tree — and no IDE consumer reads the result. The field is
-    /// retained so the resilient outcome mirrors [`ProjectParse`]'s shape; the
-    /// fail-fast [`parse_project`] still populates its own warnings.
-    pub warnings: Vec<ProjectWarning>,
     /// Every file actually read, in discovery order: its module path and the
     /// path it was read from. Serves as both the closure file set and the
     /// module-path → path mapping.
@@ -371,21 +364,14 @@ pub fn load_project_resilient_with_root(
         }
     }
 
-    // The resilient walk never scans the source tree for unreachable files. The
-    // scan enumerates and canonicalizes every `.inf` file under the source root,
-    // which for an editor runs on every keystroke and grows with the tree — yet no
-    // IDE consumer reads these warnings. They are always empty here; the fail-fast
-    // compiler keeps the scan (see [`ResilientProjectParse::warnings`]).
-    // The resilient walk never scans the source tree for unreachable files. The
-    // scan enumerates and canonicalizes every `.inf` file under the source root,
-    // which for an editor runs on every keystroke and grows with the tree — yet no
-    // IDE consumer reads these warnings. They are always empty here; the fail-fast
-    // compiler keeps the scan (see [`ResilientProjectParse::warnings`]).
+    // The resilient walk never scans the source tree for unreachable files: that
+    // scan enumerates and canonicalizes every `.inf` under the source root — work
+    // an editor would repeat on every keystroke, growing with the tree — and no IDE
+    // consumer needs the result. The fail-fast `parse_project` keeps the scan.
     ResilientProjectParse {
         arena,
         parse_errors,
         import_problems,
-        warnings: Vec::new(),
         files,
         read_failures,
     }
@@ -2244,7 +2230,10 @@ mod tests {
             fail_fast.arena, resilient.arena,
             "clean-project arenas must be byte-identical across both walks"
         );
-        assert_eq!(fail_fast.warnings, resilient.warnings);
+        assert!(
+            fail_fast.warnings.is_empty(),
+            "a clean project has no unreachable-file warnings"
+        );
     }
 
     #[test]
@@ -2297,18 +2286,18 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let parse = load_project_resilient(&entry, &loader);
-            let _ = tx.send(parse.warnings.len());
+            let _ = tx.send(parse.files.len());
         });
 
-        let warning_count = rx
+        let file_count = rx
             .recv_timeout(std::time::Duration::from_secs(20))
             .expect(
                 "the resilient walk at a filesystem root did not return: \
                  the whole-disk unreachable scan was not skipped",
             );
         assert_eq!(
-            warning_count, 0,
-            "a lone file at a filesystem root has no unreachable-file warnings"
+            file_count, 1,
+            "a lone file at a filesystem root loads only itself, with no disk scan"
         );
     }
 
@@ -2581,17 +2570,17 @@ mod tests {
     }
 
     #[test]
-    fn resilient_walk_never_reports_unreachable_warnings() {
+    fn resilient_walk_never_scans_for_unreachable_files() {
         // Regression: the resilient/IDE walk must not scan the source tree for
         // unreachable files. That scan enumerates and canonicalizes every `.inf`
         // under the source root — work an editor repeats on every keystroke — yet
-        // no IDE consumer reads the warnings. An orphan the fail-fast walk warns
-        // about must yield no resilient warning at all.
+        // no IDE consumer needs the result. An orphan the fail-fast walk warns
+        // about must not be scanned in or reported by the resilient walk at all.
         let project = TempProject::new("resilient-no-warn");
         let entry = project.write("main.inf", "pub fn main() -> i32 { return 0; }");
         project.write("orphan.inf", "pub fn orphan() {}");
 
-        // The fail-fast compiler still warns about the orphan...
+        // The fail-fast compiler still scans for and warns about the orphan...
         let fail_fast = parse_project(&entry).expect("project parses");
         assert_eq!(
             fail_fast.warnings.len(),
@@ -2599,13 +2588,17 @@ mod tests {
             "the compiler still scans for and warns about orphans"
         );
 
-        // ...but the resilient walk skips the scan entirely.
+        // ...but the resilient walk skips the scan entirely: it loads only the
+        // import-reachable closure (here just the entry) and manufactures no
+        // problems for the unreachable orphan.
         let resilient = load_project_resilient(&entry, &DiskLoader);
-        assert!(
-            resilient.warnings.is_empty(),
-            "the resilient walk must not compute unreachable-file warnings, got {:?}",
-            resilient.warnings,
+        assert_eq!(
+            resilient_module_paths(&resilient),
+            vec![Vec::<String>::new()],
+            "the resilient walk loads only the reachable entry, not the orphan",
         );
+        assert!(resilient.parse_errors.is_empty());
+        assert!(resilient.import_problems.is_empty());
     }
 
     #[test]

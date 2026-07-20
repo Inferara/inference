@@ -1,9 +1,10 @@
-//! Consolidated error types for the `inference` orchestration crate.
+//! Error types for the project front end.
 //!
-//! Per the project's error-handling convention, every fallible operation in this
-//! crate surfaces a variant of [`InferenceError`] wrapped in `anyhow::Result`,
-//! so downstream consumers can downcast to a structured error instead of parsing
-//! free-form strings.
+//! Per the project's error-handling convention, every fallible operation in the
+//! fail-fast project walk surfaces a variant of [`InferenceError`] wrapped in
+//! `anyhow::Result`, so downstream consumers can downcast to a structured error
+//! instead of parsing free-form strings. The name is kept for source
+//! compatibility: the orchestration crate re-exports it as `inference::InferenceError`.
 
 use std::path::PathBuf;
 
