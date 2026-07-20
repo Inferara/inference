@@ -12,25 +12,26 @@ Require Import Wasm.bytes.
 Require Import Wasm.numerics.
 
 (* ------------------------------------------------------------------ *)
-(* Value, number, reference and vector types                          *)
+(* Value, number and reference types                                  *)
+(*                                                                    *)
+(* Deliberately narrower than the real library: no float (`T_f32`/    *)
+(* `T_f64`) and no vector (`T_v128`) constructors, because Inference  *)
+(* has no floating-point or SIMD and no reachable emitter output can  *)
+(* mention them. Their absence makes the gate stricter -- an          *)
+(* accidental float/vector emission is a type error here, not a       *)
+(* silently type-checking term. See README.md "Scope".                *)
 (* ------------------------------------------------------------------ *)
 
 Inductive number_type : Type :=
 | T_i32 : number_type
-| T_i64 : number_type
-| T_f32 : number_type
-| T_f64 : number_type.
+| T_i64 : number_type.
 
 Inductive reference_type : Type :=
 | T_funcref : reference_type
 | T_externref : reference_type.
 
-Inductive vector_type : Type :=
-| T_v128 : vector_type.
-
 Inductive value_type : Type :=
 | T_num : number_type -> value_type
-| T_vec : vector_type -> value_type
 | T_ref : reference_type -> value_type.
 
 Inductive packed_type : Type :=
@@ -48,9 +49,7 @@ Inductive mutability : Type :=
 
 Inductive value_num : Type :=
 | VAL_int32 : i32 -> value_num
-| VAL_int64 : i64 -> value_num
-| VAL_float32 : f32 -> value_num
-| VAL_float64 : f64 -> value_num.
+| VAL_int64 : i64 -> value_num.
 
 Inductive block_type : Type :=
 | BT_id : N -> block_type
@@ -58,6 +57,13 @@ Inductive block_type : Type :=
 
 (* ------------------------------------------------------------------ *)
 (* Operator families                                                  *)
+(*                                                                    *)
+(* Integer families only. The float families (`relop_f`/`binop_f`/    *)
+(* `unop_f`) and the conversion family (`cvtop`) are deliberately     *)
+(* absent: Inference has no floating-point and its codegen emits no   *)
+(* conversion instructions, so no reachable emitter output uses them. *)
+(* The single-constructor wrappers (`Relop_i` etc.) stay because the  *)
+(* emitter writes the wrapped form. See README.md "Scope".            *)
 (* ------------------------------------------------------------------ *)
 
 Inductive testop : Type :=
@@ -71,17 +77,8 @@ Inductive relop_i : Type :=
 | ROI_le : sx -> relop_i
 | ROI_ge : sx -> relop_i.
 
-Inductive relop_f : Type :=
-| ROF_eq : relop_f
-| ROF_ne : relop_f
-| ROF_lt : relop_f
-| ROF_gt : relop_f
-| ROF_le : relop_f
-| ROF_ge : relop_f.
-
 Inductive relop : Type :=
-| Relop_i : relop_i -> relop
-| Relop_f : relop_f -> relop.
+| Relop_i : relop_i -> relop.
 
 Inductive binop_i : Type :=
 | BOI_add : binop_i
@@ -97,45 +94,16 @@ Inductive binop_i : Type :=
 | BOI_rotl : binop_i
 | BOI_rotr : binop_i.
 
-Inductive binop_f : Type :=
-| BOF_add : binop_f
-| BOF_sub : binop_f
-| BOF_mul : binop_f
-| BOF_div : binop_f
-| BOF_min : binop_f
-| BOF_max : binop_f
-| BOF_copysign : binop_f.
-
 Inductive binop : Type :=
-| Binop_i : binop_i -> binop
-| Binop_f : binop_f -> binop.
+| Binop_i : binop_i -> binop.
 
 Inductive unop_i : Type :=
 | UOI_clz : unop_i
 | UOI_ctz : unop_i
 | UOI_popcnt : unop_i.
 
-Inductive unop_f : Type :=
-| UOF_abs : unop_f
-| UOF_neg : unop_f
-| UOF_ceil : unop_f
-| UOF_floor : unop_f
-| UOF_trunc : unop_f
-| UOF_nearest : unop_f
-| UOF_sqrt : unop_f.
-
 Inductive unop : Type :=
-| Unop_i : unop_i -> unop
-| Unop_f : unop_f -> unop.
-
-Inductive cvtop : Type :=
-| CVO_wrap : number_type -> option sx -> cvtop
-| CVO_extend : number_type -> option sx -> cvtop
-| CVO_trunc : number_type -> option sx -> cvtop
-| CVO_convert : number_type -> option sx -> cvtop
-| CVO_demote : number_type -> option sx -> cvtop
-| CVO_promote : number_type -> option sx -> cvtop
-| CVO_reinterpret : number_type -> option sx -> cvtop.
+| Unop_i : unop_i -> unop.
 
 (* ------------------------------------------------------------------ *)
 (* Memory argument                                                    *)
@@ -205,8 +173,7 @@ Inductive basic_instruction : Type :=
 | BI_testop : number_type -> testop -> basic_instruction
 | BI_relop : number_type -> relop -> basic_instruction
 | BI_binop : number_type -> binop -> basic_instruction
-| BI_unop : number_type -> unop -> basic_instruction
-| BI_cvtop : number_type -> cvtop -> basic_instruction.
+| BI_unop : number_type -> unop -> basic_instruction.
 Set Elimination Schemes.
 
 (* ------------------------------------------------------------------ *)

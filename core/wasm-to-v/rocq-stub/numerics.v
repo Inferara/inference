@@ -3,12 +3,12 @@
 
 Require Import ZArith.
 
-(* Machine-integer / float representation types. Opaque: the stub type-checks
-   the *shape* of emitted terms, it does not model wrap-around arithmetic. *)
+(* Machine-integer representation types. Opaque: the stub type-checks the
+   *shape* of emitted terms, it does not model wrap-around arithmetic. No
+   `f32`/`f64` on purpose: Inference has no floating-point, so no reachable
+   emitter output mentions them -- see README.md "Scope". *)
 Parameter i32 : Type.
 Parameter i64 : Type.
-Parameter f32 : Type.
-Parameter f64 : Type.
 
 (* The emitted `Vi32`/`Vi64` helpers read
    `VAL_int32 (Wasm_int.int_of_Z i32m z)`. `int_of_Z` takes an integer-type

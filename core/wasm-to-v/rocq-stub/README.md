@@ -30,8 +30,8 @@ generated module against it.
 | File | Provides |
 | --- | --- |
 | `bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers) |
-| `numerics.v` | `i32`/`i64`/`f32`/`f64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) |
-| `datatypes.v` | value/number/reference/vector types, operator families, `memarg`, the `basic_instruction` inductive (all `BI_*` constructors), and the module/section records |
+| `numerics.v` | `i32`/`i64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) |
+| `datatypes.v` | value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive (all `BI_*` constructors), and the module/section records |
 | `verifier.v` | the `host` typeclass and `ValidModule` predicate the emitted theorems reference |
 | `_CoqProject` | maps the physical directory to the logical library name `Wasm` |
 
@@ -52,13 +52,27 @@ comparisons, memory/local/global access, structured control flow (`if`/`loop`/
 `br`), calls, and the `forall`/`exists`/`assume`/`unique`/uzumaki family — plus
 every module and section record.
 
-Deliberately **out of scope**, because Inference executable code never lowers to
-them and the corpus never exercises them: SIMD/vector, GC/reference-typing,
-atomics, and the float-conversion instructions. Several of those are also known
-emitter-vs-library divergences (see below), so declaring them here would encode
-a shape no real library accepts. If the emitter ever starts producing one of
-these from real Inference source, extend the corpus in
-`tests/src/rocq_typecheck.rs` and the relevant inductive here together.
+Deliberately **out of scope**, because Inference code never lowers to them and
+the corpus can never exercise them:
+
+- **Floating-point, entirely** — the `f32`/`f64` representation types, the
+  `T_f32`/`T_f64` number types, float constants (`VAL_float32`/`VAL_float64`),
+  and the float operator families (`relop_f`/`binop_f`/`unop_f`). Inference has
+  no floating-point.
+- **Conversions** — the whole `cvtop` family and `BI_cvtop`. Inference codegen
+  emits no conversion instructions (no `wrap`/`extend`/`trunc`/...).
+- **SIMD/vector** (`T_v128`), **GC/reference-typing instructions**, and
+  **atomics**.
+
+Their absence is a feature, not a gap: emitted terms are plain constructor
+applications, so a narrower stub type-checks exactly the same modules while
+making any accidental emission of an unsupported operator a loud `coqc` error
+instead of a silently type-checking term. Note the translator still carries
+dead arms for these operators, and its float-relop arms are known to write
+ill-typed Rocq (`Relop_f ROI_*`) — unreachable from Inference-generated wasm,
+tracked in [#284]. If the emitter ever starts producing one of these constructs
+from real Inference source, extend the corpus in `tests/src/rocq_typecheck.rs`
+and the relevant inductive here together.
 
 ## Emitter-vs-library divergences (intentional)
 
