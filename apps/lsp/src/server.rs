@@ -1281,6 +1281,10 @@ mod tests {
             publishes.is_empty(),
             "a change after close publishes nothing"
         );
+        assert!(
+            state.drain_pending_republishes().is_empty(),
+            "a dropped change queues no republish"
+        );
         let main_uri = Uri::from_str(uri).expect("a valid uri");
         assert!(
             !state.documents.contains_key(&main_uri),
