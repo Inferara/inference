@@ -100,15 +100,24 @@ mod gate {
             .unwrap_or_else(|e| panic!("wasm_to_v failed for {file}: {e}"))
     }
 
-    /// Rewrites each `Qed.` line to `Admitted.` so `coqc` type-checks the
+    /// Rewrites each `Qed.`-only line to `Admitted.` so `coqc` type-checks the
     /// statements and definitions without requiring the emitted `(* TODO *)`
-    /// proofs to close. The emitter only ever writes `Qed.` for these unfilled
+    /// proofs to close. The match is whitespace-tolerant: a line is rewritten
+    /// when its content is exactly `Qed.` after trimming surrounding whitespace,
+    /// preserving the line's original leading indentation and newline bytes. A
+    /// stricter column-0 match would be silently skipped if a future emitter
+    /// indented the terminator, and the skip would surface as a misleading
+    /// `coqc` "incomplete proof" error rather than the type error this gate
+    /// exists to catch. The emitter only ever writes `Qed.` for these unfilled
     /// per-spec theorem stubs, so this never downgrades a genuinely closed proof.
     fn admit_open_proofs(v: &str) -> String {
         let mut out = String::with_capacity(v.len());
         for line in v.split_inclusive('\n') {
-            if line.trim_end_matches(['\r', '\n']) == "Qed." {
-                let newline = &line[line.trim_end_matches(['\r', '\n']).len()..];
+            let content = line.trim_end_matches(['\r', '\n']);
+            if content.trim() == "Qed." {
+                let newline = &line[content.len()..];
+                let indent = &content[..content.len() - content.trim_start().len()];
+                out.push_str(indent);
                 out.push_str("Admitted.");
                 out.push_str(newline);
             } else {
@@ -116,6 +125,13 @@ mod gate {
             }
         }
         out
+    }
+
+    #[test]
+    fn admit_open_proofs_rewrites_qed_variants() {
+        let input = "Qed.\n  Qed.\r\n(* not a terminator: Qed. *)\nQed.";
+        let expected = "Admitted.\n  Admitted.\r\n(* not a terminator: Qed. *)\nAdmitted.";
+        assert_eq!(admit_open_proofs(input), expected);
     }
 
     /// Physical path of the vendored stub directory, relative to this crate.
@@ -188,7 +204,11 @@ mod gate {
         };
 
         // 4. Compile the vendored stub once into a private temp dir (coqc writes
-        //    `.vo` next to sources, so copy out of the read-only repo tree).
+        //    `.vo` next to sources, so copy out of the read-only repo tree). On a
+        //    coqc failure the dir is deliberately kept so the rejected `.v` and
+        //    compiled stub are available for a manual `coqc` repro; a successful
+        //    run removes it, and the pre-clean below handles a stale same-PID
+        //    leftover.
         let work =
             std::env::temp_dir().join(format!("inference_rocq_typecheck_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
@@ -202,7 +222,11 @@ mod gate {
         for module in ["bytes", "numerics", "datatypes", "verifier"] {
             let file = work.join(format!("{module}.v"));
             if let Err(log) = coqc_compile(&coqc, &work, &file) {
-                panic!("vendored stub failed to compile ({module}.v):\n{log}");
+                panic!(
+                    "vendored stub failed to compile ({module}.v):\n{log}\n\
+                     work dir kept for inspection: {}",
+                    work.display()
+                );
             }
         }
 
@@ -213,7 +237,9 @@ mod gate {
             if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
                 panic!(
                     "coqc rejected proof-mode output for `{file}` against the \
-                     vendored Wasm stub:\n{log}"
+                     vendored Wasm stub:\n{log}\n\
+                     work dir kept for inspection: {}",
+                    work.display()
                 );
             }
         }
