@@ -166,11 +166,31 @@ pub(crate) fn did_open(
     Some(publish_diagnostics_params(state, &document.uri))
 }
 
+/// Applies a full-text change to an already-open document and returns its fresh
+/// diagnostics.
+///
+/// A `didChange` is only valid for a document the client has already opened (LSP
+/// 3.17 sends `didChange` only between a document's `didOpen` and its
+/// `didClose`). A change for a URI not in the tracked set — one never opened, or
+/// one closed since (VS Code's preview-tab close race can emit a change just
+/// after `didClose`) — is a protocol violation and is dropped: the path is not
+/// interned, the URI is not adopted into the tracked set or any future
+/// dependents-republish sweep, and nothing is published (#275). This mirrors the
+/// URI layer's treat-unmappable-input-as-absent philosophy; a later proper
+/// `didOpen` starts tracking the document normally, unaffected by the dropped
+/// change. The drop is logged to stderr, never stdout (the protocol channel).
 pub(crate) fn did_change(
     state: &mut ServerState,
     params: DidChangeTextDocumentParams,
 ) -> Option<PublishDiagnosticsParams> {
     let uri = params.text_document.uri;
+    if !state.documents.contains_key(&uri) {
+        eprintln!(
+            "inference-lsp: ignoring didChange for a document with no prior didOpen: {}",
+            uri.as_str()
+        );
+        return None;
+    }
     let version = params.text_document.version;
     let path = uri::to_path(&uri)?;
     // Full-text sync: the last content change carries the whole new document.
