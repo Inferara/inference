@@ -1,5 +1,6 @@
 //! [`RootDatabase`]: the open-document store plus memoized per-file analyses.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -128,7 +129,7 @@ pub struct RootDatabase {
     /// Entry paths of memoized analyses for documents the editor never opened, in
     /// the order they were memoized (oldest first). Bounds the map against feature
     /// requests on arbitrary URIs; see [`MAX_UNOPENED_ANALYSES`].
-    unopened_order: Vec<PathBuf>,
+    unopened_order: VecDeque<PathBuf>,
 }
 
 /// The most memoized analyses to retain for documents that were never opened.
@@ -233,21 +234,22 @@ impl RootDatabase {
     /// memoized entries (opened since, or dropped by invalidation), so the cap
     /// counts only entries actually held for never-opened documents.
     fn record_unopened_analysis(&mut self, path: PathBuf) {
-        let mut kept = Vec::with_capacity(self.unopened_order.len() + 1);
+        let mut kept = VecDeque::with_capacity(self.unopened_order.len() + 1);
         for tracked in std::mem::take(&mut self.unopened_order) {
             if tracked != path
                 && self.analyses.contains_key(&tracked)
                 && self.vfs.contents_of_path(&tracked).is_none()
             {
-                kept.push(tracked);
+                kept.push_back(tracked);
             }
         }
-        kept.push(path);
+        kept.push_back(path);
         self.unopened_order = kept;
 
         while self.unopened_order.len() > MAX_UNOPENED_ANALYSES {
-            let evicted = self.unopened_order.remove(0);
-            self.analyses.remove(&evicted);
+            if let Some(evicted) = self.unopened_order.pop_front() {
+                self.analyses.remove(&evicted);
+            }
         }
     }
 
