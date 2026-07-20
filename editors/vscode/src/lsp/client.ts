@@ -10,6 +10,7 @@ import { getSettings } from '../config/settings';
 import { isExecutable } from '../toolchain/detection';
 import { inferenceHome } from '../toolchain/home';
 import { TimeoutError, withTimeout } from '../utils/timeout';
+import { SerialQueue } from './queue';
 import { lspActionForConfigChange, resolveLspBinary } from './resolve';
 
 /**
@@ -41,13 +42,11 @@ const LSP_START_TIMEOUT_MS = 30_000;
 let mainChannel: vscode.LogOutputChannel | undefined;
 let serverChannel: vscode.OutputChannel | undefined;
 let client: LanguageClient | undefined;
-let queue: Promise<void> = Promise.resolve();
+const queue = new SerialQueue();
 
 /** Serialize a lifecycle operation behind all previously queued ones. */
 function enqueue(operation: () => Promise<void>): Promise<void> {
-    const next = queue.then(operation);
-    queue = next.catch(() => undefined);
-    return next;
+    return queue.enqueue(operation);
 }
 
 /**
