@@ -895,6 +895,23 @@ fn collect_unreachable_warnings(
     src_root: &Path,
     entry: &Path,
 ) -> Vec<ProjectWarning> {
+    collect_unreachable_warnings_within(arena, src_root, entry, MAX_SCAN_DIRECTORIES)
+}
+
+/// [`collect_unreachable_warnings`] with the directory-scan cap supplied
+/// explicitly, so tests can exercise the fail-open path without materializing a
+/// tree larger than the production cap.
+///
+/// When the scan gives up (see [`enumerate_source_files`]) no warnings are
+/// emitted: a partial file list cannot tell a genuine orphan from a file the scan
+/// never reached, so reporting from it would claim a completeness the scan does
+/// not have. The parse itself is unaffected either way.
+fn collect_unreachable_warnings_within(
+    arena: &AstArena,
+    src_root: &Path,
+    entry: &Path,
+    max_directories: usize,
+) -> Vec<ProjectWarning> {
     let reachable: FxHashSet<PathBuf> = arena
         .source_files()
         .map(|sf| {
@@ -911,11 +928,13 @@ fn collect_unreachable_warnings(
         .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
         .collect();
 
-    let mut warnings = Vec::new();
-    let mut on_disk = enumerate_source_files(src_root);
+    let Some(mut on_disk) = enumerate_source_files(src_root, max_directories) else {
+        return Vec::new();
+    };
     // Sort so the warning order is deterministic regardless of directory-read
     // order (which the OS does not guarantee).
     on_disk.sort();
+    let mut warnings = Vec::new();
     for path in on_disk {
         let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if !reachable.contains(&canonical) {
@@ -925,13 +944,38 @@ fn collect_unreachable_warnings(
     warnings
 }
 
-/// Recursively collects every `.inf` file under `root`. Returns an empty vector
-/// if `root` is unreadable, so an unreachable-file scan failure never aborts an
-/// otherwise-successful parse.
-fn enumerate_source_files(root: &Path) -> Vec<PathBuf> {
+/// Upper bound on the number of directories the unreachable-file scan descends
+/// into before giving up. A real Inference source tree spans at most a few
+/// hundred directories, so this ceiling sits an order of magnitude above any
+/// realistic project while still bounding a pathological one — a bare entry file
+/// compiled from a home or filesystem-root directory, or a tree made cyclic by a
+/// symlink — to a walk that always terminates quickly.
+const MAX_SCAN_DIRECTORIES: usize = 4096;
+
+/// Recursively collects every `.inf` file under `root`, depth-first, descending
+/// into at most `max_directories` directories.
+///
+/// Returns `Some(files)` when the entire tree was scanned within that bound, or
+/// `None` when the walk reached the cap and gave up before finishing. A `None`
+/// result signals an incomplete scan whose partial file list must not be used to
+/// judge reachability — the caller emits no warnings in that case, so a scan that
+/// gives up never aborts an otherwise-successful parse. An unreadable directory is
+/// skipped rather than treated as fatal, for the same reason (an unreadable
+/// `root` yields `Some` of an empty vector, not `None`).
+///
+/// The cap keeps a pathological source root from turning the scan into a
+/// whole-disk — or, through a symlink cycle, a non-terminating — walk: compiling a
+/// bare entry file that sits directly in a home or filesystem-root directory would
+/// otherwise descend through everything beneath it.
+fn enumerate_source_files(root: &Path, max_directories: usize) -> Option<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut directories_visited = 0usize;
     while let Some(dir) = stack.pop() {
+        directories_visited += 1;
+        if directories_visited > max_directories {
+            return None;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -944,7 +988,7 @@ fn enumerate_source_files(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -2071,6 +2115,189 @@ mod tests {
             std::fs::canonicalize(path).unwrap(),
             std::fs::canonicalize(&orphan).unwrap(),
         );
+    }
+
+    // Axis: bounded directory scan
+
+    #[test]
+    fn scan_within_cap_returns_every_inf_file() {
+        // A within-cap scan finds every `.inf` under the root, at any depth, and
+        // nothing that is not a source file.
+        let project = TempProject::new("scan-complete");
+        project.write("main.inf", "pub fn main() {}");
+        project.write("a.inf", "pub fn fa() {}");
+        project.write("deep/nested/b.inf", "pub fn fb() {}");
+        project.write("notes.txt", "not source");
+
+        // root + deep + deep/nested = 3 directories; a cap of 3 is exactly enough.
+        let files =
+            enumerate_source_files(&project.root, 3).expect("a within-cap scan completes");
+        let mut names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.inf", "b.inf", "main.inf"]);
+    }
+
+    #[test]
+    fn scan_gives_up_one_directory_over_the_cap() {
+        // The cap is not off-by-one: a tree with exactly `cap` directories still
+        // scans to completion, and one directory more makes the scan give up.
+        let project = TempProject::new("scan-boundary");
+        project.write("main.inf", "pub fn main() {}");
+        project.write("one/x.inf", "pub fn fx() {}");
+        project.write("two/y.inf", "pub fn fy() {}");
+
+        // root + one + two = 3 directories.
+        assert!(
+            enumerate_source_files(&project.root, 3).is_some(),
+            "a scan at the cap completes"
+        );
+        assert!(
+            enumerate_source_files(&project.root, 2).is_none(),
+            "a scan one directory over the cap gives up"
+        );
+    }
+
+    #[test]
+    fn scan_of_unreadable_root_is_empty_not_a_give_up() {
+        // A root that cannot be read yields an empty completed scan, not a
+        // give-up, so a missing source root never suppresses warnings by accident.
+        let missing = std::env::temp_dir().join("inference-scan-root-does-not-exist-288");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let files = enumerate_source_files(&missing, MAX_SCAN_DIRECTORIES)
+            .expect("an unreadable root returns an empty scan, not a give-up");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn over_cap_scan_emits_no_warnings() {
+        // When the scan gives up, the parse still succeeds but reports nothing: a
+        // partial file list cannot distinguish a real orphan from a file the scan
+        // never reached, so warning from it would be misleading.
+        let project = TempProject::new("over-cap-warn");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        // An orphan the scan would warn about if it ever completed.
+        project.write("sub/orphan.inf", "pub fn fo() {}");
+        let src_root = entry.parent().expect("entry has a parent").to_path_buf();
+        let arena = parse_project(&entry).expect("project parses").arena;
+
+        // root + sub = 2 directories; a cap of 1 cannot cover them.
+        let warnings = collect_unreachable_warnings_within(&arena, &src_root, &entry, 1);
+        assert!(
+            warnings.is_empty(),
+            "a scan that gives up emits no warnings, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn under_cap_scan_still_warns_about_orphans() {
+        // A tree whose directory count is within the cap warns exactly as before —
+        // the bound never cuts a normal project short.
+        let project = TempProject::new("under-cap-warn");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        let orphan = project.write("sub/orphan.inf", "pub fn fo() {}");
+        let src_root = entry.parent().expect("entry has a parent").to_path_buf();
+        let arena = parse_project(&entry).expect("project parses").arena;
+
+        // root + sub = 2 directories; a cap of 2 is exactly enough to scan them.
+        let warnings = collect_unreachable_warnings_within(&arena, &src_root, &entry, 2);
+        assert_eq!(warnings.len(), 1, "the orphan is warned about");
+        let ProjectWarning::UnreachableFile { path } = &warnings[0];
+        assert_eq!(
+            std::fs::canonicalize(path).unwrap(),
+            std::fs::canonicalize(&orphan).unwrap(),
+        );
+    }
+
+    #[test]
+    fn empty_subdirectory_is_skipped_not_warned() {
+        // An empty directory under the root holds no source files, so the scan
+        // descends into it, finds nothing, and reports no warning for it.
+        let project = TempProject::new("empty-subdir");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        std::fs::create_dir_all(project.root.join("empty")).expect("create empty subdir");
+
+        let parse = parse_project(&entry).expect("project parses");
+        assert!(
+            parse.warnings.is_empty(),
+            "an empty subdirectory yields no warnings, got {:?}",
+            parse.warnings
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_cycle_in_source_root_terminates_and_succeeds() {
+        // A directory that links back to the source root would let a naive scan
+        // descend forever. The bounded scan must stop and let the parse succeed. A
+        // worker thread with a timeout turns a regressed non-terminating walk into
+        // a failed assertion rather than a stuck test run.
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new("symlink-cycle");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        symlink(&project.root, project.root.join("loop")).expect("create symlink cycle");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_entry = entry.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(parse_project(&thread_entry).is_ok());
+        });
+
+        let succeeded = rx.recv_timeout(std::time::Duration::from_secs(20)).expect(
+            "parse_project did not terminate on a symlink cycle: the directory scan is unbounded",
+        );
+        assert!(
+            succeeded,
+            "a project with a symlink cycle under its root still parses"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_subdirectory_is_skipped_not_fatal() {
+        // A directory the process cannot read is skipped, not fatal: the parse
+        // succeeds and orphans elsewhere are still reported. The unreadable
+        // directory's own contents simply never enter the scan.
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = TempProject::new("unreadable-subdir");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        let orphan = project.write("orphan.inf", "pub fn fo() {}");
+        let locked = project.root.join("locked");
+        project.write("locked/hidden.inf", "pub fn fh() {}");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock subdir");
+
+        // A privileged process (e.g. root in CI) can still read a 0o000 directory;
+        // only then is the "contents are skipped" half of the check meaningful.
+        let is_unreadable = std::fs::read_dir(&locked).is_err();
+        let parse = parse_project(&entry);
+        // Restore permissions before asserting so cleanup can remove the tree even
+        // if an assertion fails.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("restore subdir permissions");
+
+        let parse = parse.expect("an unreadable subdir must not abort the parse");
+        let warned: Vec<PathBuf> = parse
+            .warnings
+            .iter()
+            .map(|ProjectWarning::UnreachableFile { path }| path.clone())
+            .collect();
+        assert!(
+            warned.iter().any(|p| std::fs::canonicalize(p).ok()
+                == std::fs::canonicalize(&orphan).ok()),
+            "the readable orphan is still warned about, got {warned:?}"
+        );
+        if is_unreadable {
+            assert!(
+                !warned.iter().any(|p| p.ends_with("hidden.inf")),
+                "an unreadable directory's contents never enter the scan, got {warned:?}"
+            );
+        }
     }
 
     // Axis: error precedence

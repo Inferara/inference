@@ -808,6 +808,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Both the fail-fast (`build_typed_context`) and lossless (`check_with_diagnostics`) entry points surface it as an ordinary diagnostic; the size-`0` sentinel no longer cascades a spurious array-literal-size or variable/return type mismatch, so the reproduction reports exactly one error
   - The [#241] message-loop panic-boundary tests, which had used this exact panic as their trigger, now inject a deliberate panic through a debug-only server seam (`INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR`, invisible in release builds) instead
   - Compile-time constant evaluation of array sizes remains future work (#79)
+- compiler: the unreachable-file warning scan (`parse_project`) is now bounded and fails open. It recursively descended every directory under the source root; for a bare entry file whose parent is a home or filesystem-root directory that meant walking the whole disk on an otherwise-successful build, and `is_dir()` follows symlinks, so a symlink cycle in the tree could make the walk never terminate. The scan now stops after a fixed cap of directories (`MAX_SCAN_DIRECTORIES`), and a scan that gives up emits no unreachable-file warnings for that build — a partial file list cannot tell a genuine orphan from a file the scan never reached — while the parse itself completes exactly as before. Realistic projects sit far below the cap and are unaffected, and the resilient IDE walk never ran this scan, so interactive behavior is unchanged ([#288])
 
 ### Project Manifest
 
@@ -1014,6 +1015,7 @@ Initial tagged release.
 [#230]: https://github.com/Inferara/inference/pull/230
 [#231]: https://github.com/Inferara/inference/issues/231
 [#284]: https://github.com/Inferara/inference/issues/284
+[#288]: https://github.com/Inferara/inference/issues/288
 [#167]: https://github.com/Inferara/inference/issues/167
 [#172]: https://github.com/Inferara/inference/issues/172
 [#270]: https://github.com/Inferara/inference/issues/270
