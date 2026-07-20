@@ -43,11 +43,17 @@ pub struct AnalysisFinding {
 /// `ClosureFile`, recovering both the file's path (for the returned location's
 /// URI) and a line index for a correct byte-offset → line/column conversion in
 /// that file rather than in the file the request came from.
+///
+/// The line index is held behind an [`Arc`] so a query can hand a caller a cheap
+/// clone of the pointer rather than a fresh copy of the whole indexed text: an
+/// editor issues many position queries against the same open file, and each one
+/// needs the line index to convert offsets, so copying the document's bytes per
+/// request was pure waste.
 #[derive(Debug, Clone)]
 pub struct ClosureFile {
     path: PathBuf,
     source: Arc<str>,
-    line_index: LineIndex,
+    line_index: Arc<LineIndex>,
 }
 
 impl ClosureFile {
@@ -67,6 +73,13 @@ impl ClosureFile {
     #[must_use = "the line index is the reason to call this"]
     pub fn line_index(&self) -> &LineIndex {
         &self.line_index
+    }
+
+    /// A shared handle to the file's line index, cloned as a pointer bump rather
+    /// than by copying the indexed text.
+    #[must_use = "the line index is the reason to call this"]
+    pub fn line_index_arc(&self) -> Arc<LineIndex> {
+        Arc::clone(&self.line_index)
     }
 }
 
@@ -228,10 +241,13 @@ impl FileAnalysis {
         self.files.get(module_path)
     }
 
-    /// The line index of the closure file named by `module_path`.
+    /// A shared handle to the line index of the closure file named by
+    /// `module_path` (empty for the entry file), or `None` if that module is not
+    /// in this closure. The handle clones as a pointer bump, so a caller keeps no
+    /// private copy of the file's text.
     #[must_use = "the line index is the reason to call this"]
-    pub fn line_index(&self, module_path: &[String]) -> Option<&LineIndex> {
-        self.files.get(module_path).map(ClosureFile::line_index)
+    pub fn line_index_arc(&self, module_path: &[String]) -> Option<Arc<LineIndex>> {
+        self.files.get(module_path).map(ClosureFile::line_index_arc)
     }
 
     /// The arena [`SourceFileId`] of the file named by `module_path`.
@@ -298,7 +314,7 @@ fn build_closure_files(
             continue;
         };
         let source: Arc<str> = Arc::from(source_file.source.as_str());
-        let line_index = LineIndex::new(&source);
+        let line_index = Arc::new(LineIndex::new(&source));
         files.insert(
             source_file.module_path.clone(),
             ClosureFile {

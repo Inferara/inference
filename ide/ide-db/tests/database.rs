@@ -1021,6 +1021,66 @@ fn closure_donor_root_survives_shared_dep_change_when_dependent_reanalyzes_first
     );
 }
 
+// Eviction (issue #247): closing a document drops its overlay-derived analysis,
+// and analyses memoized for never-opened paths are capped so a long session
+// cannot grow the map without bound. Open documents are never evicted.
+
+#[test]
+fn closing_a_document_drops_its_memoized_entry_analysis() {
+    let tree = TempTree::new("close-drops-entry");
+    let entry = tree.write("main.inf", "pub fn main() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, "pub fn main() -> i32 { return 0; }");
+
+    let before = db.analysis(&entry).generation();
+    db.close_document(&entry);
+    // The overlay is gone, so the analysis computed from it must not be served
+    // again: the next query recomputes from disk.
+    let after = db.analysis(&entry).generation();
+    assert!(
+        after > before,
+        "closing a document must drop its memoized analysis ({before} -> {after})"
+    );
+}
+
+#[test]
+fn a_closed_file_remains_available_through_an_open_dependents_closure() {
+    // `main` imports `lib`; both are opened, and `lib` also exists on disk. Closing
+    // `lib` drops its own entry, but the still-open dependent `main` re-reads it
+    // from disk on its next query, so `lib`'s symbols stay visible.
+    let tree = TempTree::new("close-dependent-disk");
+    let main = tree.write(
+        "main.inf",
+        "use lib;\npub fn main() -> i32 { return lib::helper(); }",
+    );
+    let lib = tree.write("lib.inf", "pub fn helper() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&lib, "pub fn helper() -> i32 { return 7; }");
+    db.open_document(
+        &main,
+        "use lib;\npub fn main() -> i32 { return lib::helper(); }",
+    );
+
+    let lib_mod = vec!["lib".to_string()];
+    let before = {
+        let analysis = db.analysis(&main);
+        assert!(closure_defines(analysis, &lib_mod, "helper"));
+        analysis.generation()
+    };
+
+    db.close_document(&lib);
+    let analysis = db.analysis(&main);
+    assert!(
+        analysis.generation() > before,
+        "closing an imported file must invalidate the open dependent ({before} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "helper"),
+        "the dependent must re-read the closed file from disk and still see its symbols"
+    );
+}
+
 #[test]
 fn closing_a_document_drops_its_sticky_source_root() {
     // The sticky root must not outlive the open document. `lib/a.inf` adopts the
@@ -1050,4 +1110,310 @@ fn closing_a_document_drops_its_sticky_source_root() {
         "with the sticky root dropped and no donor left, lib::b cannot resolve"
     );
     assert_eq!(analysis.import_problems()[0].referenced_as, "lib::b");
+}
+
+#[test]
+fn never_opened_analyses_are_capped_with_fifo_eviction() {
+    // The cap is a small constant (8). Memoizing analyses for ten never-opened
+    // files evicts the two oldest, so re-querying an oldest one recomputes while a
+    // recent one is still a cache hit.
+    let tree = TempTree::new("unopened-cap");
+    let mut db = RootDatabase::default();
+
+    let mut paths = Vec::new();
+    let mut first_gen = Vec::new();
+    for i in 0..10 {
+        let path = tree.write(
+            &format!("f{i}.inf"),
+            &format!("pub fn f{i}() -> i32 {{ return {i}; }}"),
+        );
+        first_gen.push(db.analysis(&path).generation());
+        paths.push(path);
+    }
+
+    // The oldest never-opened analysis was evicted: re-querying it recomputes with
+    // a fresh, larger generation stamp.
+    let requeried_oldest = db.analysis(&paths[0]).generation();
+    assert!(
+        requeried_oldest > first_gen[9],
+        "the oldest never-opened analysis must be evicted and recomputed ({} -> {requeried_oldest})",
+        first_gen[0]
+    );
+
+    // A recently memoized never-opened analysis is retained: re-querying is a cache
+    // hit that returns its original generation.
+    assert_eq!(
+        db.analysis(&paths[9]).generation(),
+        first_gen[9],
+        "a recently memoized never-opened analysis must be retained"
+    );
+}
+
+#[test]
+fn open_documents_are_never_evicted_by_the_never_opened_cap() {
+    let tree = TempTree::new("open-never-evicted");
+    let opened = tree.write("open.inf", "pub fn kept() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&opened, "pub fn kept() -> i32 { return 0; }");
+    let open_gen = db.analysis(&opened).generation();
+
+    // Flood the cap with far more never-opened files than it retains.
+    for i in 0..20 {
+        let path = tree.write(&format!("f{i}.inf"), &format!("pub fn f{i}() {{}}"));
+        let _ = db.analysis(&path).generation();
+    }
+
+    assert_eq!(
+        db.analysis(&opened).generation(),
+        open_gen,
+        "an open document's analysis must survive the never-opened cap untouched"
+    );
+}
+
+#[test]
+fn opening_a_previously_unopened_analysis_exempts_it_from_the_cap() {
+    // A path first seen via a feature request while never opened is capped; once
+    // the editor opens it, it joins the working set and is exempt even as the cap
+    // churns with other never-opened files.
+    let tree = TempTree::new("promote-out-of-cap");
+    let promoted = tree.write("promoted.inf", "pub fn kept() -> i32 { return 0; }");
+    let mut db = RootDatabase::default();
+
+    let _ = db.analysis(&promoted).generation();
+    db.open_document(&promoted, "pub fn kept() -> i32 { return 0; }");
+    let open_gen = db.analysis(&promoted).generation();
+
+    for i in 0..20 {
+        let path = tree.write(&format!("f{i}.inf"), &format!("pub fn f{i}() {{}}"));
+        let _ = db.analysis(&path).generation();
+    }
+
+    assert_eq!(
+        db.analysis(&promoted).generation(),
+        open_gen,
+        "a document opened after first being seen unopened must be exempt from the cap"
+    );
+}
+
+// Selectivity across coexisting analyses (issue #254): the headline invalidation
+// contract — "a keystroke in one buffer must not force every other open buffer to
+// re-analyze" — is a statement about *several* live analyses, so it is asserted
+// here with more than one memoized entry present at once, observing each entry's
+// generation independently. A cache hit returns an analysis's original generation
+// unchanged, so an entry whose generation is stable across a re-query is one that
+// was not recomputed.
+
+#[test]
+fn a_keystroke_in_one_open_buffer_leaves_unrelated_open_buffers_intact() {
+    // Three independent entries are open and memoized at once. Editing one must
+    // recompute only that entry; the other two keep their exact analyses (their
+    // generations are unchanged on re-query), so a burst of typing in one file
+    // never re-runs the pipeline for unrelated buffers.
+    let tree = TempTree::new("selectivity-independent");
+    let a = tree.write("a.inf", "pub fn a() -> i32 { return 1; }");
+    let b = tree.write("b.inf", "pub fn b() -> i32 { return 2; }");
+    let c = tree.write("c.inf", "pub fn c() -> i32 { return 3; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&a, "pub fn a() -> i32 { return 1; }");
+    db.open_document(&b, "pub fn b() -> i32 { return 2; }");
+    db.open_document(&c, "pub fn c() -> i32 { return 3; }");
+
+    // Memoize all three coexisting analyses.
+    let a_first = db.analysis(&a).generation();
+    let b_first = db.analysis(&b).generation();
+    let c_first = db.analysis(&c).generation();
+
+    // A keystroke in a.inf.
+    db.change_document(&a, "pub fn a() -> i32 { return 11; }");
+
+    assert!(
+        db.analysis(&a).generation() > a_first,
+        "the edited buffer recomputes"
+    );
+    assert_eq!(
+        db.analysis(&b).generation(),
+        b_first,
+        "an unrelated open buffer is not re-analyzed by a keystroke in another"
+    );
+    assert_eq!(
+        db.analysis(&c).generation(),
+        c_first,
+        "a second unrelated open buffer is likewise untouched"
+    );
+}
+
+#[test]
+fn editing_a_shared_import_recomputes_every_dependent_but_not_an_independent_buffer() {
+    // Two open entries both import a shared on-disk lib; a third open entry is
+    // independent. Editing the shared lib must recompute *both* dependents (their
+    // closures contain it) while leaving the independent buffer's analysis
+    // memoized — invalidation is precise to the closure, across several live
+    // analyses at once.
+    let tree = TempTree::new("selectivity-shared");
+    let a = tree.write("a.inf", "use shared;\npub fn a() -> i32 { return shared::v(); }");
+    let b = tree.write("b.inf", "use shared;\npub fn b() -> i32 { return shared::v(); }");
+    let indep = tree.write("indep.inf", "pub fn indep() -> i32 { return 0; }");
+    let shared = tree.write("shared.inf", "pub fn v() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&a, "use shared;\npub fn a() -> i32 { return shared::v(); }");
+    db.open_document(&b, "use shared;\npub fn b() -> i32 { return shared::v(); }");
+    db.open_document(&indep, "pub fn indep() -> i32 { return 0; }");
+
+    let a_first = db.analysis(&a).generation();
+    let b_first = db.analysis(&b).generation();
+    let indep_first = db.analysis(&indep).generation();
+
+    db.change_document(&shared, "pub fn v() -> i32 { return 8; }");
+
+    assert!(
+        db.analysis(&a).generation() > a_first,
+        "the first dependent recomputes when the shared import changes"
+    );
+    assert!(
+        db.analysis(&b).generation() > b_first,
+        "the second dependent recomputes too"
+    );
+    assert_eq!(
+        db.analysis(&indep).generation(),
+        indep_first,
+        "the independent buffer, outside the shared closure, is not recomputed"
+    );
+}
+
+#[test]
+fn a_transitive_import_change_invalidates_the_root_entry() {
+    // A readable transitive dependency: `main` imports `a`, `a` imports `b`, and
+    // all three read cleanly. Editing `b` (two hops from the entry) must invalidate
+    // `main`'s memoized analysis, and the recompute must still resolve the whole
+    // chain. The existing transitive coverage only exercises the *unreadable → readable*
+    // recovery path; this pins plain transitive-closure invalidation.
+    let tree = TempTree::new("transitive-invalidate");
+    let main_src = "use a;\npub fn main() -> i32 { return a::mid(); }";
+    let entry = tree.write("main.inf", main_src);
+    tree.write("a.inf", "use b;\npub fn mid() -> i32 { return b::deep(); }");
+    let b = tree.write("b.inf", "pub fn deep() -> i32 { return 42; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, main_src);
+
+    let b_mod = vec!["b".to_string()];
+    let first = {
+        let analysis = db.analysis(&entry);
+        assert!(closure_defines(analysis, &b_mod, "deep"));
+        analysis.generation()
+    };
+
+    db.change_document(&b, "pub fn deep() -> i32 { return 43; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first,
+        "editing a transitive import (main -> a -> b) must recompute main ({first} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        analysis.import_problems().is_empty() && closure_defines(analysis, &b_mod, "deep"),
+        "the recompute still resolves the whole transitive chain"
+    );
+}
+
+#[test]
+fn editing_a_member_of_an_import_cycle_invalidates_the_entry() {
+    // `main` imports `a`; `a` and `b` import each other (an a <-> b cycle). The
+    // closure walk terminates and records both cycle members, so editing either one
+    // must invalidate `main` — not only the direct import `a`, but the cyclic `b`
+    // reached through it. Only termination over a cycle was pinned before.
+    let tree = TempTree::new("cycle-invalidate");
+    let main_src = "use a;\npub fn main() -> i32 { return a::fa(); }";
+    let entry = tree.write("main.inf", main_src);
+    let a = tree.write("a.inf", "use b;\npub fn fa() -> i32 { return b::fb(); }");
+    let b = tree.write("b.inf", "use a;\npub fn fb() -> i32 { return 1; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, main_src);
+
+    let after_open = db.analysis(&entry).generation();
+
+    // Editing the cyclic member `b` (reached transitively, itself importing `a`).
+    db.change_document(&b, "use a;\npub fn fb() -> i32 { return 2; }");
+    let after_b = db.analysis(&entry).generation();
+    assert!(
+        after_b > after_open,
+        "editing a cycle member `b` must recompute main ({after_open} -> {after_b})"
+    );
+
+    // Editing the direct import `a`, the other member of the cycle.
+    db.change_document(&a, "use b;\npub fn fa() -> i32 { return b::fb() + 1; }");
+    let after_a = db.analysis(&entry).generation();
+    assert!(
+        after_a > after_b,
+        "editing the other cycle member `a` must recompute main again ({after_b} -> {after_a})"
+    );
+    assert!(
+        db.analysis(&entry).import_problems().is_empty(),
+        "the cyclic project still resolves after the edits"
+    );
+}
+
+// close_document disk-fallback with divergent overlay/disk content (issue #254):
+// `overlay_text_beats_disk_contents` pins only the open direction (overlay wins
+// while open). This pins the close direction: once the overlay is dropped, the
+// next analysis must read the *disk* text, even when it diverges from what the
+// buffer held.
+
+#[test]
+fn closing_a_document_falls_back_to_divergent_disk_content() {
+    // Disk and overlay define different top-level functions. While open, the
+    // analysis sees the overlay; after `didClose` drops the overlay, the next
+    // analysis must recompute against the divergent disk text — proving the
+    // fallback re-reads disk rather than serving the vanished buffer.
+    let tree = TempTree::new("close-divergent-disk");
+    let disk_src = "pub fn disk_fn() -> i32 { return 1; }";
+    let overlay_src = "pub fn overlay_fn() -> i32 { return 2; }";
+    let entry = tree.write("main.inf", disk_src);
+    let mut db = RootDatabase::default();
+
+    db.open_document(&entry, overlay_src);
+    assert_eq!(
+        def_names(&mut db, &entry, &[]),
+        vec!["overlay_fn"],
+        "while open, the overlay text wins over the disk text"
+    );
+
+    db.close_document(&entry);
+    assert_eq!(
+        def_names(&mut db, &entry, &[]),
+        vec!["disk_fn"],
+        "after close, the analysis falls back to the divergent disk content"
+    );
+}
+
+#[test]
+fn a_closed_dependent_reads_a_divergent_import_from_disk() {
+    // The cross-file twin of the close fallback. `main` imports `lib`; `lib` is open
+    // with overlay text that diverges from its disk text (a different function
+    // name). While `lib` is open, `main`'s closure sees the overlay symbol; closing
+    // `lib` must make `main` re-read `lib` from disk and see the disk symbol
+    // instead — the still-open dependent falls back to divergent disk content.
+    let tree = TempTree::new("close-dependent-divergent");
+    let main_src = "use lib;\npub fn main() -> i32 { return 0; }";
+    let entry = tree.write("main.inf", main_src);
+    let lib = tree.write("lib.inf", "pub fn on_disk() -> i32 { return 1; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, main_src);
+    db.open_document(&lib, "pub fn in_overlay() -> i32 { return 2; }");
+
+    let lib_mod = vec!["lib".to_string()];
+    assert!(
+        closure_defines(db.analysis(&entry), &lib_mod, "in_overlay"),
+        "while lib is open, main's closure sees the overlay symbol"
+    );
+
+    db.close_document(&lib);
+    let analysis = db.analysis(&entry);
+    assert!(
+        closure_defines(analysis, &lib_mod, "on_disk"),
+        "closing lib makes the open dependent re-read the divergent disk symbol"
+    );
+    assert!(
+        !closure_defines(analysis, &lib_mod, "in_overlay"),
+        "the vanished overlay symbol is no longer visible to the dependent"
+    );
 }

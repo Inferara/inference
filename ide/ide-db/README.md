@@ -32,7 +32,10 @@ so the IDE stack never links the WASM/Rocq backend.
 - **[`RootDatabase`]** — the open-document overlay (a `Vfs`) plus a memoized
   [`FileAnalysis`] per entry file, with closure-aware invalidation so a
   keystroke in one buffer does not force every other open buffer to
-  re-analyze.
+  re-analyze. Open documents' analyses are never evicted; a closed document's
+  overlay-derived analysis is dropped (recomputed from disk on demand), and
+  analyses memoized for never-opened paths (feature requests on arbitrary URIs)
+  are FIFO-capped so a long session cannot grow the map without bound.
 - **[`FileAnalysis`]** — the merged arena (reached through its `TypedContext`),
   per-file parse errors, structured type diagnostics, unresolved-import
   problems, tagged analysis findings, and per-closure-file line indexes and

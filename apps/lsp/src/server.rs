@@ -10,7 +10,10 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 
 use inference_ide::AnalysisHost;
 use lsp_server::{
@@ -25,7 +28,7 @@ use lsp_types::request::{
     Request as _, Shutdown,
 };
 use lsp_types::{InitializeParams, MarkupKind, PublishDiagnosticsParams, Uri};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{capabilities, handlers};
 
@@ -87,6 +90,12 @@ pub(crate) struct ServerState {
     pub(crate) host: AnalysisHost,
     pub(crate) documents: FxHashMap<Uri, Document>,
     pub(crate) capabilities: NegotiatedCapabilities,
+    /// Open documents a recent change invalidated but has not yet been
+    /// republished. Filled by [`on_notification`](Self::on_notification) and
+    /// drained when the message loop goes idle (see [`run`]), so an interactive
+    /// request arriving right after a keystroke is answered before the other
+    /// affected documents are recomputed.
+    pending_republish: FxHashSet<Uri>,
 }
 
 impl ServerState {
@@ -95,6 +104,7 @@ impl ServerState {
             host: AnalysisHost::default(),
             documents: FxHashMap::default(),
             capabilities,
+            pending_republish: FxHashSet::default(),
         }
     }
 
@@ -211,10 +221,12 @@ impl ServerState {
         }
     }
 
-    /// Applies a document notification, returning the diagnostics to publish for
-    /// the notified document *and* every other open document (see
-    /// [`publishes_with_dependents`](Self::publishes_with_dependents)). An unknown
-    /// or unparsable notification publishes nothing.
+    /// Applies a document notification, eagerly returning the diagnostics to
+    /// publish for *only* the notified document and queuing every other open
+    /// document the change invalidated for a deferred republish (see
+    /// [`queue_invalidated_dependents`](Self::queue_invalidated_dependents) and
+    /// [`drain_pending_republishes`](Self::drain_pending_republishes)). An unknown
+    /// or unparsable notification publishes nothing and queues nothing.
     pub(crate) fn on_notification(
         &mut self,
         notification: Notification,
@@ -237,38 +249,68 @@ impl ServerState {
         } else {
             return Vec::new();
         };
-        self.publishes_with_dependents(primary)
-    }
-
-    /// Extends a notified document's `primary` publish with a fresh republish for
-    /// every other open document.
-    ///
-    /// A change to one file can invalidate another open document whose import
-    /// closure includes it — `ide-db` drops exactly those analyses — but the
-    /// notified document is the only one the client is told about unless we
-    /// republish the rest. Republishing every open document is the simple correct
-    /// choice: an unaffected document's analysis is still memoized, so its
-    /// republish recomputes nothing, and editors keep only a handful of files
-    /// open, so the cost is bounded by that count, not the project size.
-    fn publishes_with_dependents(
-        &mut self,
-        primary: Option<PublishDiagnosticsParams>,
-    ) -> Vec<PublishDiagnosticsParams> {
         let Some(primary) = primary else {
             return Vec::new();
         };
-        let dependents: Vec<Uri> = self
+        // The notified document was just published fresh, so it no longer owes a
+        // deferred republish even if an earlier change had queued it.
+        self.pending_republish.remove(&primary.uri);
+        self.queue_invalidated_dependents(&primary.uri);
+        vec![primary]
+    }
+
+    /// Queues every *other* open document the just-applied change invalidated.
+    ///
+    /// A change to one file can invalidate another open document whose import
+    /// closure includes it — `ide-db` drops exactly those analyses. After the
+    /// notified document's own publish has recomputed and re-memoized its
+    /// analysis, an open document whose analysis is no longer memoized is one this
+    /// change invalidated; it is queued for a deferred republish rather than
+    /// recomputed inside this notification turn. Documents the change left
+    /// untouched keep their memoized analysis and are not queued, so the client
+    /// never sees a needless republish and never keeps a stale one.
+    fn queue_invalidated_dependents(&mut self, changed: &Uri) {
+        let invalidated: Vec<Uri> = self
             .documents
-            .keys()
-            .filter(|uri| **uri != primary.uri)
-            .cloned()
+            .iter()
+            .filter(|(uri, document)| {
+                *uri != changed && !self.host.is_document_analyzed(&document.path)
+            })
+            .map(|(uri, _)| uri.clone())
             .collect();
-        let mut publishes = Vec::with_capacity(dependents.len() + 1);
-        publishes.push(primary);
-        for uri in dependents {
-            publishes.push(handlers::publish_diagnostics_params(self, &uri));
+        self.pending_republish.extend(invalidated);
+    }
+
+    /// Drains the pending-republish set into a fresh publish per queued document,
+    /// containing any analysis panic so one poisoned document cannot lose the
+    /// others' publishes.
+    ///
+    /// Called when the message loop goes idle and when the client shuts down, so a
+    /// document a keystroke invalidated is refreshed before the loop blocks and
+    /// pending publishes are never dropped on the way out.
+    pub(crate) fn drain_pending_republishes(&mut self) -> Vec<PublishDiagnosticsParams> {
+        let pending: Vec<Uri> = self.pending_republish.drain().collect();
+        let mut publishes = Vec::with_capacity(pending.len());
+        for uri in pending {
+            if let Some(params) = catch(|| handlers::publish_diagnostics_params(self, &uri)) {
+                publishes.push(params);
+            }
         }
         publishes
+    }
+
+    /// If `uri` is awaiting a deferred republish, publishes its now-fresh
+    /// diagnostics and removes it from the pending set; otherwise `None`.
+    ///
+    /// A feature request against a queued document recomputes that document's
+    /// analysis on demand, so the client is already getting fresh answers; this
+    /// also refreshes its diagnostics and drops it from the queue so the idle
+    /// drain does not redo the work. Any analysis panic is contained.
+    pub(crate) fn publish_if_pending(&mut self, uri: &Uri) -> Option<PublishDiagnosticsParams> {
+        if !self.pending_republish.remove(uri) {
+            return None;
+        }
+        catch(|| handlers::publish_diagnostics_params(self, uri))
     }
 
     /// Replaces the analysis host with a fresh one carrying only the tracked open
@@ -349,6 +391,33 @@ fn drain_until_exit(connection: &Connection) {
 
 /// Runs the message loop until the client exits or the connection closes.
 ///
+/// # Shedding per-keystroke work
+///
+/// Each keystroke arrives as its own full-text `didChange`, and analysis is
+/// single-threaded, so a naive one-message-at-a-time loop would run the whole
+/// closure pipeline once per keystroke while an interactive request waits behind
+/// the burst. Two mechanisms shed that cost (issue #247):
+///
+/// * **Coalescing.** A dedicated forwarder ([`spawn_transport_pump`]) keeps the
+///   transport's rendezvous receiver continuously drained into a buffer, so while
+///   the loop analyzes one change the burst behind it accumulates there. When the
+///   head of that buffer is a `didChange`, the available backlog is drained and
+///   consecutive changes to the same document collapse to their final text
+///   ([`coalesce_changes`]), so a typing burst runs the pipeline a handful of times
+///   instead of once per keystroke. A `didOpen`/`didClose` for that document, or
+///   any request, is a barrier the coalescer never reorders across, and no
+///   non-`didChange` message is ever dropped.
+/// * **Deferred dependents.** A notification publishes eagerly only for the
+///   changed document; every other open document it invalidated is queued
+///   ([`ServerState::on_notification`]) and republished when the loop next goes
+///   idle — after the interactive request that arrived right behind the keystroke
+///   has already been answered. The queue is always drained before the loop
+///   blocks on the next message, a request against a queued document publishes it
+///   fresh immediately ([`ServerState::publish_if_pending`]), and a shutdown
+///   flushes it, so a client never keeps a stale diagnostic set indefinitely.
+///
+/// # Shutdown handshake
+///
 /// The shutdown handshake is handled inline rather than delegated to
 /// `lsp-server`'s `Connection::handle_shutdown`, which consumes the next message
 /// itself and turns anything but `exit` into a fatal protocol error. Instead, a
@@ -376,45 +445,238 @@ pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::R
     let mut state = ServerState::new(NegotiatedCapabilities::from_init_params(init_params));
     let mut shutting_down = false;
 
-    for message in &connection.receiver {
-        match message {
-            Message::Request(request) if shutting_down => {
-                send(
-                    connection,
-                    Message::Response(Response::new_err(
-                        request.id,
-                        ErrorCode::InvalidRequest as i32,
-                        "the server is shutting down".to_owned(),
-                    )),
-                )?;
-            }
-            Message::Request(request) if request.method == Shutdown::METHOD => {
-                shutting_down = true;
-                send(
-                    connection,
-                    Message::Response(Response::new_ok(request.id, ())),
-                )?;
-            }
-            Message::Request(request) => {
-                let response = state.handle_request_resilient(request);
-                send(connection, Message::Response(response))?;
-            }
-            Message::Notification(notification) if notification.method == Exit::METHOD => {
-                return Ok(());
-            }
-            // A stray notification after `shutdown` (other than `exit`) is dropped.
-            Message::Notification(_) if shutting_down => {}
-            Message::Notification(notification) => {
-                for params in state.on_notification_resilient(notification) {
-                    let published =
-                        Notification::new(PublishDiagnostics::METHOD.to_owned(), params);
-                    send(connection, Message::Notification(published))?;
+    // Read through a buffering forwarder rather than the transport receiver
+    // directly, so a typing burst can accumulate a backlog the coalescer can
+    // collapse (see [`spawn_transport_pump`]).
+    let incoming = spawn_transport_pump(connection)?;
+
+    loop {
+        let message = match incoming.try_recv() {
+            Ok(message) => message,
+            Err(TryRecvError::Empty) => {
+                // The backlog is empty: refresh every document a recent change
+                // invalidated before parking on the next message, so no queued
+                // republish is left indefinitely stale.
+                publish_all(connection, state.drain_pending_republishes())?;
+                match incoming.recv() {
+                    Ok(message) => message,
+                    Err(_) => return Ok(()),
                 }
             }
-            Message::Response(_) => {}
+            Err(TryRecvError::Disconnected) => return Ok(()),
+        };
+
+        for message in coalesced_batch(message, &incoming) {
+            if handle_message(connection, &mut state, &mut shutting_down, message)?.is_break() {
+                return Ok(());
+            }
         }
     }
+}
+
+/// Whether the message loop should keep running or return after a message.
+#[derive(Clone, Copy)]
+enum Flow {
+    Continue,
+    Break,
+}
+
+impl Flow {
+    fn is_break(self) -> bool {
+        matches!(self, Flow::Break)
+    }
+}
+
+/// Handles one message: the shutdown/exit handshake, a routed request, or a
+/// document notification. Returns [`Flow::Break`] only for `exit`.
+fn handle_message(
+    connection: &Connection,
+    state: &mut ServerState,
+    shutting_down: &mut bool,
+    message: Message,
+) -> anyhow::Result<Flow> {
+    match message {
+        Message::Request(request) if *shutting_down => {
+            send(
+                connection,
+                Message::Response(Response::new_err(
+                    request.id,
+                    ErrorCode::InvalidRequest as i32,
+                    "the server is shutting down".to_owned(),
+                )),
+            )?;
+        }
+        Message::Request(request) if request.method == Shutdown::METHOD => {
+            *shutting_down = true;
+            // Flush queued republishes before parking on `exit`, so a graceful
+            // shutdown never drops a document's owed diagnostics.
+            publish_all(connection, state.drain_pending_republishes())?;
+            send(
+                connection,
+                Message::Response(Response::new_ok(request.id, ())),
+            )?;
+        }
+        Message::Request(request) => {
+            let document = request_document_uri(&request);
+            let response = state.handle_request_resilient(request);
+            send(connection, Message::Response(response))?;
+            // A request against a document a recent change invalidated recomputes
+            // it on demand; publish its now-fresh diagnostics and clear it from
+            // the queue so the idle drain does not redo it.
+            if let Some(params) = document.and_then(|uri| state.publish_if_pending(&uri)) {
+                publish_all(connection, vec![params])?;
+            }
+        }
+        Message::Notification(notification) if notification.method == Exit::METHOD => {
+            return Ok(Flow::Break);
+        }
+        // A stray notification after `shutdown` (other than `exit`) is dropped.
+        Message::Notification(_) if *shutting_down => {}
+        Message::Notification(notification) => {
+            publish_all(connection, state.on_notification_resilient(notification))?;
+        }
+        Message::Response(_) => {}
+    }
+    Ok(Flow::Continue)
+}
+
+/// Sends each diagnostics set as a `publishDiagnostics` notification.
+fn publish_all(
+    connection: &Connection,
+    publishes: Vec<PublishDiagnosticsParams>,
+) -> anyhow::Result<()> {
+    for params in publishes {
+        let published = Notification::new(PublishDiagnostics::METHOD.to_owned(), params);
+        send(connection, Message::Notification(published))?;
+    }
     Ok(())
+}
+
+/// Spawns a forwarder that drains the transport's rendezvous receiver into an
+/// unbounded buffer, and returns the buffer's receiver for the loop to read.
+///
+/// `lsp-server`'s stdio and socket transports connect their reader thread to the
+/// loop over a zero-capacity channel (`bounded(0)`): the reader blocks handing over
+/// each frame until the loop takes it, so consecutive frames of a typing burst
+/// never pile up in the channel — they sit unparsed in the OS pipe, invisible to a
+/// `try_recv`. Draining that channel continuously on a dedicated thread moves the
+/// backlog into an unbounded buffer instead, so while the loop is busy analyzing
+/// one change the burst behind it collects where [`coalesced_batch`] can see and
+/// collapse it. Without this, coalescing is a no-op over the production transport,
+/// since [`Connection::memory`] (the tests' transport) is the only one that buffers.
+///
+/// The forwarder ends on its own when either end disconnects — the transport closes
+/// (its reader gone) or the loop drops the returned receiver — so it needs no
+/// explicit join.
+fn spawn_transport_pump(connection: &Connection) -> anyhow::Result<Receiver<Message>> {
+    let source = connection.receiver.clone();
+    let (buffered_sender, buffered_receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("inference-lsp-transport-pump".to_owned())
+        .spawn(move || {
+            for message in source {
+                if buffered_sender.send(message).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(buffered_receiver)
+}
+
+/// The batch of messages to process for `first`, in arrival order.
+///
+/// Only a `didChange` head is worth batching: the backlog the transport pump has
+/// buffered is drained non-blockingly and consecutive same-document changes collapse
+/// to their final text ([`coalesce_changes`]). Any other head is returned alone so
+/// requests and lifecycle notifications keep exact arrival order and timing.
+fn coalesced_batch(first: Message, incoming: &Receiver<Message>) -> Vec<Message> {
+    if did_change_uri(&first).is_none() {
+        return vec![first];
+    }
+    let mut batch = vec![first];
+    while let Ok(message) = incoming.try_recv() {
+        batch.push(message);
+    }
+    coalesce_changes(batch)
+}
+
+/// Drops each `didChange` a later `didChange` for the same document supersedes,
+/// keeping only the final text of a burst.
+///
+/// A `didChange` at index `i` is dropped when a later `didChange` for the same
+/// document appears before any barrier between them: a request, or a
+/// `didOpen`/`didClose` for that same document. Barriers are never reordered
+/// across — a request must observe the edits that preceded it, and a lifecycle
+/// event bounds a document's edit run — and no non-`didChange` message and no
+/// message for another document is ever dropped, so every message's relative
+/// order is preserved.
+fn coalesce_changes(messages: Vec<Message>) -> Vec<Message> {
+    let mut keep = vec![true; messages.len()];
+    for (i, message) in messages.iter().enumerate() {
+        let Some(document) = did_change_uri(message) else {
+            continue;
+        };
+        for later in &messages[i + 1..] {
+            if is_barrier_for(later, document) {
+                break;
+            }
+            if did_change_uri(later) == Some(document) {
+                keep[i] = false;
+                break;
+            }
+        }
+    }
+    messages
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(message, keep)| keep.then_some(message))
+        .collect()
+}
+
+/// Whether `message` bars coalescing a `didChange` for `document` across it: any
+/// request, or a `didOpen`/`didClose` for that same document.
+fn is_barrier_for(message: &Message, document: &str) -> bool {
+    match message {
+        Message::Request(_) => true,
+        Message::Notification(notification) => {
+            matches!(
+                notification.method.as_str(),
+                DidOpenTextDocument::METHOD | DidCloseTextDocument::METHOD
+            ) && notification_document_uri(notification) == Some(document)
+        }
+        Message::Response(_) => false,
+    }
+}
+
+/// The document URI of a `didChange` notification, or `None` for anything else.
+fn did_change_uri(message: &Message) -> Option<&str> {
+    match message {
+        Message::Notification(notification)
+            if notification.method == DidChangeTextDocument::METHOD =>
+        {
+            notification_document_uri(notification)
+        }
+        _ => None,
+    }
+}
+
+/// The `textDocument.uri` string a document notification carries, if present.
+fn notification_document_uri(notification: &Notification) -> Option<&str> {
+    notification
+        .params
+        .get("textDocument")?
+        .get("uri")?
+        .as_str()
+}
+
+/// The `textDocument.uri` a request targets, parsed back into a [`Uri`].
+///
+/// Every feature request this server handles carries its document under
+/// `textDocument.uri`; a request without one (or with an unparsable one) simply
+/// has no pending document to refresh.
+fn request_document_uri(request: &Request) -> Option<Uri> {
+    let uri = request.params.get("textDocument")?.get("uri")?.as_str()?;
+    Uri::from_str(uri).ok()
 }
 
 /// Whether the client advertised support for the hierarchical document-symbol
@@ -553,14 +815,17 @@ mod tests {
     #[cfg(debug_assertions)]
     use std::sync::Arc;
 
-    use lsp_server::{Request, RequestId, Response};
+    use lsp_server::{Connection, Message, Request, RequestId, Response};
     use lsp_types::notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit,
+        Notification as _, PublishDiagnostics,
     };
-    use lsp_types::request::{HoverRequest, Initialize, Request as _};
-    use lsp_types::Uri;
+    use lsp_types::request::{HoverRequest, Initialize, Request as _, Shutdown};
+    use lsp_types::{InitializeParams, PublishDiagnosticsParams, Uri};
 
-    use super::{NegotiatedCapabilities, ServerState};
+    use super::{
+        coalesce_changes, coalesced_batch, is_barrier_for, run, NegotiatedCapabilities, ServerState,
+    };
     #[cfg(debug_assertions)]
     use super::{arm_analysis_panic, Document};
 
@@ -596,6 +861,36 @@ mod tests {
             "textDocument": { "uri": uri, "languageId": "inference", "version": 1, "text": text }
         });
         lsp_server::Notification::new(DidOpenTextDocument::METHOD.to_owned(), params)
+    }
+
+    fn did_change_notification(uri: &str, version: i32, text: &str) -> lsp_server::Notification {
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri, "version": version },
+            "contentChanges": [ { "text": text } ]
+        });
+        lsp_server::Notification::new(DidChangeTextDocument::METHOD.to_owned(), params)
+    }
+
+    fn did_close_notification(uri: &str) -> lsp_server::Notification {
+        let params = serde_json::json!({ "textDocument": { "uri": uri } });
+        lsp_server::Notification::new(DidCloseTextDocument::METHOD.to_owned(), params)
+    }
+
+    /// URIs of a publish list, for order-sensitive assertions.
+    fn published_uris(publishes: &[lsp_types::PublishDiagnosticsParams]) -> Vec<&str> {
+        publishes.iter().map(|p| p.uri.as_str()).collect()
+    }
+
+    const LIB_SOURCE: &str = "pub fn helper() -> i32 { return 7; }";
+    const MAIN_IMPORTING_LIB: &str = "use lib;\nfn main() -> i32 { return lib::helper(); }";
+
+    /// Opens `lib.inf` and a `main.inf` that imports it, both under `/inf-test`,
+    /// and drains the (empty) pending set so a later change starts from a clean
+    /// slate. Returns nothing; the two URIs are fixed and known to the caller.
+    fn open_lib_and_dependent(state: &mut ServerState) {
+        open(state, "file:///inf-test/lib.inf", LIB_SOURCE);
+        open(state, "file:///inf-test/main.inf", MAIN_IMPORTING_LIB);
+        let _ = state.drain_pending_republishes();
     }
 
     /// Installs `text` as the overlay for `uri` and tracks the document, without
@@ -736,7 +1031,54 @@ mod tests {
     }
 
     #[test]
-    fn a_notification_republishes_every_open_document() {
+    fn a_change_publishes_only_the_changed_document_eagerly() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        // Changing the shared lib publishes lib eagerly and nothing else in the
+        // same turn: the interactive request that may be right behind the keystroke
+        // must not wait on the dependent's recompute.
+        let eager = state.on_notification(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+        assert_eq!(
+            published_uris(&eager),
+            vec!["file:///inf-test/lib.inf"],
+            "only the changed document publishes eagerly"
+        );
+    }
+
+    #[test]
+    fn a_change_queues_the_invalidated_dependent_for_a_deferred_republish() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        state.on_notification(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+
+        // The dependent main.inf — whose closure includes the changed lib — is
+        // drained at idle, so the client never keeps stale diagnostics on a
+        // document a cross-file edit invalidated.
+        let deferred = state.drain_pending_republishes();
+        assert_eq!(
+            published_uris(&deferred),
+            vec!["file:///inf-test/main.inf"],
+            "the invalidated dependent republishes at idle"
+        );
+        // Draining is exhaustive: a second drain has nothing left.
+        assert!(
+            state.drain_pending_republishes().is_empty(),
+            "the pending set is emptied by a drain"
+        );
+    }
+
+    #[test]
+    fn a_change_does_not_queue_an_unaffected_open_document() {
         let mut state = ServerState::new(full_client());
         open(
             &mut state,
@@ -748,25 +1090,88 @@ mod tests {
             "file:///inf-test/b.inf",
             "fn b() -> i32 { return 2; }",
         );
+        let _ = state.drain_pending_republishes();
 
-        // A change to a.inf publishes for a.inf *and* republishes b.inf, so a
-        // client can never keep stale diagnostics on a document a cross-file edit
-        // invalidated.
-        let params = serde_json::json!({
-            "textDocument": { "uri": "file:///inf-test/a.inf", "version": 2 },
-            "contentChanges": [ { "text": "fn a() -> i32 { return 11; }" } ]
-        });
-        let notification =
-            lsp_server::Notification::new(DidChangeTextDocument::METHOD.to_owned(), params);
-        let publishes = state.on_notification(notification);
-        let uris: Vec<&str> = publishes.iter().map(|p| p.uri.as_str()).collect();
+        // a.inf and b.inf are independent, so changing a.inf leaves b.inf's
+        // analysis memoized and queues no republish for it.
+        state.on_notification(did_change_notification(
+            "file:///inf-test/a.inf",
+            2,
+            "fn a() -> i32 { return 11; }",
+        ));
         assert!(
-            uris.contains(&"file:///inf-test/a.inf"),
-            "the changed document"
+            state.drain_pending_republishes().is_empty(),
+            "an unaffected open document is not republished"
         );
+    }
+
+    #[test]
+    fn a_request_against_a_pending_document_publishes_it_fresh_and_clears_it() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        state.on_notification(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+
+        // main.inf is queued. A request against it (the loop calls this after
+        // answering) publishes it now and removes it from the queue.
+        let main_uri = Uri::from_str("file:///inf-test/main.inf").expect("a valid uri");
+        let published = state
+            .publish_if_pending(&main_uri)
+            .expect("the pending dependent is published on demand");
+        assert_eq!(published.uri.as_str(), "file:///inf-test/main.inf");
         assert!(
-            uris.contains(&"file:///inf-test/b.inf"),
-            "the other open document is republished too, got {uris:?}"
+            state.drain_pending_republishes().is_empty(),
+            "the on-demand publish cleared the pending document"
+        );
+
+        // A URI that was never queued yields nothing.
+        assert!(
+            state.publish_if_pending(&main_uri).is_none(),
+            "a document not awaiting republish publishes nothing on demand"
+        );
+    }
+
+    #[test]
+    fn changing_a_queued_document_clears_its_pending_republish() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        // A change to lib queues main.
+        state.on_notification(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+        // main is then edited itself, publishing it fresh — it no longer owes a
+        // deferred republish, so the idle drain has nothing left for it.
+        let eager = state.on_notification(did_change_notification(
+            "file:///inf-test/main.inf",
+            2,
+            "use lib;\nfn main() -> i32 { return lib::helper() + 1; }",
+        ));
+        assert_eq!(published_uris(&eager), vec!["file:///inf-test/main.inf"]);
+        assert!(
+            state.drain_pending_republishes().is_empty(),
+            "a document published fresh by its own change is no longer pending"
+        );
+    }
+
+    #[test]
+    fn closing_a_document_queues_its_open_dependents() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        // Closing lib removes its overlay; the open dependent main.inf must
+        // re-read lib from disk, so it is queued for a deferred republish.
+        state.on_notification(did_close_notification("file:///inf-test/lib.inf"));
+        assert_eq!(
+            published_uris(&state.drain_pending_republishes()),
+            vec!["file:///inf-test/main.inf"],
+            "closing an imported file republishes the open dependent"
         );
     }
 
@@ -971,5 +1376,374 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
             "the named-constant array size is reported as a diagnostic, got {:?}",
             published.diagnostics
         );
+    }
+
+    // --- Coalescing (issue #247, item 1) -----------------------------------
+
+    const DOC_A: &str = "file:///inf-test/a.inf";
+    const DOC_B: &str = "file:///inf-test/b.inf";
+
+    fn change_msg(uri: &str, version: i32) -> Message {
+        Message::Notification(did_change_notification(uri, version, "fn f() -> i32 { return 0; }"))
+    }
+
+    fn open_msg(uri: &str) -> Message {
+        Message::Notification(did_open_notification(uri, "fn f() {}"))
+    }
+
+    fn close_msg(uri: &str) -> Message {
+        Message::Notification(did_close_notification(uri))
+    }
+
+    fn request_msg(id: i32) -> Message {
+        Message::Request(Request::new(
+            RequestId::from(id),
+            HoverRequest::METHOD.to_owned(),
+            serde_json::json!({}),
+        ))
+    }
+
+    /// A compact label per message, so a coalesced batch is asserted by shape.
+    fn tag(message: &Message) -> String {
+        match message {
+            Message::Notification(n) if n.method == DidChangeTextDocument::METHOD => {
+                let uri = n.params["textDocument"]["uri"].as_str().unwrap();
+                let version = n.params["textDocument"]["version"].as_i64().unwrap();
+                format!("change:{uri}:{version}")
+            }
+            Message::Notification(n) if n.method == DidOpenTextDocument::METHOD => {
+                format!("open:{}", n.params["textDocument"]["uri"].as_str().unwrap())
+            }
+            Message::Notification(n) if n.method == DidCloseTextDocument::METHOD => {
+                format!("close:{}", n.params["textDocument"]["uri"].as_str().unwrap())
+            }
+            Message::Request(r) => format!("req:{}", r.id),
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    fn tags(messages: &[Message]) -> Vec<String> {
+        messages.iter().map(tag).collect()
+    }
+
+    #[test]
+    fn coalesce_collapses_a_same_document_burst_to_its_final_text() {
+        let batch = vec![change_msg(DOC_A, 1), change_msg(DOC_A, 2), change_msg(DOC_A, 3)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![format!("change:{DOC_A}:3")],
+            "a burst of edits to one document collapses to its final text"
+        );
+    }
+
+    #[test]
+    fn coalesce_keeps_the_final_change_per_document_when_documents_interleave() {
+        // Two documents edited in an interleaved burst: each collapses to its own
+        // final text, and the survivors keep their arrival order.
+        let batch = vec![
+            change_msg(DOC_A, 1),
+            change_msg(DOC_B, 1),
+            change_msg(DOC_A, 2),
+            change_msg(DOC_B, 2),
+        ];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![format!("change:{DOC_A}:2"), format!("change:{DOC_B}:2")],
+        );
+    }
+
+    #[test]
+    fn a_request_is_a_barrier_the_coalescer_never_crosses() {
+        // The request must observe the edit that preceded it, so the earlier change
+        // is not dropped even though a later change to the same document follows.
+        let batch = vec![change_msg(DOC_A, 1), request_msg(7), change_msg(DOC_A, 2)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![
+                format!("change:{DOC_A}:1"),
+                "req:7".to_owned(),
+                format!("change:{DOC_A}:2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_same_document_didclose_bars_coalescing_across_it() {
+        let batch = vec![change_msg(DOC_A, 1), close_msg(DOC_A), change_msg(DOC_A, 2)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![
+                format!("change:{DOC_A}:1"),
+                format!("close:{DOC_A}"),
+                format!("change:{DOC_A}:2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_same_document_didopen_bars_coalescing_across_it() {
+        let batch = vec![change_msg(DOC_A, 1), open_msg(DOC_A), change_msg(DOC_A, 2)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![
+                format!("change:{DOC_A}:1"),
+                format!("open:{DOC_A}"),
+                format!("change:{DOC_A}:2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn another_documents_lifecycle_event_does_not_bar_coalescing() {
+        // A close of a *different* document is not a barrier for A: A's earlier
+        // change is superseded by its later one across it. The close is kept.
+        let batch = vec![change_msg(DOC_A, 1), close_msg(DOC_B), change_msg(DOC_A, 2)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![format!("close:{DOC_B}"), format!("change:{DOC_A}:2")],
+        );
+    }
+
+    #[test]
+    fn a_didclose_mid_burst_coalesces_each_run_but_not_across_the_close() {
+        // Changes before the same-document close collapse among themselves; the
+        // close is a barrier; changes after it collapse among themselves.
+        let batch = vec![
+            change_msg(DOC_A, 1),
+            change_msg(DOC_A, 2),
+            close_msg(DOC_A),
+            change_msg(DOC_A, 3),
+            change_msg(DOC_A, 4),
+        ];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec![
+                format!("change:{DOC_A}:2"),
+                format!("close:{DOC_A}"),
+                format!("change:{DOC_A}:4"),
+            ],
+        );
+    }
+
+    #[test]
+    fn coalesce_leaves_a_batch_without_a_superseding_change_untouched() {
+        let batch = vec![request_msg(1), open_msg(DOC_A), change_msg(DOC_A, 5)];
+        assert_eq!(
+            tags(&coalesce_changes(batch)),
+            vec!["req:1".to_owned(), format!("open:{DOC_A}"), format!("change:{DOC_A}:5")],
+        );
+    }
+
+    #[test]
+    fn coalesced_batch_collapses_a_buffered_change_backlog() {
+        // The transport pump surfaces a typing burst to the loop as a buffered
+        // backlog; this covers the drain-and-coalesce path over that buffer
+        // directly. A `didChange` head plus two more for the same document, all
+        // already buffered, collapse to the final text — what a keystroke burst must
+        // become once the pump lets the backlog exist.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(change_msg(DOC_A, 2)).expect("buffer a change");
+        sender.send(change_msg(DOC_A, 3)).expect("buffer a change");
+        let batch = coalesced_batch(change_msg(DOC_A, 1), &receiver);
+        assert_eq!(
+            tags(&batch),
+            vec![format!("change:{DOC_A}:3")],
+            "a buffered same-document burst collapses to its final text"
+        );
+    }
+
+    #[test]
+    fn coalesced_batch_returns_a_non_change_head_alone_without_draining() {
+        // A non-`didChange` head is never batched: it is returned immediately and the
+        // buffered backlog behind it is left untouched, so nothing is reordered ahead
+        // of a request or lifecycle event and no message is dropped.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(change_msg(DOC_A, 1)).expect("buffer a change");
+        let batch = coalesced_batch(request_msg(9), &receiver);
+        assert_eq!(
+            tags(&batch),
+            vec!["req:9".to_owned()],
+            "the request head is returned alone"
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the backlog behind a non-change head is left for the next loop turn"
+        );
+    }
+
+    #[test]
+    fn is_barrier_for_distinguishes_requests_and_same_document_lifecycle() {
+        assert!(
+            is_barrier_for(&request_msg(1), DOC_A),
+            "any request bars coalescing across it"
+        );
+        assert!(
+            is_barrier_for(&close_msg(DOC_A), DOC_A),
+            "a same-document close is a barrier"
+        );
+        assert!(
+            !is_barrier_for(&close_msg(DOC_B), DOC_A),
+            "another document's close is not a barrier"
+        );
+        assert!(
+            !is_barrier_for(&change_msg(DOC_A, 1), DOC_A),
+            "a change is coalesced, not a barrier"
+        );
+    }
+
+    // --- Message loop, over an in-memory transport (issue #247, items 1-2) --
+
+    /// Spawns [`run`] against one half of an in-memory connection and returns the
+    /// client half plus the server thread's join handle.
+    fn run_server() -> (Connection, std::thread::JoinHandle<()>) {
+        let (server, client) = Connection::memory();
+        let handle = std::thread::spawn(move || {
+            let init: InitializeParams =
+                serde_json::from_value(serde_json::json!({ "capabilities": {} }))
+                    .expect("default init params");
+            let _ = run(&server, &init);
+        });
+        (client, handle)
+    }
+
+    fn send_to(client: &Connection, message: Message) {
+        client.sender.send(message).expect("send to the server");
+    }
+
+    /// Receives the next `publishDiagnostics` for `uri` within `timeout`, ignoring
+    /// other messages; `None` on timeout or disconnect.
+    fn recv_publish_for(
+        client: &Connection,
+        uri: &str,
+        timeout: std::time::Duration,
+    ) -> Option<PublishDiagnosticsParams> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match client.receiver.recv_timeout(remaining) {
+                Ok(Message::Notification(n)) if n.method == PublishDiagnostics::METHOD => {
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(n.params).expect("publish params");
+                    if params.uri.as_str() == uri {
+                        return Some(params);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+    }
+
+    const LOOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn shutdown_and_exit(client: &Connection, handle: std::thread::JoinHandle<()>) {
+        send_to(
+            client,
+            Message::Request(Request::new(
+                RequestId::from(1),
+                Shutdown::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        );
+        send_to(
+            client,
+            Message::Notification(lsp_server::Notification::new(
+                Exit::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        );
+        handle.join().expect("server thread joins after exit");
+    }
+
+    #[test]
+    fn the_loop_republishes_an_invalidated_dependent_when_idle() {
+        let (client, handle) = run_server();
+        send_to(
+            &client,
+            Message::Notification(did_open_notification("file:///inf-test/lib.inf", LIB_SOURCE)),
+        );
+        recv_publish_for(&client, "file:///inf-test/lib.inf", LOOP_TIMEOUT)
+            .expect("lib publishes on open");
+        send_to(
+            &client,
+            Message::Notification(did_open_notification(
+                "file:///inf-test/main.inf",
+                MAIN_IMPORTING_LIB,
+            )),
+        );
+        recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT)
+            .expect("main publishes on open");
+
+        // A change to the shared lib queues the dependent; the loop must republish
+        // it once idle, with no request to prompt it.
+        send_to(
+            &client,
+            Message::Notification(did_change_notification(
+                "file:///inf-test/lib.inf",
+                2,
+                "pub fn helper() -> i32 { return 8; }",
+            )),
+        );
+        assert!(
+            recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT).is_some(),
+            "the invalidated dependent must republish once the loop goes idle"
+        );
+
+        shutdown_and_exit(&client, handle);
+    }
+
+    #[test]
+    fn shutdown_does_not_drop_a_queued_republish() {
+        let (client, handle) = run_server();
+        send_to(
+            &client,
+            Message::Notification(did_open_notification("file:///inf-test/lib.inf", LIB_SOURCE)),
+        );
+        recv_publish_for(&client, "file:///inf-test/lib.inf", LOOP_TIMEOUT)
+            .expect("lib publishes on open");
+        send_to(
+            &client,
+            Message::Notification(did_open_notification(
+                "file:///inf-test/main.inf",
+                MAIN_IMPORTING_LIB,
+            )),
+        );
+        recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT)
+            .expect("main publishes on open");
+
+        // Change lib and immediately shut down. Whether the dependent drains at
+        // idle or on the shutdown flush, the queued republish for main must not be
+        // lost.
+        send_to(
+            &client,
+            Message::Notification(did_change_notification(
+                "file:///inf-test/lib.inf",
+                2,
+                "pub fn helper() -> i32 { return 8; }",
+            )),
+        );
+        send_to(
+            &client,
+            Message::Request(Request::new(
+                RequestId::from(1),
+                Shutdown::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        );
+        send_to(
+            &client,
+            Message::Notification(lsp_server::Notification::new(
+                Exit::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        );
+        assert!(
+            recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT).is_some(),
+            "a graceful shutdown must not lose the queued dependent republish"
+        );
+        handle.join().expect("server thread joins after exit");
     }
 }
