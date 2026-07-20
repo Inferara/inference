@@ -86,6 +86,16 @@ impl AnalysisHost {
         self.db.close_document(path);
     }
 
+    /// Whether an analysis for `path` is currently memoized.
+    ///
+    /// After a change, an open document whose analysis is no longer memoized is
+    /// one the change invalidated; the protocol layer uses this to republish
+    /// exactly the affected documents rather than every open one.
+    #[must_use = "the analyzed state is the reason to call this"]
+    pub fn is_document_analyzed(&self, path: &Path) -> bool {
+        self.db.is_analyzed(path)
+    }
+
     /// Borrows the host to answer feature queries.
     #[must_use = "an Analysis does nothing until a query method is called"]
     pub fn analysis(&mut self) -> Analysis<'_> {
@@ -147,9 +157,13 @@ impl Analysis<'_> {
 
     /// The line index of the document `path`, for byte-offset ↔ line/column
     /// conversion; `None` when the document is not analyzable.
+    ///
+    /// Returned as a shared [`Arc`] handle so repeated position queries against
+    /// the same open document share one index rather than each copying the whole
+    /// document's text.
     #[must_use = "the line index is the reason to call this"]
-    pub fn line_index(&mut self, path: &Path) -> Option<LineIndex> {
-        self.db.analysis(path).line_index(&[]).cloned()
+    pub fn line_index(&mut self, path: &Path) -> Option<Arc<LineIndex>> {
+        self.db.analysis(path).line_index_arc(&[])
     }
 
     /// The line index of `target` as it appears in `document`'s analysis closure,
@@ -161,11 +175,11 @@ impl Analysis<'_> {
     /// analyzing `target` as its own entry, which would both duplicate work and,
     /// for a non-entry file, resolve a different closure.
     #[must_use = "the line index is the reason to call this"]
-    pub fn closure_line_index(&mut self, document: &Path, target: &Path) -> Option<LineIndex> {
+    pub fn closure_line_index(&mut self, document: &Path, target: &Path) -> Option<Arc<LineIndex>> {
         let analysis = self.db.analysis(document);
         analysis.arena().source_files().find_map(|source_file| {
             let closure_file = analysis.file(&source_file.module_path)?;
-            (closure_file.path() == target).then(|| closure_file.line_index().clone())
+            (closure_file.path() == target).then(|| closure_file.line_index_arc())
         })
     }
 }
