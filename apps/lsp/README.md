@@ -148,6 +148,14 @@ converts the answer back with `convert.rs`. A URI this server cannot map to a
 file — a non-`file` scheme, an untitled buffer — yields a null result and no
 diagnostics, never a panic.
 
+`didChange` is honored only for a document already in the tracked set. LSP 3.17
+sends a change only between a document's `didOpen` and its `didClose`, so a
+change for a URI never opened (or closed since — VS Code's preview-tab close
+race can emit one just after `didClose`) is a protocol violation: it is dropped
+rather than adopted (no interning, no tracking, no publish), and logged to
+stderr. A stray change therefore never starts tracking a document the editor did
+not open, and a later proper `didOpen` tracks it normally.
+
 Nothing in this crate ever writes to stdout except the framed JSON-RPC
 messages themselves; all logging goes to stderr (see `main.rs`). This is
 required by the stdio transport — anything else on stdout corrupts the

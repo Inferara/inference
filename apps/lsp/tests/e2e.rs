@@ -1611,25 +1611,24 @@ fn requests_after_did_close_of_a_never_on_disk_document_answer_null() {
     client.shutdown_exit_ok();
 }
 
-// --- 31. didChange before didOpen: pin the current handler semantics (#254) ---
+// --- 31. didChange before didOpen is dropped, not adopted (#275) -------------
 
 #[test]
-fn did_change_before_did_open_silently_starts_tracking_the_document() {
-    // PINNED CURRENT BEHAVIOR (documented, not endorsed): a `didChange` for a URI
-    // the client never sent `didOpen` for is NOT rejected. `handlers::did_change`
-    // interns the path, installs the change text as the overlay, tracks the
-    // document, and publishes diagnostics for it — enrolling a never-opened URI in
-    // future dependents republishes. A stricter server might drop a change to an
-    // unopened document; this one does not. The wire behavior is pinned here so a
-    // deliberate change to it is noticed at review time.
+fn did_change_before_did_open_is_dropped_then_a_later_did_open_is_adopted() {
+    // A `didChange` for a URI the client never sent `didOpen` for is a protocol
+    // violation (LSP 3.17 sends `didChange` only for an open document). The server
+    // drops it — no interning, no tracking, no publish — rather than silently
+    // adopting a never-opened document and enrolling it in future dependents
+    // republishes (#275), matching the URI layer's treat-unmappable-input-as-absent
+    // philosophy. A later proper `didOpen` of the same URI is then adopted normally.
     let mut client = LspClient::spawn();
     client.initialize_default(true);
 
-    // The file exists on disk with clean text, but the change carries broken text
-    // (an undeclared variable). A published diagnostic therefore proves the server
-    // analyzed the change's overlay text, not the clean disk text — i.e. it started
-    // tracking the never-opened document.
-    let (_dir, uri) = fixture("change-before-open", "fn f() -> i32 { return 1; }");
+    // The file exists on disk with clean text; the stray change carries broken
+    // text. Were the change adopted, its broken overlay would publish a diagnostic
+    // under this URI — the absence of any such publish is the assertion.
+    let disk_src = "fn f() -> i32 { return 1; }";
+    let (_dir, uri) = fixture("change-before-open", disk_src);
     client.send_notification(
         "textDocument/didChange",
         json!({
@@ -1637,17 +1636,155 @@ fn did_change_before_did_open_silently_starts_tracking_the_document() {
             "contentChanges": [ { "text": "fn f() -> i32 { return missing_x; }" } ],
         }),
     );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        !published
+            .iter()
+            .any(|(published_uri, _)| published_uri == &uri),
+        "a didChange for a never-opened document publishes nothing, got {published:?}"
+    );
 
-    let published = client.wait_for_publish(&uri);
+    // The server stays alive and answers a request against the untracked URI: with
+    // no overlay installed it reads the clean disk text, so hover over `f` resolves
+    // without error — the dropped change was never applied.
+    let hover = hover_request(&mut client, &uri, pos_at(disk_src, "f("));
+    assert!(
+        hover.get("error").is_none(),
+        "the server survived the dropped change and still answers, got {hover}"
+    );
+
+    // A later proper `didOpen` of the same URI is adopted normally: it publishes a
+    // fresh diagnostic set for the opened (broken) text and echoes its version,
+    // completely unaffected by the earlier dropped change.
+    let opened = client.did_open(&uri, "fn f() -> i32 { return also_missing; }", 5);
     assert_eq!(
-        published.version,
-        json!(3),
-        "the never-opened change's version is echoed back"
+        opened.version,
+        json!(5),
+        "the later open's version is echoed back"
     );
     assert!(
-        !published.diagnostics.is_empty(),
-        "the change text (not the clean disk text) was analyzed and published, got {:?}",
-        published.diagnostics
+        !opened.diagnostics.is_empty(),
+        "the later didOpen is adopted and its broken text analyzed, got {:?}",
+        opened.diagnostics
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn a_did_change_after_did_close_is_dropped_and_leaves_a_dependent_untouched() {
+    // The close-race half of #275: after `didClose` the document leaves the tracked
+    // set, so a late `didChange` (VS Code can emit one on a preview-tab close race)
+    // is the same protocol violation and is dropped — it does not resurrect
+    // tracking, publishes nothing, and leaves a still-open dependent untouched.
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    let dir = TempDir::new("change-after-close");
+    let main_source = "use lib;\nfn main() -> i32 { return lib::helper(); }";
+    let lib_source = "pub fn helper() -> i32 { return 7; }";
+    let main_path = dir.write("main.inf", main_source);
+    let lib_path = dir.write("lib.inf", lib_source);
+    let main_uri = path_to_uri(&main_path);
+    let lib_uri = path_to_uri(&lib_path);
+
+    // Both open clean. Opening lib invalidates the open dependent main, whose
+    // deferred republish is consumed here so a later drain sees a clean slate.
+    let opened_main = client.did_open(&main_uri, main_source, 1);
+    assert!(opened_main.diagnostics.is_empty(), "main opens clean");
+    let opened_lib = client.did_open(&lib_uri, lib_source, 1);
+    assert!(opened_lib.diagnostics.is_empty(), "lib opens clean");
+    let main_after_lib_open = client.wait_for_publish(&main_uri);
+    assert!(
+        main_after_lib_open.diagnostics.is_empty(),
+        "main stays clean after lib opens, got {:?}",
+        main_after_lib_open.diagnostics
+    );
+
+    // Close lib: its overlay drops and main is republished from the on-disk lib
+    // (still clean). Consume that republish before probing the dropped change.
+    let closed = client.did_close(&lib_uri);
+    assert!(
+        closed.diagnostics.is_empty(),
+        "closing lib clears its diagnostics"
+    );
+    let main_after_lib_close = client.wait_for_publish(&main_uri);
+    assert!(
+        main_after_lib_close.diagnostics.is_empty(),
+        "main re-reads lib from disk and stays clean after close, got {:?}",
+        main_after_lib_close.diagnostics
+    );
+
+    // A late `didChange` for the now-closed lib, carrying text that would break
+    // main's `lib::helper()` call, is dropped: nothing is published — not for lib,
+    // not for the still-open dependent main.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": lib_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn other() -> i32 { return 8; }" } ],
+        }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        published.is_empty(),
+        "a didChange after close publishes nothing at all, got {published:?}"
+    );
+
+    // The still-open main is untouched: it answers goto and still resolves the
+    // cross-file call into the on-disk lib, proving the dropped change never
+    // installed a broken lib overlay.
+    let response = definition_request(&mut client, &main_uri, pos_at(main_source, "helper"));
+    assert_eq!(
+        response["result"]["uri"],
+        json!(lib_uri),
+        "main still resolves helper into the on-disk lib, got {response}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[test]
+fn a_dropped_did_change_does_not_perturb_an_unrelated_open_document() {
+    // A dropped `didChange` for a never-opened URI must be a complete no-op for
+    // every other document: it publishes nothing and leaves an unrelated open
+    // document's tracking and analysis intact (#275).
+    let mut client = LspClient::spawn();
+    client.initialize_default(true);
+
+    // An unrelated document, opened clean and tracked.
+    let bystander_src = "fn a() -> i32 { return 1; }";
+    let (_dir_a, bystander_uri) = fixture("dropped-change-bystander", bystander_src);
+    let opened = client.did_open(&bystander_uri, bystander_src, 1);
+    assert!(opened.diagnostics.is_empty(), "the bystander opens clean");
+
+    // A stray change for a different, never-opened URI is dropped.
+    let (_dir_b, ghost_uri) = fixture("dropped-change-ghost", "fn b() -> i32 { return 2; }");
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": ghost_uri, "version": 9 },
+            "contentChanges": [ { "text": "fn b() -> i32 { return missing; }" } ],
+        }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(1));
+    assert!(
+        published.is_empty(),
+        "a dropped change publishes nothing for anyone, got {published:?}"
+    );
+
+    // The bystander is still tracked and analyzed against its own overlay: a real
+    // change to it publishes fresh, correct diagnostics and advances its version.
+    let changed = client.did_change(&bystander_uri, "fn a() -> i32 { return still_missing; }", 2);
+    assert_eq!(
+        changed.version,
+        json!(2),
+        "the bystander's version advances"
+    );
+    assert!(
+        !changed.diagnostics.is_empty(),
+        "the bystander still analyzes its overlay after the unrelated dropped change, got {:?}",
+        changed.diagnostics
     );
 
     client.shutdown_exit_ok();

@@ -820,6 +820,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The [#241] message-loop panic-boundary tests, which had used this exact panic as their trigger, now inject a deliberate panic through a debug-only server seam (`INFERENCE_LSP_TEST_PANIC_PATH_SUBSTR`, invisible in release builds) instead
   - Compile-time constant evaluation of array sizes remains future work (#79)
 - compiler: the unreachable-file warning scan (`parse_project`) is now bounded and fails open. It recursively descended every directory under the source root; for a bare entry file whose parent is a home or filesystem-root directory that meant walking the whole disk on an otherwise-successful build, and `is_dir()` follows symlinks, so a symlink cycle in the tree could make the walk never terminate. The scan now stops after a fixed cap of directories (`MAX_SCAN_DIRECTORIES`), and a scan that gives up emits no unreachable-file warnings for that build — a partial file list cannot tell a genuine orphan from a file the scan never reached — while the parse itself completes exactly as before. Realistic projects sit far below the cap and are unaffected, and the resilient IDE walk never ran this scan, so interactive behavior is unchanged ([#288])
+- lsp: a `didChange` for a document the client never opened is now dropped instead of silently adopted. Per LSP 3.17 a client sends `didChange` only between a document's `didOpen` and its `didClose`; `handlers::did_change` used to intern the path, install the change text as the overlay, track the URI, and publish diagnostics for it — enrolling a never-opened document in every future dependents-republish sweep. It now drops such a change (no interning, no tracking, no publish) and logs the URI to stderr, matching the URI layer's treat-unmappable-input-as-absent philosophy; a later proper `didOpen` starts tracking the document normally. The same rule now covers a change arriving after `didClose` (VS Code's preview-tab close race): it no longer silently resurrects tracking, and a still-open dependent is left untouched ([#275])
 
 ### Project Manifest
 
@@ -1050,3 +1051,4 @@ Initial tagged release.
 [#157]: https://github.com/Inferara/inference/issues/157
 [#256]: https://github.com/Inferara/inference/issues/256
 [#254]: https://github.com/Inferara/inference/issues/254
+[#275]: https://github.com/Inferara/inference/issues/275
