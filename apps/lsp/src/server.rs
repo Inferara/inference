@@ -226,7 +226,8 @@ impl ServerState {
     /// document the change invalidated for a deferred republish (see
     /// [`queue_invalidated_dependents`](Self::queue_invalidated_dependents) and
     /// [`drain_pending_republishes`](Self::drain_pending_republishes)). An unknown
-    /// or unparsable notification publishes nothing and queues nothing.
+    /// or unparsable notification — or a `didChange` for a document that was never
+    /// opened (#275) — publishes nothing and queues nothing.
     pub(crate) fn on_notification(
         &mut self,
         notification: Notification,
@@ -1217,6 +1218,77 @@ mod tests {
         assert!(
             state.on_notification(notification).is_empty(),
             "closing an unmappable URI publishes nothing at all"
+        );
+    }
+
+    #[test]
+    fn a_change_for_an_unopened_document_is_dropped_then_a_later_open_adopts_it() {
+        // LSP 3.17 sends `didChange` only for an open document. A change for a URI
+        // the server never tracked is dropped — nothing is published, nothing is
+        // queued, and the document is not adopted into the tracked set (#275). A
+        // later proper `didOpen` still adopts it cleanly.
+        let mut state = ServerState::new(full_client());
+
+        let ghost = "file:///inf-test/ghost.inf";
+        let publishes = state.on_notification(did_change_notification(
+            ghost,
+            2,
+            "fn f() -> i32 { return x; }",
+        ));
+        assert!(
+            publishes.is_empty(),
+            "a change to an unopened document publishes nothing"
+        );
+        assert!(
+            state.drain_pending_republishes().is_empty(),
+            "a dropped change queues no republish"
+        );
+        let ghost_uri = Uri::from_str(ghost).expect("a valid uri");
+        assert!(
+            !state.documents.contains_key(&ghost_uri),
+            "the never-opened document was not adopted into the tracked set"
+        );
+
+        // Opening it afterwards tracks it and publishes its diagnostics normally.
+        let mut opened =
+            state.on_notification(did_open_notification(ghost, "fn f() -> i32 { return x; }"));
+        assert_eq!(opened.len(), 1, "the later open publishes once");
+        let published = opened.remove(0);
+        assert_eq!(published.uri.as_str(), ghost);
+        assert!(
+            !published.diagnostics.is_empty(),
+            "the opened document's broken text is analyzed and reported"
+        );
+    }
+
+    #[test]
+    fn a_change_after_close_is_dropped_and_does_not_resurrect_tracking() {
+        // After `didClose` the document leaves the tracked set, so a late change —
+        // the same protocol violation as a change before any open — is dropped and
+        // does not silently resurrect tracking (#275).
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn f() -> i32 { return x; }");
+        state.on_notification(did_close_notification(uri));
+        let _ = state.drain_pending_republishes();
+
+        let publishes = state.on_notification(did_change_notification(
+            uri,
+            3,
+            "fn f() -> i32 { return y; }",
+        ));
+        assert!(
+            publishes.is_empty(),
+            "a change after close publishes nothing"
+        );
+        assert!(
+            state.drain_pending_republishes().is_empty(),
+            "a dropped change queues no republish"
+        );
+        let main_uri = Uri::from_str(uri).expect("a valid uri");
+        assert!(
+            !state.documents.contains_key(&main_uri),
+            "the closed document is not resurrected into the tracked set by a late change"
         );
     }
 
