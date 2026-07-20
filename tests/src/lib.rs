@@ -6,6 +6,7 @@ mod analysis;
 mod ast;
 mod codegen;
 mod diagnostics_file_context;
+mod rocq_typecheck;
 mod spec_propagation;
 mod spec_propagation_inf;
 mod type_checker;

@@ -1,0 +1,51 @@
+name: Rocq type-check (wasm-to-v)
+
+# Type-checks proof-mode `wasm-to-v` output with `coqc` against the vendored
+# signature stub in `core/wasm-to-v/rocq-stub/` (issue #231). This catches the
+# #230 class of bug — a mis-aritied or renamed Rocq constructor — that every
+# existing string-matching test lets pass green. Kept as its own workflow file
+# so it cannot conflict with the open reusable-build.yml changes.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'core/wasm-to-v/**'
+      - 'core/wasm-codegen/**'
+      - 'tests/test_data/inf/**'
+      - 'tests/src/rocq_typecheck.rs'
+      - '.github/workflows/rocq-typecheck.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'core/wasm-to-v/**'
+      - 'core/wasm-codegen/**'
+      - 'tests/test_data/inf/**'
+      - 'tests/src/rocq_typecheck.rs'
+      - '.github/workflows/rocq-typecheck.yml'
+
+jobs:
+  rocq-typecheck:
+    name: coqc round-trip gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.3
+
+      # apt ships a Coq whose `coqc` the gate finds on PATH. The stub uses only
+      # maximally-portable vernacular (Parameter/Axiom/Inductive/Record + plain
+      # notation), so it compiles on both this apt Coq and a local brew Rocq 9.x.
+      - name: Install Coq (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends coq
+
+      - name: Report Coq version
+        run: coqc --version
+
+      # `find_coqc` in the test resolves `coqc` from PATH (or the COQC override),
+      # so no coqc job requires the private verifier library — only this stub.
+      - name: Run the coqc round-trip gate
+        run: cargo test -p inference-tests --verbose rocq_typecheck::

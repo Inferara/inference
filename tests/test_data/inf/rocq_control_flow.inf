@@ -1,0 +1,27 @@
+// Exercises the structured-control-flow surface of proof-mode Rocq lowering:
+// `loop` (BI_block + BI_loop + BI_br/BI_br_if), `if` (BI_if with two arms),
+// integer comparisons and arithmetic (BI_relop / BI_binop / BI_testop), and a
+// cross-function call (BI_call). The `spec` block adds a `forall` body modifier
+// so the module also surfaces a per-spec `ValidModule` theorem.
+fn sum_to(n: i32) -> i32 {
+    let mut acc: i32 = 0;
+    let mut i: i32 = 1;
+    loop i <= n {
+        if (i % 2) == 0 {
+            acc = acc + i;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn main() -> i32 {
+    return sum_to(10);
+}
+
+spec SumSpec {
+    fn sum_prop() forall {
+        let n: i32 = @;
+        assert(sum_to(n) == sum_to(n));
+    }
+}
