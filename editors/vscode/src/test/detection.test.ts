@@ -7,10 +7,8 @@ import { describe, it, before, after } from 'node:test';
 // We test the detection helpers directly rather than importing from detection.ts,
 // because detection.ts transitively depends on vscode (via settings.ts).
 // The helpers below are the same logic extracted for testability.
-
-function inferenceHome(): string {
-    return process.env['INFERENCE_HOME'] || path.join(os.homedir(), '.inference');
-}
+// The managed-root derivation itself is vscode-free and is tested against
+// the real module in home.test.ts.
 
 function isExecutable(filePath: string): boolean {
     try {
@@ -35,31 +33,6 @@ function findInPath(binaryName: string): string | null {
 }
 
 describe('detection helpers', () => {
-    describe('inferenceHome', () => {
-        const originalEnv = process.env['INFERENCE_HOME'];
-
-        after(() => {
-            if (originalEnv === undefined) {
-                delete process.env['INFERENCE_HOME'];
-            } else {
-                process.env['INFERENCE_HOME'] = originalEnv;
-            }
-        });
-
-        it('returns INFERENCE_HOME when set', () => {
-            process.env['INFERENCE_HOME'] = '/custom/inference';
-            assert.strictEqual(inferenceHome(), '/custom/inference');
-        });
-
-        it('returns ~/.inference when INFERENCE_HOME is not set', () => {
-            delete process.env['INFERENCE_HOME'];
-            assert.strictEqual(
-                inferenceHome(),
-                path.join(os.homedir(), '.inference'),
-            );
-        });
-    });
-
     describe('isExecutable', () => {
         let tmpDir: string;
         let execFile: string;

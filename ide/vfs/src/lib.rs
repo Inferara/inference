@@ -81,12 +81,21 @@ impl Vfs {
     ///
     /// Idempotent: interning a path already known returns the existing id
     /// without allocating a new one. Distinct paths receive distinct ids.
+    ///
+    /// # Panics
+    ///
+    /// Panics after `2^32` distinct paths have been interned. A `FileId` is a
+    /// `u32` index; minting a `2^32`nd id would wrap it onto an existing file and
+    /// silently alias two documents, so the overflow is rejected explicitly. No
+    /// real editing session approaches this bound.
     #[must_use = "the returned FileId is the only handle to the interned path"]
     pub fn intern(&mut self, path: &Path) -> FileId {
         if let Some(&id) = self.ids.get(path) {
             return id;
         }
-        let id = FileId(self.paths.len() as u32);
+        let index = u32::try_from(self.paths.len())
+            .expect("a Vfs cannot intern more than u32::MAX paths");
+        let id = FileId(index);
         let owned = path.to_path_buf();
         self.paths.push(owned.clone());
         self.ids.insert(owned, id);

@@ -284,13 +284,17 @@ pub use inference_type_checker::errors::TypeCheckError;
 
 pub mod errors;
 pub mod extern_prelude;
+pub mod manifest;
 mod project;
 pub mod wasm_link;
 
 pub use errors::InferenceError;
+pub use manifest::manifest_source_root;
 pub use project::{
-    load_project_resilient, parse_project, DiskLoader, FileLoader, FileParseErrors, ImportProblem,
-    LoadedFile, ProjectParse, ProjectWarning, ResilientProjectParse,
+    load_project_resilient, parse_project, read_source_file, strip_utf8_bom, DiskLoader,
+    load_project_resilient_with_root,
+    FileLoader, FileParseErrors, ImportProblem, LoadedFile, ProjectParse, ProjectWarning,
+    ResilientProjectParse,
 };
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`

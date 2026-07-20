@@ -177,6 +177,17 @@
           "default": "",
           "scope": "machine",
           "description": "Path to the inference-lsp binary. Leave empty for auto-detection (INFERENCE_HOME/bin, then PATH). If set but not executable, the language server is not started."
+        },
+        "inference-lsp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "scope": "window",
+          "description": "Trace the communication between VS Code and the Inference language server in the 'Inference Language Server' output channel."
         }
       }
     },
@@ -216,7 +227,7 @@
           {
             "id": "inference.walkthrough.createProject",
             "title": "Create a Project",
-            "description": "Create a new `.inf` file to start writing Inference code. The extension provides syntax highlighting, bracket matching, and code folding.\n\n[Create New File](command:workbench.action.files.newUntitledFile)",
+            "description": "Create a new file and save it with the `.inf` extension to start writing Inference code. Syntax highlighting, bracket matching, and code folding work right away; language-server features (diagnostics, hover, go to definition) activate once the file is saved on disk.\n\n[Create New File](command:workbench.action.files.newUntitledFile)",
             "media": {
               "image": "icons/inference.png",
               "altText": "Inference logo"

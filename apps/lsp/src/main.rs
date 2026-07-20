@@ -14,7 +14,6 @@ mod uri;
 
 use anyhow::Result;
 use lsp_server::Connection;
-use lsp_types::InitializeParams;
 
 /// The stack the server loop runs on. The analysis pipeline (type-checker,
 /// analysis passes) recurses with the input's nesting depth, so a pathological or
@@ -38,20 +37,26 @@ fn main() -> Result<()> {
 
 /// Owns the transport for one stdio session: handshake, message loop, teardown.
 ///
-/// A malformed frame (an empty or non-JSON body, or an unparsable
-/// `Content-Length`) is a known limitation: `lsp-server`'s stdio reader treats
-/// any framing/body parse failure as fatal to the connection and gives no seam to
-/// answer JSON-RPC `-32700` and resync, so `io_threads.join()` surfaces it as an
-/// error here and the process exits. Recovering would require replacing
-/// `Connection::stdio()` with a vendored reader; rust-analyzer accepts the same
-/// limitation on `lsp-server`. See the README's known-limitations note.
+/// A malformed or oversized frame is a known limitation: `lsp-server`'s stdio
+/// reader treats any framing/body parse failure as fatal to the connection (and
+/// pre-allocates a body buffer straight from the `Content-Length` header, with no
+/// upper bound), giving no seam to answer JSON-RPC `-32700` and resync. So a bad
+/// frame surfaces through `io_threads.join()` and the process exits. Recovering
+/// would require replacing `Connection::stdio()` with a vendored reader;
+/// rust-analyzer accepts the same limitation on `lsp-server`. See the README's
+/// known-limitations note.
 fn run_server() -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
-    let server_capabilities = serde_json::to_value(capabilities::server_capabilities())?;
-    let init_params = connection.initialize(server_capabilities)?;
-    let init_params: InitializeParams = serde_json::from_value(init_params)?;
 
-    server::run(connection, &init_params)?;
+    // A failed initialize (`None`) has already answered the initialize request with
+    // an error; there is nothing left to serve, so skip the message loop.
+    if let Some(init_params) = server::initialize(&connection)? {
+        server::run(&connection, &init_params)?;
+    }
+
+    // The transport's writer thread only ends once the connection (its sender) is
+    // dropped, so drop it before joining — otherwise `join` would block forever.
+    drop(connection);
     io_threads.join()?;
 
     eprintln!("inference-lsp: shut down cleanly");

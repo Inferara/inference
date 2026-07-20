@@ -312,6 +312,46 @@ pub(crate) fn find_def_by_name(arena: &AstArena, file: SourceFileId, name: &str)
         .find(|&def| arena.def_name(def) == name)
 }
 
+/// The first non-method definition in `file` named `name`, or `None`.
+///
+/// Struct methods are excluded from the search, so a call the type checker
+/// resolved to a *free* function — its [`CallTarget::receiver_struct`] is `None`
+/// — never lands on a same-named method that happens to precede it in the
+/// pre-order flatten. Top-level and spec-nested definitions are searched, which
+/// is exactly [`find_def_by_name`]'s coverage minus the struct-method arm.
+///
+/// [`CallTarget::receiver_struct`]: inference_type_checker::typed_context::CallTarget::receiver_struct
+#[must_use]
+pub(crate) fn find_free_def_by_name(
+    arena: &AstArena,
+    file: SourceFileId,
+    name: &str,
+) -> Option<DefId> {
+    non_method_defs(arena, file)
+        .into_iter()
+        .find(|&def| arena.def_name(def) == name)
+}
+
+/// Every definition in `file` in pre-order, excluding struct methods (which are
+/// reachable only as `receiver.method()` or `Struct::assoc()`, never as a free
+/// name). Spec-nested definitions are kept.
+fn non_method_defs(arena: &AstArena, file: SourceFileId) -> Vec<DefId> {
+    let mut defs = Vec::new();
+    for &def in &arena[file].defs {
+        collect_non_method_def(arena, def, &mut defs);
+    }
+    defs
+}
+
+fn collect_non_method_def(arena: &AstArena, def: DefId, out: &mut Vec<DefId>) {
+    out.push(def);
+    if let Def::Spec { defs, .. } = &arena[def].kind {
+        for &nested in defs {
+            collect_non_method_def(arena, nested, out);
+        }
+    }
+}
+
 /// A method named `name` defined directly on the struct `struct_def`, or `None`.
 #[must_use]
 pub(crate) fn find_method(arena: &AstArena, struct_def: DefId, name: &str) -> Option<DefId> {
@@ -408,17 +448,19 @@ pub(crate) fn imported_module_paths(arena: &AstArena, entry: SourceFileId) -> Ve
         .collect()
 }
 
-/// The `let` bindings in scope at `offset`: every `VarDef` that is a direct
-/// statement of a block enclosing the offset — a block on the hit's ancestor
-/// chain, or the covering node itself when the offset falls in a block's own gap
-/// — and whose name ends at or before the offset.
+/// The local bindings in scope at `offset`: every `let` or local `const` that is
+/// a direct statement of a block enclosing the offset — a block on the hit's
+/// ancestor chain, or the covering node itself when the offset falls in a block's
+/// own gap — and whose name ends at or before the offset.
 ///
 /// Scoping is lexical: a binding in a sibling block that has already closed is
 /// not in scope (its block is absent from the ancestor chain), and one declared
 /// later in an enclosing block is not yet visible (its name ends after the
-/// offset). Inference forbids shadowing, so a name resolves to at most one
-/// binding here. Sharing this walk keeps goto/hover and completions in agreement
-/// on what is in scope.
+/// offset). A local `const` scopes exactly like a `let` — the type checker
+/// registers it in statement order — so both are gated on the same name-end
+/// bound. Inference forbids shadowing, so a name resolves to at most one binding
+/// here. Sharing this walk keeps goto/hover and completions in agreement on what
+/// is in scope.
 #[must_use]
 pub(crate) fn in_scope_locals(arena: &AstArena, hit: &NodeHit, offset: u32) -> Vec<StmtId> {
     let mut locals = Vec::new();
@@ -427,9 +469,12 @@ pub(crate) fn in_scope_locals(arena: &AstArena, hit: &NodeHit, offset: u32) -> V
             continue;
         };
         for &stmt in &arena[block].stmts {
-            if let Stmt::VarDef { name, .. } = &arena[stmt].kind
-                && arena[*name].location.offset_end <= offset
-            {
+            let name_end = match &arena[stmt].kind {
+                Stmt::VarDef { name, .. } => arena[*name].location.offset_end,
+                Stmt::ConstDef(def) => arena[def_name_ident(arena, *def)].location.offset_end,
+                _ => continue,
+            };
+            if name_end <= offset {
                 locals.push(stmt);
             }
         }
@@ -467,6 +512,72 @@ pub(crate) fn resolve_qualified_module(
         }
     }
     file.source_file_id(&segments)
+}
+
+/// The source-root-relative path segments of each **plain** (namespace-binding)
+/// `use` directive in `entry`: a file import `use a::b;` yields `["a", "b"]`.
+///
+/// Item imports (`use a::b::{c};`) and `from`-clause extern imports are excluded,
+/// because neither binds a namespace: the first binds `c` bare, the second binds
+/// an external symbol. Only a plain import makes its trailing segment usable as a
+/// `::` qualifier, so only these paths anchor namespace resolution.
+fn plain_import_paths(arena: &AstArena, entry: SourceFileId) -> Vec<Vec<String>> {
+    arena[entry]
+        .directives
+        .iter()
+        .filter_map(|directive| {
+            let Directive::Use(use_directive) = directive;
+            if use_directive.braced || use_directive.from.is_some() {
+                return None;
+            }
+            Some(
+                use_directive
+                    .segments
+                    .iter()
+                    .map(|&segment| arena.ident_name(segment).to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Resolves the `::`-qualifier `segments` typed before a completion cursor to the
+/// module they name, trusting only **plain** namespace-binding imports.
+///
+/// A qualifier resolves two ways, both requiring a plain import so the result is
+/// code the type checker accepts:
+///
+/// - by *binding*: its head names a plain import's trailing segment (`use a::b;`
+///   binds `b`, so `b::…` resolves), and any further segments descend into
+///   submodules;
+/// - by *anchored full path*: the qualifier is itself a source-root path that a
+///   plain import is a prefix of (`use a::b;` anchors `a::b::…`), so it is
+///   addressable as written.
+///
+/// An item import `use a::b::{c};` binds `c` bare and no namespace, so it never
+/// anchors a `::` qualifier — offering `b::…` through it would suggest code that
+/// does not compile.
+#[must_use]
+pub(crate) fn resolve_plain_import_namespace(
+    file: &FileAnalysis,
+    entry: SourceFileId,
+    segments: &[String],
+) -> Option<SourceFileId> {
+    let (head, rest) = segments.split_first()?;
+    let plain = plain_import_paths(file.arena(), entry);
+    for path in &plain {
+        if path.last().map(String::as_str) == Some(head.as_str()) {
+            let mut full = path.clone();
+            full.extend(rest.iter().cloned());
+            if let Some(sfid) = file.source_file_id(&full) {
+                return Some(sfid);
+            }
+        }
+    }
+    if plain.iter().any(|path| segments.starts_with(path.as_slice())) {
+        return file.source_file_id(segments);
+    }
+    None
 }
 
 #[cfg(test)]

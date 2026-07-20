@@ -39,6 +39,32 @@ pub(crate) fn with_lib(entry: &str, lib: &str) -> (AnalysisHost, PathBuf) {
     (host, entry_path)
 }
 
+/// The absolute path of a (possibly nested) module: the last segment names the
+/// file (`<leaf>.inf`), the earlier segments its parent directories under
+/// [`ROOT`], so `["lib", "geom"]` is `<ROOT>/lib/geom.inf`.
+#[must_use]
+pub(crate) fn nested_module_path(segments: &[&str]) -> PathBuf {
+    let (leaf, dirs) = segments.split_last().expect("at least one segment");
+    let mut path = PathBuf::from(ROOT);
+    for dir in dirs {
+        path.push(dir);
+    }
+    path.push(format!("{leaf}.inf"));
+    path
+}
+
+/// A host over several open documents, each named by its module-path segments and
+/// carrying its source. The entry document must be `["main"]`; its path is
+/// returned. Analysis is lazy, so open order does not matter.
+#[must_use]
+pub(crate) fn project(files: &[(&[&str], &str)]) -> (AnalysisHost, PathBuf) {
+    let mut host = AnalysisHost::default();
+    for &(segments, source) in files {
+        host.open_document(&nested_module_path(segments), source);
+    }
+    (host, nested_module_path(&["main"]))
+}
+
 /// The byte offset of the first occurrence of `needle` in `source`.
 #[must_use]
 pub(crate) fn at(source: &str, needle: &str) -> u32 {

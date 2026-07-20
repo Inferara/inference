@@ -34,7 +34,7 @@ mod symbols;
 
 pub use analysis::{AnalysisFinding, ClosureFile, FileAnalysis};
 pub use database::RootDatabase;
-pub use hit_test::{NodeHit, hit_test};
+pub use hit_test::{NodeHit, enclosing_hit, hit_test};
 pub use symbols::file_defs;
 
 // Re-export the lower IDE layers' position primitives so the feature layer can
