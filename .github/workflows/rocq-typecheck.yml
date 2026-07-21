@@ -48,4 +48,4 @@ jobs:
       # `find_coqc` in the test resolves `coqc` from PATH (or the COQC override),
       # so no coqc job requires the private verifier library — only this stub.
       - name: Run the coqc round-trip gate
-        run: cargo test -p inference-tests --verbose rocq_typecheck::
+        run: cargo test -p inference-tests --verbose "rocq_typecheck::"
