@@ -13,24 +13,33 @@ use salsa::{Database, Setter, Storage};
 
 use crate::analysis::FileAnalysis;
 
-/// One project entry's Salsa input: its identity plus the lever that forces a
-/// recompute Salsa's own dependency tracking cannot.
+/// One project entry's Salsa input: its identity plus the eviction lever Salsa's
+/// own dependency tracking cannot supply.
 ///
 /// `path` and `src_root` are the compute's real inputs — a query reading them
-/// depends on them the ordinary way. `revision` is the **eviction** lever only:
-/// bumping it forces a recompute for the never-opened cap, which has no file event
-/// and so no change stamp to bump (see [`RootDatabase::evict_analysis`]). Ordinary
-/// content changes no longer flow through `revision`; they are carried by the
-/// per-file change stamps and the availability epoch below, which the query reads
-/// once its import closure is known. The query body reads all three, so a change
-/// to any of them invalidates its memo.
+/// depends on them the ordinary way. `evicted` is the **eviction** lever: an entry
+/// with no live overlay (a closed document, or a never-opened path pushed out of
+/// the cap) has no file event and so no change stamp to bump, yet its memoized
+/// analysis must be released. Setting `evicted` to `true` invalidates the memo and
+/// routes the entry to a tiny sentinel result (see [`analyze_entry`] and
+/// [`RootDatabase::evict_analysis`]); setting it back to `false` on the next
+/// requery forces exactly one full recompute (see
+/// [`RootDatabase::clear_eviction`]). Ordinary content changes never flow through
+/// `evicted`; they are carried by the per-file change stamps and the availability
+/// epoch below, which the query reads once its import closure is known. The query
+/// body reads all three, so a change to any of them invalidates its memo.
+///
+/// The flag needs no monotonic counter: it is only ever toggled, and each toggle
+/// is guarded (`evict` by `!state.evicted`, un-evict by `state.evicted`) so a
+/// same-value set never occurs — every write is a real change and always
+/// invalidates the memo.
 #[salsa::input]
 struct EntryInput {
     #[returns(ref)]
     path: PathBuf,
     #[returns(ref)]
     src_root: PathBuf,
-    revision: u64,
+    evicted: bool,
 }
 
 /// One reachable file's change stamp: an opaque, monotonic counter standing in for
@@ -101,7 +110,8 @@ trait IdeDatabase: salsa::Database {
     fn availability_epoch(&self) -> AvailabilityEpoch;
 }
 
-/// A memoized [`FileAnalysis`] wrapped so Salsa can store it as a query result.
+/// The memoized result of an entry's analysis: the computed [`FileAnalysis`], or
+/// the sentinel an evicted entry memoizes so Salsa releases its superseded memo.
 ///
 /// A tracked function's output must implement [`salsa::Update`], whose blanket
 /// impls recurse structurally into a value's fields. `FileAnalysis` wraps the type
@@ -110,8 +120,18 @@ trait IdeDatabase: salsa::Database {
 /// The impl below exists **only** to satisfy that static bound: Salsa never calls
 /// `maybe_update` on a tracked function's output — it replaces the memo wholesale
 /// and decides backdating purely by comparing values (see `no_eq` on the query).
+///
+/// [`Evicted`](Self::Evicted) is the roughly two-word sentinel an evicted entry
+/// memoizes: recomputing the query while the entry's `evicted` flag is set stores
+/// this in place of the fat analysis, which pushes the superseded value onto
+/// Salsa's deleted list to be freed at the next revision boundary. It is never
+/// served — [`RootDatabase::analysis`] clears the flag before any serving fetch, so
+/// a fetch that must return a result always recomputes a [`Computed`](Self::Computed).
 #[derive(Clone)]
-struct AnalysisResult(Arc<FileAnalysis>);
+enum AnalysisResult {
+    Computed(Arc<FileAnalysis>),
+    Evicted,
+}
 
 // SAFETY: `maybe_update` overwrites the owned value at `old_pointer` with
 // `new_value` and reports a change, exactly as salsa's own `always_update` helper
@@ -129,11 +149,18 @@ unsafe impl salsa::Update for AnalysisResult {
 /// The whole per-entry analysis, memoized by Salsa.
 ///
 /// [`FileAnalysis::compute`] is called unchanged; Salsa supplies memoization only.
-/// Reading `revision` keeps the eviction lever's edge live. The content-change
-/// dependencies are registered *after* the compute, once the import closure is
-/// known: one change-stamp edge per closure file, plus the availability epoch when
-/// an import went unresolved (see the loop below). The generation is taken from the
-/// database counter so it advances only when this body actually runs.
+/// The content-change dependencies are registered *after* the compute, once the
+/// import closure is known: one change-stamp edge per closure file, plus the
+/// availability epoch when an import went unresolved (see the loop below). The
+/// generation is taken from the database counter so it advances only when this body
+/// actually runs.
+///
+/// The `evicted` read must be the **first** statement. Reading it before the
+/// slow-analysis test seam keeps a landed sentinel swap from ever sleeping, and
+/// reading it before the generation mint keeps a sentinel execution from touching
+/// the recompute probe — generations count full computes only, which every
+/// relational generation assertion relies on. A sentinel memo's sole dependency is
+/// this flag, so later stamp or epoch bumps never re-execute it.
 ///
 /// `no_eq`: a `FileAnalysis` has no meaningful equality and is not `PartialEq`.
 /// The option removes that requirement and disables backdating — the result is
@@ -141,7 +168,9 @@ unsafe impl salsa::Update for AnalysisResult {
 /// on this one.
 #[salsa::tracked(no_eq)]
 fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
-    let _ = entry.revision(db);
+    if entry.evicted(db) {
+        return AnalysisResult::Evicted;
+    }
     let path = entry.path(db);
     let src_root = entry.src_root(db);
     #[cfg(debug_assertions)]
@@ -180,7 +209,7 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
     if analysis.had_missing_import() {
         let _ = db.availability_epoch().epoch(db);
     }
-    AnalysisResult(Arc::new(analysis))
+    AnalysisResult::Computed(Arc::new(analysis))
 }
 
 /// Owns the editor's open-document overlay and the per-entry-file analyses
@@ -200,10 +229,13 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
 /// later work (#157). Cancellation, though, now unwinds out of
 /// [`analysis`](Self::analysis) at the `analyze_entry` call: the pre-query
 /// side-table writes (sticky-root insert, entry insert with `analysis: None`,
-/// src-root drift bump) are idempotent setup that re-converges on retry, and
-/// result writes happen only after the query returns, so a cancelled compute
-/// leaves the entry in the consistent invalidated shape. Salsa cannot observe the
-/// file reads
+/// src-root drift bump, and the recompute branch's `evicted`-flag clear) are
+/// idempotent setup that re-converges on retry — each is guarded so a re-run is a
+/// no-op — and result writes happen only after the query returns, so a cancelled
+/// compute leaves the entry in the consistent invalidated shape. A pending sentinel
+/// swap is likewise unwind-safe: it is drained on a pop-after-success basis, so a
+/// cancelled drain leaves the queue intact for the next read to land. Salsa cannot
+/// observe the file reads
 /// themselves: the import closure is read through the `Vfs` overlay-then-disk
 /// loader, which stays outside Salsa storage so the compiler and IDE resolve
 /// imports through one seam. What Salsa *can* see is supplied for it: the query
@@ -300,26 +332,46 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
 /// # Eviction
 ///
 /// Open documents' analyses are never evicted — they are the editor's working
-/// set and are invalidated (not dropped) as their closures change. Two other
-/// sources of memoized analyses are bounded so a long session cannot grow the
-/// tracked set without limit:
+/// set and are invalidated (not dropped) as their closures change. Three sources
+/// of memoized analyses are bounded and their memos actually freed, so a long
+/// session cannot grow the tracked set without limit:
 ///
 /// * **Closing a document** removes its overlay, so its analysis (computed from
-///   that overlay) is dropped rather than left to serve vanished buffer text; a
-///   later query recomputes it from disk. Closure-aware invalidation already
-///   covers this — a document is always part of its own closure — and any
-///   still-open dependent that imported the closed file re-reads it from disk on
-///   its next query.
+///   that overlay) must stop serving vanished buffer text; a later query
+///   recomputes it from disk. Closure-aware invalidation already forces that
+///   recompute — a document is always part of its own closure — and
+///   `close_document` additionally evicts the closed entry so its memo is freed.
 /// * **Feature requests on never-opened paths** (a hover or goto against a URI the
 ///   editor never sent a `didOpen` for reaches disk through the loader) each
 ///   memoize an entry that no document change ever invalidates. These are capped
 ///   at [`MAX_UNOPENED_ANALYSES`] with FIFO eviction of the oldest.
+/// * **Never-opened entries staled by a change** and pruned from the cap's order
+///   are evicted too, rather than silently dropped with their memo left resident.
 ///
-/// Salsa 0.27 exposes no per-memo eviction, so an evicted entry's compute lingers
-/// in Salsa storage until its next recompute; what the cap preserves is the
-/// *observable* behavior — an evicted analysis recomputes with a fresh generation
-/// stamp on the next request, while a retained one stays a cache hit. Durability
-/// tiers and a real parse LRU are later work (#157).
+/// Salsa 0.27 exposes no per-memo eviction, so freeing works by a two-step
+/// sentinel swap (see [`evict_analysis`](Self::evict_analysis) and
+/// [`drain_pending_sentinel_swaps`](Self::drain_pending_sentinel_swaps)): the
+/// `evicted` flag is set, and the next read recomputes the entry to the tiny
+/// [`AnalysisResult::Evicted`] sentinel, which pushes the superseded fat analysis
+/// onto Salsa's deleted list to be freed at the next revision boundary. The honest
+/// steady-state bound on resident full analyses is
+///
+/// ```text
+/// open documents
+///   + MAX_UNOPENED_ANALYSES
+///   + (queued swaps not yet drained — cleared at the next analysis() call)
+///   + (memos superseded or swapped since the last revision boundary
+///      — cleared at the next Salsa write; a deferred-drop lag that exists
+///        for every recompute, salsa-0.27.2-version-pinned)
+/// ```
+///
+/// A permanent small residue is accepted per distinct path ever touched: the
+/// `EntryState`, the `EntryInput` slot, the `FileStamp` slot, the debug registry
+/// entry, and the `Vfs` id — on the order of 100–200 B — because Salsa 0.27 has no
+/// input removal. It is unbounded only in the number of distinct paths, the same
+/// steady state rust-analyzer ships, and is re-audited on any Salsa upgrade.
+/// Snapshot reads from a cloned `Storage` (which would let a background thread
+/// serve hits without holding the write handle) are separate later work (#292).
 #[salsa::db]
 #[derive(Default)]
 pub struct RootDatabase {
@@ -333,16 +385,10 @@ pub struct RootDatabase {
     /// despite the single-threaded loop because the query runs against a shared
     /// `&dyn IdeDatabase`, so the counter can only be advanced through `&self`.
     generation_counter: AtomicU64,
-    /// Monotonic source of per-entry `revision` values. Bumping an entry's input
-    /// to a fresh value forces Salsa to recompute it; used now only by the eviction
-    /// lever (see [`evict_analysis`](Self::evict_analysis)).
-    revision_source: u64,
-    /// Monotonic source of [`FileStamp`]/[`AvailabilityEpoch`] values, a twin of
-    /// `revision_source` kept on a separate counter so the revision machinery (the
-    /// eviction lever, retained for #157) can be retired without disturbing the
-    /// stamp source. Bumps are set-only: an input field is written through its
-    /// setter, never read-modify-written, since reading an input field outside a
-    /// query registers no edge and would only mislead.
+    /// Monotonic source of [`FileStamp`]/[`AvailabilityEpoch`] values. Bumps are
+    /// set-only: an input field is written through its setter, never
+    /// read-modify-written, since reading an input field outside a query registers
+    /// no edge and would only mislead.
     stamp_source: u64,
     /// Append-only path → [`FileStamp`] registry, shared by the write-path bump and
     /// the analysis query's in-query dependency registration so both observe one
@@ -368,6 +414,21 @@ pub struct RootDatabase {
     /// the order they were memoized (oldest first). Bounds the tracked set against
     /// feature requests on arbitrary URIs; see [`MAX_UNOPENED_ANALYSES`].
     unopened_order: VecDeque<PathBuf>,
+    /// Entries whose `evicted` flag was just set, awaiting the sentinel-recompute
+    /// that releases their superseded memo. Populated by
+    /// [`evict_analysis`](Self::evict_analysis) (from the cap, the prune, and
+    /// `close_document`) and drained only inside [`analysis`](Self::analysis): a
+    /// notification handler must not fetch, so the write path queues and the read
+    /// path lands the swap. Drained last-first with a pop-after-success so a
+    /// cancelled fetch leaves the queue intact for the next read to retry.
+    pending_sentinel_swaps: Vec<EntryInput>,
+    /// Debug-only weak registry of every full analysis this database has handed out,
+    /// so [`debug_live_analyses`](Self::debug_live_analyses) can probe true liveness:
+    /// a `Weak` that no longer upgrades has no strong retainer anywhere — memo,
+    /// mirror, deleted list, or caller. `Weak<FileAnalysis>` is `Send + Sync`, so the
+    /// `Send` assertion on `RootDatabase` still holds.
+    #[cfg(debug_assertions)]
+    live_analyses: Mutex<Vec<std::sync::Weak<FileAnalysis>>>,
 }
 
 #[salsa::db]
@@ -409,6 +470,15 @@ struct EntryState {
     /// for the cap. The stamp/epoch edges the query registered are what actually
     /// force the recompute; this field is the eager mirror of that staleness.
     analysis: Option<Arc<FileAnalysis>>,
+    /// The ide-db-side mirror of the entry's `evicted` Salsa field, so a no-op
+    /// double-eviction or a fresh entry's requery can be skipped without
+    /// read-modify-writing the input. Set with `analysis` in one atomic step by
+    /// [`evict_analysis`](RootDatabase::evict_analysis), establishing the invariant
+    /// `evicted ⟹ analysis is None`; only
+    /// [`clear_eviction`](RootDatabase::clear_eviction) breaks it, clearing the flag
+    /// first. A debug tripwire in [`analysis`](RootDatabase::analysis) checks it
+    /// against the Salsa field.
+    evicted: bool,
 }
 
 /// The most memoized analyses to retain for documents that were never opened.
@@ -419,7 +489,10 @@ struct EntryState {
 /// files a single navigation touches, while keeping the retained set small; the
 /// eviction is FIFO over never-opened entries only, so open documents are never
 /// affected.
-const MAX_UNOPENED_ANALYSES: usize = 8;
+///
+/// Public so tests (and the honest resident-memory bound in the crate docs) can
+/// derive their limits from this constant rather than a magic number.
+pub const MAX_UNOPENED_ANALYSES: usize = 8;
 
 impl RootDatabase {
     /// Opens `path` with `text` as its in-memory contents (an editor `didOpen`).
@@ -478,10 +551,12 @@ impl RootDatabase {
     /// them, since a document is always in its own closure — to recompute, and
     /// `note_stale_entries` clears the same set's mirror.
     ///
-    /// What is actually reclaimed is the overlay text. The entry's `EntryState`
-    /// and Salsa's memo of the superseded analysis are retained until the next
-    /// recompute replaces the memo — Salsa 0.27 offers no per-memo eviction, so
-    /// "dropped" here means "no longer served", not "freed" (#157).
+    /// Both the overlay text and the closed entry's memoized analysis are freed:
+    /// the eviction below sets the entry's `evicted` flag and queues a sentinel
+    /// swap, so the superseded memo is released at the next
+    /// [`analysis`](Self::analysis) call and dropped at the following revision
+    /// boundary. The `EntryState` slot itself persists (Salsa 0.27 has no input
+    /// removal).
     pub fn close_document(&mut self, path: &Path) {
         if let Some(id) = self.vfs.file_id(path) {
             self.vfs.remove_contents(id);
@@ -492,6 +567,13 @@ impl RootDatabase {
         self.bump_file_stamp(path);
         self.unopened_order.retain(|tracked| tracked != path);
         self.note_stale_entries(path, false);
+        // Free the closed entry's memo. Queue-only: the swap's fetch is deferred to
+        // the next `analysis` because a fetch is a cancellation checkpoint, and a
+        // close superseded by a newer write must run to completion (the protocol
+        // layer removes its document tracking after this call). The stamp bump above
+        // already invalidates dependents; this releases the closed entry's own memo.
+        // A close of a never-analyzed path is a no-op (no `EntryState`).
+        self.evict_analysis(path);
     }
 
     /// Whether an analysis for `path` is currently memoized (computed and not
@@ -539,10 +621,26 @@ impl RootDatabase {
     /// [`is_analyzed`](Self::is_analyzed), and the analysis is stored just above
     /// the final read.
     pub fn analysis(&mut self, path: &Path) -> &FileAnalysis {
+        // Land any sentinel swaps queued since the last read (a close, a prune, a
+        // cap eviction). Doing it first releases their superseded memos before this
+        // request's work, and an unwind here touches nothing of the requested entry.
+        self.drain_pending_sentinel_swaps();
         let recomputed = !self.is_analyzed(path);
         if recomputed {
             let src_root = self.resolve_source_root(path);
             self.sync_entry_input(path, &src_root);
+            // The mirror's `evicted` and the Salsa field must agree before the
+            // un-evict: a drift means an eviction set one without the other.
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                self.entries[path].evicted,
+                self.entries[path].input.evicted(&*self),
+                "the EntryState.evicted mirror and the Salsa evicted field drifted"
+            );
+            // A recompute of a previously-evicted entry un-evicts it: the false-write
+            // both forces the full re-execution and is the revision boundary that
+            // frees the prior deferred memo. A never-evicted entry is a no-op.
+            self.clear_eviction(path);
         }
         // Debug-only alignment tripwire: on a mirror hit (the entry still holds an
         // analysis, so `recomputed` is false) the fetch below must be a Salsa memo
@@ -561,8 +659,36 @@ impl RootDatabase {
         let input = self.entries[path].input;
         // Salsa returns the memo when the entry's inputs are unchanged and reruns
         // `analyze_entry` (minting a fresh generation) when a change-stamp, epoch, or
-        // src-root/revision bump marked it stale.
-        let AnalysisResult(analysis) = analyze_entry(&*self, input);
+        // evicted-flag bump marked it stale.
+        //
+        // Contract (recorded invariant, #157): this serving fetch performs zero
+        // Salsa writes. Every setter reachable from `analysis` sits on the
+        // recompute branch's `clear_eviction` or in `drain_pending_sentinel_swaps`,
+        // so a memo hit is write-free — the property the zero-write cap read
+        // sequence relies on, and the precondition for answering queries from
+        // cloned `Storage` handles on other threads (#292): a write from any
+        // handle blocks until every other handle drops, so a serving path that
+        // wrote would deadlock its own readers. The `Evicted` arm below is a release-build self-heal
+        // that must never run: the recompute branch cleared the flag before this
+        // fetch, and `evicted ⟹ mirror is None` means an evicted entry always took
+        // the recompute branch.
+        let analysis = match analyze_entry(&*self, input) {
+            AnalysisResult::Computed(analysis) => analysis,
+            AnalysisResult::Evicted => {
+                debug_assert!(
+                    false,
+                    "an evicted sentinel reached a serving fetch: evicted implies the \
+                     mirror is None, so the recompute branch clears the flag first"
+                );
+                self.clear_eviction(path);
+                match analyze_entry(&*self, input) {
+                    AnalysisResult::Computed(analysis) => analysis,
+                    AnalysisResult::Evicted => {
+                        unreachable!("the flag was just cleared")
+                    }
+                }
+            }
+        };
         #[cfg(debug_assertions)]
         if let Some(previous) = prior_generation {
             debug_assert_eq!(
@@ -573,6 +699,18 @@ impl RootDatabase {
                  the mirror — the stamp/epoch bumps and the stale-entry pass have \
                  drifted apart"
             );
+        }
+        // Register the handed-out analysis for the liveness probe before it is moved
+        // into the mirror, so `debug_live_analyses` can later tell a freed memo from
+        // a resident one. Retain-then-push keeps the registry from growing unboundedly.
+        #[cfg(debug_assertions)]
+        if recomputed {
+            let mut registry = self
+                .live_analyses
+                .lock()
+                .expect("live-analysis registry poisoned");
+            registry.retain(|weak| weak.strong_count() > 0);
+            registry.push(Arc::downgrade(&analysis));
         }
 
         let is_unopened = self.vfs.contents_of_path(path).is_none();
@@ -585,6 +723,12 @@ impl RootDatabase {
             // entries accumulate over a session.
             self.record_unopened_analysis(path.to_path_buf());
         }
+        // Land this call's own cap/prune evictions so the resident-memory shape
+        // matches the eager cap: the swaps queued just above are released now. An
+        // unwind here happens after this entry's result is stored, so the caller
+        // could observe `Cancelled` with `is_analyzed() == true`; that only arises
+        // from a cross-thread token fire and converges on the next read's top drain.
+        self.drain_pending_sentinel_swaps();
         self.entries[path]
             .analysis
             .as_deref()
@@ -593,60 +737,123 @@ impl RootDatabase {
 
     /// Ensures an [`EntryInput`] exists for `path` carrying `src_root`.
     ///
-    /// A new entry starts at revision zero with no analysis. An existing entry's
-    /// source root is updated only when it drifted (a close/reopen re-resolution),
-    /// which itself marks the query stale so the recompute uses the new root.
+    /// A new entry starts un-evicted with no analysis. An existing entry's source
+    /// root is updated only when it drifted (a close/reopen re-resolution), which
+    /// itself marks the query stale so the recompute uses the new root.
     fn sync_entry_input(&mut self, path: &Path, src_root: &Path) {
         if let Some(input) = self.entries.get(path).map(|state| state.input) {
             if input.src_root(&*self).as_path() != src_root {
                 input.set_src_root(self).to(src_root.to_path_buf());
             }
         } else {
-            let input = EntryInput::new(&*self, path.to_path_buf(), src_root.to_path_buf(), 0);
+            let input = EntryInput::new(&*self, path.to_path_buf(), src_root.to_path_buf(), false);
             self.entries.insert(
                 path.to_path_buf(),
                 EntryState {
                     input,
                     analysis: None,
+                    evicted: false,
                 },
             );
         }
     }
 
-    /// The eviction lever: drops `entry`'s mirror analysis and bumps its `revision`
-    /// input so the next query recomputes it.
+    /// The eviction lever: clears `entry`'s mirror analysis, sets its `evicted`
+    /// input, and queues the sentinel swap that frees its memo.
     ///
     /// Unlike a content change, an eviction has no file event and so no stamp to
-    /// bump; the `revision` input is the only thing that can force the recompute.
+    /// bump; the `evicted` flag is the only thing that can force the recompute.
     /// Folding eviction into the stamps would let a stale memo revalidate and break
-    /// the never-opened cap's recompute guarantee, so it stays a distinct lever. The
-    /// sole caller is [`record_unopened_analysis`](Self::record_unopened_analysis);
-    /// this and the `revision` machinery are retired together with the cap (#157).
+    /// the never-opened cap's recompute guarantee, so it stays a distinct lever.
+    /// Callers are the never-opened cap overflow and stale prune (see
+    /// [`record_unopened_analysis`](Self::record_unopened_analysis)) and
+    /// [`close_document`](Self::close_document).
+    ///
+    /// The gate is `EntryState` existence and `!state.evicted`, deliberately **not**
+    /// [`is_analyzed`](Self::is_analyzed): an invalidated-then-closed document (its
+    /// mirror already `None`) must still be freed, and a double eviction (a double
+    /// close) must be a no-op — no second setter, no duplicate queue entry. The
+    /// mirror-clear and flag-set are one atomic step, establishing the invariant
+    /// `evicted ⟹ mirror is None`.
+    ///
+    /// The setter invalidates the fat memo but does **not** free it; the queued
+    /// swap's fetch performs the release. Each `set_evicted` is itself a revision
+    /// boundary that frees the *previous* eviction's deferred memo — Salsa 0.27.2
+    /// clears its deleted list at every new revision, so at most one fat memo is
+    /// ever pending (re-derive on any Salsa upgrade).
     ///
     /// A no-op for a path that was never analyzed.
     fn evict_analysis(&mut self, entry: &Path) {
-        let Some(input) = self.entries.get_mut(entry).map(|state| {
-            state.analysis = None;
-            state.input
+        let Some(input) = self.entries.get_mut(entry).and_then(|state| {
+            (!state.evicted).then(|| {
+                state.analysis = None;
+                state.evicted = true;
+                state.input
+            })
         }) else {
             return;
         };
-        let next = self.next_revision();
-        input.set_revision(self).to(next);
+        input.set_evicted(self).to(true);
+        self.pending_sentinel_swaps.push(input);
     }
 
-    /// A fresh, strictly increasing `revision` value, distinct from any previously
-    /// assigned, so setting it on an input always registers as a change.
-    fn next_revision(&mut self) -> u64 {
-        self.revision_source += 1;
-        self.revision_source
+    /// Recomputes every queued evicted entry to its sentinel, releasing each
+    /// superseded fat memo to Salsa's deleted list.
+    ///
+    /// Called from [`analysis`](Self::analysis) only — never from a notification
+    /// handler, whose fetch could be abandoned half-done when a newer write
+    /// supersedes it: the write path queues, the read path lands. Each fetch is a
+    /// cancellation checkpoint (Salsa unwinds at fetch entry before any body), so an
+    /// unwind leaves the queue intact — this queue *is* the strand repair, and the
+    /// next `analysis` self-heals. No `catch_unwind` anywhere in ide-db: a
+    /// `Cancelled` unwind must propagate for the protocol layer's superseded/retry
+    /// classification. Pop-after-success so a cancelled drain retries the same entry.
+    fn drain_pending_sentinel_swaps(&mut self) {
+        while let Some(input) = self.pending_sentinel_swaps.last().copied() {
+            let result = analyze_entry(&*self, input);
+            debug_assert!(
+                matches!(result, AnalysisResult::Evicted),
+                "a queued sentinel swap must observe evicted == true"
+            );
+            self.pending_sentinel_swaps.pop();
+        }
+    }
+
+    /// Clears `path`'s `evicted` flag on the recompute branch, forcing the full
+    /// re-execution and freeing the last deferred memo.
+    ///
+    /// The false-write is (a) the input change that forces one full recompute with a
+    /// fresh generation — the requery's cross-entry generation pin — and (b) the
+    /// revision boundary that frees the previous eviction's deferred fat memo. A
+    /// never-evicted entry (a fresh entry, or a plain content-change recompute) is a
+    /// no-op: no same-value set.
+    ///
+    /// Ordering rule for the whole eviction lifecycle:
+    /// `drain_pending_sentinel_swaps` (top of [`analysis`](Self::analysis)) →
+    /// `clear_eviction` (recompute branch) → serving fetch → mirror store. Because
+    /// the top-of-analysis drain precedes every `clear_eviction`, a queued swap can
+    /// never be stale by the time the flag is cleared, so no stale-queue skip logic
+    /// is needed — that is by design, not accident, and the `debug_assert` below
+    /// machine-checks it.
+    fn clear_eviction(&mut self, path: &Path) {
+        let Some(input) = self.entries.get_mut(path).and_then(|state| {
+            state.evicted.then(|| {
+                state.evicted = false;
+                state.input
+            })
+        }) else {
+            return;
+        };
+        debug_assert!(
+            !self.pending_sentinel_swaps.contains(&input),
+            "the top-of-analysis drain lands every queued swap before any un-evict"
+        );
+        input.set_evicted(self).to(false);
     }
 
     /// A fresh, strictly increasing [`FileStamp`]/[`AvailabilityEpoch`] value,
     /// distinct from any previously assigned, so setting it on an input always
-    /// registers as a change. A twin of [`next_revision`](Self::next_revision) on a
-    /// separate counter, so retiring the revision machinery (#157) leaves the stamp
-    /// source intact.
+    /// registers as a change.
     fn next_stamp(&mut self) -> u64 {
         self.stamp_source += 1;
         self.stamp_source
@@ -681,25 +888,44 @@ impl RootDatabase {
     /// Records `path` as the most-recently memoized never-opened analysis and
     /// evicts the oldest ones beyond [`MAX_UNOPENED_ANALYSES`].
     ///
-    /// The FIFO list is first pruned of paths that are no longer never-opened
-    /// memoized entries (opened since, or marked stale by a change), so the cap
-    /// counts only entries actually held for never-opened documents. That prune
-    /// reads [`is_analyzed`](Self::is_analyzed) as "still memoized" — the same
-    /// meaning [`evict_analysis`](Self::evict_analysis) relies on — so the two must
-    /// not drift before the cap is retired (#157).
+    /// The FIFO order is first pruned, splitting the entries dropped from it three
+    /// ways: `path` itself is re-added at the back; an entry opened since (its
+    /// overlay is now available) is promoted into the working set and **never**
+    /// evicted; and an entry still never-opened but no longer memoized — staled by a
+    /// change — is collected and evicted, freeing its lingering memo rather than
+    /// silently dropping it. That third path closes a leak the cap alone never
+    /// covered. Then the existing overflow loop evicts the oldest beyond the cap.
+    ///
+    /// Pin-safety: a staled entry's memo is already invalid (the mirror and the
+    /// stamp/epoch edges move in lockstep — the alignment tripwire machine-checks
+    /// it), so setting its flag changes *when* the memory is released, never what a
+    /// requery observes: it recomputes with a fresh generation either way. Promoted
+    /// (opened-since) entries are left untouched.
     fn record_unopened_analysis(&mut self, path: PathBuf) {
         let mut kept = VecDeque::with_capacity(self.unopened_order.len() + 1);
+        let mut pruned_stale = Vec::new();
         for tracked in std::mem::take(&mut self.unopened_order) {
-            if tracked != path
-                && self.is_analyzed(&tracked)
-                && self.vfs.contents_of_path(&tracked).is_none()
-            {
+            if tracked == path {
+                continue;
+            }
+            if self.vfs.contents_of_path(&tracked).is_some() {
+                // Opened since it was memoized: promoted into the working set,
+                // exempt from the cap and never evicted.
+                continue;
+            }
+            if self.is_analyzed(&tracked) {
                 kept.push_back(tracked);
+            } else {
+                // Still never-opened but staled by a change: free its memo.
+                pruned_stale.push(tracked);
             }
         }
         kept.push_back(path);
         self.unopened_order = kept;
 
+        for stale in pruned_stale {
+            self.evict_analysis(&stale);
+        }
         while self.unopened_order.len() > MAX_UNOPENED_ANALYSES {
             if let Some(evicted) = self.unopened_order.pop_front() {
                 self.evict_analysis(&evicted);
@@ -791,6 +1017,54 @@ impl RootDatabase {
             if stale {
                 state.analysis = None;
             }
+        }
+    }
+
+    /// Debug-only liveness probe: the number of distinct full analyses with a live
+    /// strong retainer anywhere (a memo, the mirror, Salsa's deleted list, or a
+    /// caller).
+    ///
+    /// A `Weak` that no longer upgrades has been freed, so this distinguishes a
+    /// memo that was truly released from one merely unserved — the exit criterion
+    /// the memory-bound tests assert against. Upgradable entries are deduped by
+    /// `Arc::as_ptr` so a tolerated-direction mirror over-clear that re-registers
+    /// the same `Arc` is not double-counted.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    #[must_use = "the live-analysis count is the reason to call this"]
+    pub fn debug_live_analyses(&self) -> usize {
+        let mut registry = self
+            .live_analyses
+            .lock()
+            .expect("live-analysis registry poisoned");
+        registry.retain(|weak| weak.strong_count() > 0);
+        let mut seen: rustc_hash::FxHashSet<*const FileAnalysis> = rustc_hash::FxHashSet::default();
+        for weak in registry.iter() {
+            if let Some(analysis) = weak.upgrade() {
+                seen.insert(Arc::as_ptr(&analysis));
+            }
+        }
+        seen.len()
+    }
+
+    /// Debug-only constructor that counts `analyze_entry` executions.
+    ///
+    /// The `probe` is incremented on every Salsa `WillExecute` event — a full
+    /// compute or a sentinel recompute — so a test can assert exact execution
+    /// arithmetic (a memo hit fires no event, an eviction fires exactly its
+    /// sentinel). Only one tracked function exists today; a test's exact counts
+    /// must be revisited if more are added (#280).
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    #[must_use = "the probed database is the constructor's result"]
+    pub fn with_execute_probe(probe: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Self {
+            storage: Storage::new(Some(Box::new(move |event: salsa::Event| {
+                if matches!(event.kind, salsa::EventKind::WillExecute { .. }) {
+                    probe.fetch_add(1, Ordering::Relaxed);
+                }
+            }))),
+            ..Self::default()
         }
     }
 }

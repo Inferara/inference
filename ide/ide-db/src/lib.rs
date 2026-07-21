@@ -35,7 +35,7 @@ mod symbols;
 
 pub use analysis::{AnalysisFinding, ClosureFile, FileAnalysis};
 pub use cancellation::{AnalysisCancelSource, is_cancellation};
-pub use database::RootDatabase;
+pub use database::{MAX_UNOPENED_ANALYSES, RootDatabase};
 pub use hit_test::{NodeHit, enclosing_hit, hit_test};
 pub use symbols::file_defs;
 

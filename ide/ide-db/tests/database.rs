@@ -1812,3 +1812,250 @@ fn a_cancelled_analysis_unwinds_cleanly_and_the_retry_recomputes() {
         "a second read is a memo hit (equal generation), not a recompute"
     );
 }
+
+// Memory reclamation (issue #157): an evicted or closed entry's memoized analysis
+// must be *freed*, not merely unserved. These tests probe true liveness with a
+// `Weak` registry (`debug_live_analyses`) and count tracked-function executions
+// with a `WillExecute` probe (`with_execute_probe`); both are debug-only seams, so
+// the tests that use them are `#[cfg(debug_assertions)]`. Salsa 0.27.2 frees a
+// superseded memo only at the next revision boundary, so each memory-bound test
+// applies one deliberate flush write before asserting — without it the assertion is
+// flaky by construction, and the flush choreography must be re-derived (not just
+// re-run) on any Salsa upgrade.
+
+#[cfg(debug_assertions)]
+#[test]
+fn evicted_never_opened_analyses_are_freed_not_just_unserved() {
+    use inference_ide_db::MAX_UNOPENED_ANALYSES;
+
+    // Twenty distinct never-opened files memoize twenty analyses; the cap retains
+    // eight and evicts twelve via the sentinel swap. The last eviction's fat memo is
+    // still deferred until the next revision boundary — opening a twenty-first file
+    // is that boundary (its stamp bump), and that file is the one live open document
+    // the final bound accounts for.
+    let tree = TempTree::new("evicted-freed");
+    let mut db = RootDatabase::default();
+
+    for i in 0..20 {
+        let path = tree.write(
+            &format!("f{i}.inf"),
+            &format!("pub fn f{i}() -> i32 {{ return {i}; }}"),
+        );
+        let _ = db.analysis(&path).generation();
+    }
+
+    let flush = tree.write("flush.inf", "pub fn flush() -> i32 { return 0; }");
+    db.open_document(&flush, "pub fn flush() -> i32 { return 0; }");
+    let _ = db.analysis(&flush).generation();
+
+    let live = db.debug_live_analyses();
+    assert!(
+        live <= MAX_UNOPENED_ANALYSES + 1,
+        "evicted never-opened analyses must be freed, not just unserved: at most \
+         {MAX_UNOPENED_ANALYSES} retained never-opened analyses plus the one open \
+         flush document should stay live, found {live}"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_closed_documents_analysis_is_freed_not_just_unserved() {
+    let tree = TempTree::new("closed-freed");
+    let a = tree.write("a.inf", "pub fn a() -> i32 { return 1; }");
+    let b = tree.write("b.inf", "pub fn b() -> i32 { return 2; }");
+    let mut db = RootDatabase::default();
+
+    db.open_document(&a, "pub fn a() -> i32 { return 1; }");
+    let _ = db.analysis(&a).generation();
+    // Closing a queues its sentinel swap (the drain belongs to analysis(), not a
+    // notification handler).
+    db.close_document(&a);
+
+    // Opening then analyzing b runs the top-of-analysis drain, landing a's swap and
+    // releasing a's fat memo to Salsa's deleted list.
+    db.open_document(&b, "pub fn b() -> i32 { return 2; }");
+    let _ = db.analysis(&b).generation();
+    // A byte-identical didChange of b is a revision boundary that frees a's deferred
+    // memo; b's own prior memo becomes the single deferred transient the bound of 2
+    // accounts for (b's current analysis + one superseded-b memo). a's is dead.
+    db.change_document(&b, "pub fn b() -> i32 { return 2; }");
+    let _ = db.analysis(&b).generation();
+
+    let live = db.debug_live_analyses();
+    assert!(
+        live <= 2,
+        "a closed document's analysis must be freed: only b's current analysis and \
+         at most one superseded-b memo (deferred to the next revision boundary) may \
+         remain — a's must be gone — found {live}"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_staled_never_opened_analysis_pruned_from_the_cap_is_freed() {
+    // The third leak path: a never-opened entry staled by a change and pruned from
+    // the cap's order must be freed, not silently dropped with its memo resident.
+    let tree = TempTree::new("staled-prune-freed");
+    // X (never opened) imports L (on disk, in X's closure); Y is independent.
+    tree.write("dep/l.inf", "pub fn l() -> i32 { return 1; }");
+    let l = tree.path("dep/l.inf");
+    let x = tree.write("x.inf", "use dep::l;\npub fn x() -> i32 { return 0; }");
+    let y = tree.write("y.inf", "pub fn y() -> i32 { return 2; }");
+    let mut db = RootDatabase::default();
+
+    let x_first = db.analysis(&x).generation();
+    // A change to X's on-disk import L stales X (its closure contains L) but leaves
+    // X in the never-opened order.
+    db.change_document(&l, "pub fn l() -> i32 { return 9; }");
+    // Analyzing an independent never-opened Y prunes the staled X from the order and
+    // evicts it; the post-cap drain lands the swap.
+    let _ = db.analysis(&y).generation();
+    // A second change to L is a revision boundary that frees X's deferred memo.
+    db.change_document(&l, "pub fn l() -> i32 { return 8; }");
+
+    let live = db.debug_live_analyses();
+    assert!(
+        live <= 1,
+        "a staled, cap-pruned never-opened analysis must be freed: only Y's current \
+         analysis should stay live, found {live}"
+    );
+
+    // Behavior is preserved: requerying X still recomputes with a fresh generation.
+    let x_requery = db.analysis(&x).generation();
+    assert!(
+        x_requery > x_first,
+        "the pruned-and-freed X must recompute on requery ({x_first} -> {x_requery})"
+    );
+}
+
+#[test]
+fn a_pending_eviction_swap_survives_a_cancelled_request_and_lands_on_retry() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    // Closing a queues a sentinel swap. A cancellation fired before an unrelated
+    // request unwinds that request at the top-of-analysis drain (a fetch is a
+    // cancellation checkpoint), leaving the queue intact; the retry lands a's swap
+    // and completes. The freed a is then observable as a fresh recompute from disk.
+    let tree = TempTree::new("cancel-swap-survives");
+    let a = tree.write("a.inf", "pub fn a() -> i32 { return 1; }");
+    let u = tree.write("u.inf", "pub fn u() -> i32 { return 2; }");
+    let mut db = RootDatabase::default();
+
+    db.open_document(&a, "pub fn a() -> i32 { return 1; }");
+    let a_before = db.analysis(&a).generation();
+    db.close_document(&a);
+
+    let source = AnalysisCancelSource::detached();
+    db.bind_cancellation(&source);
+    let _epoch = source.request_cancellation();
+
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let _ = db.analysis(&u);
+    }));
+    let payload = unwound.expect_err("a pre-fired cancellation unwinds the request");
+    assert!(
+        is_cancellation(payload.as_ref()),
+        "the caught payload is the semantic layer's cancellation signal"
+    );
+    assert!(
+        !db.is_analyzed(&u),
+        "the cancelled request left u un-analyzed (the drain unwound before u ran)"
+    );
+
+    // The consumed signal auto-reset, so the retry drains a's swap first and then
+    // computes u to completion.
+    let _ = db.analysis(&u).generation();
+    assert!(
+        db.is_analyzed(&u),
+        "the retry completes the previously-cancelled request"
+    );
+
+    let a_after = db.analysis(&a).generation();
+    assert!(
+        a_after > a_before,
+        "the closed a recomputes from disk with a fresh generation ({a_before} -> {a_after})"
+    );
+}
+
+#[test]
+fn closing_a_document_twice_is_idempotent() {
+    // The `!state.evicted` guard in `evict_analysis` makes a double close a no-op:
+    // no second setter and no duplicate queue entry (a duplicate would break the
+    // drain-before-un-evict invariant). The observable is unchanged — a requery
+    // recomputes once, and a second read is a memo hit.
+    let path = PathBuf::from("/inf-test/twice.inf");
+    let mut db = RootDatabase::default();
+    db.open_document(&path, "pub fn f() -> i32 { return 1; }");
+    let gen1 = db.analysis(&path).generation();
+
+    db.close_document(&path);
+    db.close_document(&path);
+
+    let gen2 = db.analysis(&path).generation();
+    assert!(
+        gen2 > gen1,
+        "the requery after a double close must recompute ({gen1} -> {gen2})"
+    );
+    assert_eq!(
+        db.analysis(&path).generation(),
+        gen2,
+        "a second read after the requery is a memo hit, not a recompute"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn an_eviction_executes_only_the_evicted_entrys_sentinel() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    // The WillExecute probe counts tracked-function executions exactly: a memo hit
+    // fires none, a full compute fires one, an eviction fires exactly its own
+    // sentinel. Only one tracked function exists today (analyze_entry); if #280 adds
+    // more, these exact counts must be revisited.
+    let tree = TempTree::new("execute-probe");
+    let probe = Arc::new(AtomicUsize::new(0));
+    let mut db = RootDatabase::with_execute_probe(Arc::clone(&probe));
+
+    let mut paths = Vec::new();
+    for i in 0..8 {
+        let path = tree.write(
+            &format!("f{i}.inf"),
+            &format!("pub fn f{i}() -> i32 {{ return {i}; }}"),
+        );
+        let _ = db.analysis(&path).generation();
+        paths.push(path);
+    }
+    // Eight never-opened analyses: eight full computes, no eviction yet (cap == 8).
+    assert_eq!(
+        probe.load(Ordering::Relaxed),
+        8,
+        "eight never-opened analyses are eight full computes"
+    );
+
+    // A memo hit on the newest executes nothing.
+    let _ = db.analysis(&paths[7]).generation();
+    assert_eq!(
+        probe.load(Ordering::Relaxed),
+        8,
+        "a memo hit executes nothing"
+    );
+
+    // A ninth analysis: one full compute plus the evicted oldest's sentinel.
+    let ninth = tree.write("f8.inf", "pub fn f8() -> i32 { return 8; }");
+    let _ = db.analysis(&ninth).generation();
+    assert_eq!(
+        probe.load(Ordering::Relaxed),
+        10,
+        "the ninth full compute (9) plus the evicted oldest's sentinel (10)"
+    );
+
+    // Requerying the evicted oldest: its full recompute plus the next eviction's
+    // sentinel.
+    let _ = db.analysis(&paths[0]).generation();
+    assert_eq!(
+        probe.load(Ordering::Relaxed),
+        12,
+        "the recompute of the evicted oldest (11) plus the next eviction's sentinel (12)"
+    );
+}

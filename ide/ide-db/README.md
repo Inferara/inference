@@ -33,13 +33,18 @@ so the IDE stack never links the WASM/Rocq backend.
   Salsa-memoized [`FileAnalysis`] per entry file, with closure-aware
   invalidation so a keystroke in one buffer does not force every other open
   buffer to re-analyze. Open documents' analyses are never evicted; a closed
-  document's overlay-derived analysis stops being served (recomputed from disk
-  on demand), and analyses memoized for never-opened paths (feature requests on
-  arbitrary URIs) are FIFO-capped so only a bounded number stay live. The cap
-  bounds what is *served*, not what is resident: Salsa 0.27 has no per-memo
-  eviction, so a superseded analysis stays in Salsa storage until its entry is
-  recomputed. Reclaiming it needs durability tiers and an LRU (still open work
-  on issue #157).
+  document's overlay-derived analysis is freed (recomputed from disk on demand),
+  and analyses memoized for never-opened paths (feature requests on arbitrary
+  URIs) are FIFO-capped, with the evicted ones freed too. Salsa 0.27 has no
+  per-memo eviction, so freeing works by a two-step sentinel swap: an evicted
+  entry recomputes to a tiny sentinel, which pushes the superseded analysis onto
+  Salsa's deleted list to be dropped at the next revision boundary. Resident full
+  analyses are bounded by *open documents + [`MAX_UNOPENED_ANALYSES`] + a
+  one-write-lagged transient* (a superseded or swapped memo freed at the next
+  Salsa write). A small per-path residue (input slots, memo headers, `Vfs` ids)
+  is session-permanent because Salsa 0.27 has no input removal — the same steady
+  state rust-analyzer ships. Serving hits from a cloned `Storage` on a background
+  thread is separate later work (issue #292).
 - **[`FileAnalysis`]** — the merged arena (reached through its `TypedContext`),
   per-file parse errors, structured type diagnostics, unresolved-import
   problems, tagged analysis findings, and per-closure-file line indexes and
@@ -125,11 +130,19 @@ Its predicate reads the very `closure_paths`/`had_missing_import` fields the
 query registered its edges from, so the mirror and the edges cannot disagree (a
 debug assertion in `RootDatabase::analysis` machine-checks the alignment).
 
-Because a stale memo is only marked, never removed, "invalidated" means "will be
-recomputed before it is served again" — not "freed". Salsa 0.27 exposes no
-per-memo eviction, so the superseded value stays resident until that recompute
-replaces it; bounding real memory needs durability tiers and an LRU, which is
-still open work on issue #157.
+A stale memo is only *marked*, so "invalidated" means "will be recomputed before
+it is served again". Reclaiming an entry's memory is a separate, explicit act:
+closing a document, a cap eviction, or a change that stales a never-opened entry
+sets an `evicted` flag on the entry's input and queues a **sentinel swap**. The
+next `analysis` call recomputes the evicted entry to a roughly two-word sentinel,
+which pushes the superseded analysis onto Salsa's deleted list; Salsa frees that
+list at the next revision boundary (a version-pinned 0.27 behavior). So at most
+one fat memo is ever pending, and a requery un-evicts the entry with a single
+false-write that forces exactly one fresh recompute. Resident full analyses are
+bounded by *open documents + [`MAX_UNOPENED_ANALYSES`] + a one-write-lagged
+transient*; a small per-path metadata residue is session-permanent (Salsa 0.27
+has no input removal). Serving hits from a cloned `Storage` snapshot is separate
+later work (issue #292).
 
 ### Closure-aware invalidation
 
