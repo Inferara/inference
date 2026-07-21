@@ -32,7 +32,7 @@ protocol layer converts them with the [`LineIndex`] this crate re-exports from
 module path is the empty slice, which is how a query reaches the document it
 was asked about rather than one of its imports.
 
-## Design: Single Document, Single Thread
+## Design: Two Query Surfaces
 
 Each open file is analyzed as its own project entry (its import closure
 resolved through the overlay-then-disk loader in `ide-db`), and the resulting
@@ -41,13 +41,23 @@ into an imported file, whose `NavigationTarget` carries that file's real path
 and ranges in that file's own coordinates (`closure_line_index` fetches the
 right `LineIndex` for it without re-analyzing the target as its own entry).
 
-A query takes `&self`. The analysis is still computed lazily and memoized on
-first use, so a read mutates the database — but that mutation now runs behind a
-`RefCell` (interior mutability) rather than a `&mut self` borrow, which is what
-lets the query surface be shared. This is not an accident of implementation —
-it is exactly the access pattern the LSP main loop needs: it is
-single-threaded by design (see `apps/lsp`) and never holds one query across
-another, so the interior borrow is always uncontended.
+There are two ways to reach that analysis:
+
+- The **worker surface** — `AnalysisHost::analysis` hands out an `Analysis`
+  whose query methods take `&self`, computing lazily and memoizing on first use
+  behind a `RefCell` rather than a `&mut self` borrow. The worker thread drives
+  it and never holds one query across another, so the interior borrow is always
+  uncontended.
+- The **snapshot surface** (#292) — `AnalysisHost::plan_concurrent_read` decides
+  whether a request can be served off the worker. When it can, it mints an
+  `AnalysisSnapshot` (a `Send` per-request handle over a cloned `ide-db`
+  database handle) that a pool thread serves into a `DocumentAnalysis` carrying
+  the same plain-old-data answers; the worker folds the result back with
+  `AnalysisHost::apply_concurrent_read`. This surface is purely additive — it
+  never touches the `RefCell` interior, so the two surfaces never contend, and
+  the `&self` `Analysis` surface is byte-identical to before. See
+  [`ide/ide-db`](../ide-db/README.md#concurrent-snapshot-reads) for the snapshot
+  mechanics.
 
 ### Cancellation surface
 

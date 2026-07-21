@@ -3,15 +3,15 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
 use inference_vfs::Vfs;
 use rustc_hash::FxHashMap;
 use salsa::{Database, Setter, Storage};
 
 use crate::analysis::FileAnalysis;
+use crate::cancellation::{AnalysisCancelSource, ReaderTokenRegistration};
 
 /// One project entry's Salsa input: its identity plus the eviction lever Salsa's
 /// own dependency tracking cannot supply.
@@ -92,7 +92,17 @@ struct AvailabilityEpoch {
 /// analyzed and the write path can later bump that same input.
 #[salsa::db]
 trait IdeDatabase: salsa::Database {
-    fn vfs(&self) -> &Vfs;
+    /// A read guard over the shared editor overlay.
+    ///
+    /// The overlay lives behind an `Arc<RwLock<Vfs>>` shared with every snapshot
+    /// read clone (#292), so this returns a guard rather than a bare `&Vfs`. The
+    /// analysis query binds the guard across the whole compute: a concurrent
+    /// write cannot mutate the overlay until this guard releases, and the
+    /// write-turn choke point (see [`RootDatabase::apply_overlay_write`]) bumps
+    /// the change stamp first — quiescing every reader clone through Salsa's
+    /// own outstanding-handle wait — so by the time a write takes the write lock
+    /// no reader holds this guard, making the write uncontended by construction.
+    fn vfs(&self) -> RwLockReadGuard<'_, Vfs>;
     fn next_generation(&self) -> u64;
     /// Get-or-create the change-stamp input for `path`.
     ///
@@ -108,6 +118,12 @@ trait IdeDatabase: salsa::Database {
     /// duplicated"), so both the query's conditional read and the write-path bump
     /// route through here.
     fn availability_epoch(&self) -> AvailabilityEpoch;
+
+    /// Debug-only: whether this handle is a snapshot read clone (no worker state)
+    /// rather than the worker. The rendezvous test seam parks only on a reader, so
+    /// it never blocks the worker's own analyses (#292).
+    #[cfg(debug_assertions)]
+    fn debug_is_reader(&self) -> bool;
 }
 
 /// The memoized result of an entry's analysis: the computed [`FileAnalysis`], or
@@ -175,12 +191,24 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
     let src_root = entry.src_root(db);
     #[cfg(debug_assertions)]
     test_seams::slow_analysis_seam(db, path);
+    #[cfg(debug_assertions)]
+    test_seams::gate_seam(db, path);
+    #[cfg(debug_assertions)]
+    test_seams::rendezvous_seam(db, path);
     let generation = db.next_generation();
     // The database hands the compute a hook that unwinds if a cancellation
     // request has landed, so a long analysis is interruptible at stage
     // boundaries rather than only at the fetch entry.
     let checkpoint = || db.unwind_if_revision_cancelled();
-    let analysis = FileAnalysis::compute(db.vfs(), path, src_root, generation, &checkpoint);
+    // The overlay read guard is held across the whole compute. On a snapshot read
+    // this runs on a pool thread against the shared overlay; on an unwind (a
+    // cancellation landing mid-compute) the guard is released as the stack
+    // unwinds, strictly before the snapshot's Storage clone drops — which is why a
+    // concurrent write, whose stamp bump waits for that clone to drop, always
+    // finds the overlay uncontended (#292).
+    let vfs = db.vfs();
+    let analysis = FileAnalysis::compute(&vfs, path, src_root, generation, &checkpoint);
+    drop(vfs);
 
     // Register this compute's content-change dependencies now that the closure is
     // known. Reading each closure file's stamp records the per-file input edge that
@@ -190,8 +218,10 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
     //
     // Registering AFTER the compute is sound: Salsa records a query's input edges in
     // execution order, and order affects only verification short-circuiting, not
-    // which edges exist. No revision can advance mid-query, because every setter
-    // needs `&mut db` and this query runs on the sole shared handle.
+    // which edges exist. No revision can advance mid-query even when this runs on a
+    // snapshot read clone: a setter's `cancel_others` cannot complete while any
+    // reader clone is alive, so a write that would advance the revision blocks until
+    // this compute has unwound or finished and its handle has dropped (#292).
     //
     // The epoch read MUST stay conditional. An unconditional read would make every
     // missing-import-free memo depend on the epoch, so every newly-available open
@@ -370,37 +400,83 @@ fn analyze_entry(db: &dyn IdeDatabase, entry: EntryInput) -> AnalysisResult {
 /// entry, and the `Vfs` id — on the order of 100–200 B — because Salsa 0.27 has no
 /// input removal. It is unbounded only in the number of distinct paths, the same
 /// steady state rust-analyzer ships, and is re-audited on any Salsa upgrade.
-/// Snapshot reads from a cloned `Storage` (which would let a background thread
-/// serve hits without holding the write handle) are separate later work (#292).
+///
+/// # Concurrent snapshot reads (#292)
+///
+/// A feature request against an already-memoized (or stale-but-cheaply-recomputed)
+/// entry can be served on a background thread without holding the write handle.
+/// The worker mints a [`ReadSnapshot`] ([`plan_concurrent_read`](Self::plan_concurrent_read)):
+/// a second database handle built by cloning the Salsa `Storage` and sharing the
+/// overlay, generation counter, and stamp registry (all behind `Arc`), with no
+/// [`WorkerState`] of its own. A pool thread runs the analysis query against that
+/// handle ([`ReadSnapshot::serve`]); Salsa's own claim/block serialization means a
+/// memo hit re-serves the stored `Arc` and a stale entry re-executes exactly once,
+/// with zero writes on the serving path. The worker stays the **sole** minter and
+/// the sole mutator of [`WorkerState`]: a snapshot cannot create an entry, evict, or
+/// touch the cap, so the resident-memory bound above holds unchanged. A concurrent
+/// write quiesces every live snapshot before it mutates — the write's change-stamp
+/// bump is a Salsa setter, and a setter waits for every outstanding handle to drop,
+/// so an in-flight snapshot unwinds at its next checkpoint and releases its clone
+/// before the write proceeds (see [`apply_overlay_write`](Self::apply_overlay_write)).
 #[salsa::db]
-#[derive(Default)]
 pub struct RootDatabase {
     storage: Storage<Self>,
     /// Editor overlay, held outside Salsa storage: the analysis query reads it
     /// through the overlay-then-disk loader, the seam the compiler and IDE share.
-    vfs: Vfs,
+    /// Behind an `Arc<RwLock<..>>` so a snapshot read clone reads the same overlay
+    /// the worker writes (#292); the write-turn choke point keeps the write lock
+    /// uncontended (see [`apply_overlay_write`](Self::apply_overlay_write)).
+    vfs: Arc<RwLock<Vfs>>,
     /// Monotonic source of per-analysis generation stamps, read inside the query
     /// body (see [`IdeDatabase::next_generation`]). Outside Salsa storage because
-    /// it is a side effect of running the compute, not an input to it. Atomic
-    /// despite the single-threaded loop because the query runs against a shared
-    /// `&dyn IdeDatabase`, so the counter can only be advanced through `&self`.
-    generation_counter: AtomicU64,
+    /// it is a side effect of running the compute, not an input to it. Shared by
+    /// `Arc` with snapshot read clones so a reader-minted generation and a
+    /// worker-minted one are drawn from one sequence — which is what keeps
+    /// [`FileAnalysis::generation`] a global recompute probe across threads.
+    generation_counter: Arc<AtomicU64>,
+    /// Append-only path → [`FileStamp`] registry, shared by the write-path bump and
+    /// the analysis query's in-query dependency registration so both observe one
+    /// input per path. Behind `Arc<Mutex<..>>` because a snapshot read clone can
+    /// create a stamp input for a newly-reached closure file, and the worker's next
+    /// bump must observe that same input. Salsa inputs are never destroyed, so
+    /// entries are permanent for the session, bounded by the set of files touched.
+    file_stamps: Arc<Mutex<FxHashMap<PathBuf, FileStamp>>>,
+    /// The worker-exclusive bookkeeping — entries, sticky roots, the never-opened
+    /// FIFO, and the pending sentinel swaps. `Some` on the worker handle, `None` on
+    /// every snapshot read clone: a reader has no business creating an entry,
+    /// evicting, or touching the cap (see the module docs and [`worker_mut`](Self::worker_mut)).
+    worker: Option<WorkerState>,
+    /// Debug-only weak registry of every full analysis this database has handed out,
+    /// so [`debug_live_analyses`](Self::debug_live_analyses) can probe true liveness:
+    /// a `Weak` that no longer upgrades has no strong retainer anywhere — memo,
+    /// mirror, deleted list, or caller. Behind `Arc<Mutex<..>>` so an analysis a
+    /// snapshot read handed out registers in the same registry the worker probes.
+    /// `Weak<FileAnalysis>` is `Send + Sync`, so the `Send` assertion on
+    /// `RootDatabase` still holds.
+    #[cfg(debug_assertions)]
+    live_analyses: Arc<Mutex<Vec<std::sync::Weak<FileAnalysis>>>>,
+}
+
+/// The worker handle's exclusive bookkeeping (#292).
+///
+/// Held only by the worker database handle ([`RootDatabase::worker`] is `Some`);
+/// a snapshot read clone carries `None` and can reach none of it. Grouping these
+/// four tables behind one `Option` is what makes reader misuse a single loud
+/// panic ([`RootDatabase::worker_mut`]) rather than a scatter of guards: a path's
+/// first compute and every cap/root/mirror mutation structurally happen on the
+/// worker, so a reader forking this state is impossible rather than merely
+/// locked-against.
+#[derive(Default)]
+struct WorkerState {
     /// Monotonic source of [`FileStamp`]/[`AvailabilityEpoch`] values. Bumps are
     /// set-only: an input field is written through its setter, never
     /// read-modify-written, since reading an input field outside a query registers
     /// no edge and would only mislead.
     stamp_source: u64,
-    /// Append-only path → [`FileStamp`] registry, shared by the write-path bump and
-    /// the analysis query's in-query dependency registration so both observe one
-    /// input per path. A `Mutex` only for interior mutability through the shared
-    /// `&dyn IdeDatabase` the query holds — the worker loop is single-threaded.
-    /// Salsa inputs are never destroyed, so entries are permanent for the session,
-    /// bounded by the set of files touched.
-    file_stamps: Mutex<FxHashMap<PathBuf, FileStamp>>,
     /// Per-entry bookkeeping `RootDatabase` owns rather than Salsa: the reusable
     /// input handle plus the latest analysis, whose closure metadata drives the
     /// write-path staleness mirror, the closure-donor search,
-    /// [`is_analyzed`](Self::is_analyzed), and the never-opened cap. `analysis` is
+    /// [`RootDatabase::is_analyzed`], and the never-opened cap. `analysis` is
     /// `None` between a staleness mark and the next recompute, mirroring an absent
     /// entry in the pre-Salsa memo map.
     entries: FxHashMap<PathBuf, EntryState>,
@@ -416,19 +492,21 @@ pub struct RootDatabase {
     unopened_order: VecDeque<PathBuf>,
     /// Entries whose `evicted` flag was just set, awaiting the sentinel-recompute
     /// that releases their superseded memo. Populated by
-    /// [`evict_analysis`](Self::evict_analysis) (from the cap, the prune, and
-    /// `close_document`) and drained only inside [`analysis`](Self::analysis): a
-    /// notification handler must not fetch, so the write path queues and the read
-    /// path lands the swap. Drained last-first with a pop-after-success so a
-    /// cancelled fetch leaves the queue intact for the next read to retry.
+    /// [`RootDatabase::evict_analysis`] (from the cap, the prune, and
+    /// `close_document`) and drained only inside [`RootDatabase::analysis`] or the
+    /// idle bookkeeping pass: a notification handler must not fetch, so the write
+    /// path queues and the read path lands the swap. Drained last-first with a
+    /// pop-after-success so a cancelled fetch leaves the queue intact for the next
+    /// read to retry.
     pending_sentinel_swaps: Vec<EntryInput>,
-    /// Debug-only weak registry of every full analysis this database has handed out,
-    /// so [`debug_live_analyses`](Self::debug_live_analyses) can probe true liveness:
-    /// a `Weak` that no longer upgrades has no strong retainer anywhere — memo,
-    /// mirror, deleted list, or caller. `Weak<FileAnalysis>` is `Send + Sync`, so the
-    /// `Send` assertion on `RootDatabase` still holds.
-    #[cfg(debug_assertions)]
-    live_analyses: Mutex<Vec<std::sync::Weak<FileAnalysis>>>,
+}
+
+/// One overlay mutation for the write-turn choke point
+/// ([`RootDatabase::apply_overlay_write`]).
+enum OverlayOp {
+    Open { text: Arc<str>, newly_available: bool },
+    Change { text: Arc<str> },
+    Close,
 }
 
 #[salsa::db]
@@ -436,28 +514,48 @@ impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl IdeDatabase for RootDatabase {
-    fn vfs(&self) -> &Vfs {
-        &self.vfs
+    fn vfs(&self) -> RwLockReadGuard<'_, Vfs> {
+        self.vfs.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn next_generation(&self) -> u64 {
-        // Purely observational, so relaxed ordering suffices; the loop is
-        // single-threaded regardless.
+        // Purely observational, so relaxed ordering suffices. Shared by `Arc` with
+        // snapshot read clones, so a reader recompute and a worker recompute mint
+        // from one sequence — generation equality across threads is what makes the
+        // recompute probe sound.
         self.generation_counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     fn file_stamp(&self, path: &Path) -> FileStamp {
         // Get-or-create so the write path and the in-query registration share one
-        // input per path. The registry guard is released when this method returns —
-        // before any caller reaches a setter, which needs `&mut self`.
-        let mut registry = self.file_stamps.lock().expect("stamp registry poisoned");
+        // input per path. Callable through the shared `&self` a snapshot read holds
+        // — a reader that reaches a new closure file creates its stamp here and the
+        // worker's next bump observes the same input. The registry
+        // guard is released when this method returns, before any caller reaches a
+        // setter (which needs `&mut self`, worker-only).
+        let mut registry = self.file_stamps.lock().unwrap_or_else(PoisonError::into_inner);
         *registry
             .entry(path.to_path_buf())
             .or_insert_with(|| FileStamp::new(self, 0))
     }
 
     fn availability_epoch(&self) -> AvailabilityEpoch {
+        // The singleton is created eagerly at construction (see `init`), so on a
+        // snapshot read this is always a `try_get` hit — never the `new` branch,
+        // which two racing readers would hit simultaneously and panic ("singleton
+        // struct may not be duplicated").
         AvailabilityEpoch::try_get(self).unwrap_or_else(|| AvailabilityEpoch::new(self, 0))
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_is_reader(&self) -> bool {
+        self.worker.is_none()
+    }
+}
+
+impl Default for RootDatabase {
+    fn default() -> Self {
+        Self::init(Storage::default())
     }
 }
 
@@ -495,6 +593,52 @@ struct EntryState {
 pub const MAX_UNOPENED_ANALYSES: usize = 8;
 
 impl RootDatabase {
+    /// Builds a worker handle over `storage`, eagerly creating the availability
+    /// epoch singleton.
+    ///
+    /// Every constructor routes through here so the singleton exists before any
+    /// query — or any snapshot read clone — can reach the try-get-then-new funnel
+    /// ([`IdeDatabase::availability_epoch`]): eager creation is what kills the
+    /// reader-side duplicate-singleton race. [`with_execute_probe`](Self::with_execute_probe)
+    /// must build through here with its own probing storage, not construct the
+    /// fields and inherit a default's singleton, which would create it in a
+    /// thrown-away storage.
+    fn init(storage: Storage<Self>) -> Self {
+        let db = Self {
+            storage,
+            vfs: Arc::new(RwLock::new(Vfs::default())),
+            generation_counter: Arc::new(AtomicU64::new(0)),
+            file_stamps: Arc::new(Mutex::new(FxHashMap::default())),
+            worker: Some(WorkerState::default()),
+            #[cfg(debug_assertions)]
+            live_analyses: Arc::new(Mutex::new(Vec::new())),
+        };
+        // Force the singleton into existence now, on the worker handle, so a reader
+        // clone never takes the `new` branch.
+        let _ = db.availability_epoch();
+        db
+    }
+
+    /// The worker-exclusive bookkeeping, or a loud panic on a snapshot read clone.
+    ///
+    /// A snapshot read handle carries `worker: None` (see the module docs); any
+    /// worker-only method reached on such a handle is a bug, so this panics in
+    /// release too, not only in debug. Contained by the read pool's catch on the
+    /// LSP side; a worker-side occurrence rebuilds the host.
+    fn worker(&self) -> &WorkerState {
+        self.worker
+            .as_ref()
+            .expect("worker-only state accessed on a reader snapshot")
+    }
+
+    /// The mutable worker-exclusive bookkeeping, or a loud panic on a snapshot
+    /// read clone (see [`worker`](Self::worker)).
+    fn worker_mut(&mut self) -> &mut WorkerState {
+        self.worker
+            .as_mut()
+            .expect("worker-only state accessed on a reader snapshot")
+    }
+
     /// Opens `path` with `text` as its in-memory contents (an editor `didOpen`).
     ///
     /// Interns the path if new and installs its overlay text, then bumps the
@@ -507,23 +651,21 @@ impl RootDatabase {
         // "never interned" would miss a close/reopen cycle: reopening a file that
         // satisfies a previously-missing import would leave the importing analysis
         // stale. Keying on "had no overlay before this open" re-fires correctly and
-        // still subsumes the truly-first open.
-        let newly_available = self.vfs.contents_of_path(path).is_none();
-        let id = self.vfs.intern(path);
-        self.vfs.set_contents(id, text.into());
-        // An opened document is part of the editor's working set, never a
-        // never-opened entry subject to the eviction cap.
-        self.unopened_order.retain(|tracked| tracked != path);
-        // Every overlay mutation is paired with a stamp bump for the same path in
-        // the same turn: the stamp is the Salsa-visible proxy for a content change
-        // the loader seam otherwise hides. A newly-available open additionally bumps
-        // the availability epoch — the only edge that can re-fire a missing-import
-        // memo — and widens the mirror sweep the same way.
-        self.bump_file_stamp(path);
-        if newly_available {
-            self.bump_availability_epoch();
-        }
-        self.note_stale_entries(path, newly_available);
+        // still subsumes the truly-first open. Computed before the choke point
+        // mutates the overlay.
+        let newly_available = self
+            .vfs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contents_of_path(path)
+            .is_none();
+        self.apply_overlay_write(
+            path,
+            &OverlayOp::Open {
+                text: text.into(),
+                newly_available,
+            },
+        );
     }
 
     /// Replaces the in-memory contents of an open `path` (an editor `didChange`).
@@ -531,12 +673,10 @@ impl RootDatabase {
     /// A change never introduces a previously-unseen file, so only closures that
     /// contain `path` are recomputed and marked stale.
     pub fn change_document(&mut self, path: &Path, text: impl Into<Arc<str>>) {
-        let id = self.vfs.intern(path);
-        self.vfs.set_contents(id, text.into());
-        // The overlay mutation's paired stamp bump (see `open_document`); a change
-        // never makes a previously-absent file available, so no epoch bump.
-        self.bump_file_stamp(path);
-        self.note_stale_entries(path, false);
+        // A change never makes a previously-absent file available, so no epoch
+        // bump; the choke point applies the overlay mutation and the paired stamp
+        // bump (see `open_document`).
+        self.apply_overlay_write(path, &OverlayOp::Change { text: text.into() });
     }
 
     /// Drops the in-memory contents of `path` (an editor `didClose`).
@@ -558,22 +698,113 @@ impl RootDatabase {
     /// boundary. The `EntryState` slot itself persists (Salsa 0.27 has no input
     /// removal).
     pub fn close_document(&mut self, path: &Path) {
-        if let Some(id) = self.vfs.file_id(path) {
-            self.vfs.remove_contents(id);
-        }
-        // Drop the sticky source root so the next open re-resolves from scratch,
-        // observing a manifest created or a governing entry opened meanwhile.
-        self.source_roots.remove(path);
+        // The choke point removes the overlay, drops the sticky source root so the
+        // next open re-resolves from scratch (observing a manifest created or a
+        // governing entry opened meanwhile), and evicts the closed entry's memo.
+        // Queue-only eviction: the swap's fetch is deferred to the next `analysis`
+        // or idle drain because a fetch is a cancellation checkpoint, and a close
+        // superseded by a newer write must run to completion. A close of a
+        // never-analyzed path is a no-op (no `EntryState`).
+        self.apply_overlay_write(path, &OverlayOp::Close);
+    }
+
+    /// The write-turn choke point: applies one overlay mutation in a fixed order
+    /// that keeps a snapshot read from ever observing a torn state (#292).
+    ///
+    /// The order is load-bearing:
+    ///
+    /// 1. **Bump the change stamp first.** The setter is the quiesce point — its
+    ///    `cancel_others` fires the pending-write flag, every live snapshot read
+    ///    unwinds at its next checkpoint and drops its cloned
+    ///    handle, and no new reader can appear because the worker is the sole
+    ///    minter and is mid-turn here. Between this bump and the overlay mutation
+    ///    the stamp is new while the overlay is old, but no reader exists to
+    ///    observe the gap and the worker is not fetching.
+    /// 2. **Apply the overlay mutation** under the write lock, uncontended by
+    ///    construction (see [`overlay_write`](Self::overlay_write)).
+    /// 3. **Bump the availability epoch** when the open newly made content
+    ///    available — the one edge that re-fires a missing-import memo.
+    /// 4. **Mirror the staleness and run the per-op tail** (the never-opened FIFO
+    ///    retain, and for a close the sticky-root drop and memo eviction).
+    ///
+    /// The setter/revision-boundary count per call is identical to before the
+    /// snapshot split — exactly one stamp bump, plus at most the epoch bump and the
+    /// eviction setter — so the memory-liveness arithmetic is unchanged.
+    fn apply_overlay_write(&mut self, path: &Path, op: &OverlayOp) {
+        let newly_available = matches!(
+            op,
+            OverlayOp::Open {
+                newly_available: true,
+                ..
+            }
+        );
+        // (1) Stamp bump first — the quiesce point.
         self.bump_file_stamp(path);
-        self.unopened_order.retain(|tracked| tracked != path);
-        self.note_stale_entries(path, false);
-        // Free the closed entry's memo. Queue-only: the swap's fetch is deferred to
-        // the next `analysis` because a fetch is a cancellation checkpoint, and a
-        // close superseded by a newer write must run to completion (the protocol
-        // layer removes its document tracking after this call). The stamp bump above
-        // already invalidates dependents; this releases the closed entry's own memo.
-        // A close of a never-analyzed path is a no-op (no `EntryState`).
-        self.evict_analysis(path);
+        // (2) Overlay mutation under the (uncontended) write lock.
+        {
+            let mut vfs = self.overlay_write();
+            match &op {
+                OverlayOp::Open { text, .. } | OverlayOp::Change { text } => {
+                    let id = vfs.intern(path);
+                    vfs.set_contents(id, Arc::clone(text));
+                }
+                OverlayOp::Close => {
+                    if let Some(id) = vfs.file_id(path) {
+                        vfs.remove_contents(id);
+                    }
+                }
+            }
+        }
+        // (3) Availability epoch for a newly-available open.
+        if newly_available {
+            self.bump_availability_epoch();
+        }
+        // (4) Mirror staleness, then the per-op tail.
+        self.note_stale_entries(path, newly_available);
+        match op {
+            OverlayOp::Open { .. } => {
+                // An opened document is part of the editor's working set, never a
+                // never-opened entry subject to the eviction cap.
+                self.worker_mut()
+                    .unopened_order
+                    .retain(|tracked| tracked != path);
+            }
+            OverlayOp::Change { .. } => {}
+            OverlayOp::Close => {
+                self.worker_mut().source_roots.remove(path);
+                self.worker_mut()
+                    .unopened_order
+                    .retain(|tracked| tracked != path);
+                self.evict_analysis(path);
+            }
+        }
+    }
+
+    /// Takes the overlay write lock at the choke point.
+    ///
+    /// The change-stamp bump in [`apply_overlay_write`](Self::apply_overlay_write)
+    /// already quiesced every snapshot read (Salsa's setter waits for every
+    /// outstanding handle to drop, and a read releases its overlay guard as it
+    /// unwinds — strictly before its handle drops), so the write lock is
+    /// immediately acquirable. In debug a contended lock here is a real bug: a
+    /// write path that reached the overlay without first bumping the stamp.
+    fn overlay_write(&self) -> std::sync::RwLockWriteGuard<'_, Vfs> {
+        #[cfg(debug_assertions)]
+        {
+            return match self.vfs.try_write() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => panic!(
+                    "overlay write contended at the choke point: a snapshot read \
+                     still holds the overlay, so the change-stamp bump did not \
+                     precede this overlay mutation (#292)"
+                ),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            };
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.vfs.write().unwrap_or_else(PoisonError::into_inner)
+        }
     }
 
     /// Whether an analysis for `path` is currently memoized (computed and not
@@ -583,7 +814,8 @@ impl RootDatabase {
     /// invalidated (their analyses were dropped) from those left untouched.
     #[must_use = "the analyzed state is the reason to call this"]
     pub fn is_analyzed(&self, path: &Path) -> bool {
-        self.entries
+        self.worker()
+            .entries
             .get(path)
             .is_some_and(|state| state.analysis.is_some())
     }
@@ -595,6 +827,126 @@ impl RootDatabase {
     /// that replaces its handle must rebind.
     pub fn bind_cancellation(&self, source: &crate::cancellation::AnalysisCancelSource) {
         source.bind(Database::cancellation_token(self));
+    }
+
+    /// Decides whether a feature request for `path` can be served on a pool thread
+    /// off a [`ReadSnapshot`], or must run serially on the worker (#292).
+    ///
+    /// A read is snapshot-eligible only when its entry is cheap and safe to serve
+    /// elsewhere: the entry must exist (a never-analyzed path's first compute is
+    /// worker-only, which is what keeps the never-opened cap unbypassable), it must
+    /// not be evicted, and it must be either a mirror **hit** (memoized — a pool
+    /// serve is a zero-write memo hit) or **stale under a cached definitive source
+    /// root** (a pool recompute is then identical to a worker recompute, because
+    /// [`resolve_source_root`](Self::resolve_source_root) consults its cache first).
+    /// A stale entry whose root is *not* cached (tier-3 provisional) recomputes
+    /// serially so a donor/manifest upgrade lands exactly as it does today.
+    ///
+    /// Worker-only: the returned snapshot carries a cloned Salsa handle, and the
+    /// worker is the sole minter (`worker().` panics on a reader). The clone shares
+    /// the overlay, generation counter, and stamp registry, and registers its
+    /// cancellation token so a later write unwinds it (see the module docs).
+    #[must_use = "the plan decides where the read runs"]
+    pub fn plan_concurrent_read(
+        &self,
+        path: &Path,
+        source: &AnalysisCancelSource,
+    ) -> ConcurrentReadPlan {
+        // Only the worker mints snapshots — the clone-drain liveness argument (a
+        // write's wait terminates because the reader population strictly decreases)
+        // depends on it. `worker()` itself panics loud on a reader.
+        debug_assert!(
+            self.worker.is_some(),
+            "only the worker mints snapshots (#292)"
+        );
+        let worker = self.worker();
+        let Some(state) = worker.entries.get(path) else {
+            return ConcurrentReadPlan::Serial;
+        };
+        if state.evicted {
+            return ConcurrentReadPlan::Serial;
+        }
+        let hit = state.analysis.is_some();
+        let cached_root = worker.source_roots.contains_key(path);
+        if !(hit || cached_root) {
+            return ConcurrentReadPlan::Serial;
+        }
+        let input = state.input;
+        let mirror_generation = state.analysis.as_ref().map(|analysis| analysis.generation());
+
+        let reader_db = RootDatabase {
+            storage: self.storage.clone(),
+            vfs: Arc::clone(&self.vfs),
+            generation_counter: Arc::clone(&self.generation_counter),
+            file_stamps: Arc::clone(&self.file_stamps),
+            worker: None,
+            #[cfg(debug_assertions)]
+            live_analyses: Arc::clone(&self.live_analyses),
+        };
+        let registration = source.register_reader(Database::cancellation_token(&reader_db));
+        let dispatch_epoch = source.epoch();
+        #[cfg(debug_assertions)]
+        debug_snapshots::on_mint();
+        ConcurrentReadPlan::Concurrent(ReadSnapshot {
+            db: reader_db,
+            input,
+            dispatch_epoch,
+            mirror_generation,
+            _source: source.clone(),
+            _registration: registration,
+        })
+    }
+
+    /// Stores a pool-served analysis into the entry mirror, guarded against every
+    /// race that could stale it (#292).
+    ///
+    /// Applied only when nothing moved since the snapshot was dispatched: the
+    /// dispatch epoch is still current (no write superseded the read), the entry
+    /// still exists, its mirror is still empty, and it is not evicted. A skipped
+    /// store is the tolerated over-clear direction — at worst a later spurious
+    /// republish — and keeps the `prior_generation` alignment tripwire structurally
+    /// unreachable from pool activity. Worker-only.
+    pub fn apply_concurrent_read(
+        &mut self,
+        path: &Path,
+        analysis: &Arc<FileAnalysis>,
+        dispatch_epoch: u64,
+        source: &AnalysisCancelSource,
+    ) {
+        if source.epoch() != dispatch_epoch {
+            return;
+        }
+        if let Some(state) = self.worker_mut().entries.get_mut(path)
+            && state.analysis.is_none()
+            && !state.evicted
+        {
+            state.analysis = Some(Arc::clone(analysis));
+        }
+    }
+
+    /// Runs the deferred never-opened bookkeeping for a pool-recomputed `path`
+    /// (#292).
+    ///
+    /// A pool read cannot create an entry (first computes are worker-only), so the
+    /// resident-analysis bound is never exceeded by pool activity; only the cap's
+    /// recency order and stale-prune timing are deferred to here. Re-checks the
+    /// overlay first so a `didOpen` that arrived between the read and this apply
+    /// never enrolls an open document in the never-opened FIFO, then drains any
+    /// cap/prune evictions so the deferred-release window stays bounded.
+    ///
+    /// Caller contract: only when no concurrent reads are in flight, so the
+    /// eviction setters here cannot storm-cancel a sibling pool read. Worker-only.
+    pub fn apply_unopened_read_bookkeeping(&mut self, path: &Path) {
+        let still_unopened = self
+            .vfs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contents_of_path(path)
+            .is_none();
+        if still_unopened {
+            self.record_unopened_analysis(path.to_path_buf());
+        }
+        self.drain_pending_sentinel_swaps();
     }
 
     /// The analysis of `path` treated as a project entry, computed on first
@@ -632,11 +984,15 @@ impl RootDatabase {
             // The mirror's `evicted` and the Salsa field must agree before the
             // un-evict: a drift means an eviction set one without the other.
             #[cfg(debug_assertions)]
-            debug_assert_eq!(
-                self.entries[path].evicted,
-                self.entries[path].input.evicted(&*self),
-                "the EntryState.evicted mirror and the Salsa evicted field drifted"
-            );
+            {
+                let input = self.worker().entries[path].input;
+                let mirror_evicted = self.worker().entries[path].evicted;
+                debug_assert_eq!(
+                    mirror_evicted,
+                    input.evicted(&*self),
+                    "the EntryState.evicted mirror and the Salsa evicted field drifted"
+                );
+            }
             // A recompute of a previously-evicted entry un-evicts it: the false-write
             // both forces the full re-execution and is the revision boundary that
             // frees the prior deferred memo. A never-evicted entry is a no-op.
@@ -650,13 +1006,13 @@ impl RootDatabase {
         // the mirror value is read while it is still the previous one.
         #[cfg(debug_assertions)]
         let prior_generation = (!recomputed).then(|| {
-            self.entries[path]
+            self.worker().entries[path]
                 .analysis
                 .as_ref()
                 .expect("a mirror hit holds an analysis")
                 .generation()
         });
-        let input = self.entries[path].input;
+        let input = self.worker().entries[path].input;
         // Salsa returns the memo when the entry's inputs are unchanged and reruns
         // `analyze_entry` (minting a fresh generation) when a change-stamp, epoch, or
         // evicted-flag bump marked it stale.
@@ -708,13 +1064,19 @@ impl RootDatabase {
             let mut registry = self
                 .live_analyses
                 .lock()
-                .expect("live-analysis registry poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             registry.retain(|weak| weak.strong_count() > 0);
             registry.push(Arc::downgrade(&analysis));
         }
 
-        let is_unopened = self.vfs.contents_of_path(path).is_none();
-        self.entries
+        let is_unopened = self
+            .vfs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contents_of_path(path)
+            .is_none();
+        self.worker_mut()
+            .entries
             .get_mut(path)
             .expect("the entry is present on both the hit and the recompute path")
             .analysis = Some(analysis);
@@ -729,7 +1091,7 @@ impl RootDatabase {
         // could observe `Cancelled` with `is_analyzed() == true`; that only arises
         // from a cross-thread token fire and converges on the next read's top drain.
         self.drain_pending_sentinel_swaps();
-        self.entries[path]
+        self.worker().entries[path]
             .analysis
             .as_deref()
             .expect("the analysis was stored above")
@@ -741,13 +1103,13 @@ impl RootDatabase {
     /// root is updated only when it drifted (a close/reopen re-resolution), which
     /// itself marks the query stale so the recompute uses the new root.
     fn sync_entry_input(&mut self, path: &Path, src_root: &Path) {
-        if let Some(input) = self.entries.get(path).map(|state| state.input) {
+        if let Some(input) = self.worker().entries.get(path).map(|state| state.input) {
             if input.src_root(&*self).as_path() != src_root {
                 input.set_src_root(self).to(src_root.to_path_buf());
             }
         } else {
             let input = EntryInput::new(&*self, path.to_path_buf(), src_root.to_path_buf(), false);
-            self.entries.insert(
+            self.worker_mut().entries.insert(
                 path.to_path_buf(),
                 EntryState {
                     input,
@@ -784,7 +1146,7 @@ impl RootDatabase {
     ///
     /// A no-op for a path that was never analyzed.
     fn evict_analysis(&mut self, entry: &Path) {
-        let Some(input) = self.entries.get_mut(entry).and_then(|state| {
+        let Some(input) = self.worker_mut().entries.get_mut(entry).and_then(|state| {
             (!state.evicted).then(|| {
                 state.analysis = None;
                 state.evicted = true;
@@ -794,7 +1156,7 @@ impl RootDatabase {
             return;
         };
         input.set_evicted(self).to(true);
-        self.pending_sentinel_swaps.push(input);
+        self.worker_mut().pending_sentinel_swaps.push(input);
     }
 
     /// Recomputes every queued evicted entry to its sentinel, releasing each
@@ -809,13 +1171,13 @@ impl RootDatabase {
     /// `Cancelled` unwind must propagate for the protocol layer's superseded/retry
     /// classification. Pop-after-success so a cancelled drain retries the same entry.
     fn drain_pending_sentinel_swaps(&mut self) {
-        while let Some(input) = self.pending_sentinel_swaps.last().copied() {
+        while let Some(input) = self.worker().pending_sentinel_swaps.last().copied() {
             let result = analyze_entry(&*self, input);
             debug_assert!(
                 matches!(result, AnalysisResult::Evicted),
                 "a queued sentinel swap must observe evicted == true"
             );
-            self.pending_sentinel_swaps.pop();
+            self.worker_mut().pending_sentinel_swaps.pop();
         }
     }
 
@@ -836,7 +1198,7 @@ impl RootDatabase {
     /// is needed — that is by design, not accident, and the `debug_assert` below
     /// machine-checks it.
     fn clear_eviction(&mut self, path: &Path) {
-        let Some(input) = self.entries.get_mut(path).and_then(|state| {
+        let Some(input) = self.worker_mut().entries.get_mut(path).and_then(|state| {
             state.evicted.then(|| {
                 state.evicted = false;
                 state.input
@@ -845,7 +1207,7 @@ impl RootDatabase {
             return;
         };
         debug_assert!(
-            !self.pending_sentinel_swaps.contains(&input),
+            !self.worker().pending_sentinel_swaps.contains(&input),
             "the top-of-analysis drain lands every queued swap before any un-evict"
         );
         input.set_evicted(self).to(false);
@@ -855,8 +1217,9 @@ impl RootDatabase {
     /// distinct from any previously assigned, so setting it on an input always
     /// registers as a change.
     fn next_stamp(&mut self) -> u64 {
-        self.stamp_source += 1;
-        self.stamp_source
+        let worker = self.worker_mut();
+        worker.stamp_source += 1;
+        worker.stamp_source
     }
 
     /// Bumps `path`'s change stamp so every memo whose closure contains it
@@ -864,11 +1227,14 @@ impl RootDatabase {
     ///
     /// Get-or-create is load-bearing: an ide-db-level `change_document` can precede
     /// any analysis of `path`, and a never-opened shared import's stamp may have
-    /// been minted inside a query, so a lookup-only variant would silently
-    /// under-invalidate. Every bump runs through a setter, so it takes the write
-    /// lock (Salsa's `cancel_others` waits for outstanding read handles — trivially
-    /// immediate on the sole worker handle); the registry guard from
-    /// [`file_stamp`](Self::file_stamp) is dropped before the setter runs.
+    /// been minted inside a query — on the worker or on a snapshot read clone, which
+    /// share one stamp registry — so a lookup-only variant would silently
+    /// under-invalidate. Every bump runs through a setter, whose `cancel_others`
+    /// waits for every outstanding read handle to drop: this is precisely the
+    /// quiesce that lets the write-turn choke point take the overlay lock
+    /// uncontended (see [`apply_overlay_write`](Self::apply_overlay_write)). The
+    /// registry guard from [`file_stamp`](Self::file_stamp) is dropped before the
+    /// setter runs.
     fn bump_file_stamp(&mut self, path: &Path) {
         let stamp = self.file_stamp(path);
         let next = self.next_stamp();
@@ -902,13 +1268,19 @@ impl RootDatabase {
     /// requery observes: it recomputes with a fresh generation either way. Promoted
     /// (opened-since) entries are left untouched.
     fn record_unopened_analysis(&mut self, path: PathBuf) {
-        let mut kept = VecDeque::with_capacity(self.unopened_order.len() + 1);
+        let mut kept = VecDeque::with_capacity(self.worker().unopened_order.len() + 1);
         let mut pruned_stale = Vec::new();
-        for tracked in std::mem::take(&mut self.unopened_order) {
+        for tracked in std::mem::take(&mut self.worker_mut().unopened_order) {
             if tracked == path {
                 continue;
             }
-            if self.vfs.contents_of_path(&tracked).is_some() {
+            let opened = self
+                .vfs
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contents_of_path(&tracked)
+                .is_some();
+            if opened {
                 // Opened since it was memoized: promoted into the working set,
                 // exempt from the cap and never evicted.
                 continue;
@@ -921,13 +1293,14 @@ impl RootDatabase {
             }
         }
         kept.push_back(path);
-        self.unopened_order = kept;
+        self.worker_mut().unopened_order = kept;
 
         for stale in pruned_stale {
             self.evict_analysis(&stale);
         }
-        while self.unopened_order.len() > MAX_UNOPENED_ANALYSES {
-            if let Some(evicted) = self.unopened_order.pop_front() {
+        while self.worker().unopened_order.len() > MAX_UNOPENED_ANALYSES {
+            let evicted = self.worker_mut().unopened_order.pop_front();
+            if let Some(evicted) = evicted {
                 self.evict_analysis(&evicted);
             }
         }
@@ -950,15 +1323,19 @@ impl RootDatabase {
     /// file resolved provisionally can still be upgraded once a governing entry is
     /// analyzed.
     fn resolve_source_root(&mut self, entry: &Path) -> PathBuf {
-        if let Some(root) = self.source_roots.get(entry) {
+        if let Some(root) = self.worker().source_roots.get(entry) {
             return root.clone();
         }
         if let Some(root) = inference_project_model::manifest_source_root(entry) {
-            self.source_roots.insert(entry.to_path_buf(), root.clone());
+            self.worker_mut()
+                .source_roots
+                .insert(entry.to_path_buf(), root.clone());
             return root;
         }
         if let Some(root) = self.closure_donor_source_root(entry) {
-            self.source_roots.insert(entry.to_path_buf(), root.clone());
+            self.worker_mut()
+                .source_roots
+                .insert(entry.to_path_buf(), root.clone());
             return root;
         }
         entry
@@ -976,7 +1353,8 @@ impl RootDatabase {
     /// entries qualify the one with the lexicographically smallest entry path
     /// wins, so the choice is deterministic across repeated analyses.
     fn closure_donor_source_root(&self, file: &Path) -> Option<PathBuf> {
-        self.entries
+        self.worker()
+            .entries
             .iter()
             .filter_map(|(entry, state)| Some((entry, state.analysis.as_ref()?)))
             .filter(|(entry, analysis)| entry.as_path() != file && analysis.closure_contains(file))
@@ -1009,7 +1387,7 @@ impl RootDatabase {
     /// `didClose`); see the type-level docs for why that widens staleness to
     /// analyses with an unresolved import.
     fn note_stale_entries(&mut self, changed: &Path, newly_available: bool) {
-        for state in self.entries.values_mut() {
+        for state in self.worker_mut().entries.values_mut() {
             let stale = state.analysis.as_ref().is_some_and(|analysis| {
                 analysis.closure_contains(changed)
                     || (newly_available && analysis.had_missing_import())
@@ -1036,7 +1414,7 @@ impl RootDatabase {
         let mut registry = self
             .live_analyses
             .lock()
-            .expect("live-analysis registry poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         registry.retain(|weak| weak.strong_count() > 0);
         let mut seen: rustc_hash::FxHashSet<*const FileAnalysis> = rustc_hash::FxHashSet::default();
         for weak in registry.iter() {
@@ -1058,15 +1436,210 @@ impl RootDatabase {
     #[doc(hidden)]
     #[must_use = "the probed database is the constructor's result"]
     pub fn with_execute_probe(probe: Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        Self {
-            storage: Storage::new(Some(Box::new(move |event: salsa::Event| {
-                if matches!(event.kind, salsa::EventKind::WillExecute { .. }) {
-                    probe.fetch_add(1, Ordering::Relaxed);
+        // Route through `init` with the probing storage: `..Self::default()` would
+        // discard a singleton created in the thrown-away default storage, and a
+        // later reader clone would race to re-create it (#292).
+        Self::init(Storage::new(Some(Box::new(move |event: salsa::Event| {
+            if matches!(event.kind, salsa::EventKind::WillExecute { .. }) {
+                probe.fetch_add(1, Ordering::Relaxed);
+            }
+        }))))
+    }
+
+    /// Debug-only: whether the availability-epoch singleton already exists, so a
+    /// test can assert both constructors create it eagerly (killing the
+    /// reader-side singleton-creation race, #292).
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    #[must_use = "the singleton-existence answer is the reason to call this"]
+    pub fn debug_availability_epoch_exists(&self) -> bool {
+        AvailabilityEpoch::try_get(self).is_some()
+    }
+}
+
+/// The worker's decision for a snapshot read (#292): serve serially on the worker,
+/// or hand a [`ReadSnapshot`] to a pool thread.
+///
+// The `Concurrent` payload is large (a cloned database handle), but the plan is
+// created on the worker and immediately matched, then the snapshot is moved once
+// into the read task — boxing would add an allocation on the common path for no
+// benefit, so the size gap between the arms is deliberate.
+#[allow(clippy::large_enum_variant)]
+pub enum ConcurrentReadPlan {
+    /// Serve on the worker: a miss (no entry), an evicted entry, or a tier-3
+    /// provisional stale entry whose root is not cached.
+    Serial,
+    /// Serve off this snapshot on a pool thread.
+    Concurrent(ReadSnapshot),
+}
+
+/// A per-request read handle a pool thread serves off the worker (#292).
+///
+/// Minted only by [`RootDatabase::plan_concurrent_read`]. `db` is a cloned Salsa
+/// handle sharing the overlay, generation counter, and stamp registry; serving
+/// runs the analysis query against it and drops it before returning, so the clone
+/// never outlives the response.
+///
+/// `db` is declared **first** so its `Storage` clone drops first even if a later
+/// field's `Drop` were to panic — the clone must always release, or a write's
+/// outstanding-handle wait would hang.
+pub struct ReadSnapshot {
+    db: RootDatabase,
+    input: EntryInput,
+    dispatch_epoch: u64,
+    mirror_generation: Option<u64>,
+    /// A clone of the write-epoch source this read was dispatched under, held for
+    /// the snapshot's lifetime so the source (and thus the reader-token
+    /// registration below) outlives the read; not otherwise read.
+    _source: AnalysisCancelSource,
+    _registration: ReaderTokenRegistration,
+}
+
+/// The outcome of serving a [`ReadSnapshot`].
+pub enum ReadServe {
+    /// The analysis, plus whether serving re-executed the query (a stale recompute)
+    /// rather than hitting the stored memo.
+    Ready {
+        analysis: Arc<FileAnalysis>,
+        recomputed: bool,
+    },
+    /// The entry was evicted between plan and serve — defensively unreachable (an
+    /// eviction's setter cannot complete while this clone lives), so the worker
+    /// routes the request back for serial service.
+    NotServable,
+}
+
+impl ReadSnapshot {
+    /// The write epoch current when this snapshot was dispatched, used to guard the
+    /// worker-side mirror store (see [`RootDatabase::apply_concurrent_read`]).
+    #[must_use]
+    pub fn dispatch_epoch(&self) -> u64 {
+        self.dispatch_epoch
+    }
+
+    /// Serves this snapshot on the current (pool) thread, consuming it.
+    ///
+    /// The cloned `db` — and its `Storage` clone — drop when `self` drops at the end
+    /// of this call, before the caller can send any response, so the read never
+    /// holds a database clone across I/O. Zero Salsa writes happen here: `db.worker`
+    /// is `None`, so any worker-only method would panic, and a memo hit (or a stale
+    /// recompute) writes nothing.
+    #[must_use = "the served analysis is the reason to serve"]
+    pub fn serve(self) -> ReadServe {
+        // Explicit early checkpoint so a snapshot minted just before a write, then
+        // parked on the pool queue, unwinds at entry rather than after a full
+        // compute.
+        self.db.unwind_if_revision_cancelled();
+        match analyze_entry(&self.db, self.input) {
+            AnalysisResult::Computed(analysis) => {
+                // A generation differing from the worker's last-known one for this
+                // entry means this serve re-executed the query (a stale recompute)
+                // rather than hitting the stored memo.
+                let recomputed = self.mirror_generation != Some(analysis.generation());
+                #[cfg(debug_assertions)]
+                if recomputed {
+                    let mut registry = self
+                        .db
+                        .live_analyses
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    registry.retain(|weak| weak.strong_count() > 0);
+                    registry.push(Arc::downgrade(&analysis));
                 }
-            }))),
-            ..Self::default()
+                ReadServe::Ready {
+                    analysis,
+                    recomputed,
+                }
+            }
+            AnalysisResult::Evicted => ReadServe::NotServable,
         }
     }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for ReadSnapshot {
+    fn drop(&mut self) {
+        debug_snapshots::on_drop();
+    }
+}
+
+/// Debug-only live-snapshot counter, backing [`debug_live_snapshots`] and the
+/// drop-before-I/O pin (#292): incremented at mint, decremented when a snapshot
+/// drops (which is the moment its `Storage` clone releases).
+#[cfg(debug_assertions)]
+mod debug_snapshots {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn on_mint() {
+        LIVE.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn on_drop() {
+        LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn live() -> usize {
+        LIVE.load(Ordering::SeqCst)
+    }
+}
+
+/// Debug-only: the number of live [`ReadSnapshot`]s (minted, not yet dropped), for
+/// the drop-before-I/O pin (#292).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[must_use = "the live-snapshot count is the reason to call this"]
+pub fn debug_live_snapshots() -> usize {
+    debug_snapshots::live()
+}
+
+/// Debug-only: how many times two distinct snapshot reads were simultaneously
+/// inside the rendezvous seam — the deterministic parallelism witness (#292).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[must_use = "the meets count is the reason to call this"]
+pub fn debug_rendezvous_meets() -> u64 {
+    test_seams::rendezvous_meets()
+}
+
+/// Debug-only: arm the rendezvous seam for snapshot reads whose path contains
+/// `substr`, so a test can force two reads to overlap deterministically (#292).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn debug_arm_rendezvous(substr: &str) {
+    test_seams::arm_rendezvous(substr);
+}
+
+/// Debug-only: disarm the rendezvous seam (see [`debug_arm_rendezvous`]).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn debug_disarm_rendezvous() {
+    test_seams::disarm_rendezvous();
+}
+
+/// Debug-only: arm the gate seam for snapshot reads whose path contains `substr`,
+/// so a test can hold reads in flight and interrupt them deterministically (#292).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn debug_arm_gate(substr: &str) {
+    test_seams::arm_gate(substr);
+}
+
+/// Debug-only: release and disarm the gate seam.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn debug_disarm_gate() {
+    test_seams::disarm_gate();
+}
+
+/// Debug-only: how many snapshot reads have entered the gate seam since it was
+/// armed (#292).
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[must_use = "the gate-entered count is the reason to call this"]
+pub fn debug_gate_entered() -> usize {
+    test_seams::gate_entered()
 }
 
 /// Test-only seam: a bounded, checkpointed delay inside the tracked analysis
@@ -1077,6 +1650,11 @@ impl RootDatabase {
 /// path, well under a 30s receive bound.
 #[cfg(debug_assertions)]
 mod test_seams {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
     pub(crate) const SLOW_ANALYSIS_ENV: &str = "INFERENCE_IDE_TEST_SLOW_ANALYSIS_PATH_SUBSTR";
 
     pub(crate) fn slow_analysis_seam(db: &dyn super::IdeDatabase, path: &std::path::Path) {
@@ -1088,7 +1666,150 @@ mod test_seams {
         }
         for _ in 0..200 {
             super::Database::unwind_if_revision_cancelled(db);
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// In-process gate seam: parks a snapshot read (a reader clone) in its compute
+    /// until the test releases it or a cancellation fires, so the deterministic
+    /// concurrency tests can hold a known number of reads in flight and then
+    /// interrupt them (#292). Unlike the rendezvous seam it never auto-releases, so
+    /// it holds an arbitrary number of readers at once. Reader-only (never blocks the
+    /// worker), cancellation-polled every 25ms, bounded by a 5s escape.
+    static GATE_ARM: Mutex<Option<String>> = Mutex::new(None);
+    static GATE_ENTERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static GATE_RELEASE: AtomicBool = AtomicBool::new(false);
+
+    #[doc(hidden)]
+    pub fn arm_gate(substr: &str) {
+        GATE_RELEASE.store(false, Ordering::SeqCst);
+        GATE_ENTERED.store(0, Ordering::SeqCst);
+        *GATE_ARM.lock().unwrap_or_else(PoisonError::into_inner) = Some(substr.to_owned());
+    }
+
+    #[doc(hidden)]
+    pub fn disarm_gate() {
+        // Release first so any parked reader leaves promptly, then clear the arm.
+        GATE_RELEASE.store(true, Ordering::SeqCst);
+        *GATE_ARM.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn gate_entered() -> usize {
+        GATE_ENTERED.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn gate_seam(db: &dyn super::IdeDatabase, path: &std::path::Path) {
+        if !db.debug_is_reader() {
+            return;
+        }
+        let armed = GATE_ARM
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(substr) = armed else {
+            return;
+        };
+        if substr.is_empty() || !path.to_string_lossy().contains(&substr) {
+            return;
+        }
+        GATE_ENTERED.fetch_add(1, Ordering::SeqCst);
+        let deadline = Instant::now() + RENDEZVOUS_ESCAPE;
+        loop {
+            super::Database::unwind_if_revision_cancelled(db);
+            if GATE_RELEASE.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Environment arm for the rendezvous seam (symmetry with the slow seam); the
+    /// in-process arm below is what the deterministic ide-db test uses, since
+    /// setting an environment variable from one test thread would race the others.
+    pub(crate) const RENDEZVOUS_ENV: &str = "INFERENCE_IDE_TEST_RENDEZVOUS_PATH_SUBSTR";
+
+    /// Process-global in-process arm: the substring a snapshot read's path must
+    /// contain to rendezvous. A `Mutex<Option<..>>` (not a thread-local) so the
+    /// arm is visible on the pool threads that run the reads.
+    static RENDEZVOUS_ARM: Mutex<Option<String>> = Mutex::new(None);
+    /// The distinct matching paths currently parked in the seam.
+    static RENDEZVOUS_INSIDE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    /// Incremented once each time two distinct paths are simultaneously inside.
+    static RENDEZVOUS_MEETS: AtomicU64 = AtomicU64::new(0);
+    /// Latched when simultaneity is first observed, so a straggler leaves promptly
+    /// instead of parking to the escape bound; reset when the seam empties.
+    static RENDEZVOUS_LATCH: AtomicBool = AtomicBool::new(false);
+
+    /// The escape bound: a read parks at most this long waiting for a sibling
+    /// before proceeding alone, so a mis-set fixture can never hang the suite.
+    const RENDEZVOUS_ESCAPE: Duration = Duration::from_secs(5);
+
+    #[doc(hidden)]
+    pub fn arm_rendezvous(substr: &str) {
+        *RENDEZVOUS_ARM.lock().unwrap_or_else(PoisonError::into_inner) = Some(substr.to_owned());
+    }
+
+    #[doc(hidden)]
+    pub fn disarm_rendezvous() {
+        *RENDEZVOUS_ARM.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rendezvous_meets() -> u64 {
+        RENDEZVOUS_MEETS.load(Ordering::SeqCst)
+    }
+
+    fn rendezvous_substr(path: &std::path::Path) -> Option<String> {
+        let armed = RENDEZVOUS_ARM
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .or_else(|| std::env::var(RENDEZVOUS_ENV).ok())?;
+        let display = path.to_string_lossy();
+        (!armed.is_empty() && display.contains(&armed)).then(|| display.into_owned())
+    }
+
+    /// Parks a snapshot read until a second distinct matching path is inside too,
+    /// recording the simultaneity — the deterministic witness that two reads run
+    /// in parallel (#292). Fires only on a reader clone, so the worker never parks.
+    pub(crate) fn rendezvous_seam(db: &dyn super::IdeDatabase, path: &std::path::Path) {
+        if !db.debug_is_reader() {
+            return;
+        }
+        let Some(key) = rendezvous_substr(path) else {
+            return;
+        };
+        RENDEZVOUS_INSIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone());
+        let deadline = Instant::now() + RENDEZVOUS_ESCAPE;
+        loop {
+            super::Database::unwind_if_revision_cancelled(db);
+            let distinct = RENDEZVOUS_INSIDE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len();
+            if distinct >= 2 {
+                if !RENDEZVOUS_LATCH.swap(true, Ordering::SeqCst) {
+                    RENDEZVOUS_MEETS.fetch_add(1, Ordering::SeqCst);
+                }
+                break;
+            }
+            if RENDEZVOUS_LATCH.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut inside = RENDEZVOUS_INSIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        inside.remove(&key);
+        if inside.is_empty() {
+            RENDEZVOUS_LATCH.store(false, Ordering::SeqCst);
         }
     }
 }

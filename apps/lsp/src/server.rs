@@ -18,13 +18,16 @@
 
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use inference_ide::{AnalysisCancelSource, AnalysisHost, is_cancellation};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use inference_ide::{
+    AnalysisCancelSource, AnalysisHost, AnalysisSnapshot, DocumentAnalysis, ReadPlan, SnapshotServe,
+    is_cancellation,
+};
 use lsp_server::{
     Connection, ErrorCode, ExtractError, Message, Notification, ReqQueue, Request, RequestId,
     Response,
@@ -127,6 +130,22 @@ pub(crate) struct ServerState {
     /// The write epoch stamped on the job currently being processed; a caught
     /// cancellation with a newer source epoch means a write superseded this work.
     job_epoch: u64,
+    /// Per-path count of concurrent reads dispatched to the pool and not yet
+    /// accounted for by their worker event (#292). The worker never fetches — nor
+    /// runs deferred bookkeeping for — a path with a live pool execution, which is
+    /// what keeps it from parking on a claim a pool thread holds.
+    in_flight_reads: FxHashMap<PathBuf, usize>,
+    /// Requests a pool read routed back for serial service, deferred because a
+    /// sibling read for the same path was still in flight; each carries the
+    /// original router epoch it must be served under (#292).
+    pending_routebacks: Vec<(PathBuf, u64, Request)>,
+    /// Never-opened paths a pool read recomputed, awaiting the deferred cap
+    /// bookkeeping that runs at the next idle with no reads in flight (#292).
+    pending_unopened: Vec<PathBuf>,
+    /// Bumped whenever the host is rebuilt (a contained panic). A worker event
+    /// stamped with an older generation names a host that no longer exists, so its
+    /// bookkeeping is skipped (#292).
+    host_generation: u64,
 }
 
 impl ServerState {
@@ -156,6 +175,10 @@ impl ServerState {
             pending_republish: FxHashSet::default(),
             cancel_source,
             job_epoch: 0,
+            in_flight_reads: FxHashMap::default(),
+            pending_routebacks: Vec::new(),
+            pending_unopened: Vec::new(),
+            host_generation: 0,
         }
     }
 
@@ -475,6 +498,50 @@ impl ServerState {
         }
         self.host = host;
         self.host.bind_cancellation(&self.cancel_source);
+        // The fresh host carries fresh side tables, so any pool read still in flight
+        // from before this rebuild names a host that no longer exists. Bumping the
+        // generation makes those reads' worker events land stale and skip their
+        // bookkeeping — the reads themselves still answer from their pre-rebuild
+        // snapshots, which is the last state the client observed (#292).
+        self.host_generation += 1;
+    }
+
+    /// Drains the pending-republish set like [`drain_pending_republishes`], but
+    /// **skips** any URI whose path has a concurrent read in flight (#292).
+    ///
+    /// A path with a live pool execution must not be fetched by the worker (it
+    /// could park on the claim the pool thread holds); its republish waits for the
+    /// pool read's Served event, which publishes it. Every other queued document
+    /// drains exactly as the idle republish does today.
+    fn drain_pending_republishes_skipping_in_flight(&mut self) -> Vec<PublishDiagnosticsParams> {
+        let ready: Vec<Uri> = self
+            .pending_republish
+            .iter()
+            .filter(|uri| {
+                crate::uri::to_path(uri)
+                    .is_none_or(|path| !self.in_flight_reads.contains_key(&path))
+            })
+            .cloned()
+            .collect();
+        for uri in &ready {
+            self.pending_republish.remove(uri);
+        }
+        self.refresh_turn();
+        let mut pending: VecDeque<Uri> = ready.into();
+        let mut publishes = Vec::with_capacity(pending.len());
+        while let Some(uri) = pending.pop_front() {
+            match catch(|| handlers::publish_diagnostics_params(self, &uri)) {
+                Caught::Completed(params) => publishes.push(params),
+                Caught::Canceled if self.superseded() => {
+                    self.pending_republish.insert(uri);
+                    self.pending_republish.extend(pending);
+                    break;
+                }
+                Caught::Canceled => pending.push_front(uri),
+                Caught::Panicked => {}
+            }
+        }
+        publishes
     }
 }
 
@@ -605,9 +672,40 @@ pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::R
     let capabilities = NegotiatedCapabilities::from_init_params(init_params);
     let cancel = AnalysisCancelSource::detached();
     let req_queue: Mutex<ReqQueue<(), ()>> = Mutex::new(ReqQueue::default());
-    let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+    let (jobs_tx, jobs_rx) = crossbeam_channel::unbounded::<Job>();
+    let (tasks_tx, tasks_rx) = crossbeam_channel::unbounded::<ReadTask>();
+    let (events_tx, events_rx) = crossbeam_channel::unbounded::<WorkerEvent>();
 
     thread::scope(|scope| {
+        // The read pool: a fixed set of threads, each serving snapshots the worker
+        // hands it and posting the outcome back as an event. Each runs on the full
+        // server stack because a snapshot serve runs a real analysis.
+        let mut pool = Vec::with_capacity(READ_POOL_SIZE);
+        for n in 0..READ_POOL_SIZE {
+            let pool_tasks = tasks_rx.clone();
+            let pool_events = events_tx.clone();
+            let pool_cancel = cancel.clone();
+            let pool_req_queue = &req_queue;
+            let handle = thread::Builder::new()
+                .name(format!("inference-lsp-read-{n}"))
+                .stack_size(SERVER_STACK_SIZE)
+                .spawn_scoped(scope, move || {
+                    read_pool_loop(
+                        pool_tasks,
+                        connection,
+                        pool_req_queue,
+                        capabilities,
+                        pool_cancel,
+                        pool_events,
+                    );
+                })?;
+            pool.push(handle);
+        }
+        // The worker owns the sole task sender and the sole event receiver; drop the
+        // spawn loop's spare handles so the channels disconnect cleanly at teardown.
+        drop(tasks_rx);
+        drop(events_tx);
+
         let worker_cancel = cancel.clone();
         let worker_req_queue = &req_queue;
         let worker = thread::Builder::new()
@@ -620,16 +718,24 @@ pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::R
                     capabilities,
                     worker_cancel,
                     worker_req_queue,
+                    tasks_tx,
+                    events_rx,
                 )
             })?;
 
         let router_result = router_loop(connection, jobs_tx, &cancel, &req_queue);
-        // `jobs_tx` moved into the router and dropped when it returned, so the
-        // worker unblocks on disconnect even if it never saw the exit job; the
-        // scope then guarantees the join on every path.
+        // `jobs_tx` moved into the router and dropped when it returned, so the worker
+        // unblocks on disconnect even if it never saw the exit job. When the worker
+        // returns it drops its task sender, ending every pool loop; the scope then
+        // guarantees each join on every path.
         let worker_result = worker
             .join()
             .map_err(|_| anyhow::anyhow!("the analysis worker panicked"))?;
+        for handle in pool {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("a read-pool thread panicked"))?;
+        }
         router_result?;
         worker_result
     })
@@ -643,6 +749,75 @@ struct Job {
     message: Message,
 }
 
+/// The number of read-pool threads (#292). Two is enough to overlap an interactive
+/// request with a slow one while keeping the equal-epoch route-back thrash — a
+/// worker-internal setter cancelling in-flight reads — bounded to this many wasted
+/// partial computes.
+const READ_POOL_SIZE: usize = 2;
+
+/// The request methods a concurrent read can serve (#292).
+///
+/// Shared by the dispatch eligibility check ([`is_pool_method`]) and, by contract,
+/// the pool dispatcher (`handlers::dispatch_pool_request`), with a drift-guard unit
+/// test tying the two together. Every other method takes the serial worker path.
+pub(crate) const POOL_METHODS: [&str; 5] = [
+    HoverRequest::METHOD,
+    GotoDefinition::METHOD,
+    Completion::METHOD,
+    DocumentSymbolRequest::METHOD,
+    InlayHintRequest::METHOD,
+];
+
+/// Whether `method` is served by the read pool.
+fn is_pool_method(method: &str) -> bool {
+    POOL_METHODS.contains(&method)
+}
+
+/// A request the worker handed to the read pool, carrying the snapshot to serve it
+/// from and the stamps that guard folding its result back (#292).
+struct ReadTask {
+    request: Request,
+    uri: Uri,
+    path: PathBuf,
+    snapshot: AnalysisSnapshot,
+    /// The router epoch this read was dispatched under; a later write bumps the
+    /// source past it, which supersedes the read.
+    epoch: u64,
+    /// The host generation at dispatch; a rebuild bumps it, staling this read's
+    /// bookkeeping.
+    host_gen: u64,
+}
+
+/// What a pool thread did with a [`ReadTask`], reported back to the worker.
+enum ReadOutcome {
+    /// The read answered from `doc`; the worker folds it back into the mirror.
+    Served {
+        uri: Uri,
+        path: PathBuf,
+        doc: DocumentAnalysis,
+        epoch: u64,
+    },
+    /// The read answered (a superseded -32801 or a panic InternalError went out from
+    /// the pool); the worker only clears the in-flight count.
+    Done { path: PathBuf },
+    /// The read could not be served off the snapshot (evicted, or an equal-epoch
+    /// worker-internal cancellation); the worker serves it serially under `epoch`.
+    RouteBack {
+        path: PathBuf,
+        epoch: u64,
+        request: Request,
+    },
+    /// The pool compute panicked (not a cancellation); the worker rebuilds the host.
+    Panicked { path: PathBuf },
+}
+
+/// A [`ReadOutcome`] stamped with the host generation the read ran against, so the
+/// worker skips bookkeeping for a read whose host has since been rebuilt (#292).
+struct WorkerEvent {
+    host_gen: u64,
+    outcome: ReadOutcome,
+}
+
 /// Routes transport messages to the analysis worker in arrival order, handling
 /// only what must not wait behind an analysis: incoming request-id bookkeeping,
 /// `$/cancelRequest`, and requesting cancellation for adopted document writes.
@@ -653,7 +828,7 @@ struct Job {
 /// retries) rather than as superseded.
 fn router_loop(
     connection: &Connection,
-    jobs: mpsc::Sender<Job>,
+    jobs: Sender<Job>,
     cancel: &AnalysisCancelSource,
     req_queue: &Mutex<ReqQueue<(), ()>>,
 ) -> anyhow::Result<()> {
@@ -782,34 +957,320 @@ fn worker_loop(
     capabilities: NegotiatedCapabilities,
     cancel: AnalysisCancelSource,
     req_queue: &Mutex<ReqQueue<(), ()>>,
+    tasks: Sender<ReadTask>,
+    events: Receiver<WorkerEvent>,
 ) -> anyhow::Result<()> {
     let mut state = ServerState::with_cancel_source(capabilities, cancel);
     let mut shutting_down = false;
 
     loop {
-        let job = match jobs.try_recv() {
-            Ok(job) => job,
-            Err(TryRecvError::Empty) => {
-                // The backlog is empty: refresh every document a recent change
-                // invalidated before parking on the next job, so no queued
-                // republish is left indefinitely stale.
-                publish_all(connection, state.drain_pending_republishes())?;
-                match jobs.recv() {
-                    Ok(job) => job,
-                    Err(_) => return Ok(()),
+        // Events-first bias: apply every pool event that has arrived before taking
+        // new job work. Each event is bounded work, and a flood is bounded by the
+        // pool size, so this cannot starve job processing (#292).
+        while let Ok(event) = events.try_recv() {
+            apply_worker_event(connection, req_queue, &mut state, event)?;
+        }
+
+        match jobs.try_recv() {
+            Ok(job) => {
+                if drain_job_batch(
+                    connection,
+                    req_queue,
+                    &mut state,
+                    &mut shutting_down,
+                    &tasks,
+                    &jobs,
+                    job,
+                )?
+                .is_break()
+                {
+                    return Ok(());
                 }
             }
             Err(TryRecvError::Disconnected) => return Ok(()),
-        };
-
-        for job in coalesced_job_batch(job, &jobs) {
-            state.begin_turn(job.epoch);
-            if handle_message(connection, req_queue, &mut state, &mut shutting_down, job.message)?
-                .is_break()
-            {
-                return Ok(());
+            Err(TryRecvError::Empty) => {
+                // The backlog is empty: run idle work, then block until a job or an
+                // event wakes the loop.
+                worker_idle(connection, req_queue, &mut state)?;
+                crossbeam_channel::select! {
+                    recv(jobs) -> job => match job {
+                        Ok(job) => {
+                            if drain_job_batch(
+                                connection, req_queue, &mut state, &mut shutting_down, &tasks, &jobs, job,
+                            )?.is_break() {
+                                return Ok(());
+                            }
+                        }
+                        // Jobs disconnected (the router returned): normal teardown.
+                        Err(_) => return Ok(()),
+                    },
+                    recv(events) -> event => match event {
+                        Ok(event) => apply_worker_event(connection, req_queue, &mut state, event)?,
+                        // Events disconnected means every pool thread's sender dropped
+                        // — the pool glue died. Return an error so the scope join
+                        // surfaces the pool panic deterministically.
+                        Err(_) => return Err(anyhow::anyhow!("the read pool disconnected")),
+                    },
+                }
             }
         }
+    }
+}
+
+/// Processes the coalesced batch beginning with `first`, returning [`Flow::Break`]
+/// only for `exit`.
+fn drain_job_batch(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    state: &mut ServerState,
+    shutting_down: &mut bool,
+    tasks: &Sender<ReadTask>,
+    jobs: &Receiver<Job>,
+    first: Job,
+) -> anyhow::Result<Flow> {
+    for job in coalesced_job_batch(first, jobs) {
+        state.begin_turn(job.epoch);
+        if handle_message(
+            connection,
+            req_queue,
+            state,
+            shutting_down,
+            tasks,
+            job.message,
+        )?
+        .is_break()
+        {
+            return Ok(Flow::Break);
+        }
+    }
+    Ok(Flow::Continue)
+}
+
+/// The worker's idle work, run when the job backlog is empty (#292):
+///
+/// 1. Deferred never-opened bookkeeping — only when no reads are in flight, so the
+///    eviction setters cannot storm-cancel a sibling pool read.
+/// 2. The republish drain, skipping any path with a read in flight (the worker must
+///    never fetch a path a pool thread is executing).
+/// 3. Serving any routed-back request whose path has left the in-flight set.
+fn worker_idle(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    state: &mut ServerState,
+) -> anyhow::Result<()> {
+    if state.in_flight_reads.is_empty() && !state.pending_unopened.is_empty() {
+        for path in std::mem::take(&mut state.pending_unopened) {
+            state.host.apply_unopened_read_bookkeeping(&path);
+        }
+    }
+    publish_all(connection, state.drain_pending_republishes_skipping_in_flight())?;
+    serve_ready_routebacks(connection, req_queue, state)?;
+    Ok(())
+}
+
+/// Serves every routed-back request whose path is no longer in flight, under the
+/// request's original router epoch (#292).
+fn serve_ready_routebacks(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    state: &mut ServerState,
+) -> anyhow::Result<()> {
+    loop {
+        let Some(index) = state
+            .pending_routebacks
+            .iter()
+            .position(|(path, _, _)| !state.in_flight_reads.contains_key(path))
+        else {
+            return Ok(());
+        };
+        let (_path, epoch, request) = state.pending_routebacks.remove(index);
+        serve_routeback_now(connection, req_queue, state, epoch, request)?;
+    }
+}
+
+/// Serves a routed-back request serially, under its original router `epoch` so a
+/// write adopted after it arrived still supersedes it to -32801 — the exact
+/// classification today, now spanning the pool hop (#292).
+fn serve_routeback_now(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    state: &mut ServerState,
+    epoch: u64,
+    request: Request,
+) -> anyhow::Result<()> {
+    state.begin_turn(epoch);
+    let document = request_document_uri(&request);
+    let response = state.respond_to_request(request);
+    send_gated_response(connection, req_queue, response)?;
+    if let Some(params) = document.and_then(|uri| state.publish_if_pending(&uri)) {
+        publish_all(connection, vec![params])?;
+    }
+    Ok(())
+}
+
+/// Applies one pool event to the worker state (#292).
+fn apply_worker_event(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    state: &mut ServerState,
+    event: WorkerEvent,
+) -> anyhow::Result<()> {
+    let WorkerEvent { host_gen, outcome } = event;
+    match outcome {
+        ReadOutcome::Served {
+            uri,
+            path,
+            doc,
+            epoch,
+        } => {
+            decrement_in_flight(&mut state.in_flight_reads, &path);
+            // A read that ran against a since-rebuilt host must not write into the
+            // fresh host's bookkeeping; the read already answered from its snapshot.
+            if host_gen == state.host_generation {
+                state
+                    .host
+                    .apply_concurrent_read(&path, &doc, epoch, &state.cancel_source);
+                // The response already went out from the pool; publish this
+                // document's diagnostics now if a change had queued them (a memo hit
+                // — the pool read was the sole executor), preserving response-then-
+                // publish order for the request.
+                if let Some(params) = state.publish_if_pending(&uri) {
+                    publish_all(connection, vec![params])?;
+                }
+                // A recomputed never-opened path re-enters the cap FIFO, deferred to
+                // the next idle drain with no reads in flight.
+                if doc.recomputed() && !state.documents.contains_key(&uri) {
+                    state.pending_unopened.push(path);
+                }
+            }
+        }
+        ReadOutcome::Done { path } => {
+            decrement_in_flight(&mut state.in_flight_reads, &path);
+        }
+        ReadOutcome::RouteBack {
+            path,
+            epoch,
+            request,
+        } => {
+            decrement_in_flight(&mut state.in_flight_reads, &path);
+            if state.in_flight_reads.contains_key(&path) {
+                // A sibling read for this path is still in flight; defer the serial
+                // re-serve until it clears.
+                state.pending_routebacks.push((path, epoch, request));
+            } else {
+                serve_routeback_now(connection, req_queue, state, epoch, request)?;
+            }
+        }
+        ReadOutcome::Panicked { path } => {
+            decrement_in_flight(&mut state.in_flight_reads, &path);
+            // A pool compute panicked (not a cancellation). Rebuild the host exactly
+            // as the serial panic path does; the generation bump inside `rebuild_host`
+            // stales any sibling read's later event. In-flight siblings still answer
+            // from their pre-rebuild snapshots — the last state the client observed.
+            state.rebuild_host();
+        }
+    }
+    Ok(())
+}
+
+/// Decrements a path's in-flight read count, removing the entry at zero.
+fn decrement_in_flight(reads: &mut FxHashMap<PathBuf, usize>, path: &Path) {
+    if let Some(count) = reads.get_mut(path) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            reads.remove(path);
+        }
+    }
+}
+
+/// The read pool loop: serve each snapshot, dispatch the request against it, and
+/// report the outcome back to the worker (#292).
+///
+/// A pool thread never touches worker state; it only serves a snapshot (a cloned
+/// database handle that drops before this sends), sends the response through the
+/// completion gate, and posts an event. A cancellation or panic in the serve is
+/// contained here, so a poisoned request never takes the session down.
+fn read_pool_loop(
+    tasks: Receiver<ReadTask>,
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    capabilities: NegotiatedCapabilities,
+    cancel: AnalysisCancelSource,
+    events: Sender<WorkerEvent>,
+) {
+    while let Ok(task) = tasks.recv() {
+        let ReadTask {
+            request,
+            uri,
+            path,
+            snapshot,
+            epoch,
+            host_gen,
+        } = task;
+        let id = request.id.clone();
+        // Any unwind drops the snapshot's database clone inside the catch, so this
+        // thread holds no database clone when it sends below.
+        let served = catch(|| {
+            analysis_panic_seam(&path);
+            snapshot.serve()
+        });
+        let outcome = match served {
+            Caught::Completed(SnapshotServe::Ready(doc)) => {
+                // The dispatch and response send run the same feature `*_core`/convert
+                // functions the worker runs inside its own `catch`; contain a
+                // post-serve panic here for parity. An uncaught unwind would exit this
+                // loop with no `WorkerEvent` sent, leaving `in_flight_reads[path]`
+                // stuck non-zero — which stalls the worker's republish drain and its
+                // deferred bookkeeping session-wide (both gate on the in-flight set).
+                // Answer InternalError and report `Panicked` so the worker rebuilds,
+                // identical to the worker's contain-and-rebuild.
+                let dispatched = catch(|| {
+                    let response =
+                        handlers::dispatch_pool_request(request, &doc, capabilities, &path, &uri);
+                    send_gated_response(connection, req_queue, response)
+                });
+                match dispatched {
+                    Caught::Completed(_) => ReadOutcome::Served {
+                        uri,
+                        path,
+                        doc,
+                        epoch,
+                    },
+                    _ => {
+                        let _ = send_gated_response(connection, req_queue, panic_response(id));
+                        ReadOutcome::Panicked { path }
+                    }
+                }
+            }
+            Caught::Completed(SnapshotServe::NotServable) => ReadOutcome::RouteBack {
+                path,
+                epoch,
+                request,
+            },
+            // A newer write superseded this read: answer -32801. A PropagatedPanic
+            // from a same-key wait on a genuinely panicking executor also lands here
+            // (`is_cancellation` classifies it as cancellation); the executing thread
+            // sees the real panic and reports it Panicked, which rebuilds the host.
+            Caught::Canceled if cancel.epoch() > epoch => {
+                let _ = send_gated_response(connection, req_queue, content_modified_response(id));
+                ReadOutcome::Done { path }
+            }
+            // Equal epoch: a worker-internal setter (e.g. a cap eviction during a
+            // serial never-opened miss) cancelled this read. Only the worker mints
+            // snapshots, so there is no snapshot to retry with — route it back for
+            // serial service rather than retry on the pool.
+            Caught::Canceled => ReadOutcome::RouteBack {
+                path,
+                epoch,
+                request,
+            },
+            Caught::Panicked => {
+                let _ = send_gated_response(connection, req_queue, panic_response(id));
+                ReadOutcome::Panicked { path }
+            }
+        };
+        // A send to a departed worker is ignored: the session is ending.
+        let _ = events.send(WorkerEvent { host_gen, outcome });
     }
 }
 
@@ -836,6 +1297,7 @@ fn handle_message(
     req_queue: &Mutex<ReqQueue<(), ()>>,
     state: &mut ServerState,
     shutting_down: &mut bool,
+    tasks: &Sender<ReadTask>,
     message: Message,
 ) -> anyhow::Result<Flow> {
     match message {
@@ -858,14 +1320,21 @@ fn handle_message(
             send_gated_response(connection, req_queue, Response::new_ok(request.id, ()))?;
         }
         Message::Request(request) => {
-            let document = request_document_uri(&request);
-            let response = state.respond_to_request(request);
-            send_gated_response(connection, req_queue, response)?;
-            // A request against a document a recent change invalidated recomputes
-            // it on demand; publish its now-fresh diagnostics and clear it from
-            // the queue so the idle drain does not redo it.
-            if let Some(params) = document.and_then(|uri| state.publish_if_pending(&uri)) {
-                publish_all(connection, vec![params])?;
+            // A pool-eligible read against a memoized (or cheaply recomputable)
+            // document is dispatched to the read pool; everything else — misses,
+            // never-opened paths, evicted or tier-3 stale entries, unknown methods,
+            // superseded jobs, unmappable URIs — falls through to the serial path,
+            // byte-for-byte as before (#292).
+            if let Some(request) = try_dispatch_concurrent(state, tasks, request) {
+                let document = request_document_uri(&request);
+                let response = state.respond_to_request(request);
+                send_gated_response(connection, req_queue, response)?;
+                // A request against a document a recent change invalidated recomputes
+                // it on demand; publish its now-fresh diagnostics and clear it from
+                // the queue so the idle drain does not redo it.
+                if let Some(params) = document.and_then(|uri| state.publish_if_pending(&uri)) {
+                    publish_all(connection, vec![params])?;
+                }
             }
         }
         Message::Notification(notification) if notification.method == Exit::METHOD => {
@@ -881,10 +1350,59 @@ fn handle_message(
     Ok(Flow::Continue)
 }
 
+/// Decides whether `request` can be served by the read pool, dispatching it there
+/// when so and returning `None`; otherwise returns the request for the serial path
+/// (#292).
+///
+/// Pool-eligible means: a pool method, not superseded by a newer write (a stale job
+/// must fast-fail -32801 on the serial path, never mint a snapshot for it), a URI
+/// that maps to a path, and a plan of `Concurrent` (the entry is memoized, or stale
+/// under a cached definitive root). On dispatch the read is counted in flight and
+/// the synchronous `publish_if_pending` is skipped — it runs when the Served event
+/// lands.
+fn try_dispatch_concurrent(
+    state: &mut ServerState,
+    tasks: &Sender<ReadTask>,
+    request: Request,
+) -> Option<Request> {
+    if !is_pool_method(&request.method) || state.superseded() {
+        return Some(request);
+    }
+    let uri = request_document_uri(&request)?;
+    let path = crate::uri::to_path(&uri)?;
+    let ReadPlan::Concurrent(snapshot) = state.host.plan_concurrent_read(&path, &state.cancel_source)
+    else {
+        return Some(request);
+    };
+    // The router-stamped job epoch equals the source epoch here (the supersede
+    // fast-fail above passed), so it is the epoch to guard the fold-back against.
+    let epoch = state.job_epoch;
+    let host_gen = state.host_generation;
+    *state.in_flight_reads.entry(path.clone()).or_insert(0) += 1;
+    let task = ReadTask {
+        request,
+        uri,
+        path,
+        snapshot,
+        epoch,
+        host_gen,
+    };
+    // A send to a departed pool only happens as the session ends; the request then
+    // goes unanswered, which is acceptable at teardown.
+    let _ = tasks.send(task);
+    None
+}
+
 /// Sends `response` only if its request is still pending: a completion gate so a
 /// request already answered RequestCanceled (-32800) by the router's
 /// `$/cancelRequest` handling is never answered a second time. Completing the id
 /// (removing it from the incoming queue) both records the answer and is the check.
+///
+/// The request-queue guard is an if-condition temporary, dropped before the
+/// blocking `send`: so with several read-pool threads completing-then-sending
+/// concurrently, at most one thread's `complete` succeeds for a given id (the lock
+/// serializes the check) and the exactly-once guarantee holds without holding the
+/// lock across the send (#292).
 fn send_gated_response(
     connection: &Connection,
     req_queue: &Mutex<ReqQueue<(), ()>>,
@@ -974,7 +1492,7 @@ fn coalesce_changes(messages: Vec<Message>) -> Vec<Message> {
 }
 
 #[cfg(test)]
-fn coalesced_batch(first: Message, incoming: &Receiver<Message>) -> Vec<Message> {
+fn coalesced_batch(first: Message, incoming: &std::sync::mpsc::Receiver<Message>) -> Vec<Message> {
     if did_change_uri(&first).is_none() {
         return vec![first];
     }
@@ -1162,6 +1680,59 @@ pub(crate) fn analysis_panic_seam(path: &std::path::Path) {
 #[cfg(not(debug_assertions))]
 #[inline]
 pub(crate) fn analysis_panic_seam(_path: &std::path::Path) {}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// In-process arm for [`dispatch_panic_seam`]. `None` unless a unit test set it.
+    static DISPATCH_PANIC_SUBSTR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only seam (debug builds) that forces a deterministic panic inside the
+/// read pool's **post-serve** dispatch for a marked document — the feature
+/// `*_core`/convert path that runs after `serve()` — so the widened pool catch
+/// (#292) can be exercised without depending on a real convert bug. The analysis
+/// itself (inside `serve`) is untouched; only the dispatch unwinds. No-op in
+/// release.
+#[cfg(debug_assertions)]
+pub(crate) fn dispatch_panic_seam(path: &std::path::Path) {
+    let armed = DISPATCH_PANIC_SUBSTR.with(|cell| cell.borrow().clone());
+    if let Some(substr) = armed
+        && !substr.is_empty()
+        && path.to_string_lossy().contains(&substr)
+    {
+        panic!(
+            "deliberate LSP pool-dispatch panic for {}: exercising the #292 \
+             dispatch-catch boundary",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn dispatch_panic_seam(_path: &std::path::Path) {}
+
+/// Arms [`dispatch_panic_seam`] in the current thread for documents whose path
+/// contains `substr`, disarming when the returned guard drops. The pool
+/// containment test drives `read_pool_loop` on its own thread, so a thread-local
+/// arm reaches the dispatch without racing sibling tests.
+#[cfg(all(test, debug_assertions))]
+pub(crate) fn arm_dispatch_panic(substr: &str) -> DispatchPanicArm {
+    DISPATCH_PANIC_SUBSTR.with(|cell| *cell.borrow_mut() = Some(substr.to_owned()));
+    DispatchPanicArm
+}
+
+/// Drop guard returned by [`arm_dispatch_panic`]; clears the thread-local arm.
+#[cfg(all(test, debug_assertions))]
+pub(crate) struct DispatchPanicArm;
+
+#[cfg(all(test, debug_assertions))]
+impl Drop for DispatchPanicArm {
+    fn drop(&mut self) {
+        DISPATCH_PANIC_SUBSTR.with(|cell| *cell.borrow_mut() = None);
+    }
+}
 
 /// Arms [`analysis_panic_seam`] in the current thread for documents whose path
 /// contains `substr`, disarming when the returned guard drops. Used by the unit
@@ -2478,5 +3049,453 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
             "a graceful shutdown must not lose the queued dependent republish"
         );
         handle.join().expect("server thread joins after exit");
+    }
+
+    // --- Concurrent snapshot reads (#292) --------------------------------------
+
+    use inference_ide::{AnalysisCancelSource, DocumentAnalysis, ReadPlan, SnapshotServe};
+    use lsp_types::request::{
+        Completion, DocumentSymbolRequest, GotoDefinition, InlayHintRequest,
+    };
+
+    fn hover_req(id: i32, uri: &str) -> Request {
+        Request::new(
+            RequestId::from(id),
+            HoverRequest::METHOD.to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 3 }
+            }),
+        )
+    }
+
+    /// Serves a snapshot for `uri`'s document on this thread, yielding the
+    /// `DocumentAnalysis` an event carries. The document must already be memoized.
+    fn serve_doc(state: &super::ServerState, uri: &str) -> DocumentAnalysis {
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+        let source = AnalysisCancelSource::detached();
+        let ReadPlan::Concurrent(snapshot) = state.host.plan_concurrent_read(&path, &source) else {
+            panic!("a memoized document plans Concurrent");
+        };
+        let SnapshotServe::Ready(doc) = snapshot.serve() else {
+            panic!("a hit serves Ready");
+        };
+        doc
+    }
+
+    #[test]
+    fn the_pool_method_table_matches_the_dispatchable_methods() {
+        use super::{POOL_METHODS, is_pool_method};
+        assert_eq!(POOL_METHODS.len(), 5);
+        for method in [
+            HoverRequest::METHOD,
+            GotoDefinition::METHOD,
+            Completion::METHOD,
+            DocumentSymbolRequest::METHOD,
+            InlayHintRequest::METHOD,
+        ] {
+            assert!(is_pool_method(method), "{method} must be a pool method");
+        }
+        assert!(
+            !is_pool_method("textDocument/rename"),
+            "an unhandled method is not a pool method"
+        );
+        assert!(!is_pool_method(Shutdown::METHOD));
+    }
+
+    #[test]
+    fn try_dispatch_concurrent_routes_pool_hits_and_falls_through_otherwise() {
+        use super::{ReadTask, try_dispatch_concurrent};
+        let mut state = ServerState::new(full_client());
+        open(
+            &mut state,
+            "file:///inf-test/main.inf",
+            "fn main() -> i32 { return 1; }",
+        );
+        let _ = state.drain_pending_republishes();
+        state.refresh_turn(); // job_epoch = source epoch, so not superseded
+        let (tx, rx) = crossbeam_channel::unbounded::<ReadTask>();
+
+        // A pool method on a memoized document dispatches to the pool.
+        assert!(
+            try_dispatch_concurrent(&mut state, &tx, hover_req(1, "file:///inf-test/main.inf"))
+                .is_none(),
+            "a memoized hover is dispatched"
+        );
+        assert!(rx.try_recv().is_ok(), "a task was queued");
+
+        // A non-pool method falls through to the serial path.
+        let rename = Request::new(
+            RequestId::from(2),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({ "textDocument": { "uri": "file:///inf-test/main.inf" } }),
+        );
+        assert!(
+            try_dispatch_concurrent(&mut state, &tx, rename).is_some(),
+            "a non-pool method is serial"
+        );
+
+        // A never-opened path has no entry, so it falls through to the serial path.
+        assert!(
+            try_dispatch_concurrent(&mut state, &tx, hover_req(3, "file:///inf-test/never.inf"))
+                .is_some(),
+            "a never-opened path is serial"
+        );
+        assert!(rx.try_recv().is_err(), "no further task was queued");
+    }
+
+    #[test]
+    fn a_superseded_pool_request_falls_through_and_fast_fails() {
+        use super::{ReadTask, try_dispatch_concurrent};
+        let mut state = ServerState::new(full_client());
+        open(
+            &mut state,
+            "file:///inf-test/main.inf",
+            "fn main() -> i32 { return 1; }",
+        );
+        let _ = state.drain_pending_republishes();
+        // The turn started at epoch 0; a write since then supersedes it.
+        state.begin_turn(0);
+        let _ = state.cancel_source.request_cancellation();
+        let (tx, _rx) = crossbeam_channel::unbounded::<ReadTask>();
+
+        let request = hover_req(1, "file:///inf-test/main.inf");
+        assert!(
+            try_dispatch_concurrent(&mut state, &tx, request.clone()).is_some(),
+            "a superseded job must not mint a snapshot"
+        );
+        // The serial path fast-fails it ContentModified without computing.
+        let response = state.respond_to_request(request);
+        assert_eq!(
+            error_code(&response),
+            lsp_server::ErrorCode::ContentModified as i32
+        );
+    }
+
+    #[test]
+    fn a_shutting_down_request_is_answered_before_any_pool_branch() {
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        open(
+            &mut state,
+            "file:///inf-test/main.inf",
+            "fn main() -> i32 { return 1; }",
+        );
+        let _ = state.drain_pending_republishes();
+        let (tx, rx) = crossbeam_channel::unbounded::<super::ReadTask>();
+        let mut shutting_down = true;
+
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(1), ());
+        super::handle_message(
+            &server,
+            &req_queue,
+            &mut state,
+            &mut shutting_down,
+            &tx,
+            Message::Request(hover_req(1, "file:///inf-test/main.inf")),
+        )
+        .expect("handle");
+
+        assert!(rx.try_recv().is_err(), "no task is dispatched while shutting down");
+        match client.receiver.try_recv().expect("a response was sent") {
+            Message::Response(response) => assert_eq!(
+                error_code(&response),
+                lsp_server::ErrorCode::InvalidRequest as i32,
+                "shutting down answers InvalidRequest, not a pool dispatch"
+            ),
+            other => panic!("expected a response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_served_event_decrements_publishes_and_a_stale_gen_is_skipped() {
+        let (server, _client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+
+        // Two in-flight reads for this path; a Served event decrements one.
+        state.in_flight_reads.insert(path.clone(), 2);
+        let doc = serve_doc(&state, uri);
+        let event = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::Served {
+                uri: Uri::from_str(uri).unwrap(),
+                path: path.clone(),
+                doc,
+                epoch: 0,
+            },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, event).expect("apply");
+        assert_eq!(
+            state.in_flight_reads.get(&path).copied(),
+            Some(1),
+            "one of two in-flight reads is accounted for"
+        );
+
+        // A Served event stamped with a stale host generation is skipped without
+        // panicking (its host no longer exists), and still decrements.
+        let doc = serve_doc(&state, uri);
+        let stale = super::WorkerEvent {
+            host_gen: state.host_generation + 99,
+            outcome: super::ReadOutcome::Served {
+                uri: Uri::from_str(uri).unwrap(),
+                path: path.clone(),
+                doc,
+                epoch: 0,
+            },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, stale).expect("apply");
+        assert!(
+            !state.in_flight_reads.contains_key(&path),
+            "the last in-flight read cleared"
+        );
+    }
+
+    #[test]
+    fn a_panicked_event_rebuilds_the_host_and_bumps_the_generation() {
+        let (server, _client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+
+        let before = state.host_generation;
+        state.in_flight_reads.insert(path.clone(), 1);
+        let event = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::Panicked { path: path.clone() },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, event).expect("apply");
+
+        assert_eq!(
+            state.host_generation,
+            before + 1,
+            "a rebuild bumps the host generation"
+        );
+        assert!(!state.in_flight_reads.contains_key(&path));
+        // The session keeps serving.
+        let response = state.handle_request(hover_req(1, uri));
+        assert!(response.error.is_none(), "the rebuilt host answers requests");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_post_serve_dispatch_panic_on_the_pool_is_contained() {
+        // A panic in the post-serve dispatch (the feature `*_core`/convert path) must
+        // be contained by the pool's widened catch: the request is answered
+        // InternalError, a Panicked event is posted (so the worker rebuilds and
+        // decrements in-flight), and the pool thread does not unwind out of its loop.
+        use super::{ReadOutcome, ReadTask, WorkerEvent, arm_dispatch_panic, read_pool_loop};
+
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(1), ());
+
+        let source = AnalysisCancelSource::detached();
+        let ReadPlan::Concurrent(snapshot) = state.host.plan_concurrent_read(&path, &source) else {
+            panic!("a memoized document plans Concurrent");
+        };
+        let (tasks_tx, tasks_rx) = crossbeam_channel::unbounded::<ReadTask>();
+        let (events_tx, events_rx) = crossbeam_channel::unbounded::<WorkerEvent>();
+        tasks_tx
+            .send(ReadTask {
+                request: hover_req(1, uri),
+                uri: Uri::from_str(uri).unwrap(),
+                path: path.clone(),
+                snapshot,
+                epoch: 0,
+                host_gen: state.host_generation,
+            })
+            .expect("send task");
+        drop(tasks_tx); // read_pool_loop returns after this one task
+
+        // Arm the dispatch (post-serve) panic and drive the pool loop on this thread.
+        // If the widened catch did not contain it, this call would unwind and fail.
+        let arm = arm_dispatch_panic("main.inf");
+        read_pool_loop(
+            tasks_rx,
+            &server,
+            &req_queue,
+            full_client(),
+            source,
+            events_tx,
+        );
+        drop(arm);
+
+        // (a) The request is answered InternalError.
+        match client.receiver.try_recv().expect("a response was sent") {
+            Message::Response(response) => assert_eq!(
+                error_code(&response),
+                lsp_server::ErrorCode::InternalError as i32,
+                "a contained dispatch panic answers InternalError"
+            ),
+            other => panic!("expected a response, got {other:?}"),
+        }
+
+        // (b) A Panicked event was posted for this path.
+        let event = events_rx.try_recv().expect("a worker event was posted");
+        match event.outcome {
+            ReadOutcome::Panicked { path: panicked } => assert_eq!(panicked, path),
+            _ => panic!("expected a Panicked outcome"),
+        }
+
+        // (c) Applying it drives the worker's decrement + rebuild, so a later
+        // republish / deferred-bookkeeping cycle for this path can proceed.
+        state.in_flight_reads.insert(path.clone(), 1);
+        let before = state.host_generation;
+        let event = WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: ReadOutcome::Panicked { path: path.clone() },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, event).expect("apply");
+        assert!(
+            !state.in_flight_reads.contains_key(&path),
+            "the Panicked event decrements in-flight so bookkeeping unblocks"
+        );
+        assert_eq!(state.host_generation, before + 1, "the host rebuilt");
+    }
+
+    #[test]
+    fn a_routeback_defers_behind_a_sibling_then_serves_once() {
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+
+        // Two reads in flight; a RouteBack while a sibling remains defers.
+        state.in_flight_reads.insert(path.clone(), 2);
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(7), ());
+        let event = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::RouteBack {
+                path: path.clone(),
+                epoch: state.cancel_source.epoch(),
+                request: hover_req(7, uri),
+            },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, event).expect("apply");
+        assert_eq!(
+            state.pending_routebacks.len(),
+            1,
+            "a routeback behind a sibling is deferred"
+        );
+        assert!(
+            client.receiver.try_recv().is_err(),
+            "nothing is served while the sibling is in flight"
+        );
+
+        // The sibling finishes: the deferred routeback serves exactly once.
+        let done = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::Done { path: path.clone() },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, done).expect("apply");
+        super::serve_ready_routebacks(&server, &req_queue, &mut state).expect("serve routebacks");
+        assert!(state.pending_routebacks.is_empty(), "the routeback was served");
+        assert!(
+            matches!(client.receiver.try_recv(), Ok(Message::Response(_))),
+            "the routeback produced exactly one response"
+        );
+    }
+
+    #[test]
+    fn the_idle_republish_drain_skips_a_path_with_a_read_in_flight() {
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+        // A change to lib queues main for republish.
+        state.on_notification(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+        let main = crate::uri::to_path(&Uri::from_str("file:///inf-test/main.inf").unwrap())
+            .expect("path");
+
+        // A read is in flight for main: the idle drain must skip it.
+        state.in_flight_reads.insert(main, 1);
+        let published = state.drain_pending_republishes_skipping_in_flight();
+        assert!(
+            !published
+                .iter()
+                .any(|p| p.uri.as_str() == "file:///inf-test/main.inf"),
+            "an in-flight path is not drained"
+        );
+
+        // With the read cleared, the next drain publishes it.
+        state.in_flight_reads.clear();
+        let published = state.drain_pending_republishes_skipping_in_flight();
+        assert!(
+            published
+                .iter()
+                .any(|p| p.uri.as_str() == "file:///inf-test/main.inf"),
+            "once cleared, the path drains"
+        );
+    }
+
+    #[test]
+    fn the_completion_gate_answers_once_from_concurrent_senders() {
+        use super::{ReqQueue, send_gated_response};
+        // Two threads (as the read pool would) race to answer the same id through the
+        // gate; exactly one send reaches the client.
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<ReqQueue<(), ()>> = super::Mutex::new(ReqQueue::default());
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(9), ());
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    let _ = send_gated_response(
+                        &server,
+                        &req_queue,
+                        Response::new_ok(RequestId::from(9), ()),
+                    );
+                });
+            }
+        });
+
+        assert!(
+            matches!(client.receiver.try_recv(), Ok(Message::Response(_))),
+            "exactly one response is sent"
+        );
+        assert!(
+            client.receiver.try_recv().is_err(),
+            "the second sender is gated out"
+        );
     }
 }

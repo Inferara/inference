@@ -9,10 +9,22 @@
 //! predicate [`is_cancellation`] recognizes the semantic layer's cancellation
 //! payload so the protocol layer can discriminate it from a genuine panic
 //! without naming the framework.
+//!
+//! # Reader tokens (#292)
+//!
+//! Concurrent snapshot reads run on cloned database handles, each of which mints
+//! its own cancellation token. A snapshot registers that token here
+//! ([`register_reader`](AnalysisCancelSource::register_reader)) for as long as it
+//! lives, and [`request_cancellation`](AnalysisCancelSource::request_cancellation)
+//! fires every registered reader token **after** the bound worker token — so a
+//! write (or a shutdown) unwinds not only the worker's own in-flight analysis but
+//! every live snapshot read, and each drops its cloned handle promptly. The
+//! registration is RAII: a snapshot that serves and drops deregisters itself, so
+//! the set is exactly the snapshots currently in flight.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// A shareable handle that requests cancellation of a bound database's in-flight
 /// analysis and tracks the write epoch used to classify the resulting unwind.
@@ -31,6 +43,12 @@ struct SourceInner {
     epoch: AtomicU64,
     /// The bound database handle's cancellation token, if any.
     token: Mutex<Option<salsa::CancellationToken>>,
+    /// The cancellation tokens of every in-flight snapshot read, each paired with
+    /// the id that deregisters it (#292). Fired after the worker token so a write
+    /// unwinds every live reader clone, not only the worker's own analysis.
+    reader_tokens: Mutex<Vec<(u64, salsa::CancellationToken)>>,
+    /// Source of the deregistration ids above; only ever incremented.
+    next_reader_id: AtomicU64,
 }
 
 impl AnalysisCancelSource {
@@ -51,11 +69,14 @@ impl AnalysisCancelSource {
     /// guaranteed to see at least this bump — the fence/fence pairing is what
     /// makes superseded-vs-residual classification exact, not best-effort.
     ///
-    /// # Panics
+    /// The worker token fires first, then every registered reader token (#292),
+    /// so a write unwinds the worker's own in-flight analysis and every live
+    /// snapshot read. Firing a token is a plain atomic store — no Salsa write —
+    /// so this stays callable from the router thread without touching storage.
     ///
-    /// Panics if the token lock was poisoned by a thread that panicked while
-    /// holding it; the guarded scope only reads an `Option`, which cannot panic,
-    /// so a poison does not arise in practice.
+    /// The lock scopes only read/iterate a `Vec`/`Option`, so a poisoning panic
+    /// cannot leave them observably inconsistent; a poisoned guard is recovered
+    /// with [`PoisonError::into_inner`] rather than propagated.
     #[must_use = "the returned epoch identifies the write this cancellation clears the way for"]
     pub fn request_cancellation(&self) -> u64 {
         let epoch = self.inner.epoch.fetch_add(1, Ordering::SeqCst) + 1;
@@ -64,8 +85,17 @@ impl AnalysisCancelSource {
             .inner
             .token
             .lock()
-            .expect("cancellation token lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
+        {
+            token.cancel();
+        }
+        for (_, token) in self
+            .inner
+            .reader_tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
         {
             token.cancel();
         }
@@ -84,11 +114,39 @@ impl AnalysisCancelSource {
     /// when a handle asks to be interruptible; a later bind replaces the token,
     /// so a rebuilt handle (fresh token) re-arms the source.
     pub(crate) fn bind(&self, token: salsa::CancellationToken) {
-        *self.inner.token.lock().expect("cancellation token lock") = Some(token);
+        *self
+            .inner
+            .token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(token);
+    }
+
+    /// Registers a snapshot read's cancellation `token` so a later
+    /// [`request_cancellation`](Self::request_cancellation) unwinds that read
+    /// (#292). The returned guard deregisters the token when it drops, so the
+    /// registered set is exactly the snapshots currently in flight — the worker
+    /// mints the guard when it plans a read and the snapshot holds it until it
+    /// serves and drops.
+    pub(crate) fn register_reader(
+        &self,
+        token: salsa::CancellationToken,
+    ) -> ReaderTokenRegistration {
+        let id = self.inner.next_reader_id.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .reader_tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id, token));
+        ReaderTokenRegistration {
+            source: Arc::clone(&self.inner),
+            id,
+        }
     }
 
     /// Test-only: fires the bound token WITHOUT starting a new epoch, so an
-    /// unwind classifies as a residual self-cancel (the retry arm).
+    /// unwind classifies as a residual self-cancel (the retry arm). Deliberately
+    /// worker-token-only — the residual-self-cancel unit tests rely on it not
+    /// disturbing any reader registration.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn debug_fire_token_only(&self) {
@@ -96,11 +154,46 @@ impl AnalysisCancelSource {
             .inner
             .token
             .lock()
-            .expect("cancellation token lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
         {
             token.cancel();
         }
+    }
+
+    /// Test-only: the number of reader tokens currently registered, for the
+    /// write-turn tripwire (a write must observe zero live readers for the path
+    /// it mutates) and the concurrency tests.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    #[must_use = "the reader-token count is the reason to call this"]
+    pub fn debug_reader_token_count(&self) -> usize {
+        self.inner
+            .reader_tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// RAII deregistration handle for a snapshot read's cancellation token (#292).
+///
+/// Held by the snapshot for its whole lifetime; dropping it removes the token
+/// from the source, so a served-and-dropped read leaves no stale token behind
+/// for a later [`request_cancellation`](AnalysisCancelSource::request_cancellation)
+/// to fire.
+pub(crate) struct ReaderTokenRegistration {
+    source: Arc<SourceInner>,
+    id: u64,
+}
+
+impl Drop for ReaderTokenRegistration {
+    fn drop(&mut self) {
+        self.source
+            .reader_tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(id, _)| *id != self.id);
     }
 }
 

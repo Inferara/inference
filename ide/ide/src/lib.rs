@@ -18,18 +18,25 @@
 //! document is addressed by its path; the entry file's module path is the empty
 //! slice, which is how a query reaches the document it was asked about.
 //!
-//! # Single document, single thread
+//! # Query surfaces
 //!
 //! Each open file is analyzed as its own project entry (its import closure
 //! resolved through the overlay-then-disk loader in `ide-db`), and the resulting
 //! analysis answers every query for that document — including goto-definition
 //! into an imported file, whose [`NavigationTarget`] carries that file's real path
-//! and ranges in its own coordinates. Feature queries take `&self`: the analysis
-//! is still computed lazily and memoized on first use, so a read mutates the
-//! `RootDatabase`, but that mutation now runs behind a `RefCell` rather than a
-//! `&mut` borrow, which is what lets the query surface be shared. The LSP main
-//! loop is single-threaded and never holds one query across another, so the
-//! interior borrow is always uncontended.
+//! and ranges in its own coordinates. There are two ways to reach that analysis:
+//!
+//! * The **worker surface** — [`AnalysisHost::analysis`] hands out an [`Analysis`]
+//!   whose feature queries take `&self`, computing lazily and memoizing on first
+//!   use behind a `RefCell`. The worker thread drives it and never holds one query
+//!   across another, so the interior borrow is always uncontended.
+//! * The **snapshot surface** (#292) — [`AnalysisHost::plan_concurrent_read`]
+//!   decides whether a request can be served off the worker. When it can, it mints
+//!   an [`AnalysisSnapshot`] (a `Send` per-request handle) a pool thread serves
+//!   into a [`DocumentAnalysis`] carrying the same plain-old-data answers; the
+//!   worker later folds the result back with [`AnalysisHost::apply_concurrent_read`].
+//!   This surface is purely additive — it does not touch the `RefCell` interior,
+//!   and the worker surface above is unchanged.
 
 mod completions;
 mod diagnostics;
@@ -48,7 +55,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
-use inference_ide_db::RootDatabase;
+use inference_ide_db::{ConcurrentReadPlan, FileAnalysis, ReadServe, ReadSnapshot, RootDatabase};
 
 pub use completions::{CompletionItem, CompletionItemKind};
 pub use diagnostics::{Diagnostic, Severity};
@@ -117,6 +124,43 @@ impl AnalysisHost {
     pub fn bind_cancellation(&self, source: &AnalysisCancelSource) {
         self.db.borrow().bind_cancellation(source);
     }
+
+    /// Decides whether a feature request for `path` can be served off the worker on
+    /// a pool thread (#292), returning a [`ReadPlan`].
+    ///
+    /// Borrows the `RefCell` immutably; the returned [`AnalysisSnapshot`] carries a
+    /// cloned database handle and is `Send`, so a pool thread can serve it while the
+    /// worker moves on.
+    #[must_use = "the plan decides where the read runs"]
+    pub fn plan_concurrent_read(&self, path: &Path, source: &AnalysisCancelSource) -> ReadPlan {
+        match self.db.borrow().plan_concurrent_read(path, source) {
+            ConcurrentReadPlan::Serial => ReadPlan::Serial,
+            ConcurrentReadPlan::Concurrent(snapshot) => {
+                ReadPlan::Concurrent(AnalysisSnapshot(snapshot))
+            }
+        }
+    }
+
+    /// Folds a pool-served analysis back into the worker's entry mirror (#292),
+    /// guarded against any write that superseded the read (see
+    /// [`RootDatabase::apply_concurrent_read`](inference_ide_db::RootDatabase::apply_concurrent_read)).
+    pub fn apply_concurrent_read(
+        &mut self,
+        path: &Path,
+        doc: &DocumentAnalysis,
+        dispatch_epoch: u64,
+        source: &AnalysisCancelSource,
+    ) {
+        self.db
+            .get_mut()
+            .apply_concurrent_read(path, &doc.analysis, dispatch_epoch, source);
+    }
+
+    /// Runs the deferred never-opened bookkeeping for a pool-recomputed `path`
+    /// (#292); call only when no concurrent reads are in flight.
+    pub fn apply_unopened_read_bookkeeping(&mut self, path: &Path) {
+        self.db.get_mut().apply_unopened_read_bookkeeping(path);
+    }
 }
 
 /// A shared `&self` view over the host that answers feature queries for a
@@ -130,11 +174,11 @@ impl AnalysisHost {
 /// invalidation in place — but that mutation now runs behind the `RefCell`, which
 /// is what makes the query surface shareable.
 ///
-/// This is the shared-`&self` surface, *not* a parallel cloned-handle read
-/// model. Salsa's `Storage` is `Clone`, but a genuine handle-clone is deferred
-/// to the cancellation work: the read path still bumps a Salsa input on
-/// never-opened eviction, and a write from one live handle blocks until every
-/// other handle drops, so a cloned reader would not be freely concurrent yet.
+/// This is the worker's shared-`&self` surface. The parallel cloned-handle read
+/// model lives beside it (#292): [`AnalysisHost::plan_concurrent_read`] mints an
+/// [`AnalysisSnapshot`] a pool thread serves without touching this `RefCell`, so
+/// the two surfaces never contend. This one stays the worker's, driven from the
+/// single worker thread.
 ///
 /// The `RefCell` moves one invariant from compile time to run time: a query
 /// method re-entered while another's `borrow_mut` is live panics the cell. It
@@ -214,6 +258,146 @@ impl Analysis<'_> {
         })
     }
 }
+
+/// The worker's decision for a snapshot read (#292): serve serially on the worker,
+/// or hand an [`AnalysisSnapshot`] to a pool thread.
+///
+// The `Concurrent` payload carries a cloned database handle; the plan is created
+// on the worker and immediately matched, then the snapshot is moved once into the
+// read task, so boxing would only add an allocation on the common path.
+#[allow(clippy::large_enum_variant)]
+pub enum ReadPlan {
+    /// Serve serially on the worker.
+    Serial,
+    /// Serve off this snapshot on a pool thread.
+    Concurrent(AnalysisSnapshot),
+}
+
+/// A `Send` per-request read handle a pool thread serves off the worker (#292).
+///
+/// Wraps `ide-db`'s snapshot: serving runs the analysis query against a cloned
+/// database handle and drops it before returning a [`DocumentAnalysis`].
+pub struct AnalysisSnapshot(ReadSnapshot);
+
+impl AnalysisSnapshot {
+    /// The write epoch this snapshot was dispatched under, used to guard the
+    /// worker-side fold-back (see [`AnalysisHost::apply_concurrent_read`]).
+    #[must_use]
+    pub fn dispatch_epoch(&self) -> u64 {
+        self.0.dispatch_epoch()
+    }
+
+    /// Serves this snapshot on the current (pool) thread, consuming it.
+    ///
+    /// The cloned database handle drops before this returns, so the read never
+    /// holds it across the response the caller sends.
+    #[must_use = "the served document is the reason to serve"]
+    pub fn serve(self) -> SnapshotServe {
+        match self.0.serve() {
+            ReadServe::Ready {
+                analysis,
+                recomputed,
+            } => SnapshotServe::Ready(DocumentAnalysis {
+                analysis,
+                recomputed,
+            }),
+            ReadServe::NotServable => SnapshotServe::NotServable,
+        }
+    }
+}
+
+/// The outcome of serving an [`AnalysisSnapshot`].
+pub enum SnapshotServe {
+    /// The document's analysis, ready to answer feature queries.
+    Ready(DocumentAnalysis),
+    /// The entry was evicted between plan and serve; route the request back to the
+    /// worker for serial service.
+    NotServable,
+}
+
+/// A pool-served analysis for one document (#292).
+///
+/// Answers the same plain-old-data feature queries an [`Analysis`] does, from an
+/// owned [`FileAnalysis`] handle rather than a borrow of the host — so a pool
+/// thread can answer without touching the worker's `RefCell`. `Send + Sync`.
+pub struct DocumentAnalysis {
+    analysis: Arc<FileAnalysis>,
+    recomputed: bool,
+}
+
+impl DocumentAnalysis {
+    /// Whether serving re-executed the analysis (a stale recompute) rather than
+    /// hitting the worker's stored memo — the worker uses this to decide whether
+    /// the document's diagnostics need republishing.
+    #[must_use]
+    pub fn recomputed(&self) -> bool {
+        self.recomputed
+    }
+
+    /// The diagnostics for this document: syntax, import, type, and analysis-rule
+    /// findings that belong to it.
+    #[must_use = "the diagnostics are the reason to call this"]
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        diagnostics::diagnostics(&self.analysis)
+    }
+
+    /// The definition outline of this document.
+    #[must_use = "the symbols are the reason to call this"]
+    pub fn document_symbols(&self) -> Vec<DocumentSymbol> {
+        document_symbols::document_symbols(&self.analysis)
+    }
+
+    /// The hover for byte `offset`, if anything is there.
+    #[must_use = "the hover is the reason to call this"]
+    pub fn hover(&self, offset: u32) -> Option<Hover> {
+        hover::hover(&self.analysis, offset)
+    }
+
+    /// The definition(s) of the identifier at byte `offset`, if any.
+    #[must_use = "the navigation targets are the reason to call this"]
+    pub fn goto_definition(&self, offset: u32) -> Option<Vec<NavigationTarget>> {
+        goto_definition::goto_definition(&self.analysis, offset)
+    }
+
+    /// The completions for byte `offset`.
+    #[must_use = "the completions are the reason to call this"]
+    pub fn completions(&self, offset: u32) -> Vec<CompletionItem> {
+        completions::completions(&self.analysis, offset)
+    }
+
+    /// The non-det inlay hints, optionally clipped to `range`.
+    #[must_use = "the inlay hints are the reason to call this"]
+    pub fn inlay_hints(&self, range: Option<TextRange>) -> Vec<InlayHint> {
+        inlay_hints::inlay_hints(&self.analysis, range)
+    }
+
+    /// The line index of this document, for byte-offset ↔ line/column conversion;
+    /// `None` when the document is not analyzable.
+    #[must_use = "the line index is the reason to call this"]
+    pub fn line_index(&self) -> Option<Arc<LineIndex>> {
+        self.analysis.line_index_arc(&[])
+    }
+
+    /// The line index of `target` as it appears in this document's analysis
+    /// closure, or `None` when `target` is not part of that closure (mirrors
+    /// [`Analysis::closure_line_index`]).
+    #[must_use = "the line index is the reason to call this"]
+    pub fn closure_line_index(&self, target: &Path) -> Option<Arc<LineIndex>> {
+        let analysis = &self.analysis;
+        analysis.arena().source_files().find_map(|source_file| {
+            let closure_file = analysis.file(&source_file.module_path)?;
+            (closure_file.path() == target).then(|| closure_file.line_index_arc())
+        })
+    }
+}
+
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_send_sync<T: Send + Sync>() {}
+    // The snapshot crosses to a pool thread; the served document is shared back.
+    assert_send::<AnalysisSnapshot>();
+    assert_send_sync::<DocumentAnalysis>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -305,6 +489,52 @@ mod tests {
                 .closure_line_index(&path(), &PathBuf::from("/inf-test/nope.inf"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_snapshot_answers_every_query_like_the_analysis_surface() {
+        // The pool-served DocumentAnalysis routes to the same feature functions the
+        // worker's Analysis does, so a Concurrent plan's answers match the worker's
+        // for the same document (#292).
+        use crate::{AnalysisCancelSource, ReadPlan, SnapshotServe};
+
+        let mut host = AnalysisHost::default();
+        let lib_path = PathBuf::from("/inf-test/lib.inf");
+        let lib = "pub fn helper() -> i32 { return 7; }";
+        let main = "use lib;\nfn main() -> i32 { return lib::helper(); }";
+        host.open_document(&lib_path, lib);
+        host.open_document(&path(), main);
+        let source = AnalysisCancelSource::detached();
+        host.bind_cancellation(&source);
+
+        // Memoize main so a plan is Concurrent (a hit).
+        let worker = host.analysis();
+        let want_diagnostics = worker.diagnostics(&path()).len();
+        let want_symbols = worker.document_symbols(&path()).len();
+        let hover_offset = main.find("helper").expect("helper present") as u32;
+        let want_hover = worker.hover(&path(), hover_offset).is_some();
+        let want_goto = worker.goto_definition(&path(), hover_offset).is_some();
+        let want_completions = worker.completions(&path(), hover_offset).len();
+        let want_inlays = worker.inlay_hints(&path(), None).len();
+        let want_line_index = worker.line_index(&path()).is_some();
+        let want_closure = worker.closure_line_index(&path(), &lib_path).is_some();
+
+        let ReadPlan::Concurrent(snapshot) = host.plan_concurrent_read(&path(), &source) else {
+            panic!("a memoized document plans Concurrent");
+        };
+        let SnapshotServe::Ready(doc) = snapshot.serve() else {
+            panic!("a hit serves Ready");
+        };
+
+        assert!(!doc.recomputed(), "a hit is not a recompute");
+        assert_eq!(doc.diagnostics().len(), want_diagnostics);
+        assert_eq!(doc.document_symbols().len(), want_symbols);
+        assert_eq!(doc.hover(hover_offset).is_some(), want_hover);
+        assert_eq!(doc.goto_definition(hover_offset).is_some(), want_goto);
+        assert_eq!(doc.completions(hover_offset).len(), want_completions);
+        assert_eq!(doc.inlay_hints(None).len(), want_inlays);
+        assert_eq!(doc.line_index().is_some(), want_line_index);
+        assert_eq!(doc.closure_line_index(&lib_path).is_some(), want_closure);
     }
 
     #[test]

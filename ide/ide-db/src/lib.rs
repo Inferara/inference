@@ -35,7 +35,12 @@ mod symbols;
 
 pub use analysis::{AnalysisFinding, ClosureFile, FileAnalysis};
 pub use cancellation::{AnalysisCancelSource, is_cancellation};
-pub use database::{MAX_UNOPENED_ANALYSES, RootDatabase};
+pub use database::{ConcurrentReadPlan, MAX_UNOPENED_ANALYSES, ReadServe, ReadSnapshot, RootDatabase};
+#[cfg(debug_assertions)]
+pub use database::{
+    debug_arm_gate, debug_arm_rendezvous, debug_disarm_gate, debug_disarm_rendezvous,
+    debug_gate_entered, debug_live_snapshots, debug_rendezvous_meets,
+};
 pub use hit_test::{NodeHit, enclosing_hit, hit_test};
 pub use symbols::file_defs;
 

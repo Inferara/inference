@@ -45,34 +45,49 @@ touch `ide/ide` directly, not just `ide-db`; a change confined to
 changes shape) stays contained to `ide-db`. `apps/lsp` is insulated from all of
 this either way — it only ever calls `ide/ide`'s editor-terminology API.
 
-## Router / Worker
+## Router / Worker / Read pool
 
-Analysis is strictly serial: one `AnalysisHost` owns the sole database handle
-and answers one thing at a time (no `Storage` cloning, no concurrent reads).
-That keeps the model simple and every analysis is bounded by one open file's
-import closure, not a whole workspace. But a slow request must not make a fresh
-keystroke wait behind it, so `server::run` splits the session across two threads
-with no shared analysis state:
+The worker owns one `AnalysisHost` and mutates it strictly serially, so every
+analysis is bounded by one open file's import closure, not a whole workspace.
+But a slow request must not make a fresh keystroke wait behind it, and a slow
+read must not block a fast interactive one, so `server::run` splits the session
+across a router, a worker, and a small read pool:
 
 - The **worker** thread (`worker_loop`) owns the `ServerState` and the sole
-  analysis handle and runs the message loop over an unbounded job channel: one
-  job at a time, in arrival order. Every response and publish leaves from here.
+  *mutating* analysis handle, and processes jobs one at a time in arrival order.
+  Every mutation, and every write, happens here.
 - The **router** thread (`router_loop`, the main thread) reads the transport and
   forwards each message to the worker *instantly*, so nothing that must not wait
   behind an analysis does. It keeps the incoming request-id bookkeeping, answers
   `$/cancelRequest` (`RequestCanceled`, -32800), and — before it forwards a
-  document write it adopts (and shutdown/exit) — requests cancellation of the
-  worker's in-flight analysis, stamping the write's job with the post-bump write
-  epoch.
+  document write it adopts (and shutdown/exit) — requests cancellation of every
+  in-flight analysis (the worker's and every live snapshot read's), stamping the
+  write's job with the post-bump write epoch.
+- The **read pool** (`read_pool_loop`, `READ_POOL_SIZE = 2` threads) serves
+  read-only feature requests off the worker (#292). For a request against a
+  memoized (or cheaply-recomputable) entry, the worker mints an
+  `AnalysisSnapshot` — a cloned `ide-db` database handle — and hands it to a pool
+  thread; the pool serves the query off the snapshot, sends the response, and
+  posts the outcome back to the worker as an event. The snapshot drops before
+  the response is sent, so no thread holds a database clone across I/O. Requests
+  that are not pool-eligible (a first analysis, an evicted or tier-3 stale entry,
+  an unknown method, a superseded job) fall through to the serial worker path,
+  byte-for-byte as before.
 
 A cancellation is not a panic. The analysis pipeline polls for it at query
 checkpoints, so a superseded request unwinds and is answered `ContentModified`
 (-32801) — the client retries against the new content — with the analysis cache
 left intact (unlike a contained panic, which rebuilds the host from scratch). A
-residual self-cancel is simply retried. The two threads are joined through
-`std::thread::scope`, so the worker may borrow the `Connection` for its sender
-with no `'static` bound, and teardown cannot hang: when the router returns it
-drops the job sender, unblocking the worker even if it never saw the exit job.
+residual self-cancel is simply retried. An equal-epoch cancellation of a pool
+read (a worker-internal setter, e.g. a cap eviction during a serial miss) routes
+the request back to the worker for serial service under its original epoch. The
+router→worker job channel and the worker↔pool task/event channels are
+`crossbeam-channel` (version-aligned with `lsp-server`); the worker's loop
+drains pool events first (bounded per event), then jobs, blocking on a `select!`
+when idle. The threads are joined through `std::thread::scope`, so the worker
+and pool may borrow the `Connection` for its sender with no `'static` bound, and
+teardown cannot hang: when the router returns it drops the job sender, the worker
+returns and drops the task sender, and the pool loops end on that disconnect.
 
 ## Capability Surface
 
@@ -119,8 +134,9 @@ own tests). The worker thread owns the `ServerState` and drives it off an
 unbounded job channel; the router thread reads `connection.receiver` and
 forwards each message onto that channel, handling the `shutdown`/`exit`
 handshake state on the worker side and the request-id bookkeeping and
-`$/cancelRequest` on the router side (see [Router / Worker](#router--worker)
-above). An unknown request method is `MethodNotFound`; params that fail to
+`$/cancelRequest` on the router side (see
+[Router / Worker / Read pool](#router--worker--read-pool) above). An unknown
+request method is `MethodNotFound`; params that fail to
 deserialize are `InvalidParams` — neither ever panics or disturbs the loop, so
 one malformed request cannot take the server down.
 
