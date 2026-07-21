@@ -2248,3 +2248,249 @@ fn a_cancelled_request_leaves_the_analysis_cache_intact() {
 
     client.shutdown_exit_ok();
 }
+
+// --- 23. concurrent snapshot reads: parallelism, cancellation, teardown (#292) --
+//
+// These tests drive both the ide-db slow-analysis seam (to hold a pool read in
+// flight) and, for the panic case, the analysis-panic seam. Both are debug-only, so
+// the tests compile and run only under `debug_assertions`. Fixtures live in a
+// manifested project so a stale entry's source root is cached (tier-1) and its
+// recompute is pool-eligible; a project-less fixture would silently route serial.
+
+/// A manifested project directory (an `Inference.toml` at its root), so files under
+/// `src/` resolve against a cached tier-1 source root — the precondition for a stale
+/// entry to be pool-eligible (#292).
+#[cfg(debug_assertions)]
+fn manifested_project(tag: &str) -> TempDir {
+    let dir = TempDir::new(tag);
+    dir.write("Inference.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
+    dir
+}
+
+/// Reads responses off the wire in arrival order until each id in `ids` has been
+/// seen, returning the matching response objects in the order they arrived. Immune
+/// to interleaved publishes; every read is bounded by the harness timeout.
+#[cfg(debug_assertions)]
+fn responses_in_order(client: &mut LspClient, ids: &[i64]) -> Vec<Value> {
+    let mut seen = Vec::new();
+    let mut got: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    while got.len() < ids.len() {
+        let message = client.recv_message();
+        if message.get("method").is_none()
+            && let Some(id) = message.get("id").and_then(Value::as_i64)
+            && ids.contains(&id)
+            && got.insert(id)
+        {
+            seen.push(message);
+        }
+    }
+    seen
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_slow_pool_read_does_not_block_a_fast_sibling() {
+    // Acceptance bullet 1: two pool-eligible reads run in parallel. `slowa` is held
+    // by the armed seam; `b` is fast. Both are dispatched (slow first), yet `b`'s
+    // response precedes `slowa`'s and both are Ok — serial dispatch would answer the
+    // slow one first, failing red within the 5s seam bound.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, "slowa")]);
+    client.initialize_default(true);
+
+    let dir = manifested_project("parallel-overlap");
+    let s_path = dir.write("src/s.inf", "pub fn v() -> i32 { return 1; }");
+    let a_path = dir.write("src/slowa.inf", "use s;\nfn a() -> i32 { return s::v(); }");
+    let b_path = dir.write("src/b.inf", "use s;\nfn b() -> i32 { return s::v(); }");
+    let (s_uri, a_uri, b_uri) = (
+        path_to_uri(&s_path),
+        path_to_uri(&a_path),
+        path_to_uri(&b_path),
+    );
+
+    client.did_open(&s_uri, "pub fn v() -> i32 { return 1; }", 1);
+    // Warm `slowa` and `b` as never-opened documents (read from disk): the first
+    // hover memoizes each entry and caches its manifest root. Never opening them
+    // keeps them out of the dependents-republish sweep, so nothing slow is left
+    // pending at shutdown. `slowa`'s warm is held 5s by the seam.
+    let _ = hover_request(&mut client, &a_uri, json!({ "line": 1, "character": 3 }));
+    let _ = hover_request(&mut client, &b_uri, json!({ "line": 1, "character": 3 }));
+
+    // A change to the shared import stales both entries (still cached roots), so
+    // their next reads recompute — and route to the pool.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": s_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn v() -> i32 { return 2; }" } ],
+        }),
+    );
+
+    let id_slow = send_hover(&mut client, &a_uri, json!({ "line": 1, "character": 3 }));
+    let id_fast = send_hover(&mut client, &b_uri, json!({ "line": 1, "character": 3 }));
+
+    let order = responses_in_order(&mut client, &[id_slow, id_fast]);
+    assert_eq!(
+        order[0]["id"].as_i64(),
+        Some(id_fast),
+        "the fast sibling's response must precede the slow one's (parallel dispatch)"
+    );
+    assert!(
+        order.iter().all(|r| r.get("error").is_none()),
+        "both pool reads answer Ok, got {order:?}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_write_cancels_an_in_flight_pool_read() {
+    // Acceptance bullet 2: a write cancels an in-flight pool read to -32801, the
+    // write applies, and a repeat read answers from the new state.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, "slowdoc")]);
+    client.initialize_default(true);
+
+    let dir = manifested_project("write-cancels-pool");
+    let s_path = dir.write("src/s.inf", "pub fn v() -> i32 { return 1; }");
+    let doc_path = dir.write("src/slowdoc.inf", "use s;\nfn d() -> i32 { return s::v(); }");
+    let (s_uri, doc_uri) = (path_to_uri(&s_path), path_to_uri(&doc_path));
+
+    client.did_open(&s_uri, "pub fn v() -> i32 { return 1; }", 1);
+    // Warm the doc as never-opened (read from disk) so it memoizes with a cached
+    // root without entering the dependents-republish sweep; the warm is held 5s.
+    let _ = hover_request(&mut client, &doc_uri, json!({ "line": 1, "character": 3 }));
+    // Stale the doc so its next read recomputes (routes to the pool, held by the
+    // seam) or is superseded — either way a write in flight yields -32801.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": s_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn v() -> i32 { return 2; }" } ],
+        }),
+    );
+
+    let id = send_hover(&mut client, &doc_uri, json!({ "line": 1, "character": 3 }));
+    // A second change to the shared import fires cancellation while the read is in
+    // flight, superseding it.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": s_uri, "version": 3 },
+            "contentChanges": [ { "text": "pub fn v() -> i32 { return 3; }" } ],
+        }),
+    );
+
+    let response = collect_responses(&mut client, &[id])
+        .remove(&id)
+        .expect("the interrupted read is answered");
+    assert_eq!(
+        response["error"]["code"],
+        json!(CONTENT_MODIFIED),
+        "a write supersedes the in-flight read to -32801, got {response}"
+    );
+
+    // The write applied and the session serves a repeat read. `collect_responses`
+    // is used (not the blocking hover) so an interleaved republish cannot livelock
+    // the wait.
+    let repeat_id = send_hover(&mut client, &doc_uri, json!({ "line": 1, "character": 3 }));
+    let repeat = collect_responses(&mut client, &[repeat_id])
+        .remove(&repeat_id)
+        .expect("the repeat read is answered");
+    assert!(
+        repeat.get("error").is_none(),
+        "a repeat read answers Ok from the new state, got {repeat}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn two_seam_held_pool_reads_are_answered_at_shutdown() {
+    // Two pool reads held by the seam at shutdown: the router's cancellation fire
+    // reaches their registered tokens, so both are answered (-32801) and the session
+    // tears down cleanly.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, "slow")]);
+    client.initialize_default(true);
+
+    let dir = manifested_project("shutdown-pool");
+    let s_path = dir.write("src/s.inf", "pub fn v() -> i32 { return 1; }");
+    let a_path = dir.write("src/slowa.inf", "use s;\nfn a() -> i32 { return s::v(); }");
+    let b_path = dir.write("src/slowb.inf", "use s;\nfn b() -> i32 { return s::v(); }");
+    let (s_uri, a_uri, b_uri) = (
+        path_to_uri(&s_path),
+        path_to_uri(&a_path),
+        path_to_uri(&b_path),
+    );
+
+    client.did_open(&s_uri, "pub fn v() -> i32 { return 1; }", 1);
+    // Warm both as never-opened (read from disk) so they memoize with cached roots
+    // and stay out of the dependents-republish sweep — nothing slow is pending at
+    // shutdown. Each warm is held 5s by the seam.
+    let _ = hover_request(&mut client, &a_uri, json!({ "line": 1, "character": 3 }));
+    let _ = hover_request(&mut client, &b_uri, json!({ "line": 1, "character": 3 }));
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": s_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn v() -> i32 { return 2; }" } ],
+        }),
+    );
+
+    let id_a = send_hover(&mut client, &a_uri, json!({ "line": 1, "character": 3 }));
+    let id_b = send_hover(&mut client, &b_uri, json!({ "line": 1, "character": 3 }));
+
+    // Shut down while both reads are in flight: their tokens fire, so both answer.
+    client.send_request("shutdown", Value::Null);
+    let answered = collect_responses(&mut client, &[id_a, id_b]);
+    for id in [id_a, id_b] {
+        let response = &answered[&id];
+        let is_ok = response.get("error").is_none();
+        let is_supersede = response["error"]["code"] == json!(CONTENT_MODIFIED);
+        assert!(
+            is_ok || is_supersede,
+            "a seam-held read at shutdown is answered Ok or -32801, got {response}"
+        );
+    }
+
+    client.exit();
+    let status = client.wait_for_exit();
+    assert!(status.success(), "clean teardown after shutdown, got {status:?}");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn the_pool_survives_a_contained_analysis_panic() {
+    // A pool-eligible method whose document panics is contained (InternalError), and
+    // a healthy memoized document — served off the pool — keeps answering. (A doc that
+    // panics can never memoize, so it routes serial; the pool's own Panicked-event
+    // rebuild is pinned by the unit test.)
+    let mut client = LspClient::spawn_with_env(&[(PANIC_ENV, PANIC_PATH_MARKER)]);
+    client.initialize_default(true);
+
+    let dir = manifested_project("pool-panic");
+    let healthy_src = "fn healthy() -> i32 { return 1; }";
+    let healthy_path = dir.write("src/healthy.inf", healthy_src);
+    let panic_path = dir.write("src/panic-trigger.inf", PANIC_DOC_SOURCE);
+    let (healthy_uri, panic_uri) = (path_to_uri(&healthy_path), path_to_uri(&panic_path));
+
+    // A healthy, memoized document — pool-eligible.
+    client.did_open(&healthy_uri, healthy_src, 1);
+
+    // A hover against the never-opened panic document unwinds and is contained.
+    let panicked = hover_request(&mut client, &panic_uri, pos_at(PANIC_DOC_SOURCE, "main"));
+    assert_eq!(
+        panicked["error"]["code"],
+        json!(INTERNAL_ERROR),
+        "a panicking analysis is answered InternalError, got {panicked}"
+    );
+
+    // The healthy document keeps answering after the contained panic.
+    let hover = hover_request(&mut client, &healthy_uri, pos_at(healthy_src, "healthy"));
+    assert!(
+        hover.get("error").is_none(),
+        "the session keeps serving healthy documents, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}

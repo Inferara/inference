@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 lsp-server = "=0.8.0"
 lsp-types = "=0.97.0"
+# Version-aligned with lsp-server 0.8.0's own crossbeam-channel: the router→worker
+# job channel and the worker↔read-pool task/event channels share one channel crate.
+crossbeam-channel = "0.5"
 serde_json.workspace = true
 anyhow.workspace = true
 rustc-hash.workspace = true

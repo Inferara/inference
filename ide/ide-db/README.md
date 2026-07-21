@@ -43,8 +43,10 @@ so the IDE stack never links the WASM/Rocq backend.
   one-write-lagged transient* (a superseded or swapped memo freed at the next
   Salsa write). A small per-path residue (input slots, memo headers, `Vfs` ids)
   is session-permanent because Salsa 0.27 has no input removal — the same steady
-  state rust-analyzer ships. Serving hits from a cloned `Storage` on a background
-  thread is separate later work (issue #292).
+  state rust-analyzer ships. A read-only request against a memoized (or
+  cheaply-recomputable) entry can be served off a cloned `Storage` handle on a
+  background thread; the worker stays the sole minter and mutator of this
+  bookkeeping (see [Concurrent snapshot reads](#concurrent-snapshot-reads)).
 - **[`FileAnalysis`]** — the merged arena (reached through its `TypedContext`),
   per-file parse errors, structured type diagnostics, unresolved-import
   problems, tagged analysis findings, and per-closure-file line indexes and
@@ -87,9 +89,35 @@ Per-entry analyses are memoized by [Salsa](https://github.com/salsa-rs/salsa)
 (pinned to `0.27`, matching rust-analyzer). `RootDatabase` is a `#[salsa::db]`;
 a single tracked query runs the whole `FileAnalysis::compute` body, so a
 repeated request returns the framework's memo rather than recomputing. The
-query surface still takes `&mut self` — a read memoizes in place, driven from
-the single-threaded LSP loop — with a shared read-handle model left to later
-work.
+worker's query surface takes `&mut self` — a read memoizes in place — and a
+snapshot surface (below) serves reads off cloned handles on other threads.
+
+### Concurrent snapshot reads
+
+A read-only request can be served off the worker on a background thread (#292).
+The worker mints a `ReadSnapshot` (`plan_concurrent_read`): a second database
+handle built by cloning the Salsa `Storage` and sharing the overlay, generation
+counter, and stamp registry behind `Arc`, with **no** worker bookkeeping of its
+own (`RootDatabase.worker` is `None`). A pool thread runs the analysis query
+against that handle (`ReadSnapshot::serve`), and the worker folds the result
+back (`apply_concurrent_read`). A read is snapshot-eligible only when its entry
+is memoized (a zero-write memo hit) or stale under a **cached** definitive source
+root (a pool recompute is then identical to a worker one); a first analysis, an
+evicted entry, or a tier-3 provisional stale entry stays worker-serial, which is
+what keeps the never-opened cap and the donor/manifest root-upgrade path exactly
+as they are.
+
+The worker is the **sole** minter of snapshots and the sole mutator of the
+entry/root/cap bookkeeping, so a snapshot cannot create an entry, evict, or touch
+the cap — the resident-memory bound above is unchanged. A concurrent write
+quiesces every live snapshot before it mutates the overlay: the write's
+change-stamp bump is a Salsa setter, and a setter waits for every outstanding
+handle to drop, so an in-flight snapshot unwinds at its next checkpoint and
+releases its clone before the overlay mutation runs (the write-turn choke point
+in `apply_overlay_write` orders the stamp bump *before* the overlay write for
+exactly this reason). The write-drain latency is bounded by the checkpoint
+density inside `FileAnalysis::compute` (fetch entry, per-verify-edge, stage
+boundaries).
 
 ### Cancellation
 
@@ -141,8 +169,9 @@ one fat memo is ever pending, and a requery un-evicts the entry with a single
 false-write that forces exactly one fresh recompute. Resident full analyses are
 bounded by *open documents + [`MAX_UNOPENED_ANALYSES`] + a one-write-lagged
 transient*; a small per-path metadata residue is session-permanent (Salsa 0.27
-has no input removal). Serving hits from a cloned `Storage` snapshot is separate
-later work (issue #292).
+has no input removal). Pool reads cannot create entries or evict, so serving hits
+from a cloned `Storage` snapshot leaves this bound unchanged (see [Concurrent
+snapshot reads](#concurrent-snapshot-reads)).
 
 ### Closure-aware invalidation
 
