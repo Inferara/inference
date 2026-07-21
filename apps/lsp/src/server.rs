@@ -365,7 +365,8 @@ impl ServerState {
     /// publish for *only* the notified document and queuing every other open
     /// document the change invalidated for a deferred republish (see
     /// [`queue_invalidated_dependents`](Self::queue_invalidated_dependents) and
-    /// [`drain_pending_republishes`](Self::drain_pending_republishes)). An unknown
+    /// [`drain_pending_republishes_skipping_in_flight`](Self::drain_pending_republishes_skipping_in_flight)).
+    /// An unknown
     /// or unparsable notification — or a `didChange` for a document that was never
     /// opened (#275) — publishes nothing and queues nothing.
     pub(crate) fn on_notification(
@@ -426,10 +427,15 @@ impl ServerState {
     /// containing any analysis panic so one poisoned document cannot lose the
     /// others' publishes.
     ///
-    /// Called when the message loop goes idle and when the client shuts down, so a
-    /// document a keystroke invalidated is refreshed before the loop blocks and
-    /// pending publishes are never dropped on the way out.
-    pub(crate) fn drain_pending_republishes(&mut self) -> Vec<PublishDiagnosticsParams> {
+    /// The in-flight-read-free counterpart of
+    /// [`drain_pending_republishes_skipping_in_flight`](Self::drain_pending_republishes_skipping_in_flight),
+    /// which is what production actually drives at idle; this variant drives the
+    /// same queue/drain/requeue logic without the concurrent-read gate, so the unit
+    /// tests can exercise the deferred-republish contract in isolation. Gated to
+    /// tests because the worker never reaches it now that shutdown skips the drain
+    /// entirely (#294).
+    #[cfg(test)]
+    fn drain_pending_republishes(&mut self) -> Vec<PublishDiagnosticsParams> {
         self.refresh_turn();
         let mut pending: VecDeque<Uri> = self.pending_republish.drain().collect();
         let mut publishes = Vec::with_capacity(pending.len());
@@ -506,8 +512,10 @@ impl ServerState {
         self.host_generation += 1;
     }
 
-    /// Drains the pending-republish set like [`drain_pending_republishes`], but
-    /// **skips** any URI whose path has a concurrent read in flight (#292).
+    /// Drains the pending-republish set into a fresh publish per queued document,
+    /// **skipping** any URI whose path has a concurrent read in flight (#292). The
+    /// worker's idle republish drain; it contains any analysis panic so one poisoned
+    /// document cannot lose the others' publishes.
     ///
     /// A path with a live pool execution must not be fetched by the worker (it
     /// could park on the claim the pool thread holds); its republish waits for the
@@ -642,9 +650,11 @@ fn drain_until_exit(connection: &Connection) {
 /// open document it invalidated is queued ([`ServerState::on_notification`]) and
 /// republished when the worker next goes idle — after the interactive request that
 /// arrived right behind the keystroke has already been answered. The queue is
-/// drained before the worker parks on the next job, a request against a queued
-/// document publishes it fresh immediately ([`ServerState::publish_if_pending`]),
-/// and a shutdown flushes it, so a client never keeps a stale diagnostic set.
+/// drained before the worker parks on the next job, and a request against a queued
+/// document publishes it fresh immediately ([`ServerState::publish_if_pending`]), so
+/// a running client never keeps a stale diagnostic set. Once `shutdown` arrives the
+/// queue is abandoned rather than flushed (#294): the client can no longer act on a
+/// publish (LSP 3.17 forbids notifications after `shutdown`).
 ///
 /// # Shutdown handshake
 ///
@@ -653,7 +663,12 @@ fn drain_until_exit(connection: &Connection) {
 /// itself and turns anything but `exit` into a fatal protocol error. Instead, a
 /// `shutdown` request is answered and flips the worker's `shutting_down` flag;
 /// while it is set, every further request — including a repeated `shutdown` — is
-/// answered with `InvalidRequest` and every notification but `exit` is ignored.
+/// answered with `InvalidRequest` and every notification but `exit` is ignored, and
+/// the worker performs no idle work — no republish drain, no deferred bookkeeping
+/// (#294). Answering `shutdown` never drains the republish queue: the router fires
+/// cancellation ahead of the `shutdown` job, so a drain here would fetch every
+/// queued stale entry under a set cancellation flag and stall teardown behind a
+/// doomed analysis, and any diagnostics it published would violate LSP 3.17.
 /// The `exit` notification ends the loop.
 ///
 /// # Teardown
@@ -991,7 +1006,7 @@ fn worker_loop(
             Err(TryRecvError::Empty) => {
                 // The backlog is empty: run idle work, then block until a job or an
                 // event wakes the loop.
-                worker_idle(connection, req_queue, &mut state)?;
+                worker_idle(connection, req_queue, &mut state, shutting_down)?;
                 crossbeam_channel::select! {
                     recv(jobs) -> job => match job {
                         Ok(job) => {
@@ -1053,11 +1068,22 @@ fn drain_job_batch(
 /// 2. The republish drain, skipping any path with a read in flight (the worker must
 ///    never fetch a path a pool thread is executing).
 /// 3. Serving any routed-back request whose path has left the in-flight set.
+///
+/// Once `shutting_down` is set, all of this is skipped (#294): a client that has
+/// sent `shutdown` cannot receive further notifications (LSP 3.17), so every idle
+/// republish is protocol-noise, and — because the router fires cancellation ahead
+/// of `shutdown` — an idle recompute would fetch a stale entry under a set
+/// cancellation flag and stall the whole teardown behind a doomed analysis. The
+/// worker then only consumes the remaining jobs until `exit`.
 fn worker_idle(
     connection: &Connection,
     req_queue: &Mutex<ReqQueue<(), ()>>,
     state: &mut ServerState,
+    shutting_down: bool,
 ) -> anyhow::Result<()> {
+    if shutting_down {
+        return Ok(());
+    }
     if state.in_flight_reads.is_empty() && !state.pending_unopened.is_empty() {
         for path in std::mem::take(&mut state.pending_unopened) {
             state.host.apply_unopened_read_bookkeeping(&path);
@@ -1314,9 +1340,12 @@ fn handle_message(
         }
         Message::Request(request) if request.method == Shutdown::METHOD => {
             *shutting_down = true;
-            // Flush queued republishes before parking on `exit`, so a graceful
-            // shutdown never drops a document's owed diagnostics.
-            publish_all(connection, state.drain_pending_republishes())?;
+            // Answer `shutdown` and stop there — no republish drain (#294). The
+            // client cannot act on diagnostics published after `shutdown` (LSP 3.17
+            // forbids the server sending further notifications), and the router has
+            // already fired cancellation ahead of this job, so draining here would
+            // fetch every queued stale entry under a set cancellation flag — stalling
+            // teardown behind a doomed analysis instead of answering promptly.
             send_gated_response(connection, req_queue, Response::new_ok(request.id, ()))?;
         }
         Message::Request(request) => {
@@ -3000,7 +3029,16 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
     }
 
     #[test]
-    fn shutdown_does_not_drop_a_queued_republish() {
+    fn shutdown_abandons_a_queued_republish() {
+        // A change queues the dependent (`main`) for a deferred republish; `shutdown`
+        // then arrives before the worker next goes idle to drain it. The queue is
+        // abandoned, not flushed: after `shutdown` the server must send no further
+        // notifications (LSP 3.17), and a client that has shut down is tearing down
+        // and would never render those diagnostics anyway (#294). This test's earlier
+        // form asserted the opposite — "a graceful shutdown must not lose the queued
+        // dependent republish" — a plausible-but-wrong contract written before that
+        // protocol rule was considered; publishing on the shutdown path also stalled
+        // teardown behind the doomed recompute the router had already cancelled.
         let (client, handle) = run_server();
         send_to(
             &client,
@@ -3018,9 +3056,9 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
         recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT)
             .expect("main publishes on open");
 
-        // Change lib and immediately shut down. Whether the dependent drains at
-        // idle or on the shutdown flush, the queued republish for main must not be
-        // lost.
+        // Change lib (queuing main) and immediately shut down, so `shutdown` is
+        // processed before the worker's idle drain runs — the dependent is still
+        // queued when the shutting-down flag flips.
         send_to(
             &client,
             Message::Notification(did_change_notification(
@@ -3044,9 +3082,11 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
                 serde_json::Value::Null,
             )),
         );
+        // No republish for the queued dependent is emitted on the shutdown path;
+        // `recv_publish_for` returns `None` when the session ends without one.
         assert!(
-            recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT).is_some(),
-            "a graceful shutdown must not lose the queued dependent republish"
+            recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT).is_none(),
+            "shutdown abandons the queued dependent republish — no notifications after shutdown"
         );
         handle.join().expect("server thread joins after exit");
     }
