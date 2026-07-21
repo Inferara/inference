@@ -105,6 +105,17 @@ pub struct TypedContext {
     resolved_call_targets: FxHashMap<ExprId, CallTarget>,
 }
 
+// Compile-time assertion: TypedContext is Send + Sync. Its symbol table is an
+// index arena with no interior mutability, so this falls out structurally — the
+// proof that the scope tree carries no `Arc<RefCell<_>>` (#157). Mirrors the
+// `AstArena` assertion in `inference_ast::arena`.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+    assert_send::<TypedContext>();
+    assert_sync::<TypedContext>();
+};
+
 impl TypedContext {
     pub(crate) fn new(arena: AstArena) -> Self {
         Self {
