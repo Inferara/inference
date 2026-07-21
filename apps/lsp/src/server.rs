@@ -3100,56 +3100,90 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
         // dependent republish" — a plausible-but-wrong contract written before that
         // protocol rule was considered; publishing on the shutdown path also stalled
         // teardown behind the doomed recompute the router had already cancelled.
-        let (client, handle) = run_server();
-        send_to(
-            &client,
-            Message::Notification(did_open_notification("file:///inf-test/lib.inf", LIB_SOURCE)),
-        );
-        recv_publish_for(&client, "file:///inf-test/lib.inf", LOOP_TIMEOUT)
-            .expect("lib publishes on open");
-        send_to(
-            &client,
-            Message::Notification(did_open_notification(
-                "file:///inf-test/main.inf",
-                MAIN_IMPORTING_LIB,
-            )),
-        );
-        recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT)
-            .expect("main publishes on open");
+        //
+        // Driven directly rather than through the server loop: the loop form raced
+        // `shutdown` against the worker's idle drain (the drain won under the slower
+        // coverage runner and republished the dependent before the flag flipped),
+        // while direct drive fixes the order the contract is about — the dependent
+        // is queued, then `shutdown` arrives, then an idle turn runs.
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        open(&mut state, "file:///inf-test/lib.inf", LIB_SOURCE);
+        open(&mut state, "file:///inf-test/main.inf", MAIN_IMPORTING_LIB);
+        let _ = state.drain_pending_republishes();
+        let (tasks_tx, _tasks_rx) = crossbeam_channel::unbounded::<super::ReadTask>();
+        let mut shutting_down = false;
 
-        // Change lib (queuing main) and immediately shut down, so `shutdown` is
-        // processed before the worker's idle drain runs — the dependent is still
-        // queued when the shutting-down flag flips.
-        send_to(
-            &client,
+        // The change publishes `lib` eagerly and queues `main` for the idle drain.
+        super::handle_message(
+            &server,
+            &req_queue,
+            &mut state,
+            &mut shutting_down,
+            &tasks_tx,
             Message::Notification(did_change_notification(
                 "file:///inf-test/lib.inf",
                 2,
                 "pub fn helper() -> i32 { return 8; }",
             )),
+        )
+        .expect("handle didChange");
+        assert!(
+            state
+                .pending_republish
+                .iter()
+                .any(|uri| uri.as_str() == "file:///inf-test/main.inf"),
+            "the change queues the dependent before shutdown arrives"
         );
-        send_to(
-            &client,
+
+        // `shutdown` lands with the dependent still queued; the idle turn after it
+        // must do nothing.
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(1), ());
+        super::handle_message(
+            &server,
+            &req_queue,
+            &mut state,
+            &mut shutting_down,
+            &tasks_tx,
             Message::Request(Request::new(
                 RequestId::from(1),
                 Shutdown::METHOD.to_owned(),
                 serde_json::Value::Null,
             )),
-        );
-        send_to(
-            &client,
-            Message::Notification(lsp_server::Notification::new(
-                Exit::METHOD.to_owned(),
-                serde_json::Value::Null,
-            )),
-        );
-        // No republish for the queued dependent is emitted on the shutdown path;
-        // `recv_publish_for` returns `None` when the session ends without one.
-        assert!(
-            recv_publish_for(&client, "file:///inf-test/main.inf", LOOP_TIMEOUT).is_none(),
-            "shutdown abandons the queued dependent republish — no notifications after shutdown"
-        );
-        handle.join().expect("server thread joins after exit");
+        )
+        .expect("handle shutdown");
+        assert!(shutting_down, "the shutdown request flips the worker flag");
+        super::worker_idle(&server, &req_queue, &mut state, shutting_down)
+            .expect("the post-shutdown idle turn");
+
+        // Everything the server sent: `lib`'s eager publish and the `shutdown`
+        // response — and no publish for the abandoned dependent.
+        let mut saw_shutdown_response = false;
+        while let Ok(message) = client.receiver.try_recv() {
+            match message {
+                Message::Response(response) => {
+                    assert_eq!(response.id, RequestId::from(1));
+                    saw_shutdown_response = true;
+                }
+                Message::Notification(notification) => {
+                    let params =
+                        serde_json::to_string(&notification.params).expect("publish params");
+                    assert!(
+                        !params.contains("main.inf"),
+                        "shutdown abandons the queued dependent republish — no \
+                         notifications after shutdown"
+                    );
+                }
+                Message::Request(_) => {}
+            }
+        }
+        assert!(saw_shutdown_response, "shutdown is answered");
     }
 
     // --- Concurrent snapshot reads (#292) --------------------------------------
