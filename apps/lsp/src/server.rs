@@ -1,33 +1,45 @@
-//! The server state and the single-threaded message loop.
+//! The server state and the router/worker message loop.
 //!
 //! [`ServerState`] holds the analysis host and the set of open documents; it turns
 //! one request into one [`Response`] and one notification into the diagnostics to
 //! publish, with no I/O of its own — which is what makes it directly testable.
-//! [`run`] owns the transport: it reads messages, handles the shutdown/exit
-//! handshake inline, routes everything else through the state, and writes the
-//! results back. Nothing here prints to stdout; that stream is the protocol
-//! channel.
+//!
+//! [`run`] splits the session across two threads so an in-flight analysis stays
+//! interruptible even though analysis itself is strictly serial (issue #157). A
+//! **worker** thread ([`worker_loop`]) owns the [`ServerState`] and the sole
+//! analysis handle and processes jobs one at a time — today's message loop, one
+//! thread over. A **router** thread ([`router_loop`]) reads the transport and
+//! forwards each message to the worker instantly over an unbounded [`Job`] channel,
+//! handling inline only what must not wait behind an analysis: incoming
+//! request-id bookkeeping, `$/cancelRequest`, and requesting cancellation of the
+//! worker's in-flight analysis before it forwards an adopted document write. Every
+//! response and publish leaves from the worker; nothing here prints to stdout,
+//! which is the protocol channel.
 
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use inference_ide::AnalysisHost;
+use inference_ide::{AnalysisCancelSource, AnalysisHost, is_cancellation};
 use lsp_server::{
-    Connection, ErrorCode, ExtractError, Message, Notification, Request, RequestId, Response,
+    Connection, ErrorCode, ExtractError, Message, Notification, ReqQueue, Request, RequestId,
+    Response,
 };
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit, Notification as _,
-    PublishDiagnostics,
+    Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit,
+    Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Initialize, InlayHintRequest,
     Request as _, Shutdown,
 };
-use lsp_types::{InitializeParams, MarkupKind, PublishDiagnosticsParams, Uri};
+use lsp_types::{
+    CancelParams, InitializeParams, MarkupKind, NumberOrString, PublishDiagnosticsParams, Uri,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{capabilities, handlers};
@@ -38,6 +50,18 @@ const SERVER_NAME: &str = env!("CARGO_PKG_NAME");
 /// The server version reported in the initialize result's `serverInfo` (the crate
 /// version).
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The stack each of the server's threads runs on. The analysis pipeline
+/// (type-checker, analysis passes) recurses with the input's nesting depth, so a
+/// pathological or generated document can overflow the default stack and abort the
+/// whole process — taking every open document's state with it. A stack overflow
+/// aborts rather than unwinds, so a thread cannot *catch* it; the mitigation is
+/// headroom. 64 MiB (mirroring rust-analyzer's main-loop stack) clears realistic
+/// deep nesting by a wide margin. A thread must set this explicitly: a spawned
+/// thread's default stack is far smaller than the main thread's. `main` runs the
+/// router on a thread of this size and the analysis worker — where the deep
+/// recursion now happens — is spawned with the same headroom.
+pub(crate) const SERVER_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 /// A document the editor has opened, with the path the analysis host knows it by
 /// and the last version the editor reported (echoed back in published
@@ -96,16 +120,81 @@ pub(crate) struct ServerState {
     /// request arriving right after a keystroke is answered before the other
     /// affected documents are recomputed.
     pending_republish: FxHashSet<Uri>,
+    /// Cancellation handle bound to [`host`](Self::host). Firing it interrupts an
+    /// in-flight analysis at its next checkpoint; the write epoch it carries is
+    /// what tells a caught cancellation apart from a residual self-cancel.
+    cancel_source: AnalysisCancelSource,
+    /// The write epoch stamped on the job currently being processed; a caught
+    /// cancellation with a newer source epoch means a write superseded this work.
+    job_epoch: u64,
 }
 
 impl ServerState {
+    /// Builds a state bound to a fresh detached cancellation source, so a unit test
+    /// can fire `cancel_source` and reach the real database token. The worker uses
+    /// [`with_cancel_source`](Self::with_cancel_source) instead, to share the
+    /// router's source; this convenience has no production caller.
+    #[cfg(test)]
     pub(crate) fn new(capabilities: NegotiatedCapabilities) -> Self {
+        Self::with_cancel_source(capabilities, AnalysisCancelSource::detached())
+    }
+
+    /// Builds a state whose host is bound to `cancel_source`, so a cancellation
+    /// requested through that source interrupts this state's analyses. `new`
+    /// binds a fresh detached source; the two entry points differ only in whether
+    /// the source is shared with another thread.
+    pub(crate) fn with_cancel_source(
+        capabilities: NegotiatedCapabilities,
+        cancel_source: AnalysisCancelSource,
+    ) -> Self {
+        let host = AnalysisHost::default();
+        host.bind_cancellation(&cancel_source);
         Self {
-            host: AnalysisHost::default(),
+            host,
             documents: FxHashMap::default(),
             capabilities,
             pending_republish: FxHashSet::default(),
+            cancel_source,
+            job_epoch: 0,
         }
+    }
+
+    /// Stamps this turn with the epoch the router forwarded the job under, so a
+    /// cancellation caught while processing it is classified against the write
+    /// state current when the job was routed. The worker calls this before
+    /// dispatching each job.
+    fn begin_turn(&mut self, epoch: u64) {
+        self.job_epoch = epoch;
+    }
+
+    /// Adopts the source's current epoch as this turn's baseline, so a
+    /// cancellation caught afterward is classified against work that started now
+    /// rather than against whatever job last ran. Called before the idle and
+    /// shutdown drains, whose publishes are their own units of work.
+    fn refresh_turn(&mut self) {
+        self.job_epoch = self.cancel_source.epoch();
+    }
+
+    /// Whether a write has been requested since this turn's baseline epoch — i.e.
+    /// the work in flight is stale and a caught cancellation should be answered
+    /// ContentModified rather than retried.
+    fn superseded(&self) -> bool {
+        self.cancel_source.epoch() > self.job_epoch
+    }
+
+    /// The worker's request-dispatch wrapper: a request whose job the router
+    /// forwarded before a newer write is answered ContentModified without
+    /// computing at all.
+    ///
+    /// The dispatch-time fast-fail lives here rather than inside
+    /// [`handle_request_resilient`](Self::handle_request_resilient) because the
+    /// unit tests call that method directly and rely on it computing; only a job
+    /// routed through the worker carries a `job_epoch` older than a landed write.
+    pub(crate) fn respond_to_request(&mut self, request: Request) -> Response {
+        if self.superseded() {
+            return content_modified_response(request.id);
+        }
+        self.handle_request_resilient(request)
     }
 
     /// Routes a request through [`handle_request`](Self::handle_request),
@@ -126,13 +215,26 @@ impl ServerState {
     /// never a half-built cache entry. The unconditional rebuild does not lean on
     /// that invariant — it keeps the recovery identical to the notification path
     /// and robust to future changes in what a query mutates.
+    ///
+    /// A caught *cancellation* (not a panic) is classified against the write
+    /// epoch: if a newer write superseded this request, it is answered
+    /// ContentModified so the client retries against the new content; the host is
+    /// left intact, because a cancelled analysis leaves no memo behind. A
+    /// cancellation with no newer write behind it is a residual self-cancel — the
+    /// unwind already consumed the signal — so the request is simply retried; a
+    /// genuinely newer write always arrives with a newer epoch, which the
+    /// supersede arm catches, bounding the retry.
     pub(crate) fn handle_request_resilient(&mut self, request: Request) -> Response {
-        let id = request.id.clone();
-        match catch(|| self.handle_request(request)) {
-            Some(response) => response,
-            None => {
-                self.rebuild_host();
-                panic_response(id)
+        loop {
+            let id = request.id.clone();
+            match catch(|| self.handle_request(request.clone())) {
+                Caught::Completed(response) => return response,
+                Caught::Canceled if self.superseded() => return content_modified_response(id),
+                Caught::Canceled => {}
+                Caught::Panicked => {
+                    self.rebuild_host();
+                    return panic_response(id);
+                }
             }
         }
     }
@@ -212,11 +314,26 @@ impl ServerState {
         &mut self,
         notification: Notification,
     ) -> Vec<PublishDiagnosticsParams> {
-        match catch(|| self.on_notification(notification)) {
-            Some(publishes) => publishes,
-            None => {
-                self.rebuild_host();
-                Vec::new()
+        loop {
+            match catch(|| self.on_notification(notification.clone())) {
+                Caught::Completed(publishes) => return publishes,
+                Caught::Canceled if self.superseded() => {
+                    // The write applied but its eager publish was superseded by a
+                    // still-newer write behind us: requeue rather than lose it.
+                    if let Some(uri) = notification_document_uri(&notification)
+                        .and_then(|raw| Uri::from_str(raw).ok())
+                        && self.documents.contains_key(&uri)
+                    {
+                        self.pending_republish.insert(uri.clone());
+                        self.queue_invalidated_dependents(&uri);
+                    }
+                    return Vec::new();
+                }
+                Caught::Canceled => {}
+                Caught::Panicked => {
+                    self.rebuild_host();
+                    return Vec::new();
+                }
             }
         }
     }
@@ -290,11 +407,21 @@ impl ServerState {
     /// document a keystroke invalidated is refreshed before the loop blocks and
     /// pending publishes are never dropped on the way out.
     pub(crate) fn drain_pending_republishes(&mut self) -> Vec<PublishDiagnosticsParams> {
-        let pending: Vec<Uri> = self.pending_republish.drain().collect();
+        self.refresh_turn();
+        let mut pending: VecDeque<Uri> = self.pending_republish.drain().collect();
         let mut publishes = Vec::with_capacity(pending.len());
-        for uri in pending {
-            if let Some(params) = catch(|| handlers::publish_diagnostics_params(self, &uri)) {
-                publishes.push(params);
+        while let Some(uri) = pending.pop_front() {
+            match catch(|| handlers::publish_diagnostics_params(self, &uri)) {
+                Caught::Completed(params) => publishes.push(params),
+                Caught::Canceled if self.superseded() => {
+                    // A newer write is queued behind this drain; put this uri and
+                    // the untried remainder back for the post-write drain.
+                    self.pending_republish.insert(uri);
+                    self.pending_republish.extend(pending);
+                    break;
+                }
+                Caught::Canceled => pending.push_front(uri), // residual: retry this uri
+                Caught::Panicked => {} // existing behavior: skip the poisoned uri, no rebuild
             }
         }
         publishes
@@ -311,7 +438,18 @@ impl ServerState {
         if !self.pending_republish.remove(uri) {
             return None;
         }
-        catch(|| handlers::publish_diagnostics_params(self, uri))
+        self.refresh_turn();
+        loop {
+            match catch(|| handlers::publish_diagnostics_params(self, uri)) {
+                Caught::Completed(params) => return Some(params),
+                Caught::Canceled if self.superseded() => {
+                    self.pending_republish.insert(uri.clone());
+                    return None;
+                }
+                Caught::Canceled => {}
+                Caught::Panicked => return None,
+            }
+        }
     }
 
     /// Replaces the analysis host with a fresh one carrying only the tracked open
@@ -323,12 +461,20 @@ impl ServerState {
     /// still considers open. The first query after this recomputes every analysis
     /// from scratch. Documents are the sole source of truth here, so anything the
     /// editor had not opened is simply gone — which is correct.
+    ///
+    /// It must never run a semantic query — it only re-applies overlays — because
+    /// it executes outside [`catch`] while a cancellation may still be pending; a
+    /// query here could unwind uncontained. The fresh host mints a fresh
+    /// cancellation token, so the source is rebound before returning: forgetting
+    /// this would silently disable all cancellation after the first contained
+    /// panic.
     fn rebuild_host(&mut self) {
         let mut host = AnalysisHost::default();
         for document in self.documents.values() {
             host.open_document(&document.path, Arc::clone(&document.text));
         }
         self.host = host;
+        self.host.bind_cancellation(&self.cancel_source);
     }
 }
 
@@ -390,85 +536,277 @@ fn drain_until_exit(connection: &Connection) {
     }
 }
 
-/// Runs the message loop until the client exits or the connection closes.
+/// Runs one session as a router thread plus an analysis worker thread, returning
+/// when the client exits or the connection closes.
 ///
-/// # Shedding per-keystroke work
+/// # Router / worker split
 ///
-/// Each keystroke arrives as its own full-text `didChange`, and analysis is
-/// single-threaded, so a naive one-message-at-a-time loop would run the whole
-/// closure pipeline once per keystroke while an interactive request waits behind
-/// the burst. Two mechanisms shed that cost (issue #247):
+/// Analysis is strictly serial — the semantic stack holds `!Send` state and one
+/// message is answered at a time — but an in-flight analysis must still be
+/// *interruptible* so a fresh keystroke does not wait out a stale request (issue
+/// #157). The work is split across two threads with no shared analysis state:
 ///
-/// * **Coalescing.** A dedicated forwarder ([`spawn_transport_pump`]) keeps the
-///   transport's rendezvous receiver continuously drained into a buffer, so while
-///   the loop analyzes one change the burst behind it accumulates there. When the
-///   head of that buffer is a `didChange`, the available backlog is drained and
-///   consecutive changes to the same document collapse to their final text
-///   ([`coalesce_changes`]), so a typing burst runs the pipeline a handful of times
-///   instead of once per keystroke. A `didOpen`/`didClose` for that document, or
-///   any request, is a barrier the coalescer never reorders across, and no
-///   non-`didChange` message is ever dropped.
-/// * **Deferred dependents.** A notification publishes eagerly only for the
-///   changed document; every other open document it invalidated is queued
-///   ([`ServerState::on_notification`]) and republished when the loop next goes
-///   idle — after the interactive request that arrived right behind the keystroke
-///   has already been answered. The queue is always drained before the loop
-///   blocks on the next message, a request against a queued document publishes it
-///   fresh immediately ([`ServerState::publish_if_pending`]), and a shutdown
-///   flushes it, so a client never keeps a stale diagnostic set indefinitely.
+/// * The **worker** ([`worker_loop`]) owns the [`ServerState`] and the sole
+///   analysis handle, and runs today's message loop over an unbounded [`Job`]
+///   channel: one job at a time, in arrival order. Every response and every
+///   publish leaves from here.
+/// * The **router** ([`router_loop`]) reads the transport directly and forwards
+///   each message to the worker *instantly*, so nothing that must not wait behind
+///   an analysis does. It keeps the incoming request-id bookkeeping, answers
+///   `$/cancelRequest`, and — for a document write it adopts (and for
+///   shutdown/exit) — requests cancellation of the worker's in-flight analysis
+///   *before* forwarding the write, stamping the write's job with the post-bump
+///   write epoch so the worker classifies its own eager publish as current.
+///
+/// Because the router forwards without blocking, the unbounded job channel is the
+/// buffer a typing burst accumulates in; the worker collapses consecutive
+/// same-document changes at dequeue ([`coalesced_job_batch`]), so a burst runs the
+/// pipeline a handful of times instead of once per keystroke. A `didOpen`/
+/// `didClose` for that document, or any request, is a barrier the coalescer never
+/// reorders across, and no non-`didChange` job is ever dropped.
+///
+/// A caught cancellation is not a panic: a request superseded by a newer write is
+/// answered ContentModified (the client retries against the new content) with the
+/// analysis cache left intact, while a residual self-cancel is simply retried.
+///
+/// # Deferred dependents
+///
+/// A notification publishes eagerly only for the changed document; every other
+/// open document it invalidated is queued ([`ServerState::on_notification`]) and
+/// republished when the worker next goes idle — after the interactive request that
+/// arrived right behind the keystroke has already been answered. The queue is
+/// drained before the worker parks on the next job, a request against a queued
+/// document publishes it fresh immediately ([`ServerState::publish_if_pending`]),
+/// and a shutdown flushes it, so a client never keeps a stale diagnostic set.
 ///
 /// # Shutdown handshake
 ///
 /// The shutdown handshake is handled inline rather than delegated to
 /// `lsp-server`'s `Connection::handle_shutdown`, which consumes the next message
 /// itself and turns anything but `exit` into a fatal protocol error. Instead, a
-/// `shutdown` request is answered and flips a `shutting_down` flag; while it is
-/// set, every further request — including a repeated `shutdown` — is answered with
-/// `InvalidRequest` (the spec's behaviour for requests received between `shutdown`
-/// and `exit`) and every notification but `exit` is ignored. The `exit`
-/// notification ends the loop. Every other request is routed through
-/// [`ServerState`], and document notifications may publish diagnostics.
+/// `shutdown` request is answered and flips the worker's `shutting_down` flag;
+/// while it is set, every further request — including a repeated `shutdown` — is
+/// answered with `InvalidRequest` and every notification but `exit` is ignored.
+/// The `exit` notification ends the loop.
 ///
-/// The `shutting_down` guard precedes the `shutdown` arm so a *second* `shutdown`
-/// is rejected like any other post-shutdown request rather than answered a second
-/// `null` success.
+/// # Teardown
 ///
-/// Requests and notifications are dispatched through the resilient wrappers
-/// ([`handle_request_resilient`](ServerState::handle_request_resilient),
-/// [`on_notification_resilient`](ServerState::on_notification_resilient)), so an
-/// unwinding panic in the analysis stack fails a single request or publish
-/// instead of the whole session.
+/// The threads are joined through [`std::thread::scope`], so the worker may borrow
+/// the [`Connection`] for its sender without any `'static` bound. When the router
+/// returns it drops the job sender, so the worker unblocks on channel disconnect
+/// even if it never saw the exit job, and the scope guarantees the join on every
+/// path.
 ///
 /// # Errors
 ///
-/// Returns an error if a message cannot be written to the transport.
+/// Returns an error if a message cannot be written to the transport, or if the
+/// analysis worker thread panicked outside the contained analysis boundary.
 pub fn run(connection: &Connection, init_params: &InitializeParams) -> anyhow::Result<()> {
-    let mut state = ServerState::new(NegotiatedCapabilities::from_init_params(init_params));
+    let capabilities = NegotiatedCapabilities::from_init_params(init_params);
+    let cancel = AnalysisCancelSource::detached();
+    let req_queue: Mutex<ReqQueue<(), ()>> = Mutex::new(ReqQueue::default());
+    let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+
+    thread::scope(|scope| {
+        let worker_cancel = cancel.clone();
+        let worker_req_queue = &req_queue;
+        let worker = thread::Builder::new()
+            .name("inference-lsp-analysis".to_owned())
+            .stack_size(SERVER_STACK_SIZE)
+            .spawn_scoped(scope, move || {
+                worker_loop(
+                    jobs_rx,
+                    connection,
+                    capabilities,
+                    worker_cancel,
+                    worker_req_queue,
+                )
+            })?;
+
+        let router_result = router_loop(connection, jobs_tx, &cancel, &req_queue);
+        // `jobs_tx` moved into the router and dropped when it returned, so the
+        // worker unblocks on disconnect even if it never saw the exit job; the
+        // scope then guarantees the join on every path.
+        let worker_result = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("the analysis worker panicked"))?;
+        router_result?;
+        worker_result
+    })
+}
+
+/// A transport message paired with the write epoch the router forwarded it under,
+/// so the worker can tell a cancellation that superseded this job apart from a
+/// residual self-cancel.
+struct Job {
+    epoch: u64,
+    message: Message,
+}
+
+/// Routes transport messages to the analysis worker in arrival order, handling
+/// only what must not wait behind an analysis: incoming request-id bookkeeping,
+/// `$/cancelRequest`, and requesting cancellation for adopted document writes.
+///
+/// Cancellation for a write is requested *strictly before* the write is forwarded
+/// and the job is stamped with the post-bump epoch, so the worker always
+/// classifies the write's own eager publish as current (a residual self-cancel it
+/// retries) rather than as superseded.
+fn router_loop(
+    connection: &Connection,
+    jobs: mpsc::Sender<Job>,
+    cancel: &AnalysisCancelSource,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+) -> anyhow::Result<()> {
+    let mut tracked: FxHashSet<String> = FxHashSet::default();
+    for message in &connection.receiver {
+        let mut epoch = cancel.epoch();
+        match &message {
+            Message::Request(request) => {
+                req_queue
+                    .lock()
+                    .expect("request queue lock")
+                    .incoming
+                    .register(request.id.clone(), ());
+                // Shutdown aborts any in-flight seam-slow compute within one poll
+                // instead of stalling teardown while the worker finishes it.
+                if request.method == Shutdown::METHOD {
+                    epoch = cancel.request_cancellation();
+                }
+            }
+            Message::Notification(notification) => {
+                if notification.method == Cancel::METHOD {
+                    handle_cancel_notification(connection, req_queue, notification)?;
+                    continue; // Consumed here: bookkeeping only, never forwarded.
+                }
+                if notification.method == Exit::METHOD
+                    || is_adopted_write(&mut tracked, notification)
+                {
+                    epoch = cancel.request_cancellation();
+                }
+            }
+            Message::Response(_) => {}
+        }
+        let exit = matches!(&message, Message::Notification(n) if n.method == Exit::METHOD);
+        if jobs.send(Job { epoch, message }).is_err() {
+            break; // The worker is gone; stop routing.
+        }
+        if exit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Mirrors the worker's adoption decision from the message stream alone, using the
+/// same checks the handlers apply: a `didOpen` is adopted iff its URI maps to a
+/// path; a `didChange` iff its document is tracked and carries content changes; a
+/// `didClose` iff its document was tracked. FIFO delivery keeps this mirror and the
+/// worker's `documents` map consistent for every mappable URI.
+///
+/// A benign desync (a client spelling one document two ways across its lifecycle)
+/// degrades gracefully in both directions: a spurious fire is a harmless
+/// ContentModified under the epoch protocol, and a missed fire only loses
+/// preemption — the worker still applies the write and publishes.
+fn is_adopted_write(tracked: &mut FxHashSet<String>, notification: &Notification) -> bool {
+    let Some(raw) = notification_document_uri(notification) else {
+        return false;
+    };
+    if notification.method == DidOpenTextDocument::METHOD {
+        let mappable = Uri::from_str(raw)
+            .ok()
+            .as_ref()
+            .and_then(crate::uri::to_path)
+            .is_some();
+        if mappable {
+            tracked.insert(raw.to_owned());
+        }
+        mappable
+    } else if notification.method == DidChangeTextDocument::METHOD {
+        tracked.contains(raw) && has_content_changes(notification)
+    } else if notification.method == DidCloseTextDocument::METHOD {
+        tracked.remove(raw)
+    } else {
+        false
+    }
+}
+
+/// Whether a `didChange` notification carries a non-empty `contentChanges` array.
+/// An empty one applies nothing (the worker ignores it), so it is not a write for
+/// cancellation purposes.
+fn has_content_changes(notification: &Notification) -> bool {
+    notification
+        .params
+        .get("contentChanges")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|changes| !changes.is_empty())
+}
+
+/// Answers `$/cancelRequest` from the router: a still-pending id is completed and
+/// answered RequestCanceled (-32800) immediately, and the worker's late response
+/// for it is then suppressed by the completion gate. The in-flight compute is not
+/// aborted (bookkeeping only, rust-analyzer parity).
+///
+/// Parsed error-tolerantly — a malformed one is dropped rather than propagated, so
+/// the router stays infallible on client input.
+fn handle_cancel_notification(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    notification: &Notification,
+) -> anyhow::Result<()> {
+    let Ok(params) = serde_json::from_value::<CancelParams>(notification.params.clone()) else {
+        return Ok(());
+    };
+    let id = match params.id {
+        NumberOrString::Number(n) => RequestId::from(n),
+        NumberOrString::String(s) => RequestId::from(s),
+    };
+    if let Some(response) = req_queue
+        .lock()
+        .expect("request queue lock")
+        .incoming
+        .cancel(id)
+    {
+        send(connection, Message::Response(response))?;
+    }
+    Ok(())
+}
+
+/// The analysis worker: owns [`ServerState`] and processes jobs strictly in order
+/// — today's message loop, one thread over. It borrows the connection only for its
+/// sender (every response and publish leaves from here, except the router-built
+/// -32800) and must never read `connection.receiver`. It breaks on the exit job
+/// and on channel disconnect, so teardown cannot hang.
+fn worker_loop(
+    jobs: Receiver<Job>,
+    connection: &Connection,
+    capabilities: NegotiatedCapabilities,
+    cancel: AnalysisCancelSource,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+) -> anyhow::Result<()> {
+    let mut state = ServerState::with_cancel_source(capabilities, cancel);
     let mut shutting_down = false;
 
-    // Read through a buffering forwarder rather than the transport receiver
-    // directly, so a typing burst can accumulate a backlog the coalescer can
-    // collapse (see [`spawn_transport_pump`]).
-    let incoming = spawn_transport_pump(connection)?;
-
     loop {
-        let message = match incoming.try_recv() {
-            Ok(message) => message,
+        let job = match jobs.try_recv() {
+            Ok(job) => job,
             Err(TryRecvError::Empty) => {
                 // The backlog is empty: refresh every document a recent change
-                // invalidated before parking on the next message, so no queued
+                // invalidated before parking on the next job, so no queued
                 // republish is left indefinitely stale.
                 publish_all(connection, state.drain_pending_republishes())?;
-                match incoming.recv() {
-                    Ok(message) => message,
+                match jobs.recv() {
+                    Ok(job) => job,
                     Err(_) => return Ok(()),
                 }
             }
             Err(TryRecvError::Disconnected) => return Ok(()),
         };
 
-        for message in coalesced_batch(message, &incoming) {
-            if handle_message(connection, &mut state, &mut shutting_down, message)?.is_break() {
+        for job in coalesced_job_batch(job, &jobs) {
+            state.begin_turn(job.epoch);
+            if handle_message(connection, req_queue, &mut state, &mut shutting_down, job.message)?
+                .is_break()
+            {
                 return Ok(());
             }
         }
@@ -490,21 +828,26 @@ impl Flow {
 
 /// Handles one message: the shutdown/exit handshake, a routed request, or a
 /// document notification. Returns [`Flow::Break`] only for `exit`.
+///
+/// Every response send goes through [`send_gated_response`], so a request the
+/// router already answered RequestCanceled for is never answered a second time.
 fn handle_message(
     connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
     state: &mut ServerState,
     shutting_down: &mut bool,
     message: Message,
 ) -> anyhow::Result<Flow> {
     match message {
         Message::Request(request) if *shutting_down => {
-            send(
+            send_gated_response(
                 connection,
-                Message::Response(Response::new_err(
+                req_queue,
+                Response::new_err(
                     request.id,
                     ErrorCode::InvalidRequest as i32,
                     "the server is shutting down".to_owned(),
-                )),
+                ),
             )?;
         }
         Message::Request(request) if request.method == Shutdown::METHOD => {
@@ -512,15 +855,12 @@ fn handle_message(
             // Flush queued republishes before parking on `exit`, so a graceful
             // shutdown never drops a document's owed diagnostics.
             publish_all(connection, state.drain_pending_republishes())?;
-            send(
-                connection,
-                Message::Response(Response::new_ok(request.id, ())),
-            )?;
+            send_gated_response(connection, req_queue, Response::new_ok(request.id, ()))?;
         }
         Message::Request(request) => {
             let document = request_document_uri(&request);
-            let response = state.handle_request_resilient(request);
-            send(connection, Message::Response(response))?;
+            let response = state.respond_to_request(request);
+            send_gated_response(connection, req_queue, response)?;
             // A request against a document a recent change invalidated recomputes
             // it on demand; publish its now-fresh diagnostics and clear it from
             // the queue so the idle drain does not redo it.
@@ -541,6 +881,27 @@ fn handle_message(
     Ok(Flow::Continue)
 }
 
+/// Sends `response` only if its request is still pending: a completion gate so a
+/// request already answered RequestCanceled (-32800) by the router's
+/// `$/cancelRequest` handling is never answered a second time. Completing the id
+/// (removing it from the incoming queue) both records the answer and is the check.
+fn send_gated_response(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    response: Response,
+) -> anyhow::Result<()> {
+    if req_queue
+        .lock()
+        .expect("request queue lock")
+        .incoming
+        .complete(&response.id)
+        .is_some()
+    {
+        send(connection, Message::Response(response))?;
+    }
+    Ok(())
+}
+
 /// Sends each diagnostics set as a `publishDiagnostics` notification.
 fn publish_all(
     connection: &Connection,
@@ -553,43 +914,66 @@ fn publish_all(
     Ok(())
 }
 
-/// Spawns a forwarder that drains the transport's rendezvous receiver into an
-/// unbounded buffer, and returns the buffer's receiver for the loop to read.
+/// The batch of jobs to process for `first`, in arrival order.
 ///
-/// `lsp-server`'s stdio and socket transports connect their reader thread to the
-/// loop over a zero-capacity channel (`bounded(0)`): the reader blocks handing over
-/// each frame until the loop takes it, so consecutive frames of a typing burst
-/// never pile up in the channel — they sit unparsed in the OS pipe, invisible to a
-/// `try_recv`. Draining that channel continuously on a dedicated thread moves the
-/// backlog into an unbounded buffer instead, so while the loop is busy analyzing
-/// one change the burst behind it collects where [`coalesced_batch`] can see and
-/// collapse it. Without this, coalescing is a no-op over the production transport,
-/// since [`Connection::memory`] (the tests' transport) is the only one that buffers.
-///
-/// The forwarder ends on its own when either end disconnects — the transport closes
-/// (its reader gone) or the loop drops the returned receiver — so it needs no
-/// explicit join.
-fn spawn_transport_pump(connection: &Connection) -> anyhow::Result<Receiver<Message>> {
-    let source = connection.receiver.clone();
-    let (buffered_sender, buffered_receiver) = mpsc::channel();
-    thread::Builder::new()
-        .name("inference-lsp-transport-pump".to_owned())
-        .spawn(move || {
-            for message in source {
-                if buffered_sender.send(message).is_err() {
-                    break;
-                }
-            }
-        })?;
-    Ok(buffered_receiver)
+/// Only a `didChange` head is worth batching: the backlog buffered on the job
+/// channel is drained non-blockingly and consecutive same-document changes collapse
+/// to their final text ([`coalesce_by`]). Any other head is returned alone so
+/// requests and lifecycle notifications keep exact arrival order and timing.
+fn coalesced_job_batch(first: Job, incoming: &Receiver<Job>) -> Vec<Job> {
+    if did_change_uri(&first.message).is_none() {
+        return vec![first];
+    }
+    let mut batch = vec![first];
+    while let Ok(job) = incoming.try_recv() {
+        batch.push(job);
+    }
+    coalesce_by(batch, |job| &job.message)
 }
 
-/// The batch of messages to process for `first`, in arrival order.
+/// Drops each item whose `didChange` a later `didChange` for the same document
+/// supersedes, keeping only the final text of a burst. `message_of` projects each
+/// item to the transport message it carries, so the same rule serves both the
+/// worker's [`Job`] batches and the message-level unit tests.
 ///
-/// Only a `didChange` head is worth batching: the backlog the transport pump has
-/// buffered is drained non-blockingly and consecutive same-document changes collapse
-/// to their final text ([`coalesce_changes`]). Any other head is returned alone so
-/// requests and lifecycle notifications keep exact arrival order and timing.
+/// An item at index `i` is dropped when a later same-document `didChange` appears
+/// before any barrier between them: a request, or a `didOpen`/`didClose` for that
+/// same document. Barriers are never reordered across — a request must observe the
+/// edits that preceded it, and a lifecycle event bounds a document's edit run — and
+/// no non-`didChange` item and no item for another document is ever dropped, so
+/// every item's relative order is preserved.
+fn coalesce_by<T>(items: Vec<T>, message_of: impl Fn(&T) -> &Message) -> Vec<T> {
+    let mut keep = vec![true; items.len()];
+    for (i, item) in items.iter().enumerate() {
+        let Some(document) = did_change_uri(message_of(item)) else {
+            continue;
+        };
+        for later in &items[i + 1..] {
+            if is_barrier_for(message_of(later), document) {
+                break;
+            }
+            if did_change_uri(message_of(later)) == Some(document) {
+                keep[i] = false;
+                break;
+            }
+        }
+    }
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect()
+}
+
+// The message-level coalescer entry points the in-file unit tests exercise
+// directly. They compose the generic [`coalesce_by`] over a message stream, so the
+// coalescing rule cannot drift from the worker's job-level batching.
+#[cfg(test)]
+fn coalesce_changes(messages: Vec<Message>) -> Vec<Message> {
+    coalesce_by(messages, |message| message)
+}
+
+#[cfg(test)]
 fn coalesced_batch(first: Message, incoming: &Receiver<Message>) -> Vec<Message> {
     if did_change_uri(&first).is_none() {
         return vec![first];
@@ -599,39 +983,6 @@ fn coalesced_batch(first: Message, incoming: &Receiver<Message>) -> Vec<Message>
         batch.push(message);
     }
     coalesce_changes(batch)
-}
-
-/// Drops each `didChange` a later `didChange` for the same document supersedes,
-/// keeping only the final text of a burst.
-///
-/// A `didChange` at index `i` is dropped when a later `didChange` for the same
-/// document appears before any barrier between them: a request, or a
-/// `didOpen`/`didClose` for that same document. Barriers are never reordered
-/// across — a request must observe the edits that preceded it, and a lifecycle
-/// event bounds a document's edit run — and no non-`didChange` message and no
-/// message for another document is ever dropped, so every message's relative
-/// order is preserved.
-fn coalesce_changes(messages: Vec<Message>) -> Vec<Message> {
-    let mut keep = vec![true; messages.len()];
-    for (i, message) in messages.iter().enumerate() {
-        let Some(document) = did_change_uri(message) else {
-            continue;
-        };
-        for later in &messages[i + 1..] {
-            if is_barrier_for(later, document) {
-                break;
-            }
-            if did_change_uri(later) == Some(document) {
-                keep[i] = false;
-                break;
-            }
-        }
-    }
-    messages
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(message, keep)| keep.then_some(message))
-        .collect()
 }
 
 /// Whether `message` bars coalescing a `didChange` for `document` across it: any
@@ -715,17 +1066,44 @@ fn send(connection: &Connection, message: Message) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to send message: {error}"))
 }
 
-/// Runs `f`, containing an unwinding panic and returning `None` in its place.
+/// What became of a contained unit of work.
+enum Caught<R> {
+    Completed(R),
+    Canceled,
+    Panicked,
+}
+
+/// Runs `f`, classifying an unwinding exit: the semantic layer's cancellation
+/// signal (which bypasses the panic hook by design) versus a genuine panic.
 ///
-/// The process-wide panic hook still runs first, so the panic's message and
-/// backtrace are written to stderr as usual — only the unwind is swallowed, and
-/// only stderr (never stdout, the protocol channel) is touched. `f` borrows the
-/// server state mutably, which is not `UnwindSafe`; asserting it is safe is sound
-/// because both callers treat a caught panic the same way: they discard the host
-/// with [`ServerState::rebuild_host`] and never read the possibly-inconsistent
-/// cached state back. Any future `catch` site must recover the same way.
-fn catch<R>(f: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(AssertUnwindSafe(f)).ok()
+/// For a genuine panic the process-wide panic hook still runs first, so the
+/// message and backtrace reach stderr as usual — only the unwind is swallowed,
+/// and only stderr (never stdout, the protocol channel) is touched. `f` borrows
+/// the server state mutably, which is not `UnwindSafe`; asserting it is safe is
+/// sound per-arm: the [`Caught::Panicked`] arm's callers still discard the host
+/// ([`ServerState::rebuild_host`]) and never read the possibly-inconsistent
+/// cached state back, exactly as before. The [`Caught::Canceled`] arm
+/// deliberately does NOT discard the host: a cancelled analysis leaves no memo
+/// behind, and the database's pre-query bookkeeping is idempotent setup that
+/// re-converges on retry while result bookkeeping is written only after a compute
+/// returns — so the host is consistent and retrying (or answering
+/// ContentModified) is sound.
+fn catch<R>(f: impl FnOnce() -> R) -> Caught<R> {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => Caught::Completed(value),
+        Err(payload) if is_cancellation(payload.as_ref()) => Caught::Canceled,
+        Err(_) => Caught::Panicked,
+    }
+}
+
+/// The response for a request a newer document write superseded: the client
+/// should retry against the new content.
+fn content_modified_response(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        ErrorCode::ContentModified as i32,
+        "content modified while the request was in flight; please retry".to_owned(),
+    )
 }
 
 /// The response to a request whose handler panicked: the analysis stack unwound
@@ -1425,6 +1803,288 @@ mod tests {
         );
     }
 
+    // --- Cancellation discrimination (issue #157) --------------------------
+    //
+    // A caught cancellation is not a panic: it answers ContentModified and leaves
+    // the host intact, the exact inverse of the panic-boundary tests above (which
+    // answer InternalError and rebuild). The pre-fired cancellation token makes
+    // these deterministic with zero threads and zero sleeps — an analysis unwinds
+    // at its first query checkpoint even on a memo hit.
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_superseded_request_is_answered_content_modified_without_rebuilding() {
+        let mut state = ServerState::new(full_client());
+        // Stage two clean documents and prime their analyses (memoized clean from
+        // the host overlay), then make each one's *tracked* text — the only input a
+        // rebuild would re-apply — diverge into broken source. A rebuild would
+        // adopt that broken text and report; no rebuild keeps the clean overlay.
+        let ok_uri = "file:///inf-test/ok.inf";
+        let bystander_uri = "file:///inf-test/bystander.inf";
+        track(&mut state, ok_uri, "fn f() -> i32 { return 1; }");
+        track(&mut state, bystander_uri, "fn h() -> i32 { return 2; }");
+        assert!(
+            diagnostics_for(&mut state, ok_uri).is_empty(),
+            "ok primes clean"
+        );
+        assert!(
+            diagnostics_for(&mut state, bystander_uri).is_empty(),
+            "bystander primes clean"
+        );
+        for uri in [ok_uri, bystander_uri] {
+            let uri = Uri::from_str(uri).expect("a valid uri");
+            state
+                .documents
+                .get_mut(&uri)
+                .expect("the tracked document")
+                .text = "fn broken() -> i32 { return z; }".into();
+        }
+
+        // A write landed while this hover was in flight: fire the cancellation,
+        // then run the hover. It unwinds at the first fetch checkpoint (even though
+        // ok's analysis is memoized) and, because the epoch moved, is superseded.
+        let _epoch = state.cancel_source.request_cancellation();
+        let response = state.handle_request_resilient(hover_request(1, ok_uri, 0, 3));
+        assert_eq!(
+            error_code(&response),
+            lsp_server::ErrorCode::ContentModified as i32,
+            "a superseded request is answered ContentModified"
+        );
+        assert_eq!(
+            response.id,
+            RequestId::from(1),
+            "the superseded request's own id is echoed back"
+        );
+
+        // No rebuild: both documents still serve their clean overlay, not the
+        // divergent tracked text a rebuild would have adopted (the contrapositive
+        // of the genuine-panic test, which asserts exactly this reports).
+        assert!(
+            diagnostics_for(&mut state, ok_uri).is_empty(),
+            "the stale-but-clean overlay is still served — no host rebuild"
+        );
+        assert!(
+            diagnostics_for(&mut state, bystander_uri).is_empty(),
+            "an untouched document's clean overlay survives too — no host rebuild"
+        );
+
+        // The session stays healthy: a follow-up request completes normally
+        // (handle_request_resilient re-checks the epoch only on the cancel arm, so
+        // a completed answer is never downgraded to ContentModified).
+        let followup = state.handle_request_resilient(hover_request(2, ok_uri, 0, 3));
+        assert!(
+            followup.error.is_none(),
+            "a follow-up request after the superseded one completes"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_stale_self_cancel_retries_and_completes() {
+        // A cancellation token fired with no newer write behind it (no epoch bump)
+        // is a residual self-cancel: the unwind consumes the signal, and the
+        // resilient wrapper retries and completes. This is the arm every adopted
+        // write's own eager publish will exercise once the router fires before
+        // forwarding, so it must recover with no rebuild.
+        let mut state = ServerState::new(full_client());
+        let doc_uri = "file:///inf-test/retry.inf";
+        track(&mut state, doc_uri, "fn f() -> i32 { return 1; }");
+        // Divergent tracked text: a rebuild would adopt broken source and report.
+        let uri = Uri::from_str(doc_uri).expect("a valid uri");
+        state
+            .documents
+            .get_mut(&uri)
+            .expect("the tracked document")
+            .text = "fn broken() -> i32 { return z; }".into();
+
+        state.cancel_source.debug_fire_token_only();
+        let response = state.handle_request_resilient(hover_request(1, doc_uri, 0, 3));
+        assert!(
+            response.error.is_none(),
+            "a residual self-cancel retries and the request completes"
+        );
+        assert!(
+            diagnostics_for(&mut state, doc_uri).is_empty(),
+            "the retry served the clean overlay — no host rebuild on a self-cancel"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn cancellation_still_fires_after_a_host_rebuild() {
+        // A rebuilt host mints a fresh cancellation token; rebuild_host must rebind
+        // the source to it. This pins that rebind: a genuine panic rebuilds the
+        // host, then a cancellation fired afterward must still interrupt the new
+        // host's analysis (answered ContentModified). A forgotten rebind leaves the
+        // source firing the discarded host's token, so the request would complete
+        // Ok instead — the failure signature of the bug.
+        let _arm = arm_analysis_panic(PANIC_MARKER);
+        let mut state = ServerState::new(full_client());
+        track(&mut state, "file:///inf-test/panic.inf", PANIC_DOC_SOURCE);
+        track(
+            &mut state,
+            "file:///inf-test/ok.inf",
+            "fn f() -> i32 { return 1; }",
+        );
+
+        let panicked =
+            state.handle_request_resilient(hover_request(1, "file:///inf-test/panic.inf", 0, 3));
+        assert_eq!(
+            error_code(&panicked),
+            lsp_server::ErrorCode::InternalError as i32,
+            "the panicking request rebuilds the host and answers InternalError"
+        );
+
+        drop(_arm);
+        let _epoch = state.cancel_source.request_cancellation();
+        let superseded =
+            state.handle_request_resilient(hover_request(2, "file:///inf-test/ok.inf", 0, 3));
+        assert_eq!(
+            error_code(&superseded),
+            lsp_server::ErrorCode::ContentModified as i32,
+            "cancellation still interrupts the rebuilt host — the source was rebound"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_request_queued_behind_a_write_fast_fails_without_computing() {
+        // A request the router forwarded before a write landed must be answered
+        // ContentModified at *dispatch*, without computing at all. The analysis-panic
+        // seam is armed on the document, so any actual analysis would answer
+        // InternalError — a ContentModified here therefore proves the dispatch-time
+        // fast-fail short-circuited before the handler ever ran.
+        let _arm = arm_analysis_panic(PANIC_MARKER);
+        let mut state = ServerState::new(full_client());
+        track(&mut state, "file:///inf-test/panic.inf", PANIC_DOC_SOURCE);
+
+        // A write bumped the source epoch past this turn's baseline: job_epoch is
+        // still 0 (the just-constructed value — respond_to_request is the worker's
+        // dispatch entry and no begin_turn advanced it), so the job is superseded.
+        let _epoch = state.cancel_source.request_cancellation();
+        let response =
+            state.respond_to_request(hover_request(1, "file:///inf-test/panic.inf", 0, 3));
+        assert_eq!(
+            error_code(&response),
+            lsp_server::ErrorCode::ContentModified as i32,
+            "a queued request superseded before dispatch fast-fails without computing"
+        );
+        assert_eq!(
+            response.id,
+            RequestId::from(1),
+            "the fast-failed request's own id is echoed back"
+        );
+    }
+
+    #[test]
+    fn a_superseded_notification_requeues_its_publish_and_dependents() {
+        // A notification whose own eager publish is superseded by a newer write
+        // must not lose that publish: it requeues the changed document and its
+        // invalidated dependents for the deferred drain, and does not rebuild.
+        let mut state = ServerState::new(full_client());
+        open_lib_and_dependent(&mut state);
+
+        // Divergent tracked text on the dependent: a rebuild would adopt it and
+        // report; the drain reading the clean overlay proves no rebuild happened.
+        let main_uri = Uri::from_str("file:///inf-test/main.inf").expect("a valid uri");
+        state
+            .documents
+            .get_mut(&main_uri)
+            .expect("the tracked dependent")
+            .text = "fn broken() -> i32 { return z; }".into();
+
+        let lib_uri = Uri::from_str("file:///inf-test/lib.inf").expect("a valid uri");
+        let _epoch = state.cancel_source.request_cancellation();
+        let eager = state.on_notification_resilient(did_change_notification(
+            "file:///inf-test/lib.inf",
+            2,
+            "pub fn helper() -> i32 { return 8; }",
+        ));
+        assert!(
+            eager.is_empty(),
+            "a superseded notification publishes nothing eagerly"
+        );
+        assert!(
+            state.pending_republish.contains(&lib_uri),
+            "the changed document is requeued rather than lost"
+        );
+        assert!(
+            state.pending_republish.contains(&main_uri),
+            "the invalidated dependent is requeued too"
+        );
+
+        let publishes = state.drain_pending_republishes();
+        let drained = published_uris(&publishes);
+        assert!(
+            drained.contains(&"file:///inf-test/lib.inf"),
+            "the requeued changed document is drained, got {drained:?}"
+        );
+        assert!(
+            drained.contains(&"file:///inf-test/main.inf"),
+            "the requeued dependent is drained, got {drained:?}"
+        );
+
+        assert!(
+            diagnostics_for(&mut state, "file:///inf-test/main.inf").is_empty(),
+            "the dependent's clean overlay is served — no host rebuild"
+        );
+    }
+
+    #[test]
+    fn a_completed_request_is_not_answered_after_a_client_cancel() {
+        // The completion gate: once `$/cancelRequest` completes a pending request
+        // (answered RequestCanceled by the router), the worker's later response for
+        // the same id is suppressed, so the client sees exactly one response.
+        use std::sync::Mutex;
+
+        use super::{ReqQueue, send, send_gated_response};
+
+        let (server, client) = Connection::memory();
+        let req_queue: Mutex<ReqQueue<(), ()>> = Mutex::new(ReqQueue::default());
+
+        // The router registered request 7, then a client `$/cancelRequest` cancelled
+        // it: the RequestCanceled response is built and sent from the router side.
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(7), ());
+        let canceled = req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .cancel(RequestId::from(7))
+            .expect("a registered request is cancelable");
+        assert_eq!(
+            canceled.error.as_ref().expect("an error response").code,
+            lsp_server::ErrorCode::RequestCanceled as i32,
+            "the client cancel is answered RequestCanceled"
+        );
+        send(&server, Message::Response(canceled)).expect("send the cancel response");
+
+        // The worker then finishes the request and tries to answer it Ok; the gate
+        // must drop that late response because the id is no longer pending.
+        send_gated_response(&server, &req_queue, Response::new_ok(RequestId::from(7), ()))
+            .expect("gated send");
+
+        // The client received exactly the one RequestCanceled and nothing after it.
+        match client.receiver.recv().expect("the cancel response arrives") {
+            Message::Response(response) => {
+                assert_eq!(response.id, RequestId::from(7), "the cancelled id");
+                assert_eq!(
+                    response.error.expect("an error").code,
+                    lsp_server::ErrorCode::RequestCanceled as i32,
+                    "the sole response is the RequestCanceled"
+                );
+            }
+            other => panic!("expected a response, got {other:?}"),
+        }
+        assert!(
+            client.receiver.try_recv().is_err(),
+            "no second response is sent for the same id"
+        );
+    }
+
     #[test]
     fn named_constant_array_size_publishes_a_diagnostic_not_a_panic() {
         // The #240 fix at the LSP boundary: the source that used to `todo!`-panic the
@@ -1608,11 +2268,12 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
 
     #[test]
     fn coalesced_batch_collapses_a_buffered_change_backlog() {
-        // The transport pump surfaces a typing burst to the loop as a buffered
-        // backlog; this covers the drain-and-coalesce path over that buffer
-        // directly. A `didChange` head plus two more for the same document, all
-        // already buffered, collapse to the final text — what a keystroke burst must
-        // become once the pump lets the backlog exist.
+        // The router forwards each keystroke instantly onto the unbounded job
+        // channel, so a typing burst reaches the worker as a buffered backlog;
+        // this covers the drain-and-coalesce path over that buffer directly. A
+        // `didChange` head plus two more for the same document, all already
+        // buffered, collapse to the final text — what a keystroke burst must
+        // become at worker dequeue.
         let (sender, receiver) = std::sync::mpsc::channel();
         sender.send(change_msg(DOC_A, 2)).expect("buffer a change");
         sender.send(change_msg(DOC_A, 3)).expect("buffer a change");

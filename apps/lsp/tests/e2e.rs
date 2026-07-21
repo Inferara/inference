@@ -31,6 +31,11 @@ const INVALID_PARAMS: i64 = -32602;
 // Only the debug-only panic-boundary test asserts on this code.
 #[cfg(debug_assertions)]
 const INTERNAL_ERROR: i64 = -32603;
+// The cancellation e2e tests (debug-only) assert on these LSP codes.
+#[cfg(debug_assertions)]
+const REQUEST_CANCELED: i64 = -32800;
+#[cfg(debug_assertions)]
+const CONTENT_MODIFIED: i64 = -32801;
 
 /// The environment variable that arms the server's debug-only analysis-panic seam,
 /// and the path marker the panic-boundary tests arm it with. Only the panic-trigger
@@ -72,6 +77,83 @@ fn panic_fixture(tag: &str) -> (TempDir, String) {
     let path = dir.write("panic-trigger.inf", PANIC_DOC_SOURCE);
     let uri = path_to_uri(&path);
     (dir, uri)
+}
+
+/// The env var that arms the ide-db slow-analysis seam in the spawned server, and
+/// the path marker that arms it. Only the `slowmark.inf` entry's path carries the
+/// marker, so its analysis is held in flight (polling for cancellation every 25ms,
+/// at most 5s) while every other document analyzes normally. Gated with the tests
+/// that use them: the seam is a no-op in release builds.
+#[cfg(debug_assertions)]
+const SLOW_ANALYSIS_ENV: &str = "INFERENCE_IDE_TEST_SLOW_ANALYSIS_PATH_SUBSTR";
+#[cfg(debug_assertions)]
+const SLOW_PATH_MARKER: &str = "slowmark";
+
+/// A small, valid document and its two versions, used as the fast sibling whose
+/// `didChange` fires cancellation for an in-flight slow analysis.
+#[cfg(debug_assertions)]
+const QUICK_SOURCE: &str = "fn quick() -> i32 { return 1; }";
+#[cfg(debug_assertions)]
+const QUICK_SOURCE_V2: &str = "fn quick() -> i32 { return 2; }";
+
+/// Writes `slowmark.inf` into `dir` — a valid entry that `use`-imports ten
+/// generated sibling files and calls each, so its analysis carries real cross-file
+/// stage-boundary work. Its path carries [`SLOW_PATH_MARKER`], so an armed server
+/// holds the analysis in flight; it is written to disk but is meant to be hovered
+/// (read from disk and analyzed), never opened — a `didOpen` would burn the seam on
+/// a path with no cancellation to interrupt it. Returns the entry's URI.
+#[cfg(debug_assertions)]
+fn write_slow_entry(dir: &TempDir) -> String {
+    let mut uses = String::new();
+    let mut body = String::from("fn slow_entry() -> i32 { return 0");
+    for i in 0..10 {
+        dir.write(
+            &format!("slowlib{i}.inf"),
+            &format!("pub fn part{i}() -> i32 {{ return {i}; }}\n"),
+        );
+        uses.push_str(&format!("use slowlib{i};\n"));
+        body.push_str(&format!(" + slowlib{i}::part{i}()"));
+    }
+    body.push_str("; }\n");
+    let path = dir.write("slowmark.inf", &format!("{uses}{body}"));
+    path_to_uri(&path)
+}
+
+/// Sends a hover without waiting, returning its request id — used to launch a slow
+/// analysis whose response arrives out of band.
+#[cfg(debug_assertions)]
+fn send_hover(client: &mut LspClient, uri: &str, position: Value) -> i64 {
+    client.send_request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": position }),
+    )
+}
+
+/// Collects the responses for `ids`, reading the wire directly so the result is
+/// immune to how the responses interleave with publishes.
+///
+/// `wait_for_response` cannot span several outstanding async requests: it
+/// re-buffers non-matching messages and the underlying `recv_message` returns
+/// buffered items before the wire, so a publish (or a sibling response) landing
+/// ahead of the target livelocks it. This inspects each message exactly once,
+/// keeping matching responses and dropping everything else, so no arrival order can
+/// stall it. Every read stays bounded by the harness receive timeout.
+#[cfg(debug_assertions)]
+fn collect_responses(client: &mut LspClient, ids: &[i64]) -> std::collections::HashMap<i64, Value> {
+    let mut found = std::collections::HashMap::new();
+    while ids.iter().any(|id| !found.contains_key(id)) {
+        let message = client.recv_message();
+        let matched = message
+            .get("method")
+            .is_none()
+            .then(|| message.get("id").and_then(Value::as_i64))
+            .flatten()
+            .filter(|id| ids.contains(id));
+        if let Some(id) = matched {
+            found.insert(id, message);
+        }
+    }
+    found
 }
 
 fn hover_request(client: &mut LspClient, uri: &str, position: Value) -> Value {
@@ -1419,13 +1501,14 @@ fn did_close_of_an_unmappable_uri_publishes_nothing() {
 #[test]
 fn a_typing_burst_is_coalesced_into_far_fewer_recomputes() {
     // Regression for the coalescer being a no-op over the production transport.
-    // lsp-server's stdio uses a zero-capacity rendezvous channel, so before the
-    // transport pump a burst never accumulated where the coalescer could see it —
+    // lsp-server's stdio uses a zero-capacity rendezvous channel, so without a
+    // buffering stage a burst never accumulated where the coalescer could see it —
     // every keystroke recomputed and published once (a burst of N produced exactly N
-    // publishes). Sending a dense burst of raw didChanges — without waiting for a
-    // publish between them — lets a backlog build in the pump's buffer while the
-    // server is still analyzing an earlier change, so the rest collapse to their
-    // final text. The burst must therefore yield strictly fewer publishes than the
+    // publishes). The router now forwards each message instantly onto the unbounded
+    // job channel, so sending a dense burst of raw didChanges — without waiting for
+    // a publish between them — lets a backlog build there while the worker is still
+    // analyzing an earlier change, and the rest collapse to their final text at
+    // dequeue. The burst must therefore yield strictly fewer publishes than the
     // number of changes sent.
     let mut client = LspClient::spawn();
     client.initialize_default(true);
@@ -1473,7 +1556,7 @@ fn a_typing_burst_is_coalesced_into_far_fewer_recomputes() {
     assert!(
         (for_uri.len() as i64) < changes_sent,
         "a coalesced burst publishes fewer than the {changes_sent} changes sent, got {} \
-         (before the transport pump this was exactly {changes_sent})",
+         (without buffering ahead of the worker this was exactly {changes_sent})",
         for_uri.len()
     );
     // The last publish for the file carries the final broken text's diagnostic.
@@ -1953,6 +2036,214 @@ fn a_position_past_the_last_line_answers_null_for_every_position_request() {
     assert!(
         good.get("error").is_none(),
         "the server survived the stale out-of-range positions"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+// --- 35. cancellation over the wire (issue #157) -----------------------------
+//
+// These three tests drive the server's debug-only slow-analysis seam, which is a
+// no-op in release builds; they are compiled and run only under `debug_assertions`.
+// No assertion is timing-based: the seam polls for cancellation every 25ms and a
+// broken cancellation runs the bounded 5s seam and answers the wrong code, failing
+// red — never hanging (every harness read is 30s-bounded).
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_did_change_interrupts_a_long_analysis_and_the_queue_keeps_flowing() {
+    // EXIT CRITERION 1: a didChange interrupts an in-flight long analysis and the
+    // queue keeps flowing. The armed seam holds slowmark's analysis in flight; a
+    // didChange to the small quick.inf fires cancellation strictly before it is
+    // forwarded, so the slowmark hover is superseded and answered ContentModified
+    // (-32801) in every interleaving (mid-seam unwind, dispatch fast-fail, or first
+    // checkpoint), while quick's own work still completes.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, SLOW_PATH_MARKER)]);
+    client.initialize_default(true);
+
+    let dir = TempDir::new("cancel-interrupt");
+    let quick_path = dir.write("quick.inf", QUICK_SOURCE);
+    let quick_uri = path_to_uri(&quick_path);
+    let slow_uri = write_slow_entry(&dir);
+
+    // quick opens and publishes; the worker is then idle (a protocol barrier).
+    let opened = client.did_open(&quick_uri, QUICK_SOURCE, 1);
+    assert!(opened.diagnostics.is_empty(), "quick opens clean");
+
+    // A hover against the never-opened slowmark reads it from disk and analyzes it —
+    // the armed seam holds that analysis in flight.
+    let id_slow = send_hover(&mut client, &slow_uri, json!({ "line": 0, "character": 0 }));
+
+    // A raw didChange to quick (not the blocking did_change helper) fires
+    // cancellation before it is forwarded, superseding the in-flight slowmark hover.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": quick_uri, "version": 2 },
+            "contentChanges": [ { "text": QUICK_SOURCE_V2 } ],
+        }),
+    );
+
+    // A follow-up hover against quick proves the queue kept flowing behind the
+    // interrupted request.
+    let id_quick = send_hover(&mut client, &quick_uri, json!({ "line": 0, "character": 3 }));
+
+    // Collect both responses wire-directly, immune to how the -32801 and quick's
+    // republish interleave. The follow-up hover answering at all proves the queue
+    // kept flowing behind the interrupted request.
+    let responses = collect_responses(&mut client, &[id_slow, id_quick]);
+    assert!(
+        responses[&id_quick].get("error").is_none(),
+        "the follow-up hover completed — the queue kept flowing, got {}",
+        responses[&id_quick]
+    );
+    assert_eq!(
+        responses[&id_slow]["error"]["code"],
+        json!(CONTENT_MODIFIED),
+        "the interrupted long analysis is answered ContentModified, got {}",
+        responses[&id_slow]
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_client_cancel_answers_request_canceled_and_the_session_stays_healthy() {
+    // `$/cancelRequest` for a pending request is answered RequestCanceled (-32800)
+    // by the router while the worker is still mid-analysis — itself evidence the
+    // queue is not blocked. A didChange then aborts the orphaned compute, whose late
+    // ContentModified is suppressed by the completion gate, and the session stays
+    // healthy.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, SLOW_PATH_MARKER)]);
+    client.initialize_default(true);
+
+    let dir = TempDir::new("client-cancel");
+    let quick_path = dir.write("quick.inf", QUICK_SOURCE);
+    let quick_uri = path_to_uri(&quick_path);
+    let slow_uri = write_slow_entry(&dir);
+
+    let opened = client.did_open(&quick_uri, QUICK_SOURCE, 1);
+    assert!(opened.diagnostics.is_empty(), "quick opens clean");
+
+    // Launch the slow hover, then cancel it from the client: the router answers
+    // -32800 immediately, without waiting for the worker to finish the seam.
+    let id_slow = send_hover(&mut client, &slow_uri, json!({ "line": 0, "character": 0 }));
+    client.cancel(id_slow);
+    let canceled = client.wait_for_response(id_slow);
+    assert_eq!(
+        canceled["error"]["code"],
+        json!(REQUEST_CANCELED),
+        "the client cancel is answered RequestCanceled from the router, got {canceled}"
+    );
+
+    // A didChange to quick fires cancellation, aborting the now-orphaned slowmark
+    // compute; its late ContentModified for the same id is dropped by the gate.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": quick_uri, "version": 2 },
+            "contentChanges": [ { "text": QUICK_SOURCE_V2 } ],
+        }),
+    );
+    client.wait_for_publish(&quick_uri);
+
+    // The session is healthy: a fresh hover against quick answers normally.
+    let hover = hover_request(&mut client, &quick_uri, json!({ "line": 0, "character": 3 }));
+    assert!(
+        hover.get("error").is_none(),
+        "the session stays healthy after the client cancel, got {hover}"
+    );
+
+    client.shutdown_exit_ok();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_cancelled_request_leaves_the_analysis_cache_intact() {
+    // EXIT CRITERION 2 at the wire: a cancelled request must NOT discard the analysis
+    // cache the way a contained panic does. After a host rebuild the cache is empty,
+    // so a later edit's dependents sweep would republish EVERY open document — a
+    // bystander publish is the wire signature of a rebuild. Here a cancellation
+    // interrupts a hover, then editing lib republishes only its true dependent
+    // (main); the independent bystander stays silent, proving the cache survived.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, SLOW_PATH_MARKER)]);
+    client.initialize_default(true);
+
+    let dir = TempDir::new("cache-intact");
+    let lib_source = "pub fn helper() -> i32 { return 7; }";
+    let main_source = "use lib;\nfn main() -> i32 { return lib::helper(); }";
+    let bystander_source = "fn bystander() -> i32 { return 1; }";
+    let lib_path = dir.write("lib.inf", lib_source);
+    let main_path = dir.write("main.inf", main_source);
+    let bystander_path = dir.write("bystander.inf", bystander_source);
+    let quick_path = dir.write("quick.inf", QUICK_SOURCE);
+    let lib_uri = path_to_uri(&lib_path);
+    let main_uri = path_to_uri(&main_path);
+    let bystander_uri = path_to_uri(&bystander_path);
+    let quick_uri = path_to_uri(&quick_path);
+    let slow_uri = write_slow_entry(&dir);
+
+    // Prime lib, its dependent main, the independent bystander, and quick (the
+    // interrupter) — all clean. quick must be open so its later didChange is an
+    // adopted write that fires cancellation.
+    assert!(
+        client.did_open(&lib_uri, lib_source, 1).diagnostics.is_empty(),
+        "lib opens clean"
+    );
+    assert!(
+        client.did_open(&main_uri, main_source, 1).diagnostics.is_empty(),
+        "main opens clean"
+    );
+    assert!(
+        client
+            .did_open(&bystander_uri, bystander_source, 1)
+            .diagnostics
+            .is_empty(),
+        "bystander opens clean"
+    );
+    assert!(
+        client.did_open(&quick_uri, QUICK_SOURCE, 1).diagnostics.is_empty(),
+        "quick opens clean"
+    );
+
+    // The test-8 shape: a slow hover interrupted by an unrelated didChange yields a
+    // -32801 for the hover, without rebuilding the host.
+    let id_slow = send_hover(&mut client, &slow_uri, json!({ "line": 0, "character": 0 }));
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": quick_uri, "version": 2 },
+            "contentChanges": [ { "text": QUICK_SOURCE_V2 } ],
+        }),
+    );
+    let slow_response = collect_responses(&mut client, &[id_slow])
+        .remove(&id_slow)
+        .expect("the interrupted hover is answered");
+    assert_eq!(
+        slow_response["error"]["code"],
+        json!(CONTENT_MODIFIED),
+        "the interrupted hover is answered ContentModified, got {slow_response}"
+    );
+
+    // Now edit lib. Its true dependent main must republish; the independent bystander
+    // must NOT — a bystander publish would mean the cancellation had emptied the host
+    // (a rebuild), so its absence within the window proves the cache stayed intact.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": lib_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn helper() -> i32 { return 8; }" } ],
+        }),
+    );
+    let published = client.drain_publishes(Duration::from_secs(3));
+    assert!(
+        published.iter().any(|(uri, _)| uri == &main_uri),
+        "the true dependent main republishes after editing lib, got {published:?}"
+    );
+    assert!(
+        !published.iter().any(|(uri, _)| uri == &bystander_uri),
+        "the independent bystander does NOT republish — the cache survived (no rebuild), got {published:?}"
     );
 
     client.shutdown_exit_ok();

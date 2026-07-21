@@ -16,3 +16,4 @@ inference-parser.workspace = true
 inference-type-checker.workspace = true
 inference-vfs.workspace = true
 rustc-hash.workspace = true
+salsa.workspace = true

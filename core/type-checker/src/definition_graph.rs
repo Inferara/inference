@@ -110,7 +110,7 @@ impl ImportBindings {
             let Some(scope) = table.get_scope(scope_id) else {
                 continue;
             };
-            for (local_name, resolved) in &scope.borrow().resolved_imports {
+            for (local_name, resolved) in &scope.resolved_imports {
                 match &resolved.target {
                     ResolvedImportTarget::Item {
                         definition_scope_id,

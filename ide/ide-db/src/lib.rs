@@ -27,12 +27,14 @@
 //! [`TypedContext`]: inference_type_checker::typed_context::TypedContext
 
 mod analysis;
+mod cancellation;
 mod database;
 mod hit_test;
 mod loader;
 mod symbols;
 
 pub use analysis::{AnalysisFinding, ClosureFile, FileAnalysis};
+pub use cancellation::{AnalysisCancelSource, is_cancellation};
 pub use database::RootDatabase;
 pub use hit_test::{NodeHit, enclosing_hit, hit_test};
 pub use symbols::file_defs;

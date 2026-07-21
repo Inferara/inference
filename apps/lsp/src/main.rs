@@ -15,22 +15,12 @@ mod uri;
 use anyhow::Result;
 use lsp_server::Connection;
 
-/// The stack the server loop runs on. The analysis pipeline (type-checker,
-/// analysis passes) recurses with the input's nesting depth, so a pathological or
-/// generated document can overflow the default stack and abort the whole process
-/// — taking every open document's state with it. A stack overflow aborts rather
-/// than unwinds, so a worker thread cannot *catch* it; the mitigation is headroom.
-/// 64 MiB (mirroring rust-analyzer's main-loop stack) clears realistic deep
-/// nesting by a wide margin. A thread must set this explicitly: a spawned thread's
-/// default stack is far smaller than the main thread's.
-const SERVER_STACK_SIZE: usize = 64 * 1024 * 1024;
-
 fn main() -> Result<()> {
     eprintln!("inference-lsp: starting on stdio");
 
     let server = std::thread::Builder::new()
         .name("inference-lsp-main".to_owned())
-        .stack_size(SERVER_STACK_SIZE)
+        .stack_size(server::SERVER_STACK_SIZE)
         .spawn(run_server)?;
     server.join().expect("the server thread panicked")
 }

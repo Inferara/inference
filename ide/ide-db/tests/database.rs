@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use inference_ide_db::{FileAnalysis, NodeId, RootDatabase, Severity};
+use inference_ide_db::{
+    AnalysisCancelSource, FileAnalysis, NodeId, RootDatabase, Severity, is_cancellation,
+};
 
 /// A throwaway source tree under the system temp dir, removed on drop.
 struct TempTree {
@@ -623,6 +625,305 @@ fn opening_an_unrelated_file_does_not_invalidate_an_unreadable_import_analysis()
     );
 }
 
+// Salsa dependency-edge invalidation (issue #157): content changes force
+// recomputes through per-file change-stamp inputs and a conditional availability
+// epoch registered by the analysis query, while a write-path mirror keeps
+// `is_analyzed` answering before any query re-runs. These pin the seams that make
+// the edges and the mirror agree.
+
+#[test]
+fn an_edit_before_any_analysis_still_wires_the_dependency() {
+    // The write-path stamp bump is get-or-create: editing a file before anything is
+    // analyzed mints its stamp, and the first analysis of a dependent must find that
+    // SAME input when it registers its closure edges — not a second, unbumped one.
+    // If the two sites used separate registries (or a lookup-only bump), the later
+    // edit would register on an input the query never read, and the dependent would
+    // serve a stale analysis.
+    let tree = TempTree::new("edit-before-analysis");
+    let entry = tree.path("main.inf");
+    let helper = tree.path("lib/helper.inf");
+    let mut db = RootDatabase::default();
+
+    // A change to helper with no analyses in the db: mints and bumps helper's stamp
+    // on the write path, before any query has created it.
+    db.change_document(&helper, "pub fn help_v1() -> i32 { return 1; }");
+
+    // Open the dependent and analyze it: the in-query registration must reuse
+    // helper's already-minted stamp via the shared registry.
+    db.open_document(
+        &entry,
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+    let lib_mod = vec!["lib".to_string(), "helper".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            closure_defines(analysis, &lib_mod, "help_v1"),
+            "the first analysis sees the pre-edit helper symbol"
+        );
+        analysis.generation()
+    };
+
+    // A second edit to helper must recompute the dependent through that shared stamp
+    // edge, surfacing the new symbol.
+    db.change_document(&helper, "pub fn help_v2() -> i32 { return 2; }");
+    let analysis = db.analysis(&entry);
+    assert!(
+        analysis.generation() > first_gen,
+        "an edit to a helper wired before any analysis must recompute the dependent \
+         ({first_gen} -> {})",
+        analysis.generation()
+    );
+    assert!(
+        closure_defines(analysis, &lib_mod, "help_v2"),
+        "the recompute must see the newly-edited helper symbol"
+    );
+}
+
+#[test]
+fn a_disk_edit_without_an_editor_event_is_invisible_until_the_next_event() {
+    // The v1 invalidation contract: editor events (didOpen/didChange/didClose) are
+    // the ONLY channel that invalidates an analysis — there is no filesystem watch.
+    // A file edited on disk with no corresponding event stays invisible until the
+    // next event touches the closure, and recovery keys on the event, not on a
+    // content diff. A `didChangeWatchedFiles` feature must flip this test
+    // deliberately.
+    let tree = TempTree::new("disk-edit-invisible");
+    let entry = tree.write(
+        "main.inf",
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+    let helper = tree.write("lib/helper.inf", "pub fn help_old() -> i32 { return 1; }");
+    let mut db = RootDatabase::default();
+    // Open the entry so its analysis is part of the working set, independent of the
+    // never-opened cap.
+    db.open_document(
+        &entry,
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+
+    let lib_mod = vec!["lib".to_string(), "helper".to_string()];
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            closure_defines(analysis, &lib_mod, "help_old"),
+            "the disk helper's symbol is visible before the silent edit"
+        );
+        analysis.generation()
+    };
+
+    // Edit the helper on disk with NO editor event.
+    std::fs::write(&helper, "pub fn help_new() -> i32 { return 2; }").expect("rewrite helper");
+
+    let after_silent = db.analysis(&entry);
+    assert_eq!(
+        after_silent.generation(),
+        first_gen,
+        "a silent disk edit must not recompute — no event, no invalidation"
+    );
+    assert!(
+        closure_defines(after_silent, &lib_mod, "help_old"),
+        "the memo still holds the pre-edit content (invisibility is content-level, \
+         not merely stamp equality)"
+    );
+    assert!(
+        !closure_defines(after_silent, &lib_mod, "help_new"),
+        "the silently-written symbol is not visible without an event"
+    );
+
+    // The next event on the entry — even one that leaves its text unchanged — is the
+    // sole invalidation channel; the recompute re-reads the helper from disk.
+    db.change_document(
+        &entry,
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+    let recovered = db.analysis(&entry);
+    assert!(
+        recovered.generation() > first_gen,
+        "the didChange event must recompute the entry ({first_gen} -> {})",
+        recovered.generation()
+    );
+    assert!(
+        closure_defines(recovered, &lib_mod, "help_new"),
+        "the post-event recompute re-reads the disk helper and sees the new symbol"
+    );
+}
+
+#[test]
+fn a_change_to_an_import_flips_is_analyzed_before_any_refetch() {
+    // The write-path mirror gives the protocol layer write-time observability the
+    // Salsa edges cannot: the instant a change lands, `is_analyzed` must report the
+    // affected entry as stale and an unrelated entry as still analyzed — before any
+    // query re-runs. This is the deterministic form of the republish-selectivity
+    // contract the e2e suite otherwise observes only through timing.
+    let tree = TempTree::new("mirror-flip");
+    let entry = tree.write(
+        "main.inf",
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+    tree.write("lib/helper.inf", "pub fn help() -> i32 { return 1; }");
+    let unrelated = tree.write("other.inf", "pub fn other() -> i32 { return 0; }");
+    let helper = tree.path("lib/helper.inf");
+    let mut db = RootDatabase::default();
+    db.open_document(
+        &entry,
+        "use lib::helper;\npub fn main() -> i32 { return 0; }",
+    );
+    db.open_document(&unrelated, "pub fn other() -> i32 { return 0; }");
+
+    // Memoize both.
+    let _ = db.analysis(&entry).generation();
+    let _ = db.analysis(&unrelated).generation();
+    assert!(db.is_analyzed(&entry) && db.is_analyzed(&unrelated));
+
+    // A change to the shared import flips the mirror immediately, before any fetch.
+    db.change_document(&helper, "pub fn help() -> i32 { return 2; }");
+    assert!(
+        !db.is_analyzed(&entry),
+        "the dependent is marked stale in the mirror the instant the change lands"
+    );
+    assert!(
+        db.is_analyzed(&unrelated),
+        "an unrelated open buffer stays analyzed — the mirror clear is selective"
+    );
+
+    // The next fetch recomputes and restores the analyzed state.
+    let _ = db.analysis(&entry);
+    assert!(
+        db.is_analyzed(&entry),
+        "fetching the stale entry recomputes and re-marks it analyzed"
+    );
+}
+
+#[test]
+fn two_entries_sharing_an_import_recompute_lazily_and_independently() {
+    // Two open entries import a shared file. Editing it marks both stale, but the
+    // recompute is lazy and per-entry: fetching A recomputes only A, leaving B stale
+    // in the mirror until B is itself fetched. Pins that the salsa-driven recompute
+    // is demand-driven, not eager across every dependent.
+    let tree = TempTree::new("shared-lazy-independent");
+    let a = tree.write(
+        "a.inf",
+        "use shared;\npub fn a() -> i32 { return shared::v(); }",
+    );
+    let b = tree.write(
+        "b.inf",
+        "use shared;\npub fn b() -> i32 { return shared::v(); }",
+    );
+    let shared = tree.write("shared.inf", "pub fn v() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+    db.open_document(&a, "use shared;\npub fn a() -> i32 { return shared::v(); }");
+    db.open_document(&b, "use shared;\npub fn b() -> i32 { return shared::v(); }");
+
+    let a_first = db.analysis(&a).generation();
+    let b_first = db.analysis(&b).generation();
+
+    db.change_document(&shared, "pub fn v() -> i32 { return 8; }");
+    assert!(
+        !db.is_analyzed(&a) && !db.is_analyzed(&b),
+        "both dependents are marked stale in the mirror"
+    );
+
+    // Fetch A only: it recomputes with a fresh generation, B stays stale (lazy).
+    let a_second = db.analysis(&a).generation();
+    assert!(
+        a_second > a_first,
+        "fetching A recomputes it ({a_first} -> {a_second})"
+    );
+    assert!(
+        !db.is_analyzed(&b),
+        "B is not recomputed just because A was — the recompute is lazy and per-entry"
+    );
+
+    // Fetch B: it recomputes independently, on its own demand.
+    let b_second = db.analysis(&b).generation();
+    assert!(
+        b_second > b_first,
+        "fetching B recomputes it independently ({b_first} -> {b_second})"
+    );
+}
+
+#[test]
+fn an_unrelated_newly_available_open_refires_a_missing_import_entry() {
+    // The availability-epoch edge is a deliberately coarse over-approximation: an
+    // entry with an unresolved import reads the epoch, so ANY newly-available open —
+    // even of a file unrelated to the missing import — recomputes it. This wastes
+    // work but never serves a stale result, and is the price of having no file to
+    // name for a missing import.
+    let tree = TempTree::new("epoch-over-approximation");
+    let entry = tree.write("main.inf", "use future;\npub fn main() {}");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, "use future;\npub fn main() {}");
+
+    let first_gen = {
+        let analysis = db.analysis(&entry);
+        assert_eq!(analysis.import_problems().len(), 1, "future is missing");
+        analysis.generation()
+    };
+
+    // Open a genuinely unrelated file — not the missing import, not in the entry's
+    // closure — that had no overlay before. The epoch bump still recomputes the
+    // missing-import entry.
+    let unrelated = tree.path("unrelated.inf");
+    db.open_document(&unrelated, "pub fn other() {}");
+    let after = db.analysis(&entry);
+    assert!(
+        after.generation() > first_gen,
+        "an unrelated newly-available open must refire a missing-import entry via the \
+         epoch edge ({first_gen} -> {})",
+        after.generation()
+    );
+    assert_eq!(
+        after.import_problems().len(),
+        1,
+        "the unrelated open did not resolve the missing import — only forced a recompute"
+    );
+}
+
+#[test]
+fn a_resolved_import_stops_reacting_to_the_availability_epoch() {
+    // The epoch edge is conditional on the LAST compute having a missing import.
+    // Once the import resolves, the recomputed memo no longer reads the epoch, so a
+    // later unrelated newly-available open leaves it untouched. This is what keeps
+    // the unrelated-change equalities holding
+    // (`change_to_unrelated_file_does_not_invalidate_entry_analysis`,
+    // `opening_an_unrelated_file_does_not_invalidate_an_unreadable_import_analysis`):
+    // a "simplified" unconditional epoch read would recompute every memo on every
+    // newly-available open and break both.
+    let tree = TempTree::new("epoch-drops-after-recovery");
+    let entry = tree.write("main.inf", "use future;\npub fn main() {}");
+    let mut db = RootDatabase::default();
+    db.open_document(&entry, "use future;\npub fn main() {}");
+
+    assert_eq!(
+        db.analysis(&entry).import_problems().len(),
+        1,
+        "future is missing before it is opened"
+    );
+
+    // Resolve the missing import by opening the awaited file.
+    let future = tree.path("future.inf");
+    db.open_document(&future, "pub fn soon() {}");
+    let resolved_gen = {
+        let analysis = db.analysis(&entry);
+        assert!(
+            analysis.import_problems().is_empty(),
+            "the import now resolves to the opened overlay"
+        );
+        analysis.generation()
+    };
+
+    // A later unrelated newly-available open must NOT recompute the now-resolved
+    // entry: its last compute had no missing import, so it dropped the epoch edge.
+    let unrelated = tree.path("unrelated.inf");
+    db.open_document(&unrelated, "pub fn other() {}");
+    assert_eq!(
+        db.analysis(&entry).generation(),
+        resolved_gen,
+        "a resolved entry no longer reacts to the availability epoch"
+    );
+}
+
 // Partial semantics: a broken program still answers
 
 #[test]
@@ -887,6 +1188,50 @@ fn closure_fallback_reuses_an_analyzed_entrys_source_root() {
     );
     let b_mod = vec!["lib".to_string(), "b".to_string()];
     assert!(closure_defines(analysis, &b_mod, "seven"));
+}
+
+#[test]
+fn a_memoized_entry_keeps_its_root_when_a_donor_appears_later() {
+    // The ordering counterpart to the test above. There the donor entry is
+    // analyzed *first*, so `lib/a.inf` adopts its root on the very first (miss)
+    // resolution. Here `lib/a.inf` is analyzed first and falls to tier 3 (its own
+    // directory), where `use lib::b;` cannot resolve. Analyzing `main.inf`
+    // afterwards makes a donor available — but a source root is resolved only when
+    // an analysis is actually recomputed, so re-querying `lib/a.inf` serves the
+    // memoized result unchanged rather than silently re-resolving it under the
+    // donor that appeared since. This pins the resolution to the miss path: doing
+    // it on every request would also re-walk the filesystem on each keystroke.
+    let tree = TempTree::new("donor-appears-later");
+    let main = tree.write("main.inf", "use lib::a;\npub fn main() {}");
+    let a = tree.write("lib/a.inf", "use lib::b;\npub fn a() {}");
+    tree.write("lib/b.inf", "pub fn seven() -> i32 { return 7; }");
+    let mut db = RootDatabase::default();
+
+    // Tier 3: a.inf resolves against its own directory, so `lib::b` is missing.
+    let first_gen = {
+        let analysis = db.analysis(&a);
+        assert_eq!(
+            analysis.import_problems().len(),
+            1,
+            "an own-directory root cannot resolve a source-root-relative import"
+        );
+        analysis.generation()
+    };
+
+    // A donor now exists: main's closure covers both lib/a.inf and lib/b.inf.
+    assert!(db.analysis(&main).import_problems().is_empty());
+
+    let analysis = db.analysis(&a);
+    assert_eq!(
+        analysis.generation(),
+        first_gen,
+        "a memo hit must not recompute a.inf just because a donor appeared"
+    );
+    assert_eq!(
+        analysis.import_problems().len(),
+        1,
+        "the memoized result still reflects the own-directory root it was computed against"
+    );
 }
 
 #[test]
@@ -1415,5 +1760,55 @@ fn a_closed_dependent_reads_a_divergent_import_from_disk() {
     assert!(
         !closure_defines(analysis, &lib_mod, "in_overlay"),
         "the vanished overlay symbol is no longer visible to the dependent"
+    );
+}
+
+#[test]
+fn a_cancelled_analysis_unwinds_cleanly_and_the_retry_recomputes() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    // A cancellation requested before an analysis runs must unwind that analysis
+    // (delivering the semantic layer's cancellation payload, which `is_cancellation`
+    // recognizes and an unrelated payload does not), leave the entry un-analyzed so
+    // no stale result is served, and let a retry recompute cleanly. The final memo
+    // hit is the tripwire: the framework auto-resets the consumed cancellation on
+    // the unwinding attempt's exit, so a later read is a cache hit — an internal
+    // behavior a dependency upgrade could silently change.
+    let path = PathBuf::from("/inf-test/cancellable.inf");
+    let mut db = RootDatabase::default();
+    db.open_document(&path, "pub fn f() -> i32 { return 1; }");
+
+    let source = AnalysisCancelSource::detached();
+    db.bind_cancellation(&source);
+    let _epoch = source.request_cancellation();
+
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let _ = db.analysis(&path);
+    }));
+    let payload = unwound.expect_err("a pre-fired cancellation unwinds the analysis");
+    assert!(
+        is_cancellation(payload.as_ref()),
+        "the caught payload is the semantic layer's cancellation signal"
+    );
+    let unrelated: Box<dyn std::any::Any + Send> = Box::new("an ordinary panic payload");
+    assert!(
+        !is_cancellation(unrelated.as_ref()),
+        "a non-cancellation payload is not classified as a cancellation"
+    );
+    assert!(
+        !db.is_analyzed(&path),
+        "the cancelled compute left no memoized analysis behind"
+    );
+
+    // The consumed signal auto-reset, so the retry recomputes and memoizes.
+    let generation = db.analysis(&path).generation();
+    assert!(
+        db.is_analyzed(&path),
+        "the retry recomputes the previously-cancelled analysis"
+    );
+    assert_eq!(
+        db.analysis(&path).generation(),
+        generation,
+        "a second read is a memo hit (equal generation), not a recompute"
     );
 }

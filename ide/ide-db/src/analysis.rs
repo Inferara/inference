@@ -131,10 +131,22 @@ impl FileAnalysis {
     ///
     /// `generation` stamps the result; the database bumps it on every compute so
     /// a recompute is observable.
+    ///
+    /// `checkpoint` is invoked between the compute's expensive stages; the
+    /// database passes a hook that unwinds if the analysis was cancelled, so a
+    /// long compute is interruptible at stage boundaries rather than only at the
+    /// query entry. A caller with nothing to cancel passes a no-op.
     #[must_use = "the computed analysis must be stored to be of any use"]
-    pub(crate) fn compute(vfs: &Vfs, entry: &Path, src_root: &Path, generation: u64) -> Self {
+    pub(crate) fn compute(
+        vfs: &Vfs,
+        entry: &Path,
+        src_root: &Path,
+        generation: u64,
+        checkpoint: &dyn Fn(),
+    ) -> Self {
         let loader = VfsLoader::new(vfs);
         let parse = load_project_resilient_with_root(entry, src_root, &loader);
+        checkpoint();
 
         // The entry is always part of its own closure, even when its read failed
         // and the resilient walk recorded no `LoadedFile` for it (an unreadable
@@ -144,6 +156,9 @@ impl FileAnalysis {
         // itself — could ever invalidate it, permanently poisoning the entry's
         // cache with empty diagnostics. Inserting the entry unconditionally is a
         // no-op when the read succeeded (its `LoadedFile` path is already present).
+        // The per-file dependency registration relies on this too: the entry's own
+        // `FileStamp` edge is what lets a `didClose` (an overlay removal, bumped as
+        // a content change) reach the closed entry's own memo.
         let mut closure_paths: FxHashSet<PathBuf> =
             parse.files.iter().map(|f| f.path.clone()).collect();
         closure_paths.insert(entry.to_path_buf());
@@ -170,6 +185,7 @@ impl FileAnalysis {
             typed_context,
             errors: type_errors,
         } = check_with_diagnostics(parse.arena);
+        checkpoint();
 
         let files = build_closure_files(typed_context.arena(), &path_by_module);
         let findings = run_analysis_rules(&typed_context);
@@ -282,7 +298,27 @@ impl FileAnalysis {
         file_defs(self.arena(), file)
     }
 
+    /// The closure's file paths in a deterministic (sorted) order.
+    ///
+    /// The single enumeration point for the analysis query's per-file dependency
+    /// registration: the query reads one change-stamp input per path returned here,
+    /// so the set of registered edges is exactly this closure. Together with
+    /// [`closure_contains`](Self::closure_contains) these are the only two readers
+    /// of `closure_paths` — this one enumerates it to register the edges, that one
+    /// tests membership for the write-path staleness pass — so the recompute-forcing
+    /// edges and the mirror clear cannot drift apart.
+    pub(crate) fn closure_paths_ordered(&self) -> Vec<&Path> {
+        let mut paths: Vec<&Path> = self.closure_paths.iter().map(PathBuf::as_path).collect();
+        paths.sort_unstable();
+        paths
+    }
+
     /// Whether `path` is one of the files in this analysis's closure.
+    ///
+    /// The membership half of the lockstep pair described on
+    /// [`closure_paths_ordered`](Self::closure_paths_ordered): the write-path
+    /// staleness pass tests the same `closure_paths` set the query registered its
+    /// stamp edges from.
     pub(crate) fn closure_contains(&self, path: &Path) -> bool {
         self.closure_paths.contains(path)
     }

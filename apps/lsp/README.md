@@ -1,10 +1,12 @@
 # inference-lsp
 
-The Language Server Protocol server for Inference. A synchronous,
-single-threaded stdio binary built on `lsp-server` that answers diagnostics,
-hover, goto-definition, completion, document symbols, and inlay hints for
-`.inf` source, delegating all analysis to the `ide` stack and confining every
-protocol concern (framing, position encoding, URIs) to this crate.
+The Language Server Protocol server for Inference. A stdio binary built on
+`lsp-server` that answers diagnostics, hover, goto-definition, completion,
+document symbols, and inlay hints for `.inf` source, delegating all analysis to
+the `ide` stack and confining every protocol concern (framing, position
+encoding, URIs) to this crate. Analysis runs strictly serially on a dedicated
+worker thread, with a transport router in front of it so an in-flight analysis
+stays interruptible (see below).
 
 ## Where It Sits
 
@@ -43,18 +45,34 @@ touch `ide/ide` directly, not just `ide-db`; a change confined to
 changes shape) stays contained to `ide-db`. `apps/lsp` is insulated from all of
 this either way — it only ever calls `ide/ide`'s editor-terminology API.
 
-## Why Single-Threaded
+## Router / Worker
 
-`inference_type_checker::typed_context::TypedContext` — which every
-`FileAnalysis` holds — is `!Send`. `ide::Analysis` methods take `&mut self` for
-exactly this reason: the whole stack is designed around one thread owning one
-`AnalysisHost` and answering one LSP message at a time. `server::run` reflects
-this directly: it is a plain `for message in &connection.receiver` loop with no
-worker pool, no `tokio`, and no interior mutability wider than what
-`ServerState` itself needs. This is a deliberate v1 simplicity trade-off, not
-an oversight — a request that is slow to answer (a large file's full
-re-analysis) blocks the next message, but every analysis here is bounded by one
-open file's import closure, not a whole workspace.
+Analysis is strictly serial: one `AnalysisHost` owns the sole database handle
+and answers one thing at a time (no `Storage` cloning, no concurrent reads).
+That keeps the model simple and every analysis is bounded by one open file's
+import closure, not a whole workspace. But a slow request must not make a fresh
+keystroke wait behind it, so `server::run` splits the session across two threads
+with no shared analysis state:
+
+- The **worker** thread (`worker_loop`) owns the `ServerState` and the sole
+  analysis handle and runs the message loop over an unbounded job channel: one
+  job at a time, in arrival order. Every response and publish leaves from here.
+- The **router** thread (`router_loop`, the main thread) reads the transport and
+  forwards each message to the worker *instantly*, so nothing that must not wait
+  behind an analysis does. It keeps the incoming request-id bookkeeping, answers
+  `$/cancelRequest` (`RequestCanceled`, -32800), and — before it forwards a
+  document write it adopts (and shutdown/exit) — requests cancellation of the
+  worker's in-flight analysis, stamping the write's job with the post-bump write
+  epoch.
+
+A cancellation is not a panic. The analysis pipeline polls for it at query
+checkpoints, so a superseded request unwinds and is answered `ContentModified`
+(-32801) — the client retries against the new content — with the analysis cache
+left intact (unlike a contained panic, which rebuilds the host from scratch). A
+residual self-cancel is simply retried. The two threads are joined through
+`std::thread::scope`, so the worker may borrow the `Connection` for its sender
+with no `'static` bound, and teardown cannot hang: when the router returns it
+drops the job sender, unblocking the worker even if it never saw the exit job.
 
 ## Capability Surface
 
@@ -97,14 +115,16 @@ client never renders fences and backticks literally. A client that advertises no
 (`Uri -> Document { path, version }`) and turns one request into one
 `Response`, or one notification into the diagnostics to publish — with no I/O
 of its own, which is what makes it directly unit-testable (see `server.rs`'s
-own tests). `server::run` owns the transport: it reads messages off
-`connection.receiver`, handles the `shutdown`/`exit` handshake inline, routes
-everything else through `ServerState`, and writes results back. An unknown
-request method is `MethodNotFound`; params that fail to deserialize are
-`InvalidParams` — neither ever panics or disturbs the loop, so one malformed
-request cannot take the server down.
+own tests). The worker thread owns the `ServerState` and drives it off an
+unbounded job channel; the router thread reads `connection.receiver` and
+forwards each message onto that channel, handling the `shutdown`/`exit`
+handshake state on the worker side and the request-id bookkeeping and
+`$/cancelRequest` on the router side (see [Router / Worker](#router--worker)
+above). An unknown request method is `MethodNotFound`; params that fail to
+deserialize are `InvalidParams` — neither ever panics or disturbs the loop, so
+one malformed request cannot take the server down.
 
-The shutdown handshake is handled in the loop rather than delegated to
+The shutdown handshake is handled by the worker rather than delegated to
 `lsp-server`'s `Connection::handle_shutdown` (which consumes the next message
 itself and turns anything but `exit` into a fatal protocol error): a `shutdown`
 request is answered and flips a `shutting_down` flag, after which every further
@@ -123,21 +143,23 @@ request with an `InvalidParams` error instead of aborting the process after the
 handshake, and the initialize result carries `serverInfo` (name and version).
 
 Because each keystroke arrives as its own full-text `didChange` and analysis is
-single-threaded, `run` sheds per-keystroke work two ways (issue #247). When the
-head of the queue is a `didChange`, the immediately-available backlog is drained
-non-blockingly and consecutive changes to the *same* document collapse to their
-final text, so a typing burst runs the closure pipeline once rather than once per
-keystroke; a `didOpen`/`didClose` for that document, or any request, is a barrier
-the coalescer never reorders across, and no other message is dropped. And a
+serial, `run` sheds per-keystroke work two ways (issue #247). Since the router
+forwards without blocking, a typing burst accumulates on the unbounded job
+channel; when the head of a dequeued batch is a `didChange`, the
+immediately-available backlog is drained non-blockingly and consecutive changes
+to the *same* document collapse to their final text, so the burst runs the
+closure pipeline a handful of times rather than once per keystroke. A
+`didOpen`/`didClose` for that document, or any request, is a barrier the
+coalescer never reorders across, and no other message is dropped. And a
 notification publishes eagerly only for the *changed* document: every other open
 document it invalidated (editing one file invalidates another whose import
 closure includes it — `ide-db` drops exactly those analyses) is queued and
-republished when the loop next goes idle, so an interactive request arriving right
-behind a keystroke is answered before the other documents recompute. The queue is
-always drained before the loop blocks, a request against a queued document
-publishes it fresh immediately, and a shutdown flushes it — so the client never
-keeps a stale diagnostic set. Documents a change left untouched keep their
-memoized analysis and are not republished at all.
+republished when the worker next goes idle, so an interactive request arriving
+right behind a keystroke is answered before the other documents recompute. The
+queue is always drained before the worker blocks, a request against a queued
+document publishes it fresh immediately, and a shutdown flushes it — so the
+client never keeps a stale diagnostic set. Documents a change left untouched keep
+their memoized analysis and are not republished at all.
 
 `handlers.rs` holds one function per LSP method. Each resolves the document's
 path from its URI, converts the LSP position(s) to a byte offset using the
@@ -166,11 +188,12 @@ protocol stream — and is asserted directly by an end-to-end test (below).
 - **Deep-nesting stack headroom.** The analysis pipeline (type-checker,
   analysis passes) recurses with the input's nesting depth, so a pathological
   or generated document could overflow the default stack and abort the whole
-  process — losing every open document's state. `main.rs` runs the server loop
-  on a dedicated thread with a 64 MiB stack (mirroring rust-analyzer), which
-  clears realistic deep nesting by a wide margin (a document that overflowed the
-  default main-thread stack at ~800 levels survives past 5000 with the larger
-  stack). A stack overflow *aborts* rather than unwinds, so a worker thread
+  process — losing every open document's state. `main.rs` runs the router on a
+  dedicated thread with a 64 MiB stack (mirroring rust-analyzer), and the
+  analysis worker — where the deep recursion now happens — is spawned with the
+  same 64 MiB, which clears realistic deep nesting by a wide margin (a document
+  that overflowed the default stack at ~800 levels survives past 5000 with the
+  larger stack). A stack overflow *aborts* rather than unwinds, so the worker
   cannot catch it; the mitigation is headroom, not isolation. An input deep
   enough to exhaust even 64 MiB would still abort — bounding the recursion in
   the shared pipeline (out of scope for this crate) would be the complete fix.

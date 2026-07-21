@@ -267,6 +267,12 @@ impl LspClient {
         self.wait_for_publish(uri)
     }
 
+    /// Sends a `$/cancelRequest` for `id`. Fire-and-forget: the server answers the
+    /// cancelled request itself (RequestCanceled), so nothing is awaited here.
+    pub fn cancel(&mut self, id: i64) {
+        self.send_notification("$/cancelRequest", json!({ "id": id }));
+    }
+
     /// Collects every `publishDiagnostics` that arrives within `window`, as
     /// `(uri, diagnostics)` pairs in arrival order.
     ///

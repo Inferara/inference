@@ -3997,7 +3997,7 @@ impl TypeChecker {
             .all_scope_ids()
             .into_iter()
             .filter_map(|id| self.symbol_table.get_scope(id))
-            .map(|s| s.borrow().resolved_imports.len())
+            .map(|s| s.resolved_imports.len())
             .sum()
     }
 
@@ -4032,7 +4032,7 @@ impl TypeChecker {
             let Some(scope) = self.symbol_table.get_scope(scope_id) else {
                 return;
             };
-            scope.borrow().imports.clone()
+            scope.imports.clone()
         };
         // The first import to claim each name, kept so a later same-name import
         // can be paired with its first claimant for the canonical-target check. A
@@ -4052,7 +4052,7 @@ impl TypeChecker {
                     && self
                         .symbol_table
                         .get_scope(scope_id)
-                        .is_some_and(|s| s.borrow().lookup_symbol_local(&local_name).is_some());
+                        .is_some_and(|s| s.lookup_symbol_local(&local_name).is_some());
                 if clashes_builtin || clashes_local {
                     let with = if clashes_builtin {
                         "a builtin type"
@@ -4234,7 +4234,7 @@ impl TypeChecker {
                 Some(s) => s,
                 None => return,
             };
-            scope.borrow().imports.clone()
+            scope.imports.clone()
         };
 
         for import in imports {
@@ -4263,7 +4263,7 @@ impl TypeChecker {
         }
         self.symbol_table
             .get_scope(scope_id)
-            .is_some_and(|s| s.borrow().resolved_imports.contains_key(local_name))
+            .is_some_and(|s| s.resolved_imports.contains_key(local_name))
     }
 
     /// Whether `path` is the reserved single-segment `root` handle — `use root;`
@@ -4319,8 +4319,8 @@ impl TypeChecker {
             },
             reexported,
         };
-        if let Some(scope) = self.symbol_table.get_scope(scope_id) {
-            scope.borrow_mut().add_resolved_import(resolved);
+        if let Some(scope) = self.symbol_table.get_scope_mut(scope_id) {
+            scope.add_resolved_import(resolved);
         }
     }
 
@@ -4439,8 +4439,8 @@ impl TypeChecker {
                 },
                 reexported,
             };
-            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
-                scope.borrow_mut().add_resolved_import(resolved);
+            if let Some(scope) = self.symbol_table.get_scope_mut(scope_id) {
+                scope.add_resolved_import(resolved);
             }
         }
     }

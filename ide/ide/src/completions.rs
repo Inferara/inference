@@ -493,7 +493,7 @@ mod tests {
     use crate::test_utils::{after, at, project, single, with_lib};
 
     fn complete(source: &str, offset: u32) -> Vec<CompletionItem> {
-        let (mut host, path) = single(source);
+        let (host, path) = single(source);
         host.analysis().completions(&path, offset)
     }
 
@@ -637,7 +637,7 @@ fn m(p: P) -> i32 { return p.; }";
         // `exported`, which the checker rejects (issue #246).
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "pub fn exported() -> i32 { return 1; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, at(entry, "return 0"));
         assert!(has(&items, "lib", CompletionItemKind::Module));
         assert!(has(&items, "lib::exported", CompletionItemKind::Function));
@@ -653,7 +653,7 @@ fn m(p: P) -> i32 { return p.; }";
         // are written `geom::Point`, not `lib::geom::Point` and not bare `Point`.
         let entry = "use lib::geom;\nfn main() -> i32 { return 0; }";
         let geom = "pub struct Point { x: i32; }";
-        let (mut host, path) = project(&[
+        let (host, path) = project(&[
             (&["main"], entry),
             (&["lib", "geom"], geom),
         ]);
@@ -670,7 +670,7 @@ fn m(p: P) -> i32 { return p.; }";
     fn a_plain_import_does_not_offer_private_defs() {
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "pub fn shown() -> i32 { return 1; }\nfn hidden() -> i32 { return 2; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, at(entry, "return 0"));
         assert!(has(&items, "lib::shown", CompletionItemKind::Function));
         assert!(
@@ -700,7 +700,7 @@ fn m(p: P) -> i32 { return p.; }";
         // braced, so it must not be offered, and no `arith` namespace is bound.
         let entry = "use arith::{add};\nfn main() -> i32 { return 0; }";
         let arith = "pub fn add() -> i32 { return 1; }\npub fn sub() -> i32 { return 2; }";
-        let (mut host, path) = project(&[(&["main"], entry), (&["arith"], arith)]);
+        let (host, path) = project(&[(&["main"], entry), (&["arith"], arith)]);
         let items = host.analysis().completions(&path, at(entry, "return 0"));
         assert!(has(&items, "add", CompletionItemKind::Function));
         assert!(
@@ -719,7 +719,7 @@ fn m(p: P) -> i32 { return p.; }";
         // is private, so neither is offered (accepting either would not compile).
         let entry = "use lib::{good, absent, secret};\nfn main() -> i32 { return 0; }";
         let lib = "pub fn good() -> i32 { return 1; }\nfn secret() -> i32 { return 2; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, at(entry, "return 0"));
         assert!(has(&items, "good", CompletionItemKind::Function));
         assert!(!has_label(&items, "absent"), "a missing item is not offered");
@@ -735,7 +735,7 @@ fn m(p: P) -> i32 { return p.; }";
     fn after_a_module_qualifier_offers_its_pub_defs_bare() {
         let entry = "use lib;\nfn main() -> i32 { return lib::; }";
         let lib = "pub fn shown() -> i32 { return 1; }\nfn hidden() -> i32 { return 2; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, after(entry, "lib::"));
         assert!(
             has(&items, "shown", CompletionItemKind::Function),
@@ -782,7 +782,7 @@ fn m(p: P) -> i32 { return p.; }";
     fn a_partial_name_after_a_qualifier_still_offers_the_module_defs() {
         let entry = "use lib;\nfn main() -> i32 { return lib::sho; }";
         let lib = "pub fn shown() -> i32 { return 1; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, after(entry, "lib::sho"));
         assert!(
             has(&items, "shown", CompletionItemKind::Function),
@@ -797,7 +797,7 @@ fn m(p: P) -> i32 { return p.; }";
         // arith's defs (which `arith::x` could not call).
         let entry = "use arith::{add};\nfn main() -> i32 { return arith::; }";
         let arith = "pub fn add() -> i32 { return 1; }\npub fn sub() -> i32 { return 2; }";
-        let (mut host, path) = project(&[(&["main"], entry), (&["arith"], arith)]);
+        let (host, path) = project(&[(&["main"], entry), (&["arith"], arith)]);
         let items = host.analysis().completions(&path, after(entry, "arith::"));
         assert!(
             items.is_empty(),
@@ -826,7 +826,7 @@ fn m(p: P) -> i32 { return p.; }";
         let lib = "pub struct P { x: i32; \
 pub fn shown(self) -> i32 { return self.x; } \
 fn hidden(self) -> i32 { return self.x; } }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let items = host.analysis().completions(&path, after(entry, "p."));
         assert!(has(&items, "shown", CompletionItemKind::Method));
         assert!(has(&items, "x", CompletionItemKind::Field));

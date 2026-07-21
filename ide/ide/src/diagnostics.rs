@@ -249,14 +249,14 @@ mod tests {
     #[test]
     fn clean_file_has_no_diagnostics() {
         let src = "fn add(a: i32, b: i32) -> i32 { return a + b; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         assert!(host.analysis().diagnostics(&path).is_empty());
     }
 
     #[test]
     fn undeclared_variable_is_a_type_diagnostic_at_the_use() {
         let src = "fn f() -> i32 { return x; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         let diagnostic = diagnostics
             .iter()
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn duplicate_local_is_an_a041_finding_on_the_second_declaration() {
         let src = "fn f() { let a: i32 = 1; let a: i32 = 2; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         let finding = diagnostics
             .iter()
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn syntax_error_is_a_syntax_diagnostic() {
         let src = "fn f() { let x: i32 = ; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         assert!(
             diagnostics
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn diagnostics_are_sorted_by_range_start() {
         let src = "fn f() -> i32 { let a: i32 = 1; let a: i32 = 2; return z; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         let starts: Vec<u32> = diagnostics.iter().map(|d| d.range.start).collect();
         let mut sorted = starts.clone();
@@ -317,7 +317,7 @@ mod tests {
     fn broken_import_surfaces_on_the_use_directive() {
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "fn g() { let x: i32 = ; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let diagnostics = host.analysis().diagnostics(&path);
         let diagnostic = diagnostics
             .iter()
@@ -336,7 +336,7 @@ mod tests {
     fn missing_import_reports_cannot_find_module() {
         // `lib` is never opened and not on disk, so the import does not resolve.
         let src = "use libx;\nfn main() -> i32 { return 0; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         let diagnostic = diagnostics
             .iter()
@@ -364,7 +364,7 @@ mod tests {
         // contradictory "build the project" type error is suppressed (an IDE
         // always has a project context).
         let src = "use libx;\nfn main() -> i32 { return 0; }";
-        let (mut host, path) = single(src);
+        let (host, path) = single(src);
         let diagnostics = host.analysis().diagnostics(&path);
         assert!(
             diagnostics
@@ -412,7 +412,7 @@ mod tests {
         // imported file's own per-file-local diagnostics (they'd be misplaced).
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "fn g() { let x: i32 = ; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let diagnostics = host.analysis().diagnostics(&path);
         assert!(
             diagnostics

@@ -10,14 +10,15 @@
 //! - Import registration and resolution
 //! - Visibility checking for access control
 //!
-//! Scopes form a tree where each scope can have multiple child scopes. Each
-//! child holds a `Weak` reference to its parent; the [`SymbolTable`] owns the
-//! strong references via its `scopes` map.
+//! Scopes form a tree where each scope can have multiple child scopes. Scopes
+//! live in an index arena owned by the [`SymbolTable`]; each scope refers to its
+//! parent and children by [`ScopeId`] rather than by pointer, so the tree carries
+//! no interior mutability.
 //!
 //! ## Scope Tree Traversal
 //!
 //! `lookup_variable`, `lookup_variable_is_mut`, and `lookup_method` first check
-//! the current scope locally; on a miss they upgrade the parent `Weak` and
+//! the current scope locally; on a miss they follow the parent [`ScopeId`] and
 //! recurse, terminating when either a match is found or the root scope (which has
 //! no parent) is reached. Symbol resolution adds a file boundary on top of this
 //! (see [`SymbolTable::lookup_symbol_file_scoped`]): a non-entry file does not
@@ -32,12 +33,8 @@
 //! Functions without an explicit return type default to the unit type,
 //! represented as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Weak;
-
-use std::sync::Arc;
 
 use anyhow::bail;
 
@@ -47,8 +44,37 @@ use inference_ast::ids::DefId;
 use inference_ast::nodes::{ArgKind, Def, Location, Visibility};
 use rustc_hash::FxHashMap;
 
-pub(crate) type ScopeRef = Arc<RefCell<Scope>>;
-pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
+/// Handle to a [`Scope`] stored in [`SymbolTable::scopes`].
+///
+/// Scopes are held in an index arena: ids are dense and allocation-ordered, so a
+/// `ScopeId` is exactly the storage index. The scope-tree links (`parent`,
+/// `children`) and the table's scope maps are plain ids rather than
+/// reference-counted, interior-mutable pointers — which is what keeps the whole
+/// symbol table (and thus [`crate::typed_context::TypedContext`]) `Send + Sync`
+/// (#157).
+///
+/// The identifier is a bare `u32` at every public boundary — method parameters,
+/// and the `definition_scope_id` on [`StructInfo`]/[`EnumInfo`]/[`FuncInfo`] that
+/// downstream phases read — so this newtype stays internal to the scope tree and
+/// converts at the edge through [`ScopeId::as_u32`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ScopeId(u32);
+
+impl ScopeId {
+    /// The storage index of this scope in [`SymbolTable::scopes`].
+    #[inline]
+    #[must_use = "the storage index is the return value"]
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The bare `u32` identifier, for the public boundary that speaks `u32`.
+    #[inline]
+    #[must_use = "the scope id is the return value"]
+    fn as_u32(self) -> u32 {
+        self.0
+    }
+}
 
 /// Provenance of an `external fn` declaration: the logical module that exports
 /// it, the export field name to bind against, and (once the driver resolves it)
@@ -528,16 +554,16 @@ impl Symbol {
 }
 
 /// A scope in the symbol table tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Scope {
-    pub(crate) id: u32,
+    pub(crate) id: ScopeId,
     pub(crate) name: String,
     /// Full path from root (e.g., "mod1::mod2::mod3"), cached at creation time for O(1) lookup.
     pub(crate) full_path: String,
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
-    pub(crate) parent: Option<WeakScopeRef>,
-    pub(crate) children: Vec<ScopeRef>,
+    pub(crate) parent: Option<ScopeId>,
+    pub(crate) children: Vec<ScopeId>,
     pub(crate) symbols: FxHashMap<String, Symbol>,
     pub(crate) variables: FxHashMap<String, (u32, TypeInfo, bool)>,
     pub(crate) methods: FxHashMap<String, Vec<MethodInfo>>,
@@ -548,16 +574,15 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    #[allow(clippy::arc_with_non_send_sync)]
     #[must_use = "scope constructor returns a new scope that should be used"]
     pub(crate) fn new(
-        id: u32,
+        id: ScopeId,
         name: &str,
         full_path: String,
         visibility: Visibility,
-        parent: Option<WeakScopeRef>,
-    ) -> ScopeRef {
-        Arc::new(RefCell::new(Self {
+        parent: Option<ScopeId>,
+    ) -> Self {
+        Self {
             id,
             name: name.to_string(),
             full_path,
@@ -569,10 +594,10 @@ impl Scope {
             methods: FxHashMap::default(),
             imports: Vec::new(),
             resolved_imports: FxHashMap::default(),
-        }))
+        }
     }
 
-    pub(crate) fn add_child(&mut self, child: ScopeRef) {
+    pub(crate) fn add_child(&mut self, child: ScopeId) {
         self.children.push(child);
     }
 
@@ -619,30 +644,8 @@ impl Scope {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_variable(&self, name: &str) -> Option<TypeInfo> {
-        if let Some((_, ty, _)) = self.lookup_variable_local(name) {
-            return Some(ty);
-        }
-        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
-            return parent.borrow().lookup_variable(name);
-        }
-        None
-    }
-
-    #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_variable_is_mut_local(&self, name: &str) -> Option<bool> {
         self.variables.get(name).map(|(_, _, is_mut)| *is_mut)
-    }
-
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_variable_is_mut(&self, name: &str) -> Option<bool> {
-        if let Some(is_mut) = self.lookup_variable_is_mut_local(name) {
-            return Some(is_mut);
-        }
-        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
-            return parent.borrow().lookup_variable_is_mut(name);
-        }
-        None
     }
 
     pub(crate) fn insert_method(&mut self, type_name: &str, method_info: MethodInfo) {
@@ -650,21 +653,6 @@ impl Scope {
             .entry(type_name.to_string())
             .or_default()
             .push(method_info);
-    }
-
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<MethodInfo> {
-        if let Some(method_info) = self
-            .methods
-            .get(type_name)
-            .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
-        {
-            return Some(method_info.clone());
-        }
-        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
-            return parent.borrow().lookup_method(type_name, method_name);
-        }
-        None
     }
 
     /// Add an unresolved import to this scope
@@ -685,20 +673,37 @@ impl Scope {
     }
 }
 
+/// Index-arena symbol table.
+///
+/// Scopes are owned by `scopes`, a dense `Vec` keyed by [`ScopeId`]: the id of a
+/// scope equals its index, and ids are handed out in allocation order by
+/// `next_scope_id`. The scope maps and the current/root cursors hold ids, so the
+/// whole structure is free of `Arc`/`RefCell` and is `Send + Sync` (#157).
 #[derive(Clone)]
 pub(crate) struct SymbolTable {
-    scopes: FxHashMap<u32, ScopeRef>,
-    mod_scopes: FxHashMap<String, ScopeRef>,
-    spec_scopes: FxHashMap<String, ScopeRef>,
-    root_scope: Option<ScopeRef>,
-    current_scope: Option<ScopeRef>,
+    scopes: Vec<Scope>,
+    mod_scopes: FxHashMap<String, ScopeId>,
+    spec_scopes: FxHashMap<String, ScopeId>,
+    root_scope: Option<ScopeId>,
+    current_scope: Option<ScopeId>,
     next_scope_id: u32,
 }
+
+// Compile-time assertion: SymbolTable is Send + Sync. The scope tree is a plain
+// index arena with no interior mutability, so the property holds structurally, and
+// is anchored here at the type that maintains it (#157). `TypedContext`, whose only
+// non-trivially-`Send` field is this table, re-asserts it in `typed_context.rs`.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+    assert_send::<SymbolTable>();
+    assert_sync::<SymbolTable>();
+};
 
 impl Default for SymbolTable {
     fn default() -> Self {
         let mut table = SymbolTable {
-            scopes: FxHashMap::default(),
+            scopes: Vec::new(),
             mod_scopes: FxHashMap::default(),
             spec_scopes: FxHashMap::default(),
             root_scope: None,
@@ -713,55 +718,51 @@ impl Default for SymbolTable {
 
 impl SymbolTable {
     fn init_root_scope(&mut self) {
-        let root = Scope::new(
-            self.next_scope_id,
-            "root",
-            String::new(),
-            Visibility::Public,
-            None,
-        );
-        self.scopes.insert(self.next_scope_id, Arc::clone(&root));
-        self.mod_scopes.insert(String::new(), Arc::clone(&root));
+        let id = ScopeId(self.next_scope_id);
+        let root = Scope::new(id, "root", String::new(), Visibility::Public, None);
+        self.scopes.push(root);
+        self.mod_scopes.insert(String::new(), id);
         self.next_scope_id += 1;
-        self.root_scope = Some(Arc::clone(&root));
-        self.current_scope = Some(root);
+        self.root_scope = Some(id);
+        self.current_scope = Some(id);
     }
 
     fn init_builtin_types(&mut self) {
         use crate::type_info::{NumberType, TypeInfoKind};
 
-        if let Some(scope) = &self.current_scope {
-            let mut scope_mut = scope.borrow_mut();
+        let Some(current) = self.current_scope else {
+            return;
+        };
+        let scope = &mut self.scopes[current.index()];
 
-            for number_type in NumberType::ALL {
-                let type_info = TypeInfo {
-                    kind: TypeInfoKind::Number(*number_type),
-                    type_params: vec![],
-                };
-                let _ = scope_mut.insert_symbol(
-                    number_type.as_str(),
-                    Symbol::TypeAlias(TypeAliasInfo {
-                        type_info,
-                        visibility: Visibility::Public,
-                        definition_location: Location::default(),
-                    }),
-                );
-            }
+        for number_type in NumberType::ALL {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(*number_type),
+                type_params: vec![],
+            };
+            let _ = scope.insert_symbol(
+                number_type.as_str(),
+                Symbol::TypeAlias(TypeAliasInfo {
+                    type_info,
+                    visibility: Visibility::Public,
+                    definition_location: Location::default(),
+                }),
+            );
+        }
 
-            for (name, kind) in TypeInfoKind::NON_NUMERIC_BUILTINS {
-                let type_info = TypeInfo {
-                    kind: kind.clone(),
-                    type_params: vec![],
-                };
-                let _ = scope_mut.insert_symbol(
-                    name,
-                    Symbol::TypeAlias(TypeAliasInfo {
-                        type_info,
-                        visibility: Visibility::Public,
-                        definition_location: Location::default(),
-                    }),
-                );
-            }
+        for (name, kind) in TypeInfoKind::NON_NUMERIC_BUILTINS {
+            let type_info = TypeInfo {
+                kind: kind.clone(),
+                type_params: vec![],
+            };
+            let _ = scope.insert_symbol(
+                name,
+                Symbol::TypeAlias(TypeAliasInfo {
+                    type_info,
+                    visibility: Visibility::Public,
+                    definition_location: Location::default(),
+                }),
+            );
         }
     }
 
@@ -777,13 +778,13 @@ impl SymbolTable {
     /// `scopes` and the parent's `children`, and reassigns `current_scope` to
     /// the new scope. Returns the new `scope_id`.
     pub(crate) fn push_scope_with_name(&mut self, name: &str, visibility: Visibility) -> u32 {
-        let parent = self.current_scope.clone();
-        let scope_id = self.next_scope_id;
+        let parent = self.current_scope;
+        let id = ScopeId(self.next_scope_id);
         self.next_scope_id += 1;
 
-        let full_path = match &parent {
+        let full_path = match parent {
             Some(p) => {
-                let parent_path = &p.borrow().full_path;
+                let parent_path = &self.scopes[p.index()].full_path;
                 if parent_path.is_empty() {
                     name.to_string()
                 } else {
@@ -793,21 +794,15 @@ impl SymbolTable {
             None => name.to_string(),
         };
 
-        let new_scope = Scope::new(
-            scope_id,
-            name,
-            full_path,
-            visibility,
-            parent.as_ref().map(Arc::downgrade),
-        );
+        let new_scope = Scope::new(id, name, full_path, visibility, parent);
+        self.scopes.push(new_scope);
 
-        if let Some(current) = &parent {
-            current.borrow_mut().add_child(Arc::clone(&new_scope));
+        if let Some(p) = parent {
+            self.scopes[p.index()].add_child(id);
         }
 
-        self.scopes.insert(scope_id, Arc::clone(&new_scope));
-        self.current_scope = Some(new_scope);
-        scope_id
+        self.current_scope = Some(id);
+        id.as_u32()
     }
 
     /// Reassign `current_scope` to the parent of the current scope, if any.
@@ -815,9 +810,8 @@ impl SymbolTable {
     /// No-op when `current_scope` is `None` or has no parent (i.e. root).
     /// Counterpart to [`Self::push_scope_with_name`].
     pub(crate) fn pop_scope(&mut self) {
-        if let Some(current) = &self.current_scope {
-            let parent = current.borrow().parent.as_ref().and_then(|p| p.upgrade());
-            self.current_scope = parent;
+        if let Some(current) = self.current_scope {
+            self.current_scope = self.scopes[current.index()].parent;
         }
     }
 
@@ -839,12 +833,12 @@ impl SymbolTable {
         visibility: Visibility,
         location: Location,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
+        if let Some(current) = self.current_scope {
             let type_info = ty.unwrap_or_else(|| TypeInfo {
                 kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
                 type_params: vec![],
             });
-            scope.borrow_mut().insert_symbol(
+            self.scopes[current.index()].insert_symbol(
                 name,
                 Symbol::TypeAlias(TypeAliasInfo {
                     type_info,
@@ -874,11 +868,14 @@ impl SymbolTable {
         visibility: Visibility,
         location: Location,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            if scope.borrow().lookup_symbol_local(name).is_some() {
+        if let Some(current) = self.current_scope {
+            if self.scopes[current.index()]
+                .lookup_symbol_local(name)
+                .is_some()
+            {
                 return Ok(());
             }
-            scope.borrow_mut().insert_symbol(
+            self.scopes[current.index()].insert_symbol(
                 name,
                 Symbol::Constant(ConstInfo {
                     type_info,
@@ -899,8 +896,8 @@ impl SymbolTable {
         visibility: Visibility,
         location: Location,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            let scope_id = scope.borrow().id;
+        if let Some(current) = self.current_scope {
+            let scope_id = current.as_u32();
             let fields = fields
                 .iter()
                 .map(|(field_name, field_type)| StructFieldInfo {
@@ -916,9 +913,7 @@ impl SymbolTable {
                 definition_scope_id: scope_id,
                 definition_location: location,
             };
-            scope
-                .borrow_mut()
-                .insert_symbol(name, Symbol::Struct(struct_info))
+            self.scopes[current.index()].insert_symbol(name, Symbol::Struct(struct_info))
         } else {
             bail!("No active scope to register struct")
         }
@@ -931,8 +926,8 @@ impl SymbolTable {
         visibility: Visibility,
         location: Location,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            let scope_id = scope.borrow().id;
+        if let Some(current) = self.current_scope {
+            let scope_id = current.as_u32();
             let enum_info = EnumInfo {
                 name: name.to_string(),
                 variants: variants.iter().map(|s| (*s).to_string()).collect(),
@@ -940,19 +935,15 @@ impl SymbolTable {
                 definition_scope_id: scope_id,
                 definition_location: location,
             };
-            scope
-                .borrow_mut()
-                .insert_symbol(name, Symbol::Enum(enum_info))
+            self.scopes[current.index()].insert_symbol(name, Symbol::Enum(enum_info))
         } else {
             bail!("No active scope to register enum")
         }
     }
 
     pub(crate) fn register_spec(&mut self, name: &str) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            scope
-                .borrow_mut()
-                .insert_symbol(name, Symbol::Spec(name.to_string()))
+        if let Some(current) = self.current_scope {
+            self.scopes[current.index()].insert_symbol(name, Symbol::Spec(name.to_string()))
         } else {
             bail!("No active scope to register spec")
         }
@@ -1107,8 +1098,8 @@ impl SymbolTable {
         location: Location,
         kind: FuncKind,
     ) -> Result<(), String> {
-        if let Some(scope) = &self.current_scope {
-            let scope_id = scope.borrow().id;
+        if let Some(current) = self.current_scope {
+            let scope_id = current.as_u32();
             let sig = FuncInfo {
                 name: name.to_string(),
                 type_params,
@@ -1122,8 +1113,7 @@ impl SymbolTable {
                 definition_location: location,
                 kind,
             };
-            scope
-                .borrow_mut()
+            self.scopes[current.index()]
                 .insert_symbol(name, Symbol::Function(sig))
                 .map_err(|e| e.to_string())
         } else {
@@ -1137,10 +1127,8 @@ impl SymbolTable {
         var_type: TypeInfo,
         is_mut: bool,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            scope
-                .borrow_mut()
-                .insert_variable(name, 0, var_type, is_mut)
+        if let Some(current) = self.current_scope {
+            self.scopes[current.index()].insert_variable(name, 0, var_type, is_mut)
         } else {
             bail!("No active scope to push variable")
         }
@@ -1162,13 +1150,13 @@ impl SymbolTable {
     /// boundary, so they see their own items unchanged.
     #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_symbol_file_scoped(&self, name: &str) -> Option<Symbol> {
-        let start = self.current_scope.clone()?;
-        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
-        let mut scope = Some(start);
+        let root_id = self.root_scope;
+        let mut cursor = self.current_scope;
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
-            let is_root = Some(s.borrow().id) == root_id;
-            if let Some(symbol) = s.borrow().lookup_symbol_local(name) {
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            let is_root = Some(id) == root_id;
+            if let Some(symbol) = s.lookup_symbol_local(name) {
                 // A user symbol in the entry file (root) is invisible to a lookup
                 // that originated inside a non-entry file; only builtins pass.
                 if is_root && crossed_file_boundary && !symbol.is_builtin_binding() {
@@ -1178,10 +1166,10 @@ impl SymbolTable {
             }
             // Leaving a non-entry file namespace means the next hop into root is a
             // cross-file access; record it before advancing.
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1199,21 +1187,22 @@ impl SymbolTable {
     /// before the boundary is crossed (#63).
     #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_symbol_file_scoped_from(&self, name: &str, from_scope_id: u32) -> Option<Symbol> {
-        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
-        let mut scope = self.get_scope(from_scope_id);
+        let root_id = self.root_scope;
+        let mut cursor = Some(ScopeId(from_scope_id));
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
-            let is_root = Some(s.borrow().id) == root_id;
-            if let Some(symbol) = s.borrow().lookup_symbol_local(name) {
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            let is_root = Some(id) == root_id;
+            if let Some(symbol) = s.lookup_symbol_local(name) {
                 if is_root && crossed_file_boundary && !symbol.is_builtin_binding() {
                     return None;
                 }
                 return Some(symbol.clone());
             }
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1225,7 +1214,7 @@ impl SymbolTable {
     fn is_non_entry_file_scope(&self, scope_id: u32) -> bool {
         self.mod_scopes
             .iter()
-            .any(|(key, scope)| !key.is_empty() && scope.borrow().id == scope_id)
+            .any(|(key, id)| !key.is_empty() && id.as_u32() == scope_id)
     }
 
     /// The id of the file scope enclosing `scope_id`: the nearest ancestor (or
@@ -1240,14 +1229,14 @@ impl SymbolTable {
     /// entry.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn enclosing_file_scope(&self, scope_id: u32) -> u32 {
-        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
-        let mut current = self.get_scope(scope_id);
-        while let Some(s) = current {
-            let id = s.borrow().id;
-            if Some(id) == root_id || self.is_non_entry_file_scope(id) {
-                return id;
+        let root_id = self.root_scope;
+        let mut cursor = Some(ScopeId(scope_id));
+        while let Some(id) = cursor {
+            let Some(s) = self.scope(id) else { break };
+            if Some(id) == root_id || self.is_non_entry_file_scope(id.as_u32()) {
+                return id.as_u32();
             }
-            current = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         scope_id
     }
@@ -1279,21 +1268,21 @@ impl SymbolTable {
         // access goes through `lookup_constant`, which gates on `pub`. So a
         // lookup that originated inside a non-entry file stops before reading a
         // root-scope variable.
-        let start = self.current_scope.as_ref()?;
-        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
-        let mut scope = Some(Arc::clone(start));
+        let root_id = self.root_scope;
+        let mut cursor = self.current_scope;
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
-            let is_root = Some(s.borrow().id) == root_id;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            let is_root = Some(id) == root_id;
             if !(is_root && crossed_file_boundary)
-                && let Some(ty) = s.borrow().lookup_variable_local_type(name)
+                && let Some(ty) = s.lookup_variable_local_type(name)
             {
                 return Some(ty);
             }
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1318,22 +1307,29 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_variable_is_mut(&self, name: &str) -> Option<bool> {
-        self.current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_variable_is_mut(name))
+        let mut cursor = self.current_scope;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some(is_mut) = s.lookup_variable_is_mut_local(name) {
+                return Some(is_mut);
+            }
+            cursor = s.parent;
+        }
+        None
     }
 
     /// Checks whether a variable exists in any parent scope (skipping the current scope).
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_variable_in_parent_scopes(&self, name: &str) -> Option<TypeInfo> {
-        self.current_scope.as_ref().and_then(|scope| {
-            let scope = scope.borrow();
-            scope
-                .parent
-                .as_ref()
-                .and_then(|p| p.upgrade())
-                .and_then(|parent| parent.borrow().lookup_variable(name))
-        })
+        let mut cursor = self.scope(self.current_scope?)?.parent;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some((_, ty, _)) = s.lookup_variable_local(name) {
+                return Some(ty);
+            }
+            cursor = s.parent;
+        }
+        None
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -1356,14 +1352,15 @@ impl SymbolTable {
     /// the items an `use a::b::{x};` brought into the file.
     #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_imported_item_symbol(&self, name: &str) -> Option<Symbol> {
-        let mut scope = self.current_scope.clone();
-        while let Some(s) = scope {
-            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+        let mut cursor = self.current_scope;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some(resolved) = s.resolved_imports.get(name)
                 && let ResolvedImportTarget::Item { symbol, .. } = &resolved.target
             {
                 return Some((**symbol).clone());
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1377,9 +1374,10 @@ impl SymbolTable {
     /// top-level name that a spec in a different file happens to repeat.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_function_in_scope(&self, scope_id: u32, name: &str) -> Option<FuncInfo> {
-        let scope = self.scopes.get(&scope_id)?;
-        let symbol = scope.borrow().lookup_symbol_local(name).cloned()?;
-        symbol.as_function().cloned()
+        self.scope(ScopeId(scope_id))?
+            .lookup_symbol_local(name)?
+            .as_function()
+            .cloned()
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -1419,11 +1417,9 @@ impl SymbolTable {
     /// site — e.g. a field read on a value built via `root::` or a namespace path.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct_by_key(&self, key: &str) -> Option<StructInfo> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            if let Some(scope) = self.scopes.get(&id)
-                && let Some(symbol) = scope.borrow().lookup_symbol_local(key.rsplit("::").next()?)
+        let leaf = key.rsplit("::").next()?;
+        for scope in &self.scopes {
+            if let Some(symbol) = scope.lookup_symbol_local(leaf)
                 && let Some(info) = symbol.as_struct()
                 && self.canonical_key_for_scope(info.definition_scope_id, &info.name) == key
             {
@@ -1438,11 +1434,9 @@ impl SymbolTable {
     /// defining file, so same-named enums from different files never collapse.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_enum_by_key(&self, key: &str) -> Option<EnumInfo> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            if let Some(scope) = self.scopes.get(&id)
-                && let Some(symbol) = scope.borrow().lookup_symbol_local(key.rsplit("::").next()?)
+        let leaf = key.rsplit("::").next()?;
+        for scope in &self.scopes {
+            if let Some(symbol) = scope.lookup_symbol_local(leaf)
                 && let Some(info) = symbol.as_enum()
                 && self.canonical_key_for_scope(info.definition_scope_id, &info.name) == key
             {
@@ -1483,14 +1477,14 @@ impl SymbolTable {
     /// string). Spec and anonymous block scopes are transparent — their types
     /// belong to the enclosing file for canonical-key purposes.
     fn enclosing_file_path(&self, scope_id: u32) -> String {
-        let file_ids: BTreeSet<u32> = self.mod_scopes.values().map(|s| s.borrow().id).collect();
-        let mut current = self.get_scope(scope_id);
-        while let Some(scope) = current {
-            let id = scope.borrow().id;
-            if file_ids.contains(&id) {
-                return scope.borrow().full_path.clone();
+        let file_ids: BTreeSet<u32> = self.mod_scopes.values().map(|id| id.as_u32()).collect();
+        let mut cursor = Some(ScopeId(scope_id));
+        while let Some(id) = cursor {
+            let Some(scope) = self.scope(id) else { break };
+            if file_ids.contains(&id.as_u32()) {
+                return scope.full_path.clone();
             }
-            current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = scope.parent;
         }
         String::new()
     }
@@ -1521,14 +1515,10 @@ impl SymbolTable {
     /// struct from another file.
     #[must_use = "the enumeration is the return value"]
     pub(crate) fn structs_with_canonical_keys(&self) -> Vec<(String, StructInfo)> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
         let mut out = Vec::new();
-        for id in ids {
-            let Some(scope) = self.scopes.get(&id) else {
-                continue;
-            };
-            for symbol in scope.borrow().symbols.values() {
+        for scope in &self.scopes {
+            let id = scope.id.as_u32();
+            for symbol in scope.symbols.values() {
                 if let Some(info) = symbol.as_struct() {
                     out.push((self.canonical_key_for_scope(id, &info.name), info.clone()));
                 }
@@ -1541,14 +1531,10 @@ impl SymbolTable {
     /// [`Self::structs_with_canonical_keys`].
     #[must_use = "the enumeration is the return value"]
     pub(crate) fn enums_with_canonical_keys(&self) -> Vec<(String, EnumInfo)> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
         let mut out = Vec::new();
-        for id in ids {
-            let Some(scope) = self.scopes.get(&id) else {
-                continue;
-            };
-            for symbol in scope.borrow().symbols.values() {
+        for scope in &self.scopes {
+            let id = scope.id.as_u32();
+            for symbol in scope.symbols.values() {
                 if let Some(info) = symbol.as_enum() {
                     out.push((self.canonical_key_for_scope(id, &info.name), info.clone()));
                 }
@@ -1679,10 +1665,7 @@ impl SymbolTable {
         struct_bare_name: &str,
         method_name: &str,
     ) -> Option<MethodInfo> {
-        let scope = self.get_scope(definition_scope_id)?;
-        // `cloned()` detaches the borrow, so the owned result outlives the `Ref`.
-        let scope = scope.borrow();
-        scope
+        self.scope(ScopeId(definition_scope_id))?
             .methods
             .get(struct_bare_name)
             .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
@@ -1701,22 +1684,24 @@ impl SymbolTable {
         method_name: &str,
         from_scope_id: u32,
     ) -> Option<MethodInfo> {
-        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
-        let mut scope = self.get_scope(from_scope_id);
+        let root_id = self.root_scope;
+        let mut cursor = Some(ScopeId(from_scope_id));
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
-            let is_root = Some(s.borrow().id) == root_id;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            let is_root = Some(id) == root_id;
             if !(is_root && crossed_file_boundary)
-                && let Some(method) = s.borrow().methods.get(type_name).and_then(|methods| {
-                    methods.iter().find(|m| m.signature.name == method_name)
-                })
+                && let Some(method) = s
+                    .methods
+                    .get(type_name)
+                    .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
             {
                 return Some(method.clone());
             }
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1789,9 +1774,7 @@ impl SymbolTable {
     ) -> Option<MethodInfo> {
         let (info, _) =
             self.resolve_struct_in_namespace(type_name, ns_scope_id, accessor_scope_id)?;
-        let scope = self.get_scope(info.definition_scope_id)?;
-        let scope_ref = scope.borrow();
-        scope_ref
+        self.scope(ScopeId(info.definition_scope_id))?
             .methods
             .get(type_name)
             .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
@@ -1848,14 +1831,15 @@ impl SymbolTable {
     /// `use a::b::{S};`.
     #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_imported_item_symbol_from(&self, name: &str, from_scope_id: u32) -> Option<Symbol> {
-        let mut scope = self.get_scope(from_scope_id);
-        while let Some(s) = scope {
-            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+        let mut cursor = Some(ScopeId(from_scope_id));
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some(resolved) = s.resolved_imports.get(name)
                 && let ResolvedImportTarget::Item { symbol, .. } = &resolved.target
             {
                 return Some((**symbol).clone());
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1882,19 +1866,19 @@ impl SymbolTable {
         accessor_scope_id: u32,
     ) -> Option<Symbol> {
         let accessor_ancestry = self.scope_ancestry(accessor_scope_id);
-        let mut scope = self.get_scope(ns_scope_id);
-        while let Some(s) = scope {
-            let import_scope_id = s.borrow().id;
-            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+        let mut cursor = Some(ScopeId(ns_scope_id));
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some(resolved) = s.resolved_imports.get(name)
                 && let ResolvedImportTarget::Item { symbol, .. } = &resolved.target
             {
-                let crosses_file_boundary = !accessor_ancestry.contains(&import_scope_id);
+                let crosses_file_boundary = !accessor_ancestry.contains(&id.as_u32());
                 if crosses_file_boundary && !resolved.reexported {
                     return None;
                 }
                 return Some((**symbol).clone());
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -1909,13 +1893,8 @@ impl SymbolTable {
     pub(crate) fn extern_origins(&self) -> Vec<ExternOrigin> {
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
         let mut origins = Vec::new();
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let Some(scope) = self.scopes.get(&id) else {
-                continue;
-            };
-            for symbol in scope.borrow().symbols.values() {
+        for scope in &self.scopes {
+            for symbol in scope.symbols.values() {
                 let Some(info) = symbol.as_function() else {
                     continue;
                 };
@@ -1942,13 +1921,8 @@ impl SymbolTable {
     /// call site to the specific extern it names.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn extern_origin_by_decl(&self, decl: DefId) -> Option<ExternOrigin> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let Some(scope) = self.scopes.get(&id) else {
-                continue;
-            };
-            for symbol in scope.borrow().symbols.values() {
+        for scope in &self.scopes {
+            for symbol in scope.symbols.values() {
                 let Some(info) = symbol.as_function() else {
                     continue;
                 };
@@ -1967,11 +1941,8 @@ impl SymbolTable {
     /// so post-type-check phases can read it scope-agnostically.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_function_anywhere(&self, name: &str) -> Option<FuncInfo> {
-        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            if let Some(scope) = self.scopes.get(&id)
-                && let Some(symbol) = scope.borrow().lookup_symbol_local(name)
+        for scope in &self.scopes {
+            if let Some(symbol) = scope.lookup_symbol_local(name)
                 && let Some(info) = symbol.as_function()
             {
                 return Some(info.clone());
@@ -1987,15 +1958,14 @@ impl SymbolTable {
         visibility: Visibility,
         has_self: bool,
     ) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            let scope_id = scope.borrow().id;
+        if let Some(current) = self.current_scope {
             let method_info = MethodInfo {
                 signature,
                 visibility,
-                scope_id,
+                scope_id: current.as_u32(),
                 has_self,
             };
-            scope.borrow_mut().insert_method(type_name, method_info);
+            self.scopes[current.index()].insert_method(type_name, method_info);
             Ok(())
         } else {
             bail!("No active scope to register method")
@@ -2004,9 +1974,19 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<MethodInfo> {
-        self.current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_method(type_name, method_name))
+        let mut cursor = self.current_scope;
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
+            if let Some(method_info) = s
+                .methods
+                .get(type_name)
+                .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
+            {
+                return Some(method_info.clone());
+            }
+            cursor = s.parent;
+        }
+        None
     }
 
     /// Re-resolves every registered function and method signature, and every
@@ -2022,24 +2002,19 @@ impl SymbolTable {
     /// own scope active so its imports and namespace bindings are visible, rewrites
     /// those names to canonical `Struct`/`Enum`, matching what use sites infer.
     pub(crate) fn renormalize_signatures(&mut self) {
-        let previous = self.current_scope.clone();
-        let scope_ids: Vec<u32> = self.scopes.keys().copied().collect();
-        for id in scope_ids {
-            let Some(scope) = self.scopes.get(&id).cloned() else {
-                continue;
-            };
-            self.current_scope = Some(Arc::clone(&scope));
+        let previous = self.current_scope;
+        for index in 0..self.scopes.len() {
+            let id = ScopeId(index as u32);
+            self.current_scope = Some(id);
 
-            let func_names: Vec<String> = scope
-                .borrow()
+            let func_names: Vec<String> = self.scopes[index]
                 .symbols
                 .iter()
                 .filter(|(_, sym)| sym.as_function().is_some())
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in func_names {
-                let sig = scope
-                    .borrow()
+                let sig = self.scopes[index]
                     .lookup_symbol_local(&name)
                     .and_then(|s| s.as_function().cloned());
                 if let Some(mut sig) = sig {
@@ -2049,17 +2024,15 @@ impl SymbolTable {
                         .map(|ti| self.resolve_custom_type(ti))
                         .collect();
                     sig.return_type = self.resolve_custom_type(sig.return_type);
-                    scope
-                        .borrow_mut()
+                    self.scopes[index]
                         .symbols
                         .insert(name, Symbol::Function(sig));
                 }
             }
 
-            let method_keys: Vec<String> = scope.borrow().methods.keys().cloned().collect();
+            let method_keys: Vec<String> = self.scopes[index].methods.keys().cloned().collect();
             for type_name in method_keys {
-                let mut methods = scope
-                    .borrow()
+                let mut methods = self.scopes[index]
                     .methods
                     .get(&type_name)
                     .cloned()
@@ -2072,19 +2045,17 @@ impl SymbolTable {
                     method.signature.return_type =
                         self.resolve_custom_type(std::mem::take(&mut method.signature.return_type));
                 }
-                scope.borrow_mut().methods.insert(type_name, methods);
+                self.scopes[index].methods.insert(type_name, methods);
             }
 
-            let struct_names: Vec<String> = scope
-                .borrow()
+            let struct_names: Vec<String> = self.scopes[index]
                 .symbols
                 .iter()
                 .filter(|(_, sym)| sym.as_struct().is_some())
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in struct_names {
-                let info = scope
-                    .borrow()
+                let info = self.scopes[index]
                     .lookup_symbol_local(&name)
                     .and_then(|s| s.as_struct().cloned());
                 if let Some(mut info) = info {
@@ -2092,7 +2063,7 @@ impl SymbolTable {
                         field.type_info =
                             self.resolve_custom_type(std::mem::take(&mut field.type_info));
                     }
-                    scope.borrow_mut().symbols.insert(name, Symbol::Struct(info));
+                    self.scopes[index].symbols.insert(name, Symbol::Struct(info));
                 }
             }
         }
@@ -2116,14 +2087,14 @@ impl SymbolTable {
     /// `definition_scope_id` rather than activating each scope as the cursor, so it
     /// leaves `current_scope` untouched.
     pub(crate) fn renormalize_resolved_imports(&mut self) {
-        let scope_ids: Vec<u32> = self.scopes.keys().copied().collect();
-        for id in scope_ids {
-            let Some(scope) = self.scopes.get(&id).cloned() else {
-                continue;
-            };
-            let names: Vec<String> = scope.borrow().resolved_imports.keys().cloned().collect();
+        for index in 0..self.scopes.len() {
+            let names: Vec<String> = self.scopes[index]
+                .resolved_imports
+                .keys()
+                .cloned()
+                .collect();
             for name in names {
-                let binding = scope.borrow().resolved_imports.get(&name).cloned();
+                let binding = self.scopes[index].resolved_imports.get(&name).cloned();
                 let Some(mut binding) = binding else {
                     continue;
                 };
@@ -2144,7 +2115,7 @@ impl SymbolTable {
                     .collect();
                 sig.return_type = self
                     .resolve_custom_type_in_scope(std::mem::take(&mut sig.return_type), def_scope);
-                scope.borrow_mut().resolved_imports.insert(name, binding);
+                self.scopes[index].resolved_imports.insert(name, binding);
             }
         }
     }
@@ -2167,15 +2138,12 @@ impl SymbolTable {
     /// file scope and its `full_path` is the qualifying prefix.
     pub(crate) fn enter_spec(&mut self, name: &str) -> u32 {
         let key = self.spec_scope_key(name);
-        if let Some(existing) = self.spec_scopes.get(&key) {
-            let scope_id = existing.borrow().id;
-            self.current_scope = Some(Arc::clone(existing));
-            return scope_id;
+        if let Some(&existing) = self.spec_scopes.get(&key) {
+            self.current_scope = Some(existing);
+            return existing.as_u32();
         }
         let scope_id = self.push_scope_with_name(name, Visibility::Public);
-        if let Some(scope) = self.scopes.get(&scope_id) {
-            self.spec_scopes.insert(key, Arc::clone(scope));
-        }
+        self.spec_scopes.insert(key, ScopeId(scope_id));
         scope_id
     }
 
@@ -2187,9 +2155,9 @@ impl SymbolTable {
     /// distinct between files.
     #[must_use = "this is a pure key computation with no side effects"]
     fn spec_scope_key(&self, name: &str) -> String {
-        match &self.current_scope {
+        match self.current_scope.and_then(|id| self.scope(id)) {
             Some(scope) => {
-                let parent_path = scope.borrow().full_path.clone();
+                let parent_path = &scope.full_path;
                 if parent_path.is_empty() {
                     name.to_string()
                 } else {
@@ -2209,9 +2177,7 @@ impl SymbolTable {
     /// path — codegen never assigns spec functions an executable index.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_spec_scope(&self, scope_id: u32) -> bool {
-        self.spec_scopes
-            .values()
-            .any(|scope| scope.borrow().id == scope_id)
+        self.spec_scopes.values().any(|id| id.as_u32() == scope_id)
     }
 
     /// Whether `scope_id` is a spec scope or is nested inside one, walking the
@@ -2223,13 +2189,13 @@ impl SymbolTable {
     /// parent — not itself — is the spec scope, so the direct check would miss it.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn scope_is_within_spec(&self, scope_id: u32) -> bool {
-        let mut current = self.get_scope(scope_id);
-        while let Some(scope) = current {
-            let id = scope.borrow().id;
-            if self.is_spec_scope(id) {
+        let mut cursor = Some(ScopeId(scope_id));
+        while let Some(id) = cursor {
+            let Some(scope) = self.scope(id) else { break };
+            if self.is_spec_scope(id.as_u32()) {
                 return true;
             }
-            current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = scope.parent;
         }
         false
     }
@@ -2264,11 +2230,9 @@ impl SymbolTable {
             if let Some(existing) = self.child_scope_named(segment) {
                 self.current_scope = Some(existing);
             } else {
-                let id = self.push_scope_with_name(segment, Visibility::Public);
-                if let Some(scope) = self.scopes.get(&id) {
-                    let full_path = scope.borrow().full_path.clone();
-                    self.mod_scopes.insert(full_path, Arc::clone(scope));
-                }
+                let id = ScopeId(self.push_scope_with_name(segment, Visibility::Public));
+                let full_path = self.scopes[id.index()].full_path.clone();
+                self.mod_scopes.insert(full_path, id);
             }
         }
         self.current_scope_id().unwrap_or(0)
@@ -2278,27 +2242,25 @@ impl SymbolTable {
     /// per-file/per-spec scope walks, letting a registration pass return to a
     /// known anchor before entering the next file.
     pub(crate) fn reset_to_root(&mut self) {
-        self.current_scope = self.root_scope.clone();
+        self.current_scope = self.root_scope;
     }
 
     /// Returns the direct child scope of `current_scope` whose name matches
     /// `name`, if one exists. Used to make file-scope creation idempotent across
     /// registration passes without re-walking from the root each time.
     #[must_use = "this is a pure lookup with no side effects"]
-    fn child_scope_named(&self, name: &str) -> Option<ScopeRef> {
-        let current = self.current_scope.as_ref()?;
-        current
-            .borrow()
-            .children
+    fn child_scope_named(&self, name: &str) -> Option<ScopeId> {
+        let children = &self.scope(self.current_scope?)?.children;
+        children
             .iter()
-            .find(|c| c.borrow().name == name)
-            .cloned()
+            .copied()
+            .find(|&c| self.scope(c).is_some_and(|s| s.name == name))
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn find_module_scope(&self, path: &[String]) -> Option<u32> {
         let key = path.join("::");
-        self.mod_scopes.get(&key).map(|s| s.borrow().id)
+        self.mod_scopes.get(&key).map(|id| id.as_u32())
     }
 
     /// Returns the `::`-joined module path of the scope `scope_id` — its cached
@@ -2307,9 +2269,8 @@ impl SymbolTable {
     /// Used to name the defining file in a cross-file private-access diagnostic.
     #[must_use = "the module path is the return value"]
     pub(crate) fn module_path_of_scope(&self, scope_id: u32) -> String {
-        self.scopes
-            .get(&scope_id)
-            .map(|s| s.borrow().full_path.clone())
+        self.scope(ScopeId(scope_id))
+            .map(|s| s.full_path.clone())
             .unwrap_or_default()
     }
 
@@ -2319,10 +2280,11 @@ impl SymbolTable {
     #[must_use = "the ancestry is the return value"]
     pub(crate) fn scope_ancestry(&self, scope_id: u32) -> Vec<u32> {
         let mut chain = Vec::new();
-        let mut current = self.get_scope(scope_id);
-        while let Some(scope) = current {
-            chain.push(scope.borrow().id);
-            current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        let mut cursor = Some(ScopeId(scope_id));
+        while let Some(id) = cursor {
+            let Some(scope) = self.scope(id) else { break };
+            chain.push(id.as_u32());
+            cursor = scope.parent;
         }
         chain
     }
@@ -2563,17 +2525,15 @@ impl SymbolTable {
         let mut current = anchor;
         let mut consumed = path.len() - remaining.len();
         for segment in remaining {
-            match self.next_namespace_scope(&current, segment) {
-                Some((next, ReachedVia::Child))
-                    if self.scope_is_file_namespace(next.borrow().id) =>
-                {
+            match self.next_namespace_scope(current, segment) {
+                Some((next, ReachedVia::Child)) if self.scope_is_file_namespace(next.as_u32()) => {
                     current = next;
                     consumed += 1;
                 }
                 _ => break,
             }
         }
-        Some((current.borrow().id, consumed))
+        Some((current.as_u32(), consumed))
     }
 
     /// Whether `name` appears anywhere on the *surface* of scope `scope_id` — as a
@@ -2587,18 +2547,20 @@ impl SymbolTable {
     /// all means "not a missing file import".
     #[must_use = "this is a pure check with no side effects"]
     fn scope_surface_contains(&self, scope_id: u32, name: &str) -> bool {
-        let Some(scope) = self.get_scope(scope_id) else {
+        let Some(scope) = self.scope(ScopeId(scope_id)) else {
             return false;
         };
-        let scope = scope.borrow();
-        scope.children.iter().any(|c| c.borrow().name == name)
+        scope
+            .children
+            .iter()
+            .any(|&c| self.scope(c).is_some_and(|s| s.name == name))
             || scope.resolved_imports.contains_key(name)
             || scope.lookup_symbol_local(name).is_some()
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn current_scope_id(&self) -> Option<u32> {
-        self.current_scope.as_ref().map(|s| s.borrow().id)
+        self.current_scope.map(ScopeId::as_u32)
     }
 
     /// The root scope id — the program scope that holds the entry file's
@@ -2606,27 +2568,43 @@ impl SymbolTable {
     /// this scope so a non-entry file can reach the entry's `pub` surface.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn root_scope_id(&self) -> Option<u32> {
-        self.root_scope.as_ref().map(|r| r.borrow().id)
+        self.root_scope.map(ScopeId::as_u32)
     }
 
+    /// Borrows the scope with `u32` id `scope_id`, or `None` when out of range.
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn get_scope(&self, scope_id: u32) -> Option<ScopeRef> {
-        self.scopes.get(&scope_id).cloned()
+    pub(crate) fn get_scope(&self, scope_id: u32) -> Option<&Scope> {
+        self.scope(ScopeId(scope_id))
+    }
+
+    /// Mutably borrows the scope with `u32` id `scope_id`, or `None` when out of
+    /// range. The `&mut` counterpart of [`Self::get_scope`] for the crate-internal
+    /// callers that bind a resolved import into an existing scope.
+    #[must_use = "the mutable scope borrow is the return value; dropping it makes the call a no-op"]
+    pub(crate) fn get_scope_mut(&mut self, scope_id: u32) -> Option<&mut Scope> {
+        self.scopes.get_mut(ScopeId(scope_id).index())
+    }
+
+    /// Borrows the scope with id `id`, or `None` when the id is out of range.
+    /// The single indexing primitive the scope-tree walks are built on.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn scope(&self, id: ScopeId) -> Option<&Scope> {
+        self.scopes.get(id.index())
     }
 
     pub(crate) fn register_import(&mut self, import: Import) -> anyhow::Result<()> {
-        if let Some(scope) = &self.current_scope {
-            scope.borrow_mut().add_import(import);
+        if let Some(current) = self.current_scope {
+            self.scopes[current.index()].add_import(import);
             Ok(())
         } else {
             bail!("No active scope to register import")
         }
     }
 
-    /// Get all scope IDs for iteration
+    /// Get all scope IDs for iteration, in ascending (allocation) order.
     #[must_use = "discarding the scope IDs has no effect"]
     pub(crate) fn all_scope_ids(&self) -> Vec<u32> {
-        self.scopes.keys().copied().collect()
+        (0..self.scopes.len() as u32).collect()
     }
 
     /// Resolves a `::`-separated path to the symbol it names and the id of the
@@ -2680,7 +2658,7 @@ impl SymbolTable {
     #[must_use = "this is a pure lookup with no side effects"]
     fn walk_qualified_from(
         &self,
-        start_scope: ScopeRef,
+        start_scope: ScopeId,
         module_path: &[String],
         from_scope_id: u32,
         gate_descent: bool,
@@ -2699,13 +2677,13 @@ impl SymbolTable {
                 // A terminal reached by a re-export hop is already licensed.
                 if gate_descent
                     && last_via != Some(ReachedVia::Reexport)
-                    && !self.may_read_namespace_surface(from_scope_id, &current_scope)
+                    && !self.may_read_namespace_surface(from_scope_id, current_scope)
                 {
                     return None;
                 }
-                let scope = current_scope.borrow();
+                let scope = self.scope(current_scope)?;
                 if let Some(symbol) = scope.lookup_symbol_local(segment) {
-                    return Some((symbol.clone(), scope.id));
+                    return Some((symbol.clone(), scope.id.as_u32()));
                 }
                 if let Some(resolved) = scope.resolved_imports.get(segment)
                     && let ResolvedImportTarget::Item {
@@ -2721,8 +2699,9 @@ impl SymbolTable {
                     // [`Self::next_namespace_scope`]. The accessing file reaching
                     // its own item import (the import scope is in the accessor's
                     // ancestry) is not a boundary crossing and stays allowed.
-                    let crosses_file_boundary =
-                        !self.scope_ancestry(from_scope_id).contains(&scope.id);
+                    let crosses_file_boundary = !self
+                        .scope_ancestry(from_scope_id)
+                        .contains(&scope.id.as_u32());
                     if !crosses_file_boundary || resolved.reexported {
                         return Some(((**symbol).clone(), *definition_scope_id));
                     }
@@ -2731,12 +2710,12 @@ impl SymbolTable {
                 return None;
             }
 
-            let (next, via) = self.next_namespace_scope(&current_scope, segment)?;
+            let (next, via) = self.next_namespace_scope(current_scope, segment)?;
             // Only file-nesting child descent is gated by the manifest; a re-export
             // hop carries its own discipline and is followed freely.
             if gate_descent
                 && via == ReachedVia::Child
-                && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+                && !self.may_descend_through_namespace(from_scope_id, current_scope, next)
             {
                 return None;
             }
@@ -2766,18 +2745,20 @@ impl SymbolTable {
         &self,
         path: &'p [String],
         from_scope_id: u32,
-    ) -> Option<(ScopeRef, &'p [String])> {
+    ) -> Option<(ScopeId, &'p [String])> {
         let first_segment = &path[0];
         if first_segment == "self" {
-            return Some((self.get_scope(from_scope_id)?, &path[1..]));
+            let id = ScopeId(from_scope_id);
+            self.scope(id)?;
+            return Some((id, &path[1..]));
         }
         if let Some(scope_id) = self.namespace_binding_scope(first_segment, from_scope_id)
-            && let Some(target) = self.get_scope(scope_id)
+            && self.scope(ScopeId(scope_id)).is_some()
         {
-            return Some((target, &path[1..]));
+            return Some((ScopeId(scope_id), &path[1..]));
         }
         if self.file_may_anchor_absolute_path(path, from_scope_id) {
-            return Some((self.root_scope.clone()?, path));
+            return Some((self.root_scope?, path));
         }
         None
     }
@@ -2800,13 +2781,15 @@ impl SymbolTable {
             return None;
         }
         let (start_scope, remaining) = if path[0] == "self" {
-            (self.get_scope(from_scope_id)?, &path[1..])
+            let id = ScopeId(from_scope_id);
+            self.scope(id)?;
+            (id, &path[1..])
         } else if let Some(scope_id) = self.namespace_binding_scope(&path[0], from_scope_id)
-            && let Some(target) = self.get_scope(scope_id)
+            && self.scope(ScopeId(scope_id)).is_some()
         {
-            (target, &path[1..])
+            (ScopeId(scope_id), &path[1..])
         } else {
-            (self.root_scope.clone()?, path)
+            (self.root_scope?, path)
         };
         self.walk_qualified_from(start_scope, remaining, from_scope_id, false)
     }
@@ -2862,20 +2845,21 @@ impl SymbolTable {
     #[must_use = "the keys are the return value"]
     fn imported_namespace_keys(&self, from_scope_id: u32) -> Vec<String> {
         let mut keys = Vec::new();
-        let mut scope = self.get_scope(from_scope_id);
+        let mut cursor = Some(ScopeId(from_scope_id));
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
+        while let Some(id) = cursor {
+            let Some(s) = self.scope(id) else { break };
             if !crossed_file_boundary {
-                for resolved in s.borrow().resolved_imports.values() {
+                for resolved in s.resolved_imports.values() {
                     if let ResolvedImportTarget::Namespace { scope_id } = &resolved.target {
                         keys.push(self.module_path_of_scope(*scope_id));
                     }
                 }
             }
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         keys
     }
@@ -2898,14 +2882,15 @@ impl SymbolTable {
     /// (#63).
     #[must_use = "this is a pure lookup with no side effects"]
     fn namespace_binding_scope(&self, name: &str, from_scope_id: u32) -> Option<u32> {
-        let mut scope = self.get_scope(from_scope_id);
+        let mut cursor = Some(ScopeId(from_scope_id));
         let mut crossed_file_boundary = false;
-        while let Some(s) = scope {
+        while let Some(id) = cursor {
+            let s = self.scope(id)?;
             // Once the walk has climbed out of the originating file, the imports it
             // now sees belong to an enclosing file and must not bind this file's
             // names.
             if !crossed_file_boundary
-                && let Some(resolved) = s.borrow().resolved_imports.get(name)
+                && let Some(resolved) = s.resolved_imports.get(name)
                 && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
             {
                 return Some(*scope_id);
@@ -2914,10 +2899,10 @@ impl SymbolTable {
             // enclosing file; record it before advancing. The entry file is the
             // root scope, so its own lookups never cross and keep seeing their own
             // imports.
-            if self.is_non_entry_file_scope(s.borrow().id) {
+            if self.is_non_entry_file_scope(id.as_u32()) {
                 crossed_file_boundary = true;
             }
-            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            cursor = s.parent;
         }
         None
     }
@@ -2936,18 +2921,22 @@ impl SymbolTable {
     /// `pub use lib::arith;`, not a plain `use`.
     fn next_namespace_scope(
         &self,
-        current: &ScopeRef,
+        current: ScopeId,
         segment: &str,
-    ) -> Option<(ScopeRef, ReachedVia)> {
-        let scope = current.borrow();
-        if let Some(child) = scope.children.iter().find(|c| c.borrow().name == segment) {
-            return Some((child.clone(), ReachedVia::Child));
+    ) -> Option<(ScopeId, ReachedVia)> {
+        let scope = self.scope(current)?;
+        if let Some(&child) = scope
+            .children
+            .iter()
+            .find(|&&c| self.scope(c).is_some_and(|s| s.name == segment))
+        {
+            return Some((child, ReachedVia::Child));
         }
         if let Some(resolved) = scope.resolved_imports.get(segment)
             && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
             && resolved.reexported
         {
-            return self.get_scope(*scope_id).map(|s| (s, ReachedVia::Reexport));
+            return Some((ScopeId(*scope_id), ReachedVia::Reexport));
         }
         None
     }
@@ -2976,14 +2965,14 @@ impl SymbolTable {
     fn may_descend_through_namespace(
         &self,
         from_scope_id: u32,
-        current: &ScopeRef,
-        next: &ScopeRef,
+        current: ScopeId,
+        next: ScopeId,
     ) -> bool {
-        let next_id = next.borrow().id;
+        let next_id = next.as_u32();
         if !self.is_non_entry_file_scope(next_id) {
             return true;
         }
-        let current_id = current.borrow().id;
+        let current_id = current.as_u32();
         if self.enclosing_file_scope(next_id) == self.enclosing_file_scope(current_id) {
             return true;
         }
@@ -3009,8 +2998,8 @@ impl SymbolTable {
     /// gate fires only on cross-file reads (the `enclosing_file_scope` inequality),
     /// mirroring the pass-through gate's same-file exemption.
     #[must_use = "this is a pure check with no side effects"]
-    fn may_read_namespace_surface(&self, from_scope_id: u32, terminal: &ScopeRef) -> bool {
-        let terminal_id = terminal.borrow().id;
+    fn may_read_namespace_surface(&self, from_scope_id: u32, terminal: ScopeId) -> bool {
+        let terminal_id = terminal.as_u32();
         if !self.is_non_entry_file_scope(terminal_id) {
             return true;
         }
@@ -3047,7 +3036,9 @@ impl SymbolTable {
         for (i, segment) in module_path.iter().enumerate() {
             let is_last = i == module_path.len() - 1;
             if is_last {
-                let scope = current_scope.borrow();
+                let Some(scope) = self.scope(current_scope) else {
+                    return false;
+                };
                 if let Some(symbol) = scope.lookup_symbol_local(segment) {
                     return symbol.as_function().is_some();
                 }
@@ -3058,7 +3049,7 @@ impl SymbolTable {
                 }
                 return false;
             }
-            match self.next_namespace_scope_ignoring_reexport(&current_scope, segment) {
+            match self.next_namespace_scope_ignoring_reexport(current_scope, segment) {
                 Some(next) => current_scope = next,
                 None => return false,
             }
@@ -3072,17 +3063,21 @@ impl SymbolTable {
     /// probe whether a path would resolve if the missing `pub use` were added.
     fn next_namespace_scope_ignoring_reexport(
         &self,
-        current: &ScopeRef,
+        current: ScopeId,
         segment: &str,
-    ) -> Option<ScopeRef> {
-        let scope = current.borrow();
-        if let Some(child) = scope.children.iter().find(|c| c.borrow().name == segment) {
-            return Some(child.clone());
+    ) -> Option<ScopeId> {
+        let scope = self.scope(current)?;
+        if let Some(&child) = scope
+            .children
+            .iter()
+            .find(|&&c| self.scope(c).is_some_and(|s| s.name == segment))
+        {
+            return Some(child);
         }
         if let Some(resolved) = scope.resolved_imports.get(segment)
             && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
         {
-            return self.get_scope(*scope_id);
+            return Some(ScopeId(*scope_id));
         }
         None
     }
@@ -3120,10 +3115,10 @@ impl SymbolTable {
             return false;
         };
         for segment in remaining {
-            match self.next_namespace_scope(&current_scope, segment) {
+            match self.next_namespace_scope(current_scope, segment) {
                 Some((next, via)) => {
                     if via == ReachedVia::Child
-                        && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+                        && !self.may_descend_through_namespace(from_scope_id, current_scope, next)
                     {
                         return false;
                     }
@@ -3202,8 +3197,8 @@ impl SymbolTable {
             // An absolute path that did not anchor on a bound namespace: the first
             // segment must itself be a root child namespace, else this is not a
             // namespace path.
-            self.next_namespace_scope(&start_scope, &path[0])?;
-        } else if !self.scope_is_file_namespace(start_scope.borrow().id) {
+            self.next_namespace_scope(start_scope, &path[0])?;
+        } else if !self.scope_is_file_namespace(start_scope.as_u32()) {
             return None;
         }
 
@@ -3247,7 +3242,7 @@ impl SymbolTable {
         // imported the parent (`use a;` / `use lib;`), exactly as the head
         // precedence requires for the head segment (#63).
         for (i, segment) in path.iter().enumerate().skip(consumed) {
-            let scope_id = current_scope.borrow().id;
+            let scope_id = current_scope.as_u32();
             // A same-named type pre-empts the sub-file at the type-access start only
             // when the type interpretation is *viable* for the suffix (the type is
             // the leaf, or `Type::member` names a real assoc fn / enum variant).
@@ -3266,10 +3261,10 @@ impl SymbolTable {
             {
                 break;
             }
-            match self.next_namespace_scope(&current_scope, segment) {
+            match self.next_namespace_scope(current_scope, segment) {
                 Some((next, via)) => {
                     if via == ReachedVia::Child
-                        && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+                        && !self.may_descend_through_namespace(from_scope_id, current_scope, next)
                     {
                         break;
                     }
@@ -3291,11 +3286,11 @@ impl SymbolTable {
         // is exempt. This mirrors the value/function resolver's terminal gate so the
         // type path and the value path enforce the identical rule.
         if last_via != Some(ReachedVia::Reexport)
-            && !self.may_read_namespace_surface(from_scope_id, &current_scope)
+            && !self.may_read_namespace_surface(from_scope_id, current_scope)
         {
             return None;
         }
-        Some((current_scope.borrow().id, consumed))
+        Some((current_scope.as_u32(), consumed))
     }
 
     /// Whether `name` is a struct or enum defined in the file enclosing
@@ -3420,10 +3415,8 @@ impl SymbolTable {
     ) -> anyhow::Result<u32> {
         let scope_id = self.push_scope_with_name(module_name, Visibility::Public);
 
-        if let Some(scope) = self.scopes.get(&scope_id) {
-            let full_path = scope.borrow().full_path.clone();
-            self.mod_scopes.insert(full_path, Arc::clone(scope));
-        }
+        let full_path = self.scopes[ScopeId(scope_id).index()].full_path.clone();
+        self.mod_scopes.insert(full_path, ScopeId(scope_id));
 
         for sf in arena.source_files() {
             for &def_id in &sf.defs {
@@ -3727,8 +3720,7 @@ mod tests {
             let scope1 = table.get_scope(scope1_id).unwrap();
             let scope2 = table.get_scope(scope2_id).unwrap();
             assert_ne!(
-                scope1.borrow().name,
-                scope2.borrow().name,
+                scope1.name, scope2.name,
                 "Consecutive anonymous scopes should have unique names"
             );
         }
@@ -3739,13 +3731,12 @@ mod tests {
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
             assert!(
-                scope.borrow().name.starts_with("anonymous_"),
+                scope.name.starts_with("anonymous_"),
                 "Anonymous scope name should start with 'anonymous_'"
             );
             let expected_name = format!("anonymous_{scope_id}");
             assert_eq!(
-                scope.borrow().name,
-                expected_name,
+                scope.name, expected_name,
                 "Anonymous scope name should match pattern anonymous_{{scope_id}}"
             );
         }
@@ -3759,12 +3750,11 @@ mod tests {
             let inner1 = table.get_scope(inner1_id).unwrap();
             let inner2 = table.get_scope(inner2_id).unwrap();
             assert_ne!(
-                inner1.borrow().full_path,
-                inner2.borrow().full_path,
+                inner1.full_path, inner2.full_path,
                 "Nested anonymous scopes should have different full_paths"
             );
             assert!(
-                inner1.borrow().full_path.contains("test_func"),
+                inner1.full_path.contains("test_func"),
                 "Full path should include parent function name"
             );
         }
@@ -3774,7 +3764,7 @@ mod tests {
             let mut table = SymbolTable::default();
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-            let full_path = scope.borrow().full_path.clone();
+            let full_path = scope.full_path.clone();
             let path_segments: Vec<String> = full_path.split("::").map(String::from).collect();
             assert!(
                 table.find_module_scope(&path_segments).is_none(),
@@ -3809,16 +3799,15 @@ mod tests {
             }
             for (i, scope_id) in scope_ids.iter().enumerate() {
                 let scope = table.get_scope(*scope_id).unwrap();
-                let scope_borrow = scope.borrow();
                 let expected_depth = i + 1;
-                let path_parts: Vec<&str> = scope_borrow.full_path.split("::").collect();
+                let path_parts: Vec<&str> = scope.full_path.split("::").collect();
                 assert_eq!(
                     path_parts.len(),
                     expected_depth,
                     "Deeply nested scope at level {i} should have correct path depth"
                 );
                 assert!(
-                    scope_borrow.name.starts_with("anonymous_"),
+                    scope.name.starts_with("anonymous_"),
                     "All nested scopes should have anonymous_ prefix"
                 );
             }
@@ -3837,9 +3826,9 @@ mod tests {
             let sibling2 = table.get_scope(sibling2_id).unwrap();
             let sibling3 = table.get_scope(sibling3_id).unwrap();
             let names = [
-                sibling1.borrow().name.clone(),
-                sibling2.borrow().name.clone(),
-                sibling3.borrow().name.clone(),
+                sibling1.name.clone(),
+                sibling2.name.clone(),
+                sibling3.name.clone(),
             ];
             assert_eq!(
                 names.len(),
@@ -3855,28 +3844,24 @@ mod tests {
             let child_id = table.push_scope();
             let child_scope = table.get_scope(child_id).unwrap();
             let parent_scope = table.get_scope(parent_id).unwrap();
-            let child_parent = child_scope
-                .borrow()
-                .parent
-                .as_ref()
-                .and_then(|p| p.upgrade());
+            let child_parent = child_scope.parent;
             assert!(
                 child_parent.is_some(),
                 "Anonymous child scope should have parent"
             );
-            let child_parent_id = child_parent.unwrap().borrow().id;
+            let child_parent_id = child_parent.unwrap().as_u32();
             assert_eq!(
                 child_parent_id, parent_id,
                 "Anonymous scope's parent should be the enclosing scope"
             );
-            let parent_children = &parent_scope.borrow().children;
+            let parent_children = &parent_scope.children;
             assert_eq!(
                 parent_children.len(),
                 1,
                 "Parent should have the anonymous child in its children list"
             );
             assert_eq!(
-                parent_children[0].borrow().id,
+                parent_children[0].as_u32(),
                 child_id,
                 "Parent's child should be the anonymous scope"
             );
@@ -3888,7 +3873,7 @@ mod tests {
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
             assert!(
-                matches!(scope.borrow().visibility, Visibility::Private),
+                matches!(scope.visibility, Visibility::Private),
                 "Anonymous scopes should have private visibility"
             );
         }
@@ -3917,8 +3902,8 @@ mod tests {
             table.push_scope_with_name("mod2", Visibility::Private);
             let anon_id = table.push_scope();
             let anon_scope = table.get_scope(anon_id).unwrap();
-            let full_path = anon_scope.borrow().full_path.clone();
-            let name = anon_scope.borrow().name.clone();
+            let full_path = anon_scope.full_path.clone();
+            let name = anon_scope.name.clone();
             let expected_path = format!("mod1::mod2::{name}");
             assert_eq!(
                 full_path, expected_path,
@@ -3935,7 +3920,7 @@ mod tests {
             let mut table = SymbolTable::default();
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-            let full_path = scope.borrow().full_path.clone();
+            let full_path = scope.full_path.clone();
             assert!(
                 !full_path.starts_with("::"),
                 "Root-level anonymous scope should not start with ::"
@@ -3944,6 +3929,40 @@ mod tests {
                 full_path.starts_with("anonymous_"),
                 "Root-level anonymous scope full_path should be just the name"
             );
+        }
+    }
+
+    mod scope_arena_invariants {
+        use super::*;
+
+        /// Every allocated scope's stored id equals the id it is retrieved by.
+        /// This is the index-equals-id invariant the arena's O(1) lookup relies
+        /// on: `ScopeId(id).index()` is only a valid storage index because ids are
+        /// dense and allocation-ordered. A mix of file, anonymous, and popped
+        /// scopes must not perturb it.
+        #[test]
+        fn stored_id_equals_retrieval_id() {
+            let mut table = SymbolTable::default();
+            table.push_scope_with_name("a", Visibility::Public);
+            table.push_scope();
+            table.pop_scope();
+            table.push_scope_with_name("b", Visibility::Public);
+            table.enter_spec("Sp");
+
+            let ids = table.all_scope_ids();
+            assert_eq!(
+                ids,
+                (0..ids.len() as u32).collect::<Vec<_>>(),
+                "scope ids must be the dense range 0..n"
+            );
+            for id in ids {
+                let scope = table.get_scope(id).expect("every allocated id resolves");
+                assert_eq!(
+                    scope.id.as_u32(),
+                    id,
+                    "a scope's stored id must equal the id it is fetched by"
+                );
+            }
         }
     }
 

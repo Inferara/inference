@@ -24,9 +24,12 @@
 //! resolved through the overlay-then-disk loader in `ide-db`), and the resulting
 //! analysis answers every query for that document — including goto-definition
 //! into an imported file, whose [`NavigationTarget`] carries that file's real path
-//! and ranges in its own coordinates. A query borrows the database mutably because
-//! the analysis is computed lazily and memoized on first use; the LSP main loop is
-//! single-threaded, so this is exactly the access pattern it needs.
+//! and ranges in its own coordinates. Feature queries take `&self`: the analysis
+//! is still computed lazily and memoized on first use, so a read mutates the
+//! `RootDatabase`, but that mutation now runs behind a `RefCell` rather than a
+//! `&mut` borrow, which is what lets the query surface be shared. The LSP main
+//! loop is single-threaded and never holds one query across another, so the
+//! interior borrow is always uncontended.
 
 mod completions;
 mod diagnostics;
@@ -41,6 +44,7 @@ mod type_render;
 #[cfg(test)]
 mod test_utils;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -58,6 +62,11 @@ pub use inlay_hints::{InlayHint, InlayHintKind};
 // path-addressed, so the file-id PODs are intentionally not surfaced here.
 pub use inference_ide_db::{LineCol, LineIndex, TextRange};
 
+// Re-export the cancellation surface so the protocol layer binds a source and
+// classifies a caught unwind through `inference-ide` alone, never naming the
+// underlying semantic framework.
+pub use inference_ide_db::{AnalysisCancelSource, is_cancellation};
+
 /// Owns the editor's open documents and the analyses derived from them.
 ///
 /// Construct with [`AnalysisHost::default`], mirror the editor's lifecycle with
@@ -66,24 +75,24 @@ pub use inference_ide_db::{LineCol, LineIndex, TextRange};
 /// feature queries.
 #[derive(Default)]
 pub struct AnalysisHost {
-    db: RootDatabase,
+    db: RefCell<RootDatabase>,
 }
 
 impl AnalysisHost {
     /// Records `text` as the current contents of `path` (an editor `didOpen`).
     pub fn open_document(&mut self, path: &Path, text: impl Into<Arc<str>>) {
-        self.db.open_document(path, text);
+        self.db.get_mut().open_document(path, text);
     }
 
     /// Replaces the current contents of the open document `path` (a `didChange`).
     pub fn change_document(&mut self, path: &Path, text: impl Into<Arc<str>>) {
-        self.db.change_document(path, text);
+        self.db.get_mut().change_document(path, text);
     }
 
     /// Drops the in-memory contents of `path` (a `didClose`); later analyses read
     /// it from disk again.
     pub fn close_document(&mut self, path: &Path) {
-        self.db.close_document(path);
+        self.db.get_mut().close_document(path);
     }
 
     /// Whether an analysis for `path` is currently memoized.
@@ -93,66 +102,87 @@ impl AnalysisHost {
     /// exactly the affected documents rather than every open one.
     #[must_use = "the analyzed state is the reason to call this"]
     pub fn is_document_analyzed(&self, path: &Path) -> bool {
-        self.db.is_analyzed(path)
+        self.db.borrow().is_analyzed(path)
     }
 
     /// Borrows the host to answer feature queries.
     #[must_use = "an Analysis does nothing until a query method is called"]
-    pub fn analysis(&mut self) -> Analysis<'_> {
-        Analysis { db: &mut self.db }
+    pub fn analysis(&self) -> Analysis<'_> {
+        Analysis { db: &self.db }
+    }
+
+    /// Binds `source` so a cancellation request from another thread interrupts
+    /// this host's in-flight analysis at its next checkpoint. Rebind after
+    /// replacing the host: the binding is per-database-handle.
+    pub fn bind_cancellation(&self, source: &AnalysisCancelSource) {
+        self.db.borrow().bind_cancellation(source);
     }
 }
 
-/// A borrowed view over the host that answers feature queries for a document.
+/// A shared `&self` view over the host that answers feature queries for a
+/// document.
 ///
-/// Each method names its document by path and takes `&mut self` because the
-/// document's analysis is computed lazily and cached on first use — a read
-/// mutates the [`RootDatabase`] to memoize its result. That is why the borrow is
-/// `&'a mut RootDatabase` rather than shared: it is correct for the
-/// single-threaded LSP main loop, but it forecloses request cancellation and
-/// parallel reads, which would need a `RootDatabase` that memoizes behind shared
-/// interior mutability. Adopting Salsa (issue #157) is the planned path to that;
-/// until then this constraint is deliberate and load-bearing.
+/// It holds a `&RefCell<RootDatabase>`, not a `&mut RootDatabase`: each query
+/// method takes `&self` and opens a `borrow_mut` scoped to that single call,
+/// releasing it before returning, so an `Analysis` holds no live borrow between
+/// calls. The read still needs `&mut RootDatabase` underneath — the analysis is
+/// computed lazily on first use and a read memoizes the result and drives
+/// invalidation in place — but that mutation now runs behind the `RefCell`, which
+/// is what makes the query surface shareable.
+///
+/// This is the shared-`&self` surface, *not* a parallel cloned-handle read
+/// model. Salsa's `Storage` is `Clone`, but a genuine handle-clone is deferred
+/// to the cancellation work: the read path still bumps a Salsa input on
+/// never-opened eviction, and a write from one live handle blocks until every
+/// other handle drops, so a cloned reader would not be freely concurrent yet.
+///
+/// The `RefCell` moves one invariant from compile time to run time: a query
+/// method re-entered while another's `borrow_mut` is live panics the cell. It
+/// holds under the single-threaded LSP loop because every query's borrow is
+/// scoped to its own call. A second property — the host is not mutated while an
+/// `Analysis` is live — stays compile-time-enforced: the `Analysis` lifetime is
+/// a shared borrow of the host, which the `&mut self` write methods cannot
+/// coexist with.
 pub struct Analysis<'a> {
-    db: &'a mut RootDatabase,
+    db: &'a RefCell<RootDatabase>,
 }
 
 impl Analysis<'_> {
     /// The diagnostics for the open document `path`: syntax, import, type, and
     /// analysis-rule findings that belong to it.
     #[must_use = "the diagnostics are the reason to call this"]
-    pub fn diagnostics(&mut self, path: &Path) -> Vec<Diagnostic> {
-        diagnostics::diagnostics(self.db.analysis(path))
+    pub fn diagnostics(&self, path: &Path) -> Vec<Diagnostic> {
+        diagnostics::diagnostics(self.db.borrow_mut().analysis(path))
     }
 
     /// The definition outline of the document `path`.
     #[must_use = "the symbols are the reason to call this"]
-    pub fn document_symbols(&mut self, path: &Path) -> Vec<DocumentSymbol> {
-        document_symbols::document_symbols(self.db.analysis(path))
+    pub fn document_symbols(&self, path: &Path) -> Vec<DocumentSymbol> {
+        document_symbols::document_symbols(self.db.borrow_mut().analysis(path))
     }
 
     /// The hover for byte `offset` in the document `path`, if anything is there.
     #[must_use = "the hover is the reason to call this"]
-    pub fn hover(&mut self, path: &Path, offset: u32) -> Option<Hover> {
-        hover::hover(self.db.analysis(path), offset)
+    pub fn hover(&self, path: &Path, offset: u32) -> Option<Hover> {
+        hover::hover(self.db.borrow_mut().analysis(path), offset)
     }
 
     /// The definition(s) of the identifier at byte `offset` in `path`, if any.
     #[must_use = "the navigation targets are the reason to call this"]
-    pub fn goto_definition(&mut self, path: &Path, offset: u32) -> Option<Vec<NavigationTarget>> {
-        goto_definition::goto_definition(self.db.analysis(path), offset)
+    pub fn goto_definition(&self, path: &Path, offset: u32) -> Option<Vec<NavigationTarget>> {
+        goto_definition::goto_definition(self.db.borrow_mut().analysis(path), offset)
     }
 
     /// The completions for byte `offset` in the document `path`.
     #[must_use = "the completions are the reason to call this"]
-    pub fn completions(&mut self, path: &Path, offset: u32) -> Vec<CompletionItem> {
-        completions::completions(self.db.analysis(path), offset)
+    pub fn completions(&self, path: &Path, offset: u32) -> Vec<CompletionItem> {
+        completions::completions(self.db.borrow_mut().analysis(path), offset)
     }
 
     /// The non-det inlay hints for `path`, optionally clipped to `range`.
     #[must_use = "the inlay hints are the reason to call this"]
-    pub fn inlay_hints(&mut self, path: &Path, range: Option<TextRange>) -> Vec<InlayHint> {
-        inlay_hints::inlay_hints(self.db.analysis(path), range)
+    pub fn inlay_hints(&self, path: &Path, range: Option<TextRange>) -> Vec<InlayHint> {
+        inlay_hints::inlay_hints(self.db.borrow_mut().analysis(path), range)
     }
 
     /// The line index of the document `path`, for byte-offset ↔ line/column
@@ -162,8 +192,8 @@ impl Analysis<'_> {
     /// the same open document share one index rather than each copying the whole
     /// document's text.
     #[must_use = "the line index is the reason to call this"]
-    pub fn line_index(&mut self, path: &Path) -> Option<Arc<LineIndex>> {
-        self.db.analysis(path).line_index_arc(&[])
+    pub fn line_index(&self, path: &Path) -> Option<Arc<LineIndex>> {
+        self.db.borrow_mut().analysis(path).line_index_arc(&[])
     }
 
     /// The line index of `target` as it appears in `document`'s analysis closure,
@@ -175,8 +205,9 @@ impl Analysis<'_> {
     /// analyzing `target` as its own entry, which would both duplicate work and,
     /// for a non-entry file, resolve a different closure.
     #[must_use = "the line index is the reason to call this"]
-    pub fn closure_line_index(&mut self, document: &Path, target: &Path) -> Option<Arc<LineIndex>> {
-        let analysis = self.db.analysis(document);
+    pub fn closure_line_index(&self, document: &Path, target: &Path) -> Option<Arc<LineIndex>> {
+        let mut db = self.db.borrow_mut();
+        let analysis = db.analysis(document);
         analysis.arena().source_files().find_map(|source_file| {
             let closure_file = analysis.file(&source_file.module_path)?;
             (closure_file.path() == target).then(|| closure_file.line_index_arc())
@@ -201,7 +232,7 @@ mod tests {
         let mut host = AnalysisHost::default();
         let source = "fn add(a: i32, b: i32) -> i32 { return a + b; }";
         host.open_document(&path(), source);
-        let mut analysis = host.analysis();
+        let analysis = host.analysis();
         assert!(analysis.diagnostics(&path()).is_empty());
         assert_eq!(analysis.document_symbols(&path()).len(), 1);
         let offset = source.find("add").expect("name present") as u32;
@@ -274,5 +305,22 @@ mod tests {
                 .closure_line_index(&path(), &PathBuf::from("/inf-test/nope.inf"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn queries_answer_through_a_shared_borrow() {
+        // The document is opened inside `single`'s own scoped `&mut` borrow;
+        // here the host is bound without `mut`, so every call below reaches it
+        // through a shared `&host`. Two `Analysis` values are held live from the
+        // same shared borrow and each answers a query — this only type-checks
+        // because `analysis` and the query methods take `&self`; a regression to
+        // `&mut self` would fail to compile.
+        let (host, path) =
+            crate::test_utils::single("fn add(a: i32, b: i32) -> i32 { return a + b; }");
+        let first = host.analysis();
+        let second = host.analysis();
+        assert!(first.diagnostics(&path).is_empty());
+        assert_eq!(second.document_symbols(&path).len(), 1);
+        assert!(host.is_document_analyzed(&path));
     }
 }
