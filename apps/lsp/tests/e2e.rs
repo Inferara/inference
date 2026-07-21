@@ -2494,3 +2494,114 @@ fn the_pool_survives_a_contained_analysis_panic() {
 
     client.shutdown_exit_ok();
 }
+
+// --- 24. shutdown publishes no diagnostics for a stale dependent (#294) -------
+
+#[cfg(debug_assertions)]
+#[test]
+fn shutdown_does_not_republish_a_stale_open_slow_dependent() {
+    // #294 (protocol silence after shutdown). An open dependent whose analysis is
+    // stale and pending a deferred republish at the moment `shutdown` arrives, with
+    // its recompute held by the slow seam. The router fires cancellation ahead of the
+    // `shutdown` job, so if the worker still drained the republish queue on either
+    // post-shutdown path it would fetch the stale dependent under a set cancellation
+    // flag — delaying the shutdown response ~5s behind the seam and then emitting a
+    // `publishDiagnostics` for it *after* `shutdown`, which LSP 3.17 forbids.
+    //
+    // The corrected mechanism (the issue's write-up said the server "loops forever";
+    // it does not): salsa resets its cancellation token on every unwind, so the
+    // drain's retry always completes and the server always answered `shutdown`. The
+    // apparent "hang" was client-side — a `wait_for_response` loop hot-spins when any
+    // publish (the trailing post-shutdown one) lands ahead of the response it awaits.
+    // This test therefore pins *protocol silence*, not termination: no diagnostics for
+    // the stale dependent once shutdown is in flight. It reads the wire directly
+    // (never `wait_for_response`) and brackets both drain sites with response
+    // barriers, bounded by the harness receive timeout — a drained recompute fails
+    // this within the seam bound rather than hanging the suite.
+    let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, SLOW_PATH_MARKER)]);
+    client.initialize_default(true);
+
+    let dir = manifested_project("shutdown-stale-pending");
+    let lib_source = "pub fn v() -> i32 { return 1; }";
+    let dep_source = "use lib;\nfn a() -> i32 { return lib::v(); }";
+    let lib_path = dir.write("src/lib.inf", lib_source);
+    // The dependent's path carries the slow marker, so every analysis of it is held
+    // in flight by the seam — including any shutdown-path recompute.
+    let dep_path = dir.write("src/slowmark.inf", dep_source);
+    let (lib_uri, dep_uri) = (path_to_uri(&lib_path), path_to_uri(&dep_path));
+
+    // Open the shared import and the slow dependent — both tracked. Opening the
+    // dependent runs its analysis once through the full seam (no cancellation
+    // pending) and memoizes it.
+    assert!(
+        client.did_open(&lib_uri, lib_source, 1).diagnostics.is_empty(),
+        "lib opens clean"
+    );
+    assert!(
+        client.did_open(&dep_uri, dep_source, 1).diagnostics.is_empty(),
+        "the slow dependent opens clean"
+    );
+
+    // Stale the dependent by editing its import, then shut down immediately — no wait
+    // between them. The change invalidates the dependent's memo and queues it for a
+    // deferred republish; `shutdown` arrives while it is still stale, open, and
+    // pending.
+    client.send_notification(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": lib_uri, "version": 2 },
+            "contentChanges": [ { "text": "pub fn v() -> i32 { return 2; }" } ],
+        }),
+    );
+    let shutdown_id = client.send_request("shutdown", Value::Null);
+
+    // A dependent republish would surface on either post-shutdown path: the shutdown
+    // arm publishes *before* the shutdown response, the worker's idle drain *after*
+    // it. Two response barriers bracket both without any wall-clock wait. The first is
+    // the shutdown response itself. The second is a request sent only *after* that
+    // response arrives — while shutting down it is answered `InvalidRequest`, and its
+    // response cannot be produced until the worker has looped past `shutdown` and
+    // through one round of idle work, so an idle-drain republish is guaranteed to
+    // precede it on the wire.
+    let mut dependent_republished = false;
+    let read_to_response = |client: &mut LspClient, id: i64, seen: &mut bool| -> Value {
+        loop {
+            let message = client.recv_message();
+            if message.get("method").is_none()
+                && message.get("id").and_then(Value::as_i64) == Some(id)
+            {
+                return message;
+            }
+            if message.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+                && message["params"]["uri"] == json!(dep_uri)
+            {
+                *seen = true;
+            }
+        }
+    };
+
+    let shutdown_response = read_to_response(&mut client, shutdown_id, &mut dependent_republished);
+    assert!(
+        shutdown_response.get("error").is_none(),
+        "shutdown is answered Ok, got {shutdown_response}"
+    );
+
+    let barrier_id = send_hover(&mut client, &dep_uri, json!({ "line": 1, "character": 3 }));
+    let barrier_response = read_to_response(&mut client, barrier_id, &mut dependent_republished);
+    assert_eq!(
+        barrier_response["error"]["code"],
+        json!(INVALID_REQUEST),
+        "a request after shutdown is answered InvalidRequest, got {barrier_response}"
+    );
+
+    assert!(
+        !dependent_republished,
+        "the stale dependent must not be republished on any post-shutdown path (#294)"
+    );
+
+    // And the session tears down cleanly.
+    client.exit();
+    let status = client.wait_for_exit();
+    assert!(status.success(), "clean teardown after shutdown, got {status:?}");
+}

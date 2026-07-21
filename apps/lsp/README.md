@@ -146,7 +146,9 @@ itself and turns anything but `exit` into a fatal protocol error): a `shutdown`
 request is answered and flips a `shutting_down` flag, after which every further
 request — including a *repeated* `shutdown` — is answered with `InvalidRequest`
 (`-32600`, the spec's behaviour for a request received between `shutdown` and
-`exit`) and every notification but `exit` is dropped, until `exit` ends the loop.
+`exit`) and every notification but `exit` is dropped, and the worker performs no
+idle work — no republish drain, no deferred bookkeeping — until `exit` ends the
+loop.
 A mid-session `initialize` (the client may send it only once) is likewise
 answered `InvalidRequest`, not the misleading `MethodNotFound` an unknown method
 gets.
@@ -172,10 +174,14 @@ document it invalidated (editing one file invalidates another whose import
 closure includes it — `ide-db` drops exactly those analyses) is queued and
 republished when the worker next goes idle, so an interactive request arriving
 right behind a keystroke is answered before the other documents recompute. The
-queue is always drained before the worker blocks, a request against a queued
-document publishes it fresh immediately, and a shutdown flushes it — so the
-client never keeps a stale diagnostic set. Documents a change left untouched keep
-their memoized analysis and are not republished at all.
+queue is always drained before the worker blocks, and a request against a queued
+document publishes it fresh immediately, so a running client never keeps a stale
+diagnostic set. Once `shutdown` arrives the queue is abandoned rather than flushed
+(issue #294): a client that has shut down cannot act on a publish, LSP 3.17
+forbids the server sending one, and — because the router fires cancellation ahead
+of the `shutdown` job — a shutdown-path drain would re-analyze every queued stale
+entry under a set cancellation flag and stall teardown. Documents a change left
+untouched keep their memoized analysis and are not republished at all.
 
 `handlers.rs` holds one function per LSP method. Each resolves the document's
 path from its URI, converts the LSP position(s) to a byte offset using the
