@@ -146,6 +146,14 @@ pub(crate) struct ServerState {
     /// stamped with an older generation names a host that no longer exists, so its
     /// bookkeeping is skipped (#292).
     host_generation: u64,
+    /// Set once `shutdown` is answered, mirroring the message loop's `shutting_down`
+    /// flag so the paths that run *without* that loop-local — chiefly
+    /// [`apply_worker_event`], driven by a pool event that may land after `shutdown`
+    /// — can tell shutdown apart. Post-shutdown a routed-back pre-shutdown request is
+    /// answered `-32801` rather than queued for idle work that no longer runs, and a
+    /// pool serve's trailing republish is dropped as the protocol-noise it would be
+    /// (#294).
+    shutting_down: bool,
 }
 
 impl ServerState {
@@ -179,6 +187,7 @@ impl ServerState {
             pending_routebacks: Vec::new(),
             pending_unopened: Vec::new(),
             host_generation: 0,
+            shutting_down: false,
         }
     }
 
@@ -664,11 +673,19 @@ fn drain_until_exit(connection: &Connection) {
 /// `shutdown` request is answered and flips the worker's `shutting_down` flag;
 /// while it is set, every further request — including a repeated `shutdown` — is
 /// answered with `InvalidRequest` and every notification but `exit` is ignored, and
-/// the worker performs no idle work — no republish drain, no deferred bookkeeping
-/// (#294). Answering `shutdown` never drains the republish queue: the router fires
-/// cancellation ahead of the `shutdown` job, so a drain here would fetch every
-/// queued stale entry under a set cancellation flag and stall teardown behind a
-/// doomed analysis, and any diagnostics it published would violate LSP 3.17.
+/// the worker performs no notification-producing idle work — no republish drain, no
+/// deferred bookkeeping (#294). Answering `shutdown` never drains the republish
+/// queue: the router fires cancellation ahead of the `shutdown` job, so a drain here
+/// would fetch every queued stale entry under a set cancellation flag and stall
+/// teardown behind a doomed analysis, and any diagnostics it published would violate
+/// LSP 3.17.
+///
+/// What is *not* abandoned is a response owed to a pre-shutdown request. A request a
+/// pool read routed back — parked behind an in-flight sibling — is answered `-32801`
+/// rather than dropped: at the `shutdown` flip for anything already parked, and in
+/// [`apply_worker_event`] for a routeback that lands afterward. A response is not a
+/// notification, so it stays protocol-legal after `shutdown`, and dropping it would
+/// leave the request unanswered with a dangling id.
 /// The `exit` notification ends the loop.
 ///
 /// # Teardown
@@ -1069,12 +1086,17 @@ fn drain_job_batch(
 ///    never fetch a path a pool thread is executing).
 /// 3. Serving any routed-back request whose path has left the in-flight set.
 ///
-/// Once `shutting_down` is set, all of this is skipped (#294): a client that has
-/// sent `shutdown` cannot receive further notifications (LSP 3.17), so every idle
-/// republish is protocol-noise, and — because the router fires cancellation ahead
-/// of `shutdown` — an idle recompute would fetch a stale entry under a set
+/// Once `shutting_down` is set, all of this idle *work* is skipped (#294): a client
+/// that has sent `shutdown` cannot receive further notifications (LSP 3.17), so every
+/// idle republish is protocol-noise, and — because the router fires cancellation
+/// ahead of `shutdown` — an idle recompute would fetch a stale entry under a set
 /// cancellation flag and stall the whole teardown behind a doomed analysis. The
 /// worker then only consumes the remaining jobs until `exit`.
+///
+/// Only notification-producing work is abandoned, not *responses*: a request that
+/// routed back and was parked here is still answered `-32801`, at the `shutdown`
+/// flip and in [`apply_worker_event`] — see [`answer_routeback_superseded`]. That is
+/// why routebacks are cleared before this early return can strand them.
 fn worker_idle(
     connection: &Connection,
     req_queue: &Mutex<ReqQueue<(), ()>>,
@@ -1134,6 +1156,26 @@ fn serve_routeback_now(
     Ok(())
 }
 
+/// Answers a routed-back request `ContentModified` (-32801) without serving it — the
+/// shutdown-path disposition for a pre-shutdown request still parked when `shutdown`
+/// arrives (#294).
+///
+/// A response to a pre-shutdown request is not a notification, so it stays
+/// protocol-legal after `shutdown`; dropping it would leave the request unanswered
+/// and its id dangling in the incoming queue. The router fires cancellation ahead of
+/// the `shutdown` job, so a serial re-serve would classify the routeback superseded
+/// and answer this same code — answering directly skips the doomed recompute and its
+/// trailing `publish_if_pending`, which would be a notification after `shutdown`. The
+/// send still passes the completion gate, so a client `$/cancelRequest` is not
+/// answered twice.
+fn answer_routeback_superseded(
+    connection: &Connection,
+    req_queue: &Mutex<ReqQueue<(), ()>>,
+    request: Request,
+) -> anyhow::Result<()> {
+    send_gated_response(connection, req_queue, content_modified_response(request.id))
+}
+
 /// Applies one pool event to the worker state (#292).
 fn apply_worker_event(
     connection: &Connection,
@@ -1159,8 +1201,12 @@ fn apply_worker_event(
                 // The response already went out from the pool; publish this
                 // document's diagnostics now if a change had queued them (a memo hit
                 // — the pool read was the sole executor), preserving response-then-
-                // publish order for the request.
-                if let Some(params) = state.publish_if_pending(&uri) {
+                // publish order for the request. Suppressed once shutting down: a
+                // publish after `shutdown` is protocol-noise the client cannot act on
+                // (LSP 3.17), like the abandoned republish drain (#294).
+                if !state.shutting_down
+                    && let Some(params) = state.publish_if_pending(&uri)
+                {
                     publish_all(connection, vec![params])?;
                 }
                 // A recomputed never-opened path re-enters the cap FIFO, deferred to
@@ -1179,7 +1225,13 @@ fn apply_worker_event(
             request,
         } => {
             decrement_in_flight(&mut state.in_flight_reads, &path);
-            if state.in_flight_reads.contains_key(&path) {
+            if state.shutting_down {
+                // A pre-shutdown request that routed back after `shutdown`: answer it
+                // -32801 now. Queueing it would strand it — the idle drain that serves
+                // routebacks no longer runs — and a serial re-serve would publish
+                // after `shutdown` (#294).
+                answer_routeback_superseded(connection, req_queue, request)?;
+            } else if state.in_flight_reads.contains_key(&path) {
                 // A sibling read for this path is still in flight; defer the serial
                 // re-serve until it clears.
                 state.pending_routebacks.push((path, epoch, request));
@@ -1340,12 +1392,21 @@ fn handle_message(
         }
         Message::Request(request) if request.method == Shutdown::METHOD => {
             *shutting_down = true;
-            // Answer `shutdown` and stop there — no republish drain (#294). The
-            // client cannot act on diagnostics published after `shutdown` (LSP 3.17
-            // forbids the server sending further notifications), and the router has
-            // already fired cancellation ahead of this job, so draining here would
-            // fetch every queued stale entry under a set cancellation flag — stalling
-            // teardown behind a doomed analysis instead of answering promptly.
+            state.shutting_down = true;
+            // Answer `shutdown` and stop draining republishes (#294). The client
+            // cannot act on diagnostics published after `shutdown` (LSP 3.17 forbids
+            // the server sending further notifications), and the router has already
+            // fired cancellation ahead of this job, so draining here would fetch every
+            // queued stale entry under a set cancellation flag — stalling teardown
+            // behind a doomed analysis instead of answering promptly.
+            //
+            // A pre-shutdown request still parked as a routeback (behind a sibling
+            // read that has not landed) is *not* a notification: answer each -32801
+            // now rather than stranding it, since the idle drain that used to serve
+            // routebacks no longer runs while shutting down.
+            for (_path, _epoch, routeback) in std::mem::take(&mut state.pending_routebacks) {
+                answer_routeback_superseded(connection, req_queue, routeback)?;
+            }
             send_gated_response(connection, req_queue, Response::new_ok(request.id, ()))?;
         }
         Message::Request(request) => {
@@ -3468,6 +3529,182 @@ fn main() -> i32 { let arr: [i32; N] = [1, 2, 3]; return arr[0]; }";
             matches!(client.receiver.try_recv(), Ok(Message::Response(_))),
             "the routeback produced exactly one response"
         );
+    }
+
+    #[test]
+    fn shutdown_answers_a_routeback_parked_behind_a_slow_sibling() {
+        // #294 (P1). A pre-shutdown request that routed back and is parked behind a
+        // still-in-flight sibling read must be ANSWERED (-32801), not dropped, when
+        // `shutdown` arrives before the sibling lands. A response to a pre-shutdown
+        // request is not a notification, so it is protocol-legal after `shutdown`; but
+        // the idle drain that serves routebacks no longer runs while shutting down, so
+        // without `shutdown` itself clearing the parked routeback the request would go
+        // unanswered forever with a dangling id in the incoming queue.
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+        let (tx, _rx) = crossbeam_channel::unbounded::<super::ReadTask>();
+
+        // A routeback (id 7) parks behind an in-flight sibling on the same path.
+        state.in_flight_reads.insert(path.clone(), 2);
+        register(&req_queue, 7);
+        let routeback = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::RouteBack {
+                path: path.clone(),
+                epoch: state.cancel_source.epoch(),
+                request: hover_req(7, uri),
+            },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, routeback).expect("apply");
+        assert_eq!(
+            state.pending_routebacks.len(),
+            1,
+            "the routeback parks behind the in-flight sibling"
+        );
+
+        // `shutdown` arrives before the sibling lands: the parked routeback is cleared.
+        let mut shutting_down = false;
+        register(&req_queue, 1);
+        super::handle_message(
+            &server,
+            &req_queue,
+            &mut state,
+            &mut shutting_down,
+            &tx,
+            Message::Request(Request::new(
+                RequestId::from(1),
+                Shutdown::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        )
+        .expect("handle shutdown");
+        assert!(shutting_down && state.shutting_down, "the shutting-down flag flipped");
+        assert!(
+            state.pending_routebacks.is_empty(),
+            "the parked routeback is cleared, not stranded"
+        );
+
+        // The routeback (id 7) was answered -32801 and the shutdown (id 1) Ok; the
+        // routeback's id is completed, so nothing dangles in the incoming queue.
+        let responses = drain_responses(&client);
+        assert_eq!(
+            response_code(&responses, &RequestId::from(7)),
+            Some(lsp_server::ErrorCode::ContentModified as i32),
+            "the parked routeback is answered -32801, not silence"
+        );
+        assert!(
+            response_code(&responses, &RequestId::from(1)).is_none(),
+            "the shutdown request is answered Ok"
+        );
+        assert!(
+            req_queue
+                .lock()
+                .expect("lock")
+                .incoming
+                .complete(&RequestId::from(7))
+                .is_none(),
+            "the routeback's id is not left dangling in the incoming queue"
+        );
+
+        // The sibling lands after `shutdown`: it only decrements the in-flight count
+        // and never re-serves the already-answered routeback.
+        let done = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::Done { path: path.clone() },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, done).expect("apply");
+        assert!(
+            client.receiver.try_recv().is_err(),
+            "the sibling landing produces no further response and no publish"
+        );
+
+        // Clean teardown: `exit` breaks the message loop.
+        let flow = super::handle_message(
+            &server,
+            &req_queue,
+            &mut state,
+            &mut shutting_down,
+            &tx,
+            Message::Notification(lsp_server::Notification::new(
+                Exit::METHOD.to_owned(),
+                serde_json::Value::Null,
+            )),
+        )
+        .expect("handle exit");
+        assert!(flow.is_break(), "exit breaks the message loop");
+    }
+
+    #[test]
+    fn a_routeback_arriving_after_shutdown_is_answered_not_queued() {
+        // #294 (P1), the second timing arm: a pool read dispatched before `shutdown`
+        // that routes back *after* the flag flips is answered -32801 directly in
+        // `apply_worker_event`, never queued for the idle drain that no longer runs.
+        let (server, client) = Connection::memory();
+        let req_queue: super::Mutex<super::ReqQueue<(), ()>> =
+            super::Mutex::new(super::ReqQueue::default());
+        let mut state = ServerState::new(full_client());
+        let uri = "file:///inf-test/main.inf";
+        open(&mut state, uri, "fn main() -> i32 { return 1; }");
+        let _ = state.drain_pending_republishes();
+        let path = crate::uri::to_path(&Uri::from_str(uri).expect("uri")).expect("path");
+
+        state.shutting_down = true;
+        state.in_flight_reads.insert(path.clone(), 1);
+        register(&req_queue, 8);
+        let routeback = super::WorkerEvent {
+            host_gen: state.host_generation,
+            outcome: super::ReadOutcome::RouteBack {
+                path: path.clone(),
+                epoch: state.cancel_source.epoch(),
+                request: hover_req(8, uri),
+            },
+        };
+        super::apply_worker_event(&server, &req_queue, &mut state, routeback).expect("apply");
+
+        assert!(
+            state.pending_routebacks.is_empty(),
+            "a routeback after shutdown is answered, not queued"
+        );
+        let responses = drain_responses(&client);
+        assert_eq!(
+            response_code(&responses, &RequestId::from(8)),
+            Some(lsp_server::ErrorCode::ContentModified as i32),
+            "the routeback is answered -32801 in apply_worker_event"
+        );
+    }
+
+    /// Registers `id` as an incoming request so a gated response for it is sent.
+    fn register(req_queue: &super::Mutex<super::ReqQueue<(), ()>>, id: i32) {
+        req_queue
+            .lock()
+            .expect("lock")
+            .incoming
+            .register(RequestId::from(id), ());
+    }
+
+    /// Drains every response currently queued on the client end.
+    fn drain_responses(client: &Connection) -> Vec<Response> {
+        let mut responses = Vec::new();
+        while let Ok(Message::Response(response)) = client.receiver.try_recv() {
+            responses.push(response);
+        }
+        responses
+    }
+
+    /// The error code of the response for `id`, if it is an error response; `None`
+    /// when `id` was answered Ok or is absent.
+    fn response_code(responses: &[Response], id: &RequestId) -> Option<i32> {
+        responses
+            .iter()
+            .find(|response| &response.id == id)
+            .and_then(|response| response.error.as_ref())
+            .map(|error| error.code)
     }
 
     #[test]
