@@ -41,11 +41,24 @@ into an imported file, whose `NavigationTarget` carries that file's real path
 and ranges in that file's own coordinates (`closure_line_index` fetches the
 right `LineIndex` for it without re-analyzing the target as its own entry).
 
-A query borrows the database with `&mut self` because the analysis is computed
-lazily and memoized on first use. This is not an accident of implementation —
+A query takes `&self`. The analysis is still computed lazily and memoized on
+first use, so a read mutates the database — but that mutation now runs behind a
+`RefCell` (interior mutability) rather than a `&mut self` borrow, which is what
+lets the query surface be shared. This is not an accident of implementation —
 it is exactly the access pattern the LSP main loop needs: it is
-single-threaded by design (see `apps/lsp`), so there is never a second caller
-to conflict with the mutable borrow.
+single-threaded by design (see `apps/lsp`) and never holds one query across
+another, so the interior borrow is always uncontended.
+
+### Cancellation surface
+
+`AnalysisHost::bind_cancellation` couples the host to an `AnalysisCancelSource`,
+so a cancellation requested from another thread interrupts this host's in-flight
+analysis at its next checkpoint (rebind after a host rebuild — the binding is
+per-database-handle). `AnalysisCancelSource` and the `is_cancellation` payload
+predicate are re-exported from `ide-db`, so the protocol layer binds a source and
+classifies a caught unwind through `inference-ide` alone, never naming the
+underlying semantic framework. See [`ide/ide-db`](../ide-db/README.md#cancellation)
+for the query-checkpoint mechanics.
 
 ## Feature-Per-Module Layout
 
@@ -62,8 +75,9 @@ to conflict with the mutable borrow.
 | `type_render.rs` | Renders a checked `TypeInfo` as a source-like string for hovers and completions | `inference-type-checker` |
 
 `lib.rs` wires these together: `AnalysisHost` owns the `RootDatabase`;
-`Analysis<'_>` is a thin borrowing façade whose methods each resolve the
-document's `FileAnalysis` and delegate to the matching module.
+`Analysis<'_>` is a thin borrowing façade — now a shared `&self` borrow over the
+host's `RefCell<RootDatabase>` — whose methods each resolve the document's
+`FileAnalysis` and delegate to the matching module.
 
 ## Features
 
@@ -150,7 +164,7 @@ let mut host = AnalysisHost::default();
 let path = PathBuf::from("/project/src/main.inf");
 host.open_document(&path, "fn add(a: i32, b: i32) -> i32 { return a + b; }");
 
-let mut analysis = host.analysis();
+let analysis = host.analysis();
 assert!(analysis.diagnostics(&path).is_empty());
 assert_eq!(analysis.document_symbols(&path).len(), 1);
 

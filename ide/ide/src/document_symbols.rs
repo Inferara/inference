@@ -150,7 +150,7 @@ spec Laws { fn commutes() {} }\n\
 fn entry() { return; }";
 
     fn symbols(source: &str) -> Vec<DocumentSymbol> {
-        let (mut host, path) = single(source);
+        let (host, path) = single(source);
         host.analysis().document_symbols(&path)
     }
 
@@ -282,7 +282,7 @@ fn entry() { return; }";
         use crate::test_utils::with_lib;
         let entry = "use lib;\nfn only_me() -> i32 { return 0; }";
         let lib = "pub fn hidden() -> i32 { return 1; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let names: Vec<String> = host
             .analysis()
             .document_symbols(&path)

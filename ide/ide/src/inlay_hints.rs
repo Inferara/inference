@@ -128,7 +128,7 @@ mod tests {
 }";
 
     fn hints(source: &str, range: Option<TextRange>) -> Vec<InlayHint> {
-        let (mut host, path) = single(source);
+        let (host, path) = single(source);
         host.analysis().inlay_hints(&path, range)
     }
 

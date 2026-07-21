@@ -29,13 +29,17 @@ so the IDE stack never links the WASM/Rocq backend.
 
 ## What It Owns
 
-- **[`RootDatabase`]** — the open-document overlay (a `Vfs`) plus a memoized
-  [`FileAnalysis`] per entry file, with closure-aware invalidation so a
-  keystroke in one buffer does not force every other open buffer to
-  re-analyze. Open documents' analyses are never evicted; a closed document's
-  overlay-derived analysis is dropped (recomputed from disk on demand), and
-  analyses memoized for never-opened paths (feature requests on arbitrary URIs)
-  are FIFO-capped so a long session cannot grow the map without bound.
+- **[`RootDatabase`]** — the open-document overlay (a `Vfs`) plus a
+  Salsa-memoized [`FileAnalysis`] per entry file, with closure-aware
+  invalidation so a keystroke in one buffer does not force every other open
+  buffer to re-analyze. Open documents' analyses are never evicted; a closed
+  document's overlay-derived analysis stops being served (recomputed from disk
+  on demand), and analyses memoized for never-opened paths (feature requests on
+  arbitrary URIs) are FIFO-capped so only a bounded number stay live. The cap
+  bounds what is *served*, not what is resident: Salsa 0.27 has no per-memo
+  eviction, so a superseded analysis stays in Salsa storage until its entry is
+  recomputed. Reclaiming it needs durability tiers and an LRU (still open work
+  on issue #157).
 - **[`FileAnalysis`]** — the merged arena (reached through its `TypedContext`),
   per-file parse errors, structured type diagnostics, unresolved-import
   problems, tagged analysis findings, and per-closure-file line indexes and
@@ -72,21 +76,82 @@ goto-definition into a file it imports. This means:
   per-entry-file analyses. It is simple, always correct, and the duplicated
   work is bounded by how many files the editor happens to have open.
 
+### Salsa memoization
+
+Per-entry analyses are memoized by [Salsa](https://github.com/salsa-rs/salsa)
+(pinned to `0.27`, matching rust-analyzer). `RootDatabase` is a `#[salsa::db]`;
+a single tracked query runs the whole `FileAnalysis::compute` body, so a
+repeated request returns the framework's memo rather than recomputing. The
+query surface still takes `&mut self` — a read memoizes in place, driven from
+the single-threaded LSP loop — with a shared read-handle model left to later
+work.
+
+### Cancellation
+
+`RootDatabase::bind_cancellation` couples the database handle to an
+[`AnalysisCancelSource`] — a monotonic write epoch plus the handle's cancellation
+token. A request through the source unwinds the handle's in-flight analysis at
+its next checkpoint: the tracked query polls at the fetch entry and passes
+`FileAnalysis::compute` a hook it invokes between the load, type-check, and
+rule-running stages, so a long analysis is interruptible rather than run to
+completion. The unwind delivers the framework's cancellation payload;
+[`is_cancellation`] recognizes it so a caller can tell a superseded analysis
+apart from a genuine panic without naming the framework. A cancelled compute
+writes no result — its pre-query bookkeeping is idempotent setup that reconverges
+on retry — so the entry is left in the consistent invalidated shape and the
+framework auto-resets the consumed signal, leaving a retry free to recompute.
+Both `AnalysisCancelSource` and `is_cancellation` are re-exported through
+`ide/ide`.
+
+Salsa does **not** see the file reads themselves: the import closure is read
+through the `Vfs` overlay-then-disk loader, which stays outside Salsa storage
+so the compiler and IDE keep resolving imports through one seam. What Salsa
+*can* see is supplied for it. The analysis query, once it knows the closure it
+just read, registers a **per-file change-stamp** edge for every file in that
+closure, plus a single **availability-epoch** edge when an import went
+unresolved. The write path then bumps those inputs on the matching editor event
+(`bump_file_stamp` on any overlay mutation, `bump_availability_epoch` on an open
+that makes content newly available), so a change the loader seam hides still
+forces exactly the affected memos to recompute. Recompute forcing lives entirely
+in these Salsa edges — not in dropping a hand-rolled map entry.
+
+Alongside the edges, the write path keeps an eager **mirror**: each entry's
+latest analysis, cleared to `None` the moment a change makes it stale
+(`RootDatabase::note_stale_entries`). The mirror forces no recompute; it exists
+so the editor-facing bookkeeping that must answer *before* any query re-runs —
+`is_analyzed`, the protocol layer's republish sweep, the closure-donor search,
+and the never-opened cap — has a write-time view of what a change invalidated.
+Its predicate reads the very `closure_paths`/`had_missing_import` fields the
+query registered its edges from, so the mirror and the edges cannot disagree (a
+debug assertion in `RootDatabase::analysis` machine-checks the alignment).
+
+Because a stale memo is only marked, never removed, "invalidated" means "will be
+recomputed before it is served again" — not "freed". Salsa 0.27 exposes no
+per-memo eviction, so the superseded value stays resident until that recompute
+replaces it; bounding real memory needs durability tiers and an LRU, which is
+still open work on issue #157.
+
 ### Closure-aware invalidation
 
 A keystroke in one buffer must not force every other open buffer to
 re-analyze. Every `FileAnalysis` records the absolute paths of every file in
-its import closure, so a content change to path `P` invalidates only the
-analyses whose closure contains `P` (`RootDatabase::invalidate`).
+its import closure, and the query registers a change-stamp edge for each, so a
+content change to path `P` recomputes only the analyses whose closure contains
+`P` — the write path bumps `P`'s stamp and Salsa re-runs exactly those memos.
+`RootDatabase::note_stale_entries` clears the same set's mirror in the same turn.
 
-One extra case: opening a **previously unseen** path can satisfy an import
-that was missing before, but a missing import was never in any closure (there
-was no file to record). So a newly-seen overlay additionally invalidates every
-analysis that recorded an unresolved import (`had_missing_import`). This is a
-deliberately coarse over-approximation — it may recompute an analysis whose
-specific missing import is unrelated to the newly-opened file — chosen because
-it is simple and always correct. A file that appears on disk without being
-opened is not observed; there is no filesystem watch in v1.
+One extra case a per-file stamp cannot cover: opening a **previously unseen**
+path can satisfy an import that was missing before, but a missing import was
+never in any closure (there was no file to record, and so no stamp to bump). So
+the query registers one more edge — the availability epoch — whenever it
+recorded an unresolved import, and an open that makes overlay content newly
+available bumps that epoch, recomputing every analysis that had a missing
+import. This is a deliberately coarse over-approximation — it may recompute an
+analysis whose specific missing import is unrelated to the newly-opened file —
+chosen because it is simple and always correct: the edge is read only by memos
+whose last compute actually had a missing import, so a resolved analysis stops
+reacting to it. A file that appears on disk without being opened is not
+observed; there is no filesystem watch in v1.
 
 Analyses and the overlay are keyed by exact path spelling. A caller that may
 refer to one file by two spellings must canonicalize before calling in, so the

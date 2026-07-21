@@ -539,7 +539,7 @@ mod tests {
     use crate::test_utils::{at, module_path, nested_module_path, nth, project, single, with_lib};
 
     fn goto(source: &str, offset: u32) -> Option<Vec<NavigationTarget>> {
-        let (mut host, path) = single(source);
+        let (host, path) = single(source);
         host.analysis().goto_definition(&path, offset)
     }
 
@@ -620,7 +620,7 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
     fn goto_imported_constant_used_as_a_value() {
         let entry = "use lib::{MAX};\nfn main() -> i32 { return MAX; }";
         let lib = "pub const MAX: i32 = 99;";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let mut targets = host
             .analysis()
             .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
@@ -681,7 +681,7 @@ return z + inner;\n\
         // the qualifier into lib.inf rather than dropping it and returning None.
         let entry = "use lib;\nfn main() -> i32 { let t: lib::T = lib::mk(); return t.v; }\n";
         let lib = "pub struct T { v: i32; }\npub fn mk() -> T { return T { v: 1 }; }\n";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let target = host
             .analysis()
             .goto_definition(&path, at(entry, "lib::T") + "lib::".len() as u32)
@@ -701,7 +701,7 @@ return z + inner;\n\
         // fall through to module-member resolution rather than returning None.
         let entry = "use lib;\nfn main() -> i32 { return lib::MAX; }\n";
         let lib = "pub const MAX: i32 = 99;\n";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let target = host
             .analysis()
             .goto_definition(&path, at(entry, "lib::MAX") + "lib::".len() as u32)
@@ -715,7 +715,7 @@ return z + inner;\n\
     fn goto_cross_module_function_returns_the_imported_file() {
         let entry = "use lib;\nfn main() -> i32 { return lib::helper(); }";
         let lib = "pub fn helper() -> i32 { return 7; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let mut targets = host
             .analysis()
             .goto_definition(&path, at(entry, "helper();"))
@@ -753,7 +753,7 @@ fn caller() -> i32 { return produce(); }";
     fn goto_plain_use_segment_reaches_the_module_file() {
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "pub fn helper() -> i32 { return 7; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let target = host
             .analysis()
             .goto_definition(&path, at(entry, "lib"))
@@ -767,7 +767,7 @@ fn caller() -> i32 { return produce(); }";
     fn goto_braced_item_import_reaches_its_definition() {
         let entry = "use lib::{helper};\nfn main() -> i32 { return 0; }";
         let lib = "pub fn helper() -> i32 { return 7; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let target = host
             .analysis()
             .goto_definition(&path, at(entry, "helper"))
@@ -783,7 +783,7 @@ fn caller() -> i32 { return produce(); }";
         // reachable import, so goto declines rather than teleporting into it.
         let entry = "use lib::{secret, ghost};\nfn main() -> i32 { return 0; }";
         let lib = "fn secret() -> i32 { return 1; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         assert!(
             host.analysis()
                 .goto_definition(&path, at(entry, "secret"))
@@ -802,7 +802,7 @@ fn caller() -> i32 { return produce(); }";
     fn goto_nested_use_segments_reach_their_modules() {
         let entry = "use lib::geom;\nfn main() -> i32 { return 0; }";
         let geom = "pub struct Point { x: i32; }";
-        let (mut host, path) = project(&[(&["main"], entry), (&["lib", "geom"], geom)]);
+        let (host, path) = project(&[(&["main"], entry), (&["lib", "geom"], geom)]);
         // The trailing `geom` segment names lib/geom.inf.
         let target = host
             .analysis()
@@ -909,7 +909,7 @@ fn caller() -> i32 { return get(); }";
         let entry = "use lib;\nuse other::{MAX};\nfn main() -> i32 { return MAX; }";
         let lib = "pub const MAX: i32 = 1;";
         let other = "pub const MAX: i32 = 2;";
-        let (mut host, path) = project(&[
+        let (host, path) = project(&[
             (&["main"], entry),
             (&["lib"], lib),
             (&["other"], other),
@@ -929,7 +929,7 @@ fn caller() -> i32 { return get(); }";
         // error; goto must decline rather than teleport into `lib`.
         let entry = "use lib;\nfn main() -> i32 { return MAX; }";
         let lib = "pub const MAX: i32 = 1;";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         assert!(
             host.analysis()
                 .goto_definition(&path, at(entry, "return MAX") + "return ".len() as u32)
@@ -945,7 +945,7 @@ fn caller() -> i32 { return get(); }";
         let entry = "use mid::{MAX};\nfn main() -> i32 { return MAX; }";
         let mid = "pub use lib::{MAX};";
         let lib = "pub const MAX: i32 = 99;";
-        let (mut host, path) = project(&[
+        let (host, path) = project(&[
             (&["main"], entry),
             (&["mid"], mid),
             (&["lib"], lib),
@@ -966,7 +966,7 @@ fn caller() -> i32 { return get(); }";
         let entry = "use a::{MAX};\nfn main() -> i32 { return MAX; }";
         let a = "pub use b::{MAX};";
         let b = "pub use a::{MAX};";
-        let (mut host, path) =
+        let (host, path) =
             project(&[(&["main"], entry), (&["a"], a), (&["b"], b)]);
         assert!(
             host.analysis()

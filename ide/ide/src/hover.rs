@@ -367,7 +367,7 @@ mod tests {
     use crate::test_utils::{at, nth, single, with_lib};
 
     fn hover_at(source: &str, offset: u32) -> Option<Hover> {
-        let (mut host, path) = single(source);
+        let (host, path) = single(source);
         host.analysis().hover(&path, offset)
     }
 
@@ -512,7 +512,7 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
         // must still resolve its type through the imported file's definition.
         let entry = "use lib;\nfn use_pt(p: lib::Point) -> i32 { return p.x; }";
         let lib = "pub struct Point { pub x: i32; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let hover = host
             .analysis()
             .hover(&path, at(entry, "p.x") + "p.".len() as u32)
@@ -542,7 +542,7 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
     fn hover_plain_use_segment_names_the_module() {
         let entry = "use lib;\nfn main() -> i32 { return 0; }";
         let lib = "pub fn helper() -> i32 { return 7; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let hover = host
             .analysis()
             .hover(&path, at(entry, "lib"))
@@ -554,7 +554,7 @@ fn mk() -> i32 { let r: R = R { z: 1 }; return r.z; }";
     fn hover_braced_item_import_shows_the_definition_signature() {
         let entry = "use lib::{helper};\nfn main() -> i32 { return 0; }";
         let lib = "pub fn helper() -> i32 { return 7; }";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let hover = host
             .analysis()
             .hover(&path, at(entry, "helper"))
@@ -606,7 +606,7 @@ fn caller() -> i32 { return get(); }";
         // a local same-named struct.
         let entry = "use lib;\nfn main() -> i32 { let t: lib::T = lib::mk(); return t.v; }\n";
         let lib = "pub struct T { v: i32; }\npub fn mk() -> T { return T { v: 1 }; }\n";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let offset = at(entry, "lib::T") + "lib::".len() as u32;
         let hover = host
             .analysis()
@@ -627,7 +627,7 @@ fn caller() -> i32 { return get(); }";
         let entry =
             "use lib;\nenum T { Local }\nfn main() -> i32 { let t: lib::T = lib::mk(); return t.v; }\n";
         let lib = "pub struct T { v: i32; }\npub fn mk() -> T { return T { v: 1 }; }\n";
-        let (mut host, path) = with_lib(entry, lib);
+        let (host, path) = with_lib(entry, lib);
         let offset = at(entry, "lib::T") + "lib::".len() as u32;
         let hover = host
             .analysis()
