@@ -21,13 +21,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FxHashMap` (use `FxHashMap::default()` for the empty case). Same `_by_spec`
   rename rationale: symmetric with the `CodegenOutput` getter shape and avoids
   an extra transformation at the API boundary ([issue#21])
-- Rocq output: `ValidModule` arity changed from 2 → 1 (no longer takes a specs
-  list); the new `ValidSpec : module -> list N -> Prop` predicate carries the
-  per-spec proof obligation. Downstream Rocq libraries must define `ValidSpec`
-  and update existing `ValidModule` consumers. Theorem names also changed:
-  `valid_<mod>` is now 1-arg, and per-spec theorems take the form
+- `inference::wasm_to_v` / `translate_bytes` gains a fourth parameter,
+  `hspecs_by_spec: &inference_hassert::HSpecMap`, the per-spec `hassert`
+  verification-obligation map. Pass `HSpecMap::default()` to source obligations
+  entirely from the embedded `inference.hspecs` custom section (the normal
+  post-link CLI path); pass a populated map to override or supplement it,
+  mirroring the existing `spec_funcs_by_spec` explicit-vs-embedded precedence.
+  `CodegenOutput` gains a matching `hspecs()` accessor (empty in compile mode)
+- Rocq output targets [wasm-verifier](https://github.com/Inferara/wasm-verifier)
+  on vanilla WasmCert-Coq v2.2.0, replacing the WasmCert-Coq-Essence fork.
+  `ValidModule : module -> Prop` is now truly 1-ary and always emitted (even
+  for a module with zero specs); the new `ValidSpec : module -> list hassert
+  -> Prop` predicate carries the per-spec proof obligation as a **`hassert`
+  value** — a translated logical formula — rather than a WASM function-index
+  list. This supersedes both the shape the translator actually emitted before
+  this change (a 2-ary `ValidModule <mod> <specs>` with `specs : list N`, no
+  separate `ValidSpec` at all) and the 1-ary-`ValidModule`-plus-`list N`-
+  `ValidSpec` shape this file and `core/wasm-to-v/ROCQ_CONTRACT.md` previously
+  *documented* under issue #21 but the translator never actually implemented.
+  A `spec` function's WASM body is also no longer translated as instructions
+  at all: it is omitted from the module record entirely (module-, export-,
+  element-, start-, and `T_app`-index remap follows — see
+  `core/wasm-to-v/ROCQ_CONTRACT.md`), and its logical content is instead
+  derived, AST-side, from the specification body itself, `forall`-quantified
+  (or plain) spec functions only this milestone. Downstream Rocq libraries
+  must define the hassert-valued `ValidSpec` and update existing `ValidModule`
+  consumers. Theorem names: `valid_<mod>` is 1-arg, per-spec theorems are
   `valid_<mod>__<SpecName>` (double underscore, with explicit collision
   rationale documented in `core/wasm-to-v/ROCQ_CONTRACT.md`) ([issue#17], [issue#21])
+- New leaf crate `core/hassert` (`inference-hassert`): the `HAssert`/`HTerm`
+  verification-obligation IR mirroring wasm-verifier's `term`/`hassert`
+  inductives, smart constructors with `HA_true`-identity simplification
+  (`and`/`imp`/`or`/`ex`/`nz`/`eqz`), and the codec for the new
+  `inference.hspecs` custom WASM section (version 1, sorted symbol table,
+  specs sorted by name, per-hassert `(fn_symbol, tree)` records, LEB128, a
+  hardened decoder with bounds/UTF-8/trailing-byte/recursion-depth checks).
+  Used by `wasm-codegen` (producer), `wasm-linker` (verbatim carrier), and
+  `wasm-to-v` (consumer) so the wire format has one implementation instead of
+  the per-crate duplication `inference.spec_funcs` has today
+- New fatal proof-mode diagnostics `P001`–`P009` (`core/wasm-codegen/src/hassert/`):
+  a specification function that cannot be translated to a `hassert`
+  obligation — an `exists`/`unique`/`assume`-quantified body, a construct
+  with no assertion encoding (`loop`, `break`, `unique`, `**`, memory access),
+  reassignment, a non-scalar term/parameter/`@`, an untranslatable call, or a
+  quantified spec *method* — now aborts code generation
+  (`CodegenError::UntranslatableSpec`) instead of silently emitting a module
+  whose specifications are unverifiable. Every diagnostic in a spec is
+  collected before failing
+- `wasm-to-v` rejects any non-deterministic instruction (`forall`/`exists`/
+  `assume`/`unique`/uzumaki) reaching a *surviving* (executable, non-spec)
+  function body as `WasmToVError::UnsupportedFeature`. With `spec` functions
+  omitted from the module record and analysis rule A042 barring non-det
+  syntax outside a `spec` declaration, this path is unreachable from
+  Inference-compiled code; the rejection is defense-in-depth against a
+  foreign or hand-crafted `.wasm`. Retires the `BI_unique` typecheck debt the
+  vendored stub previously carried
 - Lower `assert(<bool>)` to a WASM trap-on-false (previously panicked codegen) ([#195])
   - Emits `<cond>; i32.eqz; if (empty); unreachable; end` — the smallest correct shape, and one that `wasm-to-v` already maps to `BI_unreachable` for proof-mode translation
   - Asserts are emitted in both `Compile` and `Proof` modes (Stmt-level, not Def-level); no `CompilationMode` branching
@@ -210,7 +258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Emit `inference.spec_funcs` WASM custom section in `proof` mode carrying the per-spec index map. Bare `.wasm` binaries are now self-describing; the Rocq translator can recover the map without an out-of-band `CodegenOutput`. The section name uses the vendor-prefixed `inference.*` namespace rather than the `metadata.code.*` namespace reserved by the WebAssembly tool-conventions repo. Section is omitted in `compile` mode so binaries stay byte-identical ([issue#16])
 - `wasm-to-v` crate: new `errors.rs` with `WasmToVError` thiserror enum (`InvalidRocqIdentifier`, `RocqStdlibShadow`, `EmbeddedSpecMismatch`, `WasmParse`) and `InvalidIdentifierReason` sub-enum, closing the CLAUDE.md compliance gap that left this crate without an `errors.rs` ([issue#20])
 - `wasm-to-v` crate: `validate_rocq_identifier` helper rejects Rocq-illegal module/spec names (non-alphabetic leading char, invalid chars, length > 255, stdlib shadow, reserved vernacular/Gallina keyword) before they reach `Definition <name>` emission. Called at the top of `translate_bytes` and again per spec name in `translate()` ([issue#20])
-- `wasm-to-v` translator: per-spec Rocq emission. Each entry in `spec_funcs_by_spec` produces one `Definition <mod>__<SpecName>_specs : list N` and one `Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs.`. Empty per-spec lists render as `(@nil N)` so they type-check regardless of scope state at the consumer site ([issue#21], [issue#22])
+- `wasm-to-v` translator: per-spec Rocq emission. Each spec with translated `hassert` obligations produces one `Definition <mod>__<SpecName>_hspec{k} : hassert` per obligation (source order) plus a gathering `Definition <mod>__<SpecName>_specs : list hassert`, and one `Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs.`; a spec with no free-function obligations (only methods, or an empty `spec { }`) renders `(@nil hassert)` so it type-checks regardless of scope state at the consumer site ([issue#21], [issue#22])
 - Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
   - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
   - Rewrite `compiler.rs` to generate WASM binary directly in-process
@@ -419,6 +467,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A041 `DuplicateLocalName`: reject duplicate function-local names across disjoint
   sibling blocks (if/else arms, sequential ifs, non-det blocks) with a two-location
   diagnostic instead of panicking in codegen ([#217])
+- A042 `NonDetOutsideSpec`: reject non-deterministic constructs — inline
+  `forall`/`exists`/`assume`/`unique` statement blocks, the function-body-modifier
+  form (`fn f() forall { … }`), and (transitively, via A006) `@` — used lexically
+  outside a `spec { … }` declaration. Purely lexical (mode-independent), so it
+  fires in both compile and proof modes; only the outermost offending block on
+  each path is reported, since an inner non-det block nested inside an
+  already-rejected outer one adds no new information
 
 ### AST
 
@@ -453,13 +508,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Rocq Translation
 
 - WASM module-name subsection now reflects the CLI-supplied input file stem instead of the hardcoded `"output"`. The Rocq translator reads this back, so the emitted `Definition <mod>__<Spec>_specs` and `Theorem valid_<mod>` identifiers now use the source filename. Multi-module workflows that previously collided on a single `output` identifier now produce distinct ones
-- Empty per-spec lists now emit `(@nil N)` instead of `[]%N` so the generated `Definition` type-checks regardless of whether `Open Scope N_scope` is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` literally must update ([issue#21], [issue#22])
+- Empty per-spec lists emit `(@nil hassert)` — not `[]%N`, and no longer `list N` at all — so the generated `Definition` type-checks regardless of whether a scope is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` or `(@nil N)` literally must update ([issue#21], [issue#22])
 - Rewrite WASM-to-V translator for WasmCertCoq theory syntax ([#23])
 - Add function name propagation to V output ([#24])
 
 ### Documentation
 
 - New `core/wasm-to-v/ROCQ_CONTRACT.md` documenting the external Rocq predicates the generator depends on (`ValidModule` 1-arg, new `ValidSpec`), the emitted proof-skeleton shape, and the spec-map precedence rules (explicit vs embedded) ([issue#17])
+- Rewrite `core/wasm-to-v/ROCQ_CONTRACT.md` for the wasm-verifier/vanilla-WasmCert target: the hassert-valued `ValidSpec` contract (superseding both the shape actually emitted before this change and the never-implemented shape this file previously documented), a full worked `.v` example, the spec-function omission and index-remap rule, `T_app` symbol resolution, both `inference.*` custom sections, the A042/`P0xx`/non-det-rejection language rules surfacing at `-v`, a migration section, and the source-to-`hassert` translation-scheme table. Rewrite `core/wasm-to-v/rocq-stub/README.md` for the two-namespace stub and `core/wasm-to-v/README.md`'s non-deterministic-instructions section for the new omit-and-derive translation
 - Add compilation targets matrix documentation (`book/compilation_targets.md`) ([issue#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
 - Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
@@ -558,6 +614,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New gated test `tests/src/rocq_typecheck.rs` drives the in-process pipeline (parse → type-check → proof-mode codegen → `wasm_to_v`) over a corpus spanning the proof surface — inline and function-body-modifier `forall`/`exists`/`assume`, `unique`, `BI_call`, comparisons, `assert`, and `if`/`loop` control flow — then compiles each generated module against the stub; it rewrites the emitted `(* TODO *)` `Qed.` to `Admitted.` so it checks statements + definitions without requiring proofs to close
   - Two new corpus fixtures, `tests/test_data/inf/rocq_control_flow.inf` and `rocq_unique.inf`; existing spec fixtures are reused
   - The test is gated on `coqc` availability (`COQC` override, else `PATH`): it skips with a clear message when absent, and the new `.github/workflows/rocq-typecheck.yml` CI job installs Coq via apt so the gate is real on every PR. Wiring the full private WasmCert-Coq-Essence library into CI needs org secrets and remains a follow-up
+- Replace the `rocq-stub` single `Wasm`-namespace stub with a two-namespace pair, `wasm/` (`Wasm.*`, vanilla WasmCert-Coq v2.2.0) and `wasm_verifier/` (`WasmVerifier.*`, the `hassert` assertion language and the `ValidModule`/`ValidSpec` predicates), retiring the WasmCert-Coq-Essence-fork target
+  - `wasm/datatypes.v`'s `basic_instruction` inductive deliberately declares no `BI_forall`/`BI_exists`/`BI_assume`/`BI_unique`/`BI_uzumaki_num` constructors — their absence is itself the regression guard now that `spec` functions are omitted from the module record and non-det in a surviving body is a translate error
+  - `tests/src/rocq_typecheck.rs` compiles both namespaces (`Wasm` before `WasmVerifier`, since the latter imports the former) and the corpus's required-construct needle set drops the `BI_*` non-det needles in favor of `ValidSpec`/`hassert`/`term_eq`/`Himpl`/`T_app`/`T_local`/`HA_ex`
+  - New corpus fixture `tests/test_data/inf/rocq_spec_shapes.inf` exercises the `hassert` obligation shapes (an `assume` antecedent and an `if` guard as `Himpl`, a cross-call as `T_app`, a universal `@` as `T_local`, a `==` under `forall` as `term_eq`, a nested `exists` as `HA_ex`)
 - Close the LSP/IDE test-coverage gaps from the PR #239 review ([#254])
   - `ide-db` invalidation: selectivity is now pinned with several memoized analyses coexisting (a keystroke in one open buffer leaves unrelated buffers' analyses at their exact generation; editing a shared import recomputes every dependent but not an independent buffer), plus transitive-closure invalidation (edit `C` in `A→B→C` recomputes `A`), invalidation on editing a member of an import cycle, and `close_document`'s disk-fallback with divergent overlay/disk content (both the entry itself and a still-open dependent re-read the divergent disk text)
   - LSP e2e: requests after `didClose` (disk-backed doc answers from disk, never-on-disk doc answers null, server stays alive); `didChange` before `didOpen` pinned at the wire level (the handler silently starts tracking the never-opened document — documented as current behavior, not endorsed); a percent-encoded round-trip through a project directory containing a space and a non-ASCII character (didOpen target, publishDiagnostics echo, and cross-file goto target URIs all round-trip); an `inlayHint` bounded sub-document range that pins `params.range.end` clipping (the #249 clamp test only pinned the start side); and a position past the last line answering null for hover/definition/completion

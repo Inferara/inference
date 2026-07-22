@@ -109,7 +109,8 @@ Typed AST (TypedContext)
    TypeSection first, then ImportSection (only if at least one `external fn` is present;
    sits between Type and Function per WASM spec), FunctionSection, MemorySection and
    GlobalSection (only when at least one function uses arrays or structs), ExportSection,
-   CodeSection, NameSection, and custom spec sections. The import section placement is
+   CodeSection, NameSection, and (proof mode, when non-empty) the `inference.spec_funcs` and
+   `inference.hspecs` custom sections. The import section placement is
    mandatory because imported functions occupy the lowest indices and the section ordering
    is enforced by the binary format.
 
@@ -304,9 +305,11 @@ Detailed design documents live in `docs/`:
 - `lib.rs` - Public API, multi-file AST traversal in canonical arena order, two-stage index pre-scan across all files (imports → top-level functions → methods), root-only export policy (`should_export`), file-qualified spec name emission (`qualified_spec_name` with `_` join for non-entry specs), `SpecNameCollision` backstop
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
 - `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
-- `errors.rs` - `CodegenError` enum for function call lowering failures
-- `output.rs` - `CodegenOutput` containing WASM bytes and metadata
+- `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
+- `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`)
+- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation, read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator; `diag.rs`: the `P001`–`P009` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
+- `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
 
 ## Testing
 

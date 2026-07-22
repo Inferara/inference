@@ -13,7 +13,7 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 - **Complete WASM module translation**: Functions, types, imports, exports, tables, memory, globals, data segments, and elements
 - **Custom name section support**: Preserves function and local variable names from WASM debug information
 - **Expression tree reconstruction**: Converts linear WASM instructions into structured Rocq expressions
-- **Non-deterministic instruction support**: Handles Inference's extended WASM instructions (forall, exists, uzumaki, assume, unique)
+- **Specification-to-`hassert` translation**: A `spec` block's WASM body is never translated as instructions — the function is omitted from the module record entirely, and its logical content becomes a `hassert` verification obligation (see [Non-Deterministic Instructions](#non-deterministic-instructions) and [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md))
 - **Partial output on error**: Section entries that fail to translate are skipped rather than aborting the entire module
 - **Zero-copy parsing**: Efficiently processes WASM bytecode using streaming parser
 
@@ -26,16 +26,19 @@ use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
 use rustc_hash::FxHashMap;
 
 let wasm_bytes = std::fs::read("output.wasm")?;
-let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-let rocq_code = translate_bytes("my_module", &wasm_bytes, &empty)?;
+let empty_specs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+let empty_hspecs = inference_hassert::HSpecMap::default();
+let rocq_code = translate_bytes("my_module", &wasm_bytes, &empty_specs, &empty_hspecs)?;
 std::fs::write("output.v", rocq_code)?;
 ```
 
-Pass an empty map to source the per-spec indices from the WASM custom
-section (`inference.spec_funcs`) that `wasm-codegen` embeds in `proof`
-mode. Pass a populated `FxHashMap<String, Vec<u32>>` to override or
-supplement the embedded section; the translator surfaces
-`WasmToVError::EmbeddedSpecMismatch` if both are present and disagree.
+Pass empty maps to source both the per-spec indices and the `hassert`
+obligations from the WASM custom sections (`inference.spec_funcs` and
+`inference.hspecs`) that `wasm-codegen` embeds in `proof` mode. Pass a
+populated map to override or supplement the embedded section; the
+translator surfaces `WasmToVError::EmbeddedSpecMismatch` /
+`WasmToVError::EmbeddedHspecsMismatch` if the explicit and embedded sides
+disagree.
 
 ### Integration with Inference Compiler
 
@@ -52,6 +55,7 @@ let rocq_output = wasm_to_v(
     "module_name",
     codegen_output.wasm(),
     codegen_output.spec_func_indices_by_spec(),
+    codegen_output.hspecs(),
 )?;
 ```
 
@@ -145,9 +149,9 @@ local.get 1
 i32.add
 
 // Becomes Rocq expression (simplified)
-BI_const (Vi32 0) ::
-BI_const (Vi32 1) ::
-BI_binop (Binop_i BOI_add) ::
+BI_local_get 0%N ::
+BI_local_get 1%N ::
+BI_binop T_i32 (Binop_i BOI_add) ::
 nil
 ```
 
@@ -187,9 +191,9 @@ i32.add
 Becomes:
 
 ```coq
-BI_get_local 0%N ::
-BI_get_local 1%N ::
-BI_binop (Binop_i BOI_add) ::
+BI_local_get 0%N ::
+BI_local_get 1%N ::
+BI_binop T_i32 (Binop_i BOI_add) ::
 nil
 ```
 
@@ -293,47 +297,49 @@ The tag section (exception handling) and component model sections are silently i
 
 ## Non-Deterministic Instructions
 
-Inference extends WebAssembly with custom instructions for non-deterministic computation and formal verification. These extensions enable explicit representation of non-deterministic choices in the binary format.
+Inference extends WebAssembly with custom instructions for non-deterministic computation, in the `0xfc` prefix space:
 
-| Instruction | Binary Encoding | Purpose | Rocq Translation |
-|-------------|-----------------|---------|------------------|
-| `forall` | `0xfc 0x3a` | Begin universal quantification block | Forall block construct |
-| `exists` | `0xfc 0x3b` | Begin existential quantification block | Exists block construct |
-| `assume` | `0xfc 0x3c` | Filter execution paths by constraint | Assume statement |
-| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists | Unique constraint |
-| `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value | Uzumaki constructor |
-| `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value | Uzumaki constructor |
+| Instruction | Binary Encoding | Purpose |
+|-------------|-----------------|---------|
+| `forall` | `0xfc 0x3a` | Begin universal quantification block |
+| `exists` | `0xfc 0x3b` | Begin existential quantification block |
+| `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
+| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists |
+| `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
+| `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 
-These instructions are parsed by the forked `inf-wasmparser` dependency and translated to corresponding Rocq constructs that enable formal reasoning about non-deterministic programs.
+This crate's parser recognizes all six via the forked `inf-wasmparser`
+dependency, but **none of them are translated into Rocq instructions any
+more**. The consumer this crate targets, [wasm-verifier], sits on vanilla
+WasmCert-Coq, which has no `BI_forall`/`BI_exists`/`BI_assume`/
+`BI_unique`/`BI_uzumaki_num` counterparts to translate into.
 
-### Example
+Instead, translation is a two-part split, both enforced fail-closed:
 
-**Inference Source:**
-```inference
-forall {
-    let x = @i32;  // uzumaki - all possible i32 values
-    assume(x > 0);
-    return x;
-}
-```
+1. **A `spec` function's body is never emitted as instructions at all.**
+   Every WASM function index codegen recorded as originating inside a
+   `spec` block is omitted from the module record — no `Definition`, no
+   `mod_funcs` entry — and every surviving reference (calls, exports,
+   elements, the start function) is renumbered past the gap. Its logical
+   content is instead carried, out of band, as one `hassert` value per
+   `forall`-quantified (or plain) spec function, built AST-side during
+   codegen (`core/wasm-codegen/src/hassert/`) and serialized into the
+   `inference.hspecs` custom section. `wasm-to-v` reads that section,
+   resolves each obligation's applied function symbols against the final
+   (post-link) module layout, and prints one
+   `Definition <mod>__<Spec>_hspec{k} : hassert := …` per obligation plus
+   a `Theorem valid_<mod>__<Spec> : ValidSpec <mod> <mod>__<Spec>_specs`.
+   See [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md) for the full translation
+   scheme and a complete worked example.
+2. **A non-deterministic instruction reaching a *surviving* (executable,
+   non-spec) function body is a translate error**
+   (`WasmToVError::UnsupportedFeature`). Inference's own analysis rule
+   A042 already rejects non-det syntax anywhere outside a `spec`
+   declaration at compile time, so this path is unreachable from
+   Inference-compiled code; the rejection is defense-in-depth against a
+   foreign or hand-crafted `.wasm`.
 
-**Generated WASM (pseudo):**
-```wasm
-forall.start
-  uzumaki.i32
-  local.set 0
-  local.get 0
-  i32.const 0
-  i32.gt_s
-  assume
-  local.get 0
-forall.end
-```
-
-**Translated Rocq:**
-```coq
-(* Rocq representation with forall block and uzumaki *)
-```
+[wasm-verifier]: https://github.com/Inferara/wasm-verifier
 
 ## Testing
 
@@ -513,9 +519,8 @@ Require Import List.
 Require Import String.
 Require Import BinNat.
 Require Import ZArith.
-From Wasm Require Import bytes.
-From Wasm Require Import numerics.
-From Wasm Require Import datatypes.
+From Wasm Require Import bytes numerics datatypes host.
+From WasmVerifier Require Import Assertions Verifier.
 
 (* Helper definitions *)
 Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).
@@ -527,17 +532,17 @@ Definition add : module_func := {|
   modfunc_type := 0%N;
   modfunc_locals := nil;
   modfunc_body :=
-    BI_get_local 0%N ::
-    BI_get_local 1%N ::
-    BI_binop (Binop_i BOI_add) ::
+    BI_local_get 0%N ::
+    BI_local_get 1%N ::
+    BI_binop T_i32 (Binop_i BOI_add) ::
     nil;
 |}.
 
 (* Module record *)
 Definition my_module : module := {|
   mod_types :=
-    {| recType_types := [Tf (T_num T_i32 :: T_num T_i32 :: nil)
-                             (T_num T_i32 :: nil)] |} :: nil;
+    Tf (T_num T_i32 :: T_num T_i32 :: nil) (T_num T_i32 :: nil) ::
+    nil;
   mod_funcs := add :: nil;
   mod_tables := nil;
   mod_mems := nil;
@@ -586,12 +591,12 @@ Definition max : module_func := {|
   modfunc_type := 0%N;
   modfunc_locals := nil;
   modfunc_body :=
-    BI_get_local 0%N ::
-    BI_get_local 1%N ::
-    BI_relop (Relop_i (ROI_gt SX_S)) ::
-    BI_if (Tf nil (T_num T_i32 :: nil))
-      (BI_get_local 0%N :: nil)
-      (BI_get_local 1%N :: nil) ::
+    BI_local_get 0%N ::
+    BI_local_get 1%N ::
+    BI_relop T_i32 (Relop_i (ROI_gt SX_S)) ::
+    BI_if (BT_valtype (Some (T_num T_i32)))
+      (BI_local_get 0%N :: nil)
+      (BI_local_get 1%N :: nil) ::
     nil;
 |}.
 ```
@@ -601,6 +606,8 @@ The if-then-else structure is preserved with proper type annotations for the res
 ## Related Documentation
 
 - [Rocq Output Contract](./ROCQ_CONTRACT.md) - The external Rocq predicates the generated `.v` files depend on, and the proof-skeleton shape the translator emits
+- [Vendored Rocq Stub](./rocq-stub/README.md) - The two-namespace signature stub the `coqc` type-check gate compiles generated modules against
+- [`core/hassert`](../hassert/) - The `HAssert`/`HTerm` verification-obligation IR and the `inference.hspecs` custom-section codec shared by codegen, the linker, and this crate
 - [WASM Codegen Documentation](../wasm-codegen/README.md) - WebAssembly code generation
 - [Language Specification](https://github.com/Inferara/inference-language-spec) - Inference language reference
 - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant

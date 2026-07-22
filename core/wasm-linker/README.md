@@ -94,6 +94,48 @@ name collision after sanitization (e.g. two distinct logical modules that
 sanitize to the same identifier) is still disambiguated by the translator's index
 suffix; the module prefix removes the common case rather than every possible one.
 
+## Proof-Mode Custom Sections
+
+Two more custom sections carry proof-mode verification metadata across the
+link: `inference.spec_funcs` (per-spec WASM function indices) and
+`inference.hspecs` (per-spec `hassert` verification obligations, decoded via
+the shared `inference-hassert` crate — the same codec `wasm-codegen` writes
+and `wasm-to-v` reads). Both are handled identically at a high level, driven
+by the parsed module's role:
+
+- **External modules never decode either section.** `ParsedModule::parse_with_role`
+  skips both at the custom-section dispatch point for `ModuleRole::External`,
+  without even attempting to decode them — a malformed one in an irrelevant
+  external can never fail the link, because only the executable closure of the
+  satisfied export crosses the merge; an external's own spec obligations are
+  never part of the output.
+- **The main module decodes and validates both up front.** A malformed
+  payload, or a **second** `inference.spec_funcs`/`inference.hspecs` section
+  in the main module, is a hard `LinkError::Parse` rather than a silent
+  last-wins overwrite — both sections are verification deliverables the merge
+  must not drop.
+- **`inference.spec_funcs` is remapped.** Its `spec_name -> [func_idx]` payload
+  is expressed in the *pre-link* function-index space, so `Plan::remap_spec_funcs`
+  rewrites every recorded index through the exact same `map_main_func` map
+  that repoints the main module's own `call` targets and exports, then
+  `crate::spec_funcs::encode` re-emits it canonically. `map_main_func` bounds-checks
+  each index here too — a garbage or out-of-range spec index is rejected with a
+  `LinkError` instead of being silently remapped onto the wrong (or a
+  nonexistent) function and reaching the Rocq proof obligation.
+- **`inference.hspecs` needs no remap.** Its obligations reference callees
+  *symbolically*, by function name, not by index, so the merge carries the
+  decoded map through unchanged in content — it is simply re-encoded
+  canonically (`inference_hassert::encode`) once the merge is otherwise
+  complete. Every symbol stays resolvable post-link because the main module's
+  own function names survive the rebuilt name section verbatim (only merged
+  external names are synthesized), so nothing in the payload needs updating.
+
+Both sections are emitted only when the main module actually carried one — a
+self-contained module (or one with no `spec` blocks at all) produces neither
+`inference.*` section in the linked output, matching the executable-code-only
+output of a plain merge. When present, they are emitted in that order,
+directly after the rebuilt `name` section.
+
 ## Feasibility Tiers
 
 Whether an external function can be merged depends on what its transitive closure
@@ -193,7 +235,7 @@ to a same-named `sum` exported by a different module.
 
 | Error | Meaning |
 |-------|---------|
-| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM |
+| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section (both are never even decoded for an external) |
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
@@ -248,8 +290,9 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 | `src/parse.rs` | `ParsedModule` — section-by-section owned representation; `ParsedModule::parse` |
 | `src/closure.rs` | `compute` — transitive closure via BFS; `ClosureEffects` for tier classification |
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision |
-| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section |
+| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode |
 | `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space |
+| `src/spec_funcs.rs` | Codec for the `inference.spec_funcs` custom section — mirrors `inference_wasm_codegen`'s encoder as a self-contained copy rather than a cross-crate dependency (the sibling `inference.hspecs` section, by contrast, shares its codec via the `inference-hassert` crate) |
 | `tests/link.rs` | Integration tests: Tier A, Tier B, Tier C rejection, transitive closure, type dedup, name section, multiple externals, diamond closure |
 
 ## Testing
@@ -306,7 +349,9 @@ corpus, so the seam is exercised under stable `cargo test` even without
 
 ## Related Resources
 
-- `core/wasm-codegen` — emits the intermediate module with `(import …)` entries consumed by this crate
+- `core/wasm-codegen` — emits the intermediate module with `(import …)` entries consumed by this crate, plus the `inference.spec_funcs`/`inference.hspecs` sections this crate remaps/carries through
+- `core/hassert` — the `HAssert`/`HTerm` IR and `inference.hspecs` codec shared by `wasm-codegen`, this crate, and `wasm-to-v`
+- `core/wasm-to-v/ROCQ_CONTRACT.md` — how the Rocq translator consumes both sections downstream of this crate
 - `core/inference/src/lib.rs` — driver entry points (`codegen`, `link`, `wasm_to_v`)
 - Master plan: `.claude/docs/issues/9/master_plan.md` — design decisions and phase scope
 - [WebAssembly binary format](https://webassembly.github.io/spec/core/binary/index.html) — section ordering, index spaces
