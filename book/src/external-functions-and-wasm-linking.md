@@ -22,8 +22,9 @@ external fn sum(i32, i32) -> i32;
 ```
 
 The type signature must match the exported function in the external module exactly.
-If the types disagree, the front-end validation step (`validate_extern`) reports a
-`SignatureMismatch` error before any code is generated.
+If the types disagree, the validation step (`validate_extern`, run by the link
+driver when it resolves each binding against the real `.wasm` bytes) reports a
+`SignatureMismatch` error and no linked module is produced.
 
 ## Binding an External Function to a Module
 

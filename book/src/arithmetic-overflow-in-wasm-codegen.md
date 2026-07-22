@@ -113,7 +113,7 @@ Negating `i32::MIN` produces `i32::MIN`. This is verifiable against the golden W
 
 WASM has no unsigned integer types. All integer values are stored in `i32` or `i64` slots and interpreted as unsigned or signed by the individual instruction. Inference maps `u32` to `i32` and `u64` to `i64` by reinterpreting the bit pattern.
 
-Unsigned literals use `.cast_signed()` in `lower_literal`:
+Unsigned literals use `.cast_signed()` in `lower_number_literal`:
 
 ```rust
 // u32 literal: parse as u32, reinterpret bits as i32
@@ -250,7 +250,7 @@ UnaryOperatorKind::Neg => {
 }
 ```
 
-**`lower_literal`** uses `.cast_signed()` for unsigned types to perform bit-pattern reinterpretation without value conversion:
+**`lower_number_literal`** uses `.cast_signed()` for unsigned types to perform bit-pattern reinterpretation without value conversion:
 
 ```rust
 // u32: parse bits as u32, reinterpret as i32 for WASM storage
@@ -285,9 +285,9 @@ This mode would be appropriate for development builds. It has a direct cost in c
 
 ### Constant Folding and Compile-Time Detection
 
-The type-checker or a future constant-folding pass could evaluate constant expressions at compile time and report an error when the result overflows. For example, `const x: i8 = 200` could be flagged at compile time because 200 exceeds `i8::MAX` (127). This does not require runtime guards — it is purely a front-end diagnostic.
+A constant-folding pass could evaluate constant *expressions* at compile time and report an error when the result overflows. This does not require runtime guards — it is purely a front-end diagnostic.
 
-This is already tracked as a known gap: the current type-checker accepts `let a: i8 = 200` without error. A literal range validation pass would catch this class of overflow without touching codegen at all.
+The literal case is already closed: analysis rule **A022 (Literal out of range)** rejects `let a: i8 = 200` at compile time, because 200 exceeds `i8::MAX` (127) and the value could never round-trip through its declared type (see [Static Analysis](static-analysis.md)). What remains open is folding *computed* constants — `127 + 1` assigned to an `i8` still wraps silently.
 
 ### Overflow Checks in Non-Deterministic Blocks
 

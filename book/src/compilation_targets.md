@@ -19,7 +19,7 @@
 
 **`proof` mode**: Emits all code (including spec functions with non-det intrinsics) into a single WASM module for `wasm_to_v` Rocq translation. Only spec functions (those containing `non_det_operations`) receive `optnone`+`noinline` barriers to preserve 1:1 structural correspondence with the source code — this ensures Rocq readability. Execution functions are compiled at the target's default release optimization, identical to compile mode release, so that Rocq proofs cover the actual deployed code. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32` (custom intrinsics require strict MVP). Build profiles (`debug`/`release`) do not apply to proof mode — execution always uses release optimization, spec always uses `O0` + barriers.
 
-The contract between the generated `.wasm` binary, the per-spec function index map carried alongside (or embedded as the `inference.spec_funcs` custom section), and the Rocq predicates the generated `.v` file depends on is documented in [`core/wasm-to-v/ROCQ_CONTRACT.md`](../core/wasm-to-v/ROCQ_CONTRACT.md).
+The contract between the generated `.wasm` binary, the per-spec function index map carried alongside (or embedded as the `inference.spec_funcs` custom section), and the Rocq predicates the generated `.v` file depends on is documented in [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../core/wasm-to-v/ROCQ_CONTRACT.md).
 
 ### Selecting a mode at the CLI
 
