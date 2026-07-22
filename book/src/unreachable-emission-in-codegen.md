@@ -182,5 +182,5 @@ WebAssembly provides inherent control-flow integrity: all functions and their ty
 
 Inference follows the same layered strategy as rustc, LLVM, GCC, Zig, and Binaryen:
 
-1. **Front-end**: A `core/analysis/` crate will enforce that all non-void functions return on every code path, producing a compile-time error for violations.
+1. **Front-end**: The `core/analysis/` crate enforces that all non-void functions return on every code path — rule **A007 (Missing return)** produces a compile-time error for violations (see [Static Analysis](static-analysis.md)).
 2. **Codegen**: The `unreachable` instruction before function `end` serves as a safety net. If the front-end has a bug, the program traps instead of silently misbehaving.

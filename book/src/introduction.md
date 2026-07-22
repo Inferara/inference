@@ -49,6 +49,13 @@ single source file:
 - **[The WASM Linker](the-wasm-linker.md)** — the static merge that folds external
   function bodies into a single self-contained module.
 
+A third group covers the toolchain outside the batch compiler:
+
+- **[The Language Server](the-language-server.md)** — the `inference-lsp` server
+  and the layered `ide/` crate stack: Salsa-memoized analyses, the
+  router/worker/read-pool thread architecture, and how the editor gets real
+  compiler answers on every keystroke.
+
 The appendix preserves historical notes from the project's earlier LLVM-based
 backend, retained for reference.
 

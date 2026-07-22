@@ -9448,18 +9448,16 @@ var require_brace_expansion = __commonJS({
     }
     function expand(str, max, isTop) {
       var expansions = [];
-      for (; ; ) {
-        const m = balanced("{", "}", str);
-        if (!m) return [str];
-        const pre = m.pre;
-        if (/\$$/.test(m.pre)) {
-          const post2 = m.post.length ? expand(m.post, max, false) : [""];
-          for (let k2 = 0; k2 < post2.length && k2 < max; k2++) {
-            const expansion2 = pre + "{" + m.body + "}" + post2[k2];
-            expansions.push(expansion2);
-          }
-          return expansions;
+      var m = balanced("{", "}", str);
+      if (!m) return [str];
+      var pre = m.pre;
+      var post = m.post.length ? expand(m.post, max, false) : [""];
+      if (/\$$/.test(m.pre)) {
+        for (var k = 0; k < post.length && k < max; k++) {
+          var expansion = pre + "{" + m.body + "}" + post[k];
+          expansions.push(expansion);
         }
+      } else {
         var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
         var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
         var isSequence = isNumericSequence || isAlphaSequence;
@@ -9467,12 +9465,10 @@ var require_brace_expansion = __commonJS({
         if (!isSequence && !isOptions) {
           if (m.post.match(/,(?!,).*\}/)) {
             str = m.pre + "{" + m.body + escClose + m.post;
-            isTop = true;
-            continue;
+            return expand(str, max, true);
           }
           return [str];
         }
-        const post = m.post.length ? expand(m.post, max, false) : [""];
         var n;
         if (isSequence) {
           n = m.body.split(/\.\./);
@@ -9535,8 +9531,8 @@ var require_brace_expansion = __commonJS({
               expansions.push(expansion);
           }
         }
-        return expansions;
       }
+      return expansions;
     }
   }
 });
@@ -17473,22 +17469,20 @@ var require_range = __commonJS({
       return comp;
     };
     var isX = (id) => !id || id.toLowerCase() === "x" || id === "*";
-    var invalidXRangeOrder = (M, m, p) => isX(M) && !isX(m) || isX(m) && p && !isX(p);
     var replaceTildes = (comp, options) => {
       return comp.trim().split(/\s+/).map((c) => replaceTilde(c, options)).join(" ");
     };
     var replaceTilde = (comp, options) => {
       const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE];
-      const z = options.includePrerelease ? "-0" : "";
       return comp.replace(r, (_, M, m, p, pr) => {
         debug("tilde", comp, _, M, m, p, pr);
         let ret;
         if (isX(M)) {
           ret = "";
         } else if (isX(m)) {
-          ret = `>=${M}.0.0${z} <${+M + 1}.0.0-0`;
+          ret = `>=${M}.0.0 <${+M + 1}.0.0-0`;
         } else if (isX(p)) {
-          ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0-0`;
+          ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0-0`;
         } else if (pr) {
           debug("replaceTilde pr", pr);
           ret = `>=${M}.${m}.${p}-${pr} <${M}.${+m + 1}.0-0`;
@@ -17534,9 +17528,9 @@ var require_range = __commonJS({
           debug("no pr");
           if (M === "0") {
             if (m === "0") {
-              ret = `>=${M}.${m}.${p} <${M}.${m}.${+p + 1}-0`;
+              ret = `>=${M}.${m}.${p}${z} <${M}.${m}.${+p + 1}-0`;
             } else {
-              ret = `>=${M}.${m}.${p} <${M}.${+m + 1}.0-0`;
+              ret = `>=${M}.${m}.${p}${z} <${M}.${+m + 1}.0-0`;
             }
           } else {
             ret = `>=${M}.${m}.${p} <${+M + 1}.0.0-0`;
@@ -17555,9 +17549,6 @@ var require_range = __commonJS({
       const r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE];
       return comp.replace(r, (ret, gtlt, M, m, p, pr) => {
         debug("xRange", comp, ret, gtlt, M, m, p, pr);
-        if (invalidXRangeOrder(M, m, p)) {
-          return comp;
-        }
         const xM = isX(M);
         const xm = xM || isX(m);
         const xp = xm || isX(p);

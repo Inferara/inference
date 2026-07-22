@@ -26,9 +26,9 @@ Inference's non-deterministic blocks (`forall`, `exists`, `unique`) make this re
 
 ### Rule Independence
 
-Each analysis check is a distinct zero-sized struct implementing the `Rule` trait. Rules do not communicate with each other. They do not share mutable state. Each rule receives the same `&TypedContext` and produces its own `Vec<AnalysisDiagnostic>` independently.
+Each analysis check is a distinct zero-sized struct implementing the `Rule` trait. Rules do not communicate with each other. They do not share mutable state. Each rule receives the same `&TypedContext` and produces its own `Vec<LabeledDiagnostic>` independently — each finding paired with the module path of the file it belongs to, so a multi-file report can name the file an imported finding came from.
 
-This design has several consequences. Rules can be added or removed without touching each other. Rules could be executed in parallel on separate threads — the `Send + Sync` bounds on `Rule` are specified now, not added later. Test cases for one rule cannot silently affect another.
+This design has several consequences. Rules can be added or removed without touching each other. Rules could be executed in parallel on separate threads — the `Send + Sync` bounds on `Rule` are specified now, not added later. Test cases for one rule cannot silently affect another. And because a rule is a pure query over the `TypedContext`, the same `all_rules()` set runs unchanged inside the [language server](the-language-server.md), where each finding becomes an editor diagnostic tagged with its rule id.
 
 ### Severity Model
 
@@ -103,10 +103,11 @@ TypedContext (read-only)
       |           |           |
       |           |           v
       |           |       visitor(stmt_id, &WalkContext)
-      |           |           { loop_depth, nondet_depth, nondet_block_kind }
+      |           |           { loop_depth, nondet_depth,
+      |           |             nondet_block_kind, module_path }
       |           |
       |           v
-      |       Vec<AnalysisDiagnostic>
+      |       Vec<LabeledDiagnostic>
       |
       v
   partition by severity
@@ -130,7 +131,7 @@ crate::rule! {
     #[name = "Break outside loop"]
     #[severity = error]
     pub struct BreakOutsideLoop;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         // implementation
     }
 }
@@ -156,7 +157,7 @@ impl crate::rule::Rule for BreakOutsideLoop {
     fn severity(&self) -> crate::errors::Severity {
         crate::__severity!(error)   // expands to Severity::Error
     }
-    fn check(&self, ctx: &crate::rule::TypedContext) -> Vec<crate::errors::AnalysisDiagnostic> {
+    fn check(&self, ctx: &crate::rule::TypedContext) -> Vec<crate::errors::LabeledDiagnostic> {
         // the body you wrote
     }
 }
@@ -199,16 +200,19 @@ crate::rule! {
     #[name = "Break outside loop"]
     #[severity = error]
     pub struct BreakOutsideLoop;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             if matches!(arena[stmt_id].kind, Stmt::Break)
                 && walk_ctx.loop_depth == 0
             {
-                errors.push(AnalysisDiagnostic::BreakOutsideLoop {
-                    location: arena[stmt_id].location,
-                });
+                errors.push(LabeledDiagnostic::new(
+                    walk_ctx.module_path.clone(),
+                    AnalysisDiagnostic::BreakOutsideLoop {
+                        location: arena[stmt_id].location,
+                    },
+                ));
             }
         });
         errors
@@ -216,7 +220,7 @@ crate::rule! {
 }
 ```
 
-The check body is two conditions: the statement is a `Break`, and `loop_depth` is zero, meaning no enclosing loop exists at this point in the traversal. When both conditions are true, the statement's source location is captured in the diagnostic.
+The check body is two conditions: the statement is a `Break`, and `loop_depth` is zero, meaning no enclosing loop exists at this point in the traversal. When both conditions are true, the statement's source location is captured in the diagnostic, wrapped in a `LabeledDiagnostic` carrying the module path of the file being walked.
 
 ## The Shared Walker
 
@@ -231,20 +235,21 @@ Most rules need to visit every statement in every function body and inspect the 
 - `Def::Function` — calls the callback with the function's body block
 - `Def::Struct` — iterates methods and calls the callback for each method's body
 - `Def::Spec` — recurses into the spec's nested definitions
-- `Def::Module` — recurses into the module's nested definitions (if the module has a body)
 - `Def::Enum`, `Def::Constant`, `Def::ExternFunction`, `Def::TypeAlias` — skipped
 
-This ensures every function body in the program is visited regardless of where it is defined: top-level functions, struct methods, functions inside spec blocks, and functions inside modules are all covered by a single call to `walk_function_bodies`.
+This ensures every function body in the program is visited regardless of where it is defined: top-level functions, struct methods, and functions inside spec blocks are all covered by a single call to `walk_function_bodies`. There is no module arm because
+[modules are files](module-hierarchy-and-multi-file-compilation.md), not AST nodes — `walk_function_bodies` reaches an imported module's bodies by iterating every source file in the `TypedContext`.
 
 ### Depth Tracking
 
-`WalkContext` carries three fields through the traversal:
+`WalkContext` carries four fields through the traversal:
 
 ```rust
 pub(crate) struct WalkContext {
     pub loop_depth: u32,
     pub nondet_depth: u32,
     pub nondet_block_kind: Option<&'static str>,
+    pub module_path: Vec<String>,
 }
 ```
 
@@ -267,7 +272,9 @@ if block.block_kind.is_non_det() {
 
 This save/restore pattern handles nested non-det blocks correctly: if a `forall` block contains an `exists` block, the visitor sees `nondet_block_kind = Some("exists")` while inside the inner block, and `Some("forall")` again after exiting it.
 
-At each function boundary, `walk_function_bodies` asserts that all three fields have returned to their initial values. This is a programming invariant, not user input validation: a mismatch would indicate a bug in the walker itself.
+`module_path` is not nesting state: it names the file whose bodies are currently being walked (empty for the entry file) and is reset as `walk_function_bodies` moves from one source file to the next. A rule clones it into each `LabeledDiagnostic` it emits, which is how a finding inside an imported file is attributed to that file in a multi-file report.
+
+At each function boundary, `walk_function_bodies` asserts that the three nesting fields have returned to their initial values. This is a programming invariant, not user input validation: a mismatch would indicate a bug in the walker itself.
 
 ### Why `dyn FnMut`
 
@@ -290,15 +297,124 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-| ID | Name | Severity | What it checks | Verification rationale |
-|----|------|----------|----------------|------------------------|
-| A001 | Break outside loop | Error | `break` appears where no enclosing loop exists | Structural error: `break` has no target; the WASM `br` instruction it would lower to would be malformed |
-| A002 | Break inside non-det block | Error | `break` appears inside a `forall`, `exists`, `assume`, or `unique` block | `break` would short-circuit path exploration; `forall` and `exists` require all paths to be enumerated for the assertion to be sound |
-| A003 | Return inside loop | Error | `return` appears inside a loop body | Single-exit-point discipline simplifies the Rocq translation; multiple exits from inside a loop create branching proof obligations that are difficult to discharge uniformly |
-| A004 | Infinite loop without break | Error | A `loop { ... }` without a condition contains no `break` that targets it | A non-terminating loop makes the Rocq translation non-total; Rocq requires proof of termination for every recursive construct |
-| A005 | Return inside non-det block | Error | `return` appears inside a `forall`, `exists`, `assume`, or `unique` block | Same as A002: `return` exits the enclosing function, cutting off path exploration before the non-det block's assertion can be checked on all paths |
+Thirty-eight rules are registered in `all_rules()`. Thirty-three are
+error-severity — they block compilation — and five are warnings; no
+info-severity rule has been defined yet. Three ids in the numbering range
+(A013, A021, A030) are currently unassigned. The tables below group the rules
+by the invariant family they protect; the descriptions are condensed from the
+rules' own doc comments.
 
-All five current rules are error-severity. Advisory rules (warning or info severity) are supported by the infrastructure but none have been defined yet.
+### Control flow and termination
+
+| ID | What it enforces |
+|----|------------------|
+| A001 | `break` must appear inside a loop body |
+| A002 | `break` must not appear inside a non-deterministic block |
+| A003 | `return` must not appear inside a loop body |
+| A004 | an infinite loop must contain a reachable `break` |
+| A005 | `return` must not appear inside a non-deterministic block |
+| A007 | non-void functions must return on all code paths |
+| A035 | direct and mutual/indirect recursion is forbidden |
+| A036 | cumulative shadow-stack depth must not exceed the stack budget |
+
+This family carries the core verification argument. A `break` with no
+enclosing loop (A001) has no target — the WASM `br` it would lower to would be
+malformed. A `break` or `return` inside a `forall`, `exists`, `assume`, or
+`unique` block (A002, A005) would short-circuit path exploration, silently
+invalidating an assertion whose soundness depends on every path being
+enumerated. A `return` inside a loop (A003) breaks the single-exit discipline
+that keeps the Rocq translation's proof obligations uniform. An infinite loop
+with no reachable `break` (A004) makes the translation non-total — Rocq
+requires termination. A function that can fall off its end without returning
+(A007) is the same non-totality in another guise (see
+[Unreachable Emission](unreachable-emission-in-codegen.md)). Recursion (A035)
+and unbounded stack growth (A036) are rejected in the spirit of the Power of
+Ten rules for safety-critical code: a statically bounded call graph is one the
+proof — and the runtime — can always exhaust.
+
+### Uzumaki placement
+
+| ID | What it enforces |
+|----|------------------|
+| A006 | `@` must appear inside a non-deterministic block |
+| A008 | a standalone `@` expression has no effect |
+| A014 | an array `@` cannot be used as a function argument |
+| A023 | `@` in a reassignment is not allowed |
+| A027 | `@` on a nested struct type is rejected |
+| A028 | `@` on an array of structs is rejected |
+| A038 | `@` on a struct- or array-typed struct-literal field is rejected |
+| A039 | a struct `@` cannot be used as a function argument |
+| A040 | `@` on a struct- or array-typed array-literal element is rejected |
+
+An `@` outside a non-deterministic block (A006) has no set of execution paths
+to range over, and a standalone `@` (A008) selects a value nobody observes.
+The rest of the family protects a codegen invariant: a *compound* (struct- or
+array-typed) `@` lowers through a named stack slot, so every position that has
+no such slot — an argument list, a literal field or element, a reassignment —
+is rejected rather than silently mis-lowered.
+
+### Compound values (structs and arrays)
+
+| ID | What it enforces |
+|----|------------------|
+| A012 | compound literals cannot be passed directly as function arguments |
+| A015 | compound literals appear only in supported positions |
+| A016 | compound-returning function calls appear only in `let` or `return` |
+| A017 | assignment from a compound-returning function call is rejected |
+| A018 | method-call chains on compound-returning function calls are rejected |
+| A026 | nested compound type depth must not exceed the maximum |
+| A029 | compound literals in compound assignments are rejected |
+| A031 | unsupported compound return expressions are rejected |
+
+Compound values live in linear memory, not on the WASM value stack (see
+[Memory Allocation](memory-allocation-in-wasm-codegen.md)). Every rule in this
+family fences off a position where a compound value would need to materialize
+without a named destination to own its memory.
+
+### Values and indexing
+
+| ID | What it enforces |
+|----|------------------|
+| A019 | an array index must be a 32-bit integer type |
+| A022 | a numeric literal must fit the valid range of its target type |
+| A037 | a constant array index must be within the array's bounds |
+
+A022 exists because WebAssembly arithmetic wraps silently — the rule closes
+the front door on values that could never round-trip through their declared
+type (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)).
+A037 turns a guaranteed runtime trap into a compile-time error when the index
+is statically known.
+
+### Language restrictions
+
+| ID | What it enforces |
+|----|------------------|
+| A024 | calls to unbound external functions are not supported in codegen |
+| A025 | variable declarations must have an initializer |
+| A032 | top-level `const` declarations are not yet supported |
+| A033 | combined unary operators are prohibited |
+| A041 | a function-local name is declared at most once per function body |
+
+These are honesty rules: each rejects, with a named diagnostic, a construct
+the pipeline does not (or does not yet) support — rather than letting it fail
+obscurely further down. A025 and A041 also remove whole classes of ambiguity
+(reads of uninitialized memory, shadowing) that would otherwise need proof
+obligations of their own.
+
+### Advisory rules
+
+| ID | Severity | What it flags |
+|----|----------|---------------|
+| A009 | Warning | an enum definition with no variants |
+| A010 | Warning | a method that declares `self` but never references it |
+| A011 | Warning | a struct definition with neither fields nor methods |
+| A020 | Warning | unreachable code after `return`, `break`, or an infinite loop |
+| A034 | Warning | a visibility modifier on a definition inside a `spec` body |
+
+The warnings are the advisory tier the severity model was designed for: each
+flags code that is almost certainly not what the author meant, but blocks
+nothing — the pipeline continues and the finding is reported alongside any
+errors.
 
 ## Adding a New Rule
 
@@ -316,7 +432,10 @@ Use a custom traversal when the check requires different scoping than the shared
 //! AXXX: Description of what the rule checks.
 
 use inference_ast::nodes::Stmt;
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// One-line description for rustdoc.
@@ -324,12 +443,13 @@ crate::rule! {
     #[name = "Human readable name"]
     #[severity = error]
     pub struct YourRuleName;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
-            // inspect arena[stmt_id].kind and walk_ctx fields
-            // push to errors when the rule fires
+            // inspect arena[stmt_id].kind and walk_ctx fields; when the
+            // rule fires, push a LabeledDiagnostic pairing
+            // walk_ctx.module_path with the diagnostic
         });
         errors
     }
