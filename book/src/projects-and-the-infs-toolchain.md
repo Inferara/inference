@@ -259,6 +259,30 @@ pub fn main() -> i32 {
 }
 ```
 
+## Toolchain Management
+
+Project workflow is only half of `infs`'s surface. The other half is a
+rustup-style toolchain manager — the part that makes "install Inference" a
+one-command operation and lets several compiler versions coexist:
+
+| Command | What it does |
+|---------|--------------|
+| `infs install [version]` | Download and install a toolchain (latest stable when no version is given) |
+| `infs uninstall <version>` | Remove an installed toolchain |
+| `infs list` | List installed toolchains, marking the default |
+| `infs versions` | Fetch the release manifest and list what is available |
+| `infs default <version>` | Set the default toolchain used for compilation |
+| `infs component` | Install, list, or remove optional components such as `wasm-opt` (Binaryen), the optimizer behind the `[build.wasm-opt]` manifest table |
+| `infs doctor` | Verify the installation and report issues with suggested fixes |
+| `infs self` | Update or manage the `infs` binary itself |
+| `infs version` | Show the CLI's own version (`-v` adds build and platform detail) |
+
+Toolchains live under `INFERENCE_HOME` (default `~/.inference`), and the
+release manifest is fetched from the distribution server (overridable via
+`INFS_DIST_SERVER`). `infs build` and `infs run` resolve the `infc` they spawn
+through this installation — the resolution order is described in the next
+section.
+
 ## Relationship to `infc`
 
 `infs` is a thin orchestrator. It does not link, parse, or type-check anything

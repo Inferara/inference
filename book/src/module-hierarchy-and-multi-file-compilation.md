@@ -84,7 +84,7 @@ use { sort } from collections;
 ```
 
 This form is **not** a source import. It names a logical WASM module identifier, not a
-file path. The compiler-time front end (`core/inference/src/project.rs`) skips it entirely
+file path. The compiler-time front end (`core/project-model/src/project.rs`) skips it entirely
 when walking the import closure. The from form is resolved at link time by
 `inference-wasm-linker`.
 
@@ -243,7 +243,12 @@ rejects any attempt to use one where the other is expected.
 ## Import-Closure Walk
 
 The compiler resolves the full set of files to compile through a **breadth-first walk** from
-the entry file. This walk is implemented in `core/inference/src/project.rs`.
+the entry file. This walk is implemented in `core/project-model/src/project.rs` — a leaf
+crate (`inference-project-model`) extracted from the orchestration crate so that the batch
+compiler and the [language server](the-language-server.md) share one closure walk. The
+compiler enters it through `inference::parse_project` (re-exported unchanged), while the
+IDE enters through `load_project_resilient`, which reads files through a `FileLoader` seam
+so the editor's unsaved buffers take priority over what is on disk.
 
 The algorithm:
 
@@ -427,8 +432,8 @@ different names derived from the canonical keys.
 
 ## Related Resources
 
-- `core/inference/src/project.rs` — `parse_project`, `discover_files`, import-closure walk,
-  `collect_unreachable_warnings`
+- `core/project-model/src/project.rs` — `parse_project`, `load_project_resilient`,
+  the import-closure walk, `collect_unreachable_warnings`
 - `core/fn-key/src/lib.rs` — `FnKey` variants, `fold_spec_name`, `qualify_dotted`
 - `core/type-checker/src/symbol_table.rs` — `canonical_key_for_scope`,
   `file_module_path_of_scope`

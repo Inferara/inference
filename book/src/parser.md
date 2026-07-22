@@ -21,8 +21,8 @@ shape everything that follows:
   simple.
 - **Resilient, structured errors.** The parser *never aborts and never panics* —
   on any input it returns a tree plus a list of structured
-  `ParseError { span, message }` values, so later phases and the IDE always have
-  something to work with.
+  `ParseError { span, message }` values, so later phases and
+  [the IDE](the-language-server.md) always have something to work with.
 - **Speed.** The engine is fast (see [Performance](#performance)) and lowers
   straight into a compact arena-based AST.
 
@@ -155,15 +155,14 @@ pub enum SyntaxKind {
 }
 ```
 
-The boundary between the two groups is the associated constant
-`SyntaxKind::FIRST_NODE` (the `SourceFile` variant). A compile-time assertion keeps
+The boundary between the two groups is the module-level constant `FIRST_NODE`
+(the discriminant of the `SourceFile` variant). A compile-time assertion keeps
 all *token* kinds below 128:
 
 ```rust,ignore
-const _: () = assert!(
-    (SyntaxKind::FIRST_NODE as usize) <= 128,
-    "token kinds must fit in TokenSet (u128)"
-);
+pub(crate) const FIRST_NODE: u16 = SyntaxKind::SourceFile as u16;
+
+const _: () = assert!(FIRST_NODE <= 128, "token kinds must fit a u128 TokenSet");
 ```
 
 That bound exists because `TokenSet` (`core/parser/src/token_set.rs`) is a
@@ -226,9 +225,9 @@ m.complete(p, SyntaxKind::MemberAccessExpression);
 
 Binary and unary expressions are parsed by precedence climbing
 (`core/parser/src/grammar/expr.rs`). Each binary operator has a single **binding
-power** plus a `right_assoc` flag — the numbers come from the Inference grammar's
-`PRECEDENCE` map, so the parse shapes match the language definition exactly (higher
-binds tighter):
+power** plus a `right_assoc` flag — the numbers live in a small `bp` module next
+to the Pratt loop and are the crate's definition of Inference's precedence
+(higher binds tighter):
 
 | Operators | Binding power | Associativity |
 |-----------|--------------:|---------------|
@@ -318,7 +317,7 @@ lowering uses to find the children it needs.
 ## Stage 5: lowering to the AstArena
 
 `lower.rs` walks the CST and allocates typed AST nodes into the `AstArena`. This is
-the largest module in the crate (~1,600 lines).
+the largest module in the crate (~3,000 lines).
 
 `AstArena` indices are sequential `la_arena` slots, so the *order* in which nodes
 are allocated is part of the AST's identity — every later phase indexes into the
@@ -391,7 +390,7 @@ keep its existing contract.
 The parser is covered at two levels: in-crate unit tests for every stage, and the
 compiler's end-to-end suites that exercise it as the real front end.
 
-In-crate, `core/parser` carries ~200 unit tests spanning:
+In-crate, `core/parser` carries ~260 unit tests spanning:
 
 - the lexer (every token class, joint bits, round-trip losslessness, edge cases
   like `-42` and unterminated strings);

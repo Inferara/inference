@@ -18,6 +18,10 @@
 - [External Functions and WASM Linking](external-functions-and-wasm-linking.md)
 - [The WASM Linker](the-wasm-linker.md)
 
+# IDE Support
+
+- [The Language Server](the-language-server.md)
+
 # Appendix
 
 - [LLVM-Specific Test Features (Legacy)](appendix/llvm-features.md)
