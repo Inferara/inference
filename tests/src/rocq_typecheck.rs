@@ -44,8 +44,8 @@ mod gate {
     /// `assert`, and structured control flow (`if`/`loop`).
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
-        ("nondet_blocks.inf", "nondet_blocks"),
-        ("nondet_body_modifiers.inf", "nondet_body_modifiers"),
+        ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
+        ("spec_nondet_body_modifiers.inf", "spec_nondet_body_modifiers"),
         ("three_specs.inf", "three_specs"),
         ("spec_calls_top.inf", "spec_calls_top"),
         ("spec_method.inf", "spec_method"),

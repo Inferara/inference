@@ -1,11 +1,9 @@
-// Exercises the Rocq lowering of the non-deterministic quantifier blocks
-// (`forall`, `exists`, `assume`). Each lowers to a verifier-library
-// constructor with a specific arity:
-//   BI_forall : list basic_instruction -> _          (no block_type)
-//   BI_exists : list basic_instruction -> _          (no block_type)
-//   BI_assume : block_type -> list basic_instruction -> _  (keeps block_type)
-// Proof-mode codegen emits every function body, so the lowered constructors
-// appear in the generated `.v` regardless of spec membership.
+// Negative analysis fixture: inline non-deterministic blocks (`forall`,
+// `exists`, `assume`) in plain top-level functions — lexically OUTSIDE any
+// `spec` declaration. Non-deterministic constructs describe specifications and
+// are valid only inside a `spec`, so analysis rejects every block here with
+// A042 (one diagnostic per block). The spec-wrapped counterpart that exercises
+// the same proof-mode lowering lives in `spec_nondet_blocks.inf`.
 pub fn forall_fn() {
     forall {
         let x: i32 = @;

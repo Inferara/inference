@@ -5,9 +5,15 @@
 // the arity the emitter writes (`block_type -> list basic_instruction -> _`)
 // precisely so the arity stays pinned and current `main` type-checks. See the
 // stub README for the divergence note and the swap-to-real-library follow-up.
-pub fn unique_fn() {
-    unique {
-        let x: i32 = @;
-        assert(x == x);
+//
+// The `unique` block lives inside a `spec` because non-deterministic constructs
+// are valid only inside a spec declaration; proof-mode codegen still lowers the
+// spec-function body, so `BI_unique` is emitted as before.
+spec UniqueSpec {
+    fn unique_fn() {
+        unique {
+            let x: i32 = @;
+            assert(x == x);
+        }
     }
 }

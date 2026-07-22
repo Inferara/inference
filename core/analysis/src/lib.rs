@@ -94,6 +94,16 @@
 //!   rule — it preserves a 1:1 source-name to local to proof-index mapping per
 //!   function — not a proof-soundness requirement.
 //!
+//! ### Non-Deterministic Constructs Outside `spec` (A042)
+//!
+//! - A042: The non-deterministic block forms (inline `forall`/`exists`/`assume`/
+//!   `unique` blocks and the function-body-modifier form `fn f() forall { … }`)
+//!   describe formal specifications and are valid only lexically inside a `spec`
+//!   declaration. Used in a top-level function, a top-level struct method, or a
+//!   block nested inside either, they are rejected. The check is lexical, hence
+//!   independent of the compilation mode. Only the outermost non-det block on
+//!   each path is reported.
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -208,6 +218,7 @@ mod tests {
             AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { ty: "Point".to_string(), location: dummy_location() },
             AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
+            AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: "forall" },
         ];
 
         let rules = rules::all_rules();

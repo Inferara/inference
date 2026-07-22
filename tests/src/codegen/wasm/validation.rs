@@ -333,7 +333,7 @@ mod codegen_validation_tests {
     fn nested_nondet_forall_inside_exists_produces_valid_wasm() {
         let source =
             r#"pub fn nested_forall_in_exists() { exists { forall { const a: i32 = 42; } } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested non-det WASM is invalid: {e}"));
@@ -350,7 +350,7 @@ mod codegen_validation_tests {
     #[test]
     fn nested_nondet_forall_inside_forall_produces_valid_wasm() {
         let source = r#"pub fn nested_forall() { forall { forall { const a: i32 = 42; } } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested forall-in-forall WASM is invalid: {e}"));
@@ -364,7 +364,7 @@ mod codegen_validation_tests {
     #[test]
     fn nested_nondet_expression_drop_uses_innermost_block() {
         let source = r#"pub fn nested_drop_test() -> i32 { exists { forall { const x: i32 = 99; } } return 0; }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested non-det with const WASM is invalid: {e}"));
@@ -421,7 +421,7 @@ mod codegen_validation_tests {
     #[test]
     fn nondet_void_block_trailing_expression_emits_drop() {
         let source = r#"pub fn drop_test() { forall { const a: i32 = 42; a; } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).unwrap_or_else(|e| panic!("Drop-path WASM is invalid: {e}"));
         assert!(
@@ -823,7 +823,7 @@ mod codegen_validation_tests {
             fn do_nothing() { }
             pub fn caller() { forall { do_nothing(); } }
         "#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Void call in non-det block WASM is invalid: {e}"));
@@ -889,7 +889,7 @@ mod codegen_validation_tests {
             fn get_value() -> i32 { return 42; }
             pub fn spec() { forall { let x: i32 = get_value(); } }
         "#;
-        let wasm = codegen_output(source).wasm().to_vec();
+        let wasm = codegen_output_no_analysis(source).wasm().to_vec();
         inf_wasmparser::validate(&wasm).unwrap_or_else(|e| {
             panic!("Value-returning call in non-det block with let WASM is invalid: {e}")
         });

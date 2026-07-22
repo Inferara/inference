@@ -20,6 +20,7 @@ pub mod method_call_chain_compound;
 pub mod method_never_accesses_self;
 pub mod missing_return;
 pub mod nested_compound_depth;
+pub mod nondet_outside_spec;
 pub mod recursion;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
@@ -59,6 +60,7 @@ use method_call_chain_compound::MethodCallChainCompound;
 use method_never_accesses_self::MethodNeverAccessesSelf;
 use missing_return::MissingReturn;
 use nested_compound_depth::NestedCompoundDepth;
+use nondet_outside_spec::NonDetOutsideSpec;
 use recursion::RecursionDetected;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
@@ -123,5 +125,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &StructUzumakiAsArgument,
         &UzumakiOnCompoundArrayElement,
         &DuplicateLocalName,
+        &NonDetOutsideSpec,
     ]
 }

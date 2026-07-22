@@ -350,11 +350,13 @@ mod analysis_rules_tests {
     fn a027_uzumaki_on_struct_with_scalar_array_field_accepted() {
         let source = r#"
             struct HasArray { arr: [i32; 3]; val: i32; }
-            fn main() -> i32 {
-                forall {
-                    let h: HasArray = @;
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn check() {
+                    forall {
+                        let h: HasArray = @;
+                    }
                 }
-                return 0;
             }
         "#;
         let result = analyze(source);

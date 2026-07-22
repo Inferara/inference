@@ -1,0 +1,29 @@
+// Inline non-deterministic blocks (`forall`/`exists`/`assume`) inside spec
+// functions. In proof mode every spec-function body is lowered, so this fixture
+// keeps the verifier-library block constructors and their arities covered by the
+// coqc gate via the inline-block (`lower_block`) lowering path:
+//   BI_forall : list basic_instruction -> _              (no block_type)
+//   BI_exists : list basic_instruction -> _              (no block_type)
+//   BI_assume : block_type -> list basic_instruction -> _ (keeps block_type)
+// This is the spec-wrapped, analysis-legal counterpart of the negative fixture
+// `nondet_blocks.inf`.
+spec NondetBlocks {
+  fn forall_fn() {
+    forall {
+      let x: i32 = @;
+      assert(x == x);
+    }
+  }
+  fn exists_fn() {
+    exists {
+      let y: i32 = @;
+      assert(y == y);
+    }
+  }
+  fn assume_fn() {
+    assume {
+      let z: i32 = @;
+      assert(z == z);
+    }
+  }
+}
