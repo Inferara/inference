@@ -46,6 +46,33 @@ fn proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> CodegenOutput {
     .expect("multi-file proof codegen should succeed")
 }
 
+/// Like [`proof_codegen_multi_file`] but returns the codegen `Result`, for
+/// negative tests asserting a proof-mode obligation-translation rejection (a
+/// spec body with no `hassert` encoding is now a hard codegen error).
+fn try_proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> anyhow::Result<CodegenOutput> {
+    let mut arena = inference_ast::arena::AstArena::default();
+    for (module_path, source) in files {
+        let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+        let parsed = inference_parser::parse_into(arena, source, module_path);
+        assert!(
+            parsed.errors.is_empty(),
+            "multi-file proof source has syntax errors: {:?}",
+            parsed.errors
+        );
+        arena = parsed.arena;
+    }
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .expect("multi-file proof type check should succeed")
+        .typed_context();
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        Target::Wasm32,
+        CompilationMode::Proof,
+        OptLevel::O3,
+        "output",
+    )
+}
+
 /// Instantiates `wasm_bytes` and returns the store + instance for calling
 /// exported functions.
 fn instantiate(wasm_bytes: &[u8]) -> (Store<()>, Instance) {
@@ -342,11 +369,12 @@ spec LibSpec {
 }
 
 #[test]
-fn field_position_uzumaki_with_qualified_cross_file_struct_proof_mode_compiles() {
+fn field_position_uzumaki_with_qualified_cross_file_struct_is_rejected() {
     // A field-position uzumaki on a qualified cross-file struct type
-    // (`lib::geom::Point { x: @, y: @ }`) inside a spec's `forall` must compile in
-    // proof mode: the cross-file field types are threaded onto each uzumaki node so
-    // codegen emits the right opcodes rather than panicking on a missing type.
+    // (`lib::geom::Point { x: @, y: @ }`) inside a spec's `forall`: the struct
+    // literal and the subsequent `p.x` field access have no `hassert` encoding,
+    // so proof-mode codegen rejects the spec with `P002` (previously it produced
+    // WASM because the obligation pass was additive; the flip makes it fatal).
     let main = "\
 use lib::geom;
 
@@ -361,10 +389,12 @@ pub fn main() {}
 ";
     let geom = "pub struct Point { x: i32; y: i32; }";
 
-    let output = proof_codegen_multi_file(&[(vec![], main), (vec!["lib", "geom"], geom)]);
-    inf_wasmparser::validate(output.wasm()).unwrap_or_else(|e| {
-        panic!("cross-file field-position uzumaki must produce valid proof-mode WASM: {e}")
-    });
+    let err = try_proof_codegen_multi_file(&[(vec![], main), (vec!["lib", "geom"], geom)])
+        .expect_err("a struct-valued cross-file spec body has no assertion encoding");
+    assert!(
+        err.to_string().contains("P002"),
+        "expected a P002 rejection for the struct construct; got:\n{err}"
+    );
 }
 
 #[test]
@@ -2081,8 +2111,13 @@ pub fn build() -> Outer {
         (vec!["lib", "geo"], geo),
     ]);
     let empty = rustc_hash::FxHashMap::default();
-    let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-        .expect("proof translation should succeed");
+    let v = inference::wasm_to_v(
+        "Mod",
+        output.wasm(),
+        &empty,
+        &inference::HSpecMap::default(),
+    )
+    .expect("proof translation should succeed");
 
     // Both bodies survive as distinct functions (a collapse would lose one).
     assert!(
@@ -2100,16 +2135,22 @@ pub fn build() -> Outer {
     );
 }
 
+// The following four sources previously exercised cross-file / spec-local method
+// dispatch *from inside a spec body* by inspecting the translated `.v`. Under the
+// wasm-verifier contract a spec function is OMITTED from the module record and,
+// more fundamentally, its obligation cannot mention an instance-method call
+// (`P005`, "instance methods operate on memory") or a struct value (`P005`, "its
+// result is not a single scalar") — such a spec has no `hassert` encoding, so
+// proof-mode codegen now rejects it. The executable-path dispatch soundness these
+// scenarios protect lives on in `cross_file_method_dispatches_by_receiver_canonical_identity`
+// and `cross_file_method_misdispatch_does_not_read_past_receiver` (which drive the
+// same dispatch through `main`); these become negative tests pinning the rejection.
+
 #[test]
-fn spec_inner_cross_file_method_dispatches_by_canonical_identity() {
-    // The fix added a canonical-key branch to the codegen method lookup whose
-    // spec probe runs *first* when a spec is active. This exercises that branch
-    // from inside a `spec { }` block: the spec body calls `o.inner.get()` on a
-    // `lib::geo::Inner` receiver while the entry defines its own same-named
-    // `Inner` with a different `get`. The spec method must still dispatch on the
-    // receiver's canonical identity (the foreign body, 99999) rather than the
-    // call-site bare name (the entry body, 11111). Proof mode preserves the spec
-    // so the spec body actually reaches codegen and the canonical-key lookup.
+fn spec_inner_cross_file_method_call_is_rejected() {
+    // A spec body calling `o.inner.get()` on a cross-file receiver: the call to
+    // the compound-returning `build()` and the instance method `get()` both lack
+    // an assertion encoding, so codegen rejects the spec with `P005`.
     let main = "\
 struct Inner { a: i32; b: i32; pub fn get(self) -> i32 { return 11111; } }
 use lib::geo::{Outer, build};
@@ -2134,39 +2175,19 @@ pub fn build() -> Outer {
 }
 ";
 
-    let output = proof_codegen_multi_file(&[
-        (vec![], main),
-        (vec!["lib", "geo"], geo),
-    ]);
-    let empty = rustc_hash::FxHashMap::default();
-    let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-        .expect("proof translation should succeed");
-
-    // Both same-named bodies survive as distinct functions.
+    let err = try_proof_codegen_multi_file(&[(vec![], main), (vec!["lib", "geo"], geo)])
+        .expect_err("a spec body calling an instance method has no assertion encoding");
     assert!(
-        v.contains("Vi32 99999") && v.contains("Vi32 11111"),
-        "both same-named method bodies must survive into the proof artifact:\n{v}"
-    );
-    // The spec's `check` must call the canonical (`lib::geo`) body (99999), not
-    // the entry's same-named `get` (11111). Resolving by the call-site bare name
-    // inside the spec would target the entry body and verify the wrong method.
-    let check_call_idx = spec_check_method_call_index(&v);
-    let target_body = nth_func_body_constant(&v, check_call_idx);
-    assert_eq!(
-        target_body, 99999,
-        "the spec's method call must dispatch to the canonical `lib::geo::Inner::get` \
-         (99999), not the entry's body (11111); v:\n{v}"
+        err.to_string().contains("P005"),
+        "expected a P005 rejection for the spec's instance-method call; got:\n{err}"
     );
 }
 
 #[test]
-fn spec_with_own_same_named_struct_dispatches_cross_file_receiver_to_foreign_method() {
-    // A `spec` that defines its *own* `struct Helper` registers `Helper.tag` as a
-    // `SpecMethod`. A call on a cross-file `lib::ext::Helper` value inside the same
-    // spec must dispatch on the receiver's canonical identity (the foreign body,
-    // 2), not the spec's own same-named `tag` (1). A spec-first probe keyed by the
-    // bare struct name would wrongly resolve to the spec's `Helper.tag` because
-    // that `SpecMethod` registration exists — the exact hijack this guards against.
+fn spec_with_own_same_named_struct_cross_file_call_is_rejected() {
+    // A spec defining its own `Helper` and calling `e.tag()` on a cross-file
+    // `lib::ext::Helper`: both the compound-returning `mk()` and the instance
+    // method `tag()` are `P005` in an obligation, so the spec is rejected.
     let main = "\
 use lib::ext;
 spec GSpec {
@@ -2189,93 +2210,18 @@ pub struct Helper {
 pub fn mk() -> Helper { return Helper { v: 7 }; }
 ";
 
-    let output = proof_codegen_multi_file(&[
-        (vec![], main),
-        (vec!["lib", "ext"], ext),
-    ]);
-    let empty = rustc_hash::FxHashMap::default();
-    let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-        .expect("proof translation should succeed");
-
-    // Both same-named `tag` bodies survive as distinct functions.
+    let err = try_proof_codegen_multi_file(&[(vec![], main), (vec!["lib", "ext"], ext)])
+        .expect_err("a spec body calling an instance method has no assertion encoding");
     assert!(
-        v.contains("Vi32 1") && v.contains("Vi32 2"),
-        "both same-named `tag` bodies must survive into the proof artifact:\n{v}"
-    );
-    let check_call_idx = spec_check_method_call_index(&v);
-    let target_body = nth_func_body_constant(&v, check_call_idx);
-    assert_eq!(
-        target_body, 2,
-        "the spec's call on a `lib::ext::Helper` value must dispatch to the foreign \
-         `tag` (2), not the spec's own same-named `tag` (1); v:\n{v}"
+        err.to_string().contains("P005"),
+        "expected a P005 rejection for the spec's cross-file method call; got:\n{err}"
     );
 }
 
 #[test]
-fn spec_with_own_same_named_struct_layout_divergent_receiver_loads_correct_offset() {
-    // Layout-divergent variant: the cross-file `Helper` is a single `i32` (field at
-    // offset 0); the spec's own `Helper` has its read field at offset 12. If the
-    // spec's `tag` were wrongly dispatched for the cross-file receiver, it would
-    // emit a load at offset 12 against a 4-byte struct — an out-of-bounds read
-    // baked into the proof. The call must reach the cross-file body, which loads
-    // its field at offset 0.
-    let main = "\
-use lib::ext;
-spec GSpec {
-    struct Helper {
-        a: i32;
-        b: i32;
-        c: i32;
-        d: i32;
-        fn tag(self) -> i32 { return self.d; }
-    }
-    fn check() -> i32 {
-        let e: lib::ext::Helper = lib::ext::mk();
-        return e.tag();
-    }
-}
-pub fn main() -> i32 { return 0; }
-";
-    let ext = "\
-pub struct Helper {
-    v: i32;
-    pub fn tag(self) -> i32 { return self.v; }
-}
-pub fn mk() -> Helper { return Helper { v: 2 }; }
-";
-
-    let output = proof_codegen_multi_file(&[
-        (vec![], main),
-        (vec!["lib", "ext"], ext),
-    ]);
-    let empty = rustc_hash::FxHashMap::default();
-    let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-        .expect("proof translation should succeed");
-
-    // The function the spec's `check` calls must read its field at offset 0 (the
-    // cross-file `self.v`), with no `Vi32 12` offset add (the spec's `self.d`).
-    let check_call_idx = spec_check_method_call_index(&v);
-    let target = nth_function_body(&v, check_call_idx);
-    assert!(
-        !target.contains("Vi32 12"),
-        "the dispatched method must be the cross-file `tag` (offset-0 load), not the \
-         spec's `tag` (offset-12 load) — an OOB read on a 4-byte struct; body:\n{target}"
-    );
-    assert!(
-        target.contains("BI_load"),
-        "the dispatched cross-file `tag` must load its field directly at offset 0; body:\n{target}"
-    );
-}
-
-#[test]
-fn spec_own_inner_struct_method_still_dispatches_to_itself() {
-    // Over-correction guard: a call inside the spec on the spec's *own* inner
-    // struct must still resolve to the spec's `SpecMethod` registration. The
-    // canonical-key `Method` candidate does not exist for a spec-inner struct (its
-    // methods register only as `SpecMethod`), so the spec probe is the correct
-    // fallback. Here the spec's own `Helper.make()` builds a spec `Helper` and the
-    // `.tag()` on it must reach the spec's body (42), with no foreign `Helper` in
-    // play to be confused with.
+fn spec_own_inner_struct_method_call_is_rejected() {
+    // A spec calling `Helper::make()` (compound result) then `h.tag()` (instance
+    // method) on its own inner struct: still `P005`, no assertion encoding.
     let main = "\
 spec GSpec {
     struct Helper {
@@ -2291,19 +2237,11 @@ spec GSpec {
 pub fn main() -> i32 { return 0; }
 ";
 
-    let output = proof_codegen_multi_file(&[(vec![], main)]);
-    let empty = rustc_hash::FxHashMap::default();
-    let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-        .expect("proof translation should succeed");
-
-    // The spec's `check` calls `Helper::make()` then `h.tag()`; the method
-    // dispatch must reach the spec's own `tag` body (42).
-    let check_call_idx = spec_check_method_call_index(&v);
-    let target_body = nth_func_body_constant(&v, check_call_idx);
-    assert_eq!(
-        target_body, 42,
-        "a call on the spec's own inner struct must dispatch to the spec's own \
-         method (42); v:\n{v}"
+    let err = try_proof_codegen_multi_file(&[(vec![], main)])
+        .expect_err("a spec body calling an instance method has no assertion encoding");
+    assert!(
+        err.to_string().contains("P005"),
+        "expected a P005 rejection for the spec's own-struct method call; got:\n{err}"
     );
 }
 
@@ -2312,14 +2250,6 @@ pub fn main() -> i32 { return 0; }
 /// test to confirm method dispatch targets the canonical body.
 fn main_method_call_index(v: &str) -> usize {
     nth_function_second_call_index(v, "main")
-}
-
-/// Returns the index of the *second* `BI_call` in the spec body `check` — the
-/// method dispatch (the first call is the free `build()`). Used by the
-/// spec-inner dispatch test to confirm the spec resolves the method on the
-/// receiver's canonical identity.
-fn spec_check_method_call_index(v: &str) -> usize {
-    nth_function_second_call_index(v, "check")
 }
 
 /// Returns the index of the *second* `BI_call` in the body of the function
@@ -2378,31 +2308,6 @@ fn nth_func_body_constant(v: &str, n: usize) -> i32 {
     let rest = &def_body[vi32 + "Vi32 ".len()..];
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().expect("Vi32 must carry a numeric constant")
-}
-
-/// Returns the full definition-body text of the `n`th function listed in the
-/// module's `mod_funcs` definition. Used to inspect the *instructions* of a
-/// dispatched method (e.g. its field-load offset), rather than only its returned
-/// constant.
-fn nth_function_body(v: &str, n: usize) -> String {
-    let funcs_start = v.find("mod_funcs :=").expect("v must list mod_funcs");
-    let funcs_list = &v[funcs_start..];
-    let funcs_end = funcs_list.find("nil;").expect("mod_funcs must terminate");
-    let func_name = funcs_list[..funcs_end]
-        .lines()
-        .filter_map(|line| {
-            let name = line.trim().trim_end_matches(" ::").trim();
-            (!name.is_empty() && name != "mod_funcs :=").then(|| name.to_string())
-        })
-        .nth(n)
-        .expect("mod_funcs must list the called function");
-    let def_marker = format!("Definition {func_name} : module_func");
-    let def_start = v
-        .find(&def_marker)
-        .unwrap_or_else(|| panic!("v must define function `{func_name}`"));
-    let def_body = &v[def_start..];
-    let def_end = def_body.find("|}.").expect("function body must terminate");
-    def_body[..def_end].to_string()
 }
 
 // Head precedence: a struct/enum defined in the accessing file pre-empts a

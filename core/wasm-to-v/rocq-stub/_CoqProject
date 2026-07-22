@@ -1,6 +1,9 @@
--Q . Wasm
+-Q wasm Wasm
+-Q wasm_verifier WasmVerifier
 
-bytes.v
-numerics.v
-datatypes.v
-verifier.v
+wasm/bytes.v
+wasm/numerics.v
+wasm/datatypes.v
+wasm/host.v
+wasm_verifier/Assertions.v
+wasm_verifier/Verifier.v

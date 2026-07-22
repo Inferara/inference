@@ -2691,11 +2691,15 @@ fn build_compiles_uzumaki_operator() {
     );
 }
 
-/// QA: TC-13.6 - Verify compilation of file with all non-det features.
+/// QA: TC-13.6 - Verify a `-v` build of the TRANSLATABLE non-deterministic
+/// feature set (a `forall` spec function with the uzumaki `@`, an `assume`
+/// filter, and a nested `exists` block).
 ///
-/// **Expected behavior**: Exit code 0, both WASM and Rocq outputs generated.
+/// **Expected behavior**: Exit code 0, both WASM and Rocq outputs generated —
+/// the spec lowers to the custom WASM opcodes and its `hassert` obligation is
+/// emitted into the `.v` (the spec function is omitted from the module record).
 #[test]
-fn build_compiles_all_nondet_features() {
+fn build_compiles_translatable_nondet_features() {
     let Some(infc_path) = require_infc() else {
         return;
     };
@@ -2727,6 +2731,45 @@ fn build_compiles_all_nondet_features() {
     assert!(
         v_output.path().exists(),
         "Expected V file at: {:?}",
+        v_output.path()
+    );
+}
+
+/// QA: TC-13.7 - Verify a `-v` (proof-mode) build of a spec containing a
+/// `unique` block is rejected. `unique` has no `hassert` encoding, so codegen
+/// aborts with a fatal `P002` diagnostic. Pins that `infs` propagates a fatal
+/// hassert diagnostic from `infc` to stderr with a non-zero exit, and that no
+/// partial `.v` artifact is left behind.
+///
+/// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
+/// rejection, and no `.v` is written.
+#[test]
+fn build_v_rejects_unique_block_with_p002() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique.inf");
+    let dest = temp.child("nondet_unique.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
+
+    // A fatal codegen error must leave no partial proof artifact behind.
+    let v_output = temp.child("out").child("nondet_unique.v");
+    assert!(
+        !v_output.path().exists(),
+        "no .v must be written when proof-mode codegen fails: {:?}",
         v_output.path()
     );
 }

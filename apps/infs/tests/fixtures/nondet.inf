@@ -1,41 +1,28 @@
-// A spec bundling every non-deterministic construct (forall/exists/assume/unique
-// and the uzumaki `@`). Non-deterministic constructs are valid only inside a spec
-// declaration, so they live here. A proof-mode build (`-v`) compiles the spec and
-// emits Rocq alongside the WASM; a compile-mode build strips the proof-only spec
-// and emits only the executable `main`.
+// A spec exercising the TRANSLATABLE non-deterministic constructs: a `forall`
+// body with the uzumaki `@`, an `assume` filter, and a nested `exists` block.
+// Non-deterministic constructs are valid only inside a spec declaration.
+//
+// A proof-mode build (`-v`) lowers the `forall`/`@`/`assume`/`exists` to the
+// custom WASM opcodes AND emits the spec's `hassert` obligation into the Rocq
+// `.v` (the spec function itself is omitted from the module record). A
+// compile-mode build strips the proof-only spec and emits only the executable
+// `main`.
+//
+// The `unique` block has no assertion encoding and is a fatal proof-mode error;
+// that negative path lives in `nondet_unique.inf`.
 pub fn main() -> i32 {
     return 0;
 }
 
 spec NonDetFeatures {
-    fn hello_uzumaki() -> i32 {
-        forall {
-            let x: i32 = @;
-        }
-        return 0;
-    }
-
-    fn hello_world() {
-        forall {
-            const a: i32 = 42;
-        }
-    }
-
-    fn hello_exists() {
-        exists {
-            const a: i32 = 42;
-        }
-    }
-
-    fn hello_assume() {
+    fn features() forall {
+        let n: i32 = @;
         assume {
-            const a: i32 = 42;
+            assert(n > 0);
         }
-    }
-
-    fn hello_unique() {
-        unique {
-            const a: i32 = 42;
+        exists {
+            let m: i32 = @;
+            assert(m == n);
         }
     }
 }

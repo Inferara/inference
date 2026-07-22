@@ -1,0 +1,46 @@
+// The canonical wasm-verifier PrimeExample, expressed in Inference: a faithful
+// executable `is_prime` (the `T_app` target of the spec obligation) paired with
+// the `forall` spec whose obligation reproduces `prime_hspec1`
+// (wasm-verifier theories/examples/PrimeExample.v:147-164) node-for-node.
+//
+// `is_prime` is written without a return inside the loop (analysis rule A003):
+// it seeds a `result` flag, then clears it on finding any divisor. The loop's
+// `i * i <= n` bound keeps it a real trial-division primality test rather than a
+// stub, and its body survives in the module record as defined-fn index 0 — which
+// is why the obligation's cross-call prints as `T_app 0`.
+//
+// The else-arm existential binder is named `k`, not `m`: two `let m` in one
+// function would share a WASM local slot (analysis rule A041 forbids the reuse),
+// and binder names never reach the obligation IR, so the tree is identical to
+// PrimeExample's — the then-arm `m` is a `T_local` slot, the else-arm binder a
+// `T_lvar` introduced by `HA_ex`.
+fn is_prime(n: i32) -> bool {
+    if n < 2 {
+        return false;
+    }
+    let mut result: bool = true;
+    let mut i: i32 = 2;
+    loop i * i <= n {
+        if (n % i) == 0 {
+            result = false;
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+spec prime_properties {
+    fn prime_spec() forall {
+        let n: i32 = @;
+        assume { assert(n > 1); }
+        if is_prime(n) {
+            let m: i32 = @;
+            assume { assert(m > 1 && m < n); }
+            assert(n % m > 0);
+        } else exists {
+            let k: i32 = @;
+            assume { assert(k > 1 && k < n); }
+            assert(n % k == 0);
+        }
+    }
+}

@@ -45,24 +45,26 @@ mod gate {
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
-        ("spec_nondet_body_modifiers.inf", "spec_nondet_body_modifiers"),
         ("three_specs.inf", "three_specs"),
         ("spec_calls_top.inf", "spec_calls_top"),
         ("spec_method.inf", "spec_method"),
         ("mixed_compile_proof.inf", "mixed_compile_proof"),
         ("rocq_control_flow.inf", "rocq_control_flow"),
-        ("rocq_unique.inf", "rocq_unique"),
+        ("rocq_spec_shapes.inf", "rocq_spec_shapes"),
+        ("rocq_prime_example.inf", "rocq_prime_example"),
     ];
 
-    /// Constructors the corpus must keep exercising. These are the
-    /// arity-sensitive shapes a codegen or translator regression would silently
-    /// drop; asserting their presence keeps the `coqc` gate meaningful even if a
-    /// future change stops emitting one of them.
+    /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
+    /// families: WASM instructions that survive in the module record's
+    /// *executable* function bodies (`BI_*`), and the `hassert` obligation shapes
+    /// (`ValidSpec`, `term_eq`, `Himpl`, `T_app`, `T_local`, `HA_ex`, …). The
+    /// fork-only non-deterministic constructors (`BI_forall`/`BI_exists`/
+    /// `BI_assume`/`BI_unique`/`BI_uzumaki_num`) are deliberately ABSENT — spec
+    /// functions are omitted from the module record and non-det is rejected in
+    /// surviving bodies, so a regression that reintroduced one would fail the
+    /// stub compile, not this needle set. Asserting these keeps the `coqc` gate
+    /// meaningful even if a future change stops emitting one of them.
     const REQUIRED_CONSTRUCTS: &[&str] = &[
-        "BI_forall (",
-        "BI_exists (",
-        "BI_assume (",
-        "BI_unique (",
         "BI_if (",
         "BI_loop (",
         "BI_block (",
@@ -72,8 +74,15 @@ mod gate {
         "BI_relop ",
         "BI_binop ",
         "BI_testop ",
-        "BI_uzumaki_num ",
         "ValidModule ",
+        "ValidSpec ",
+        ": hassert",
+        "list hassert",
+        "term_eq",
+        "Himpl",
+        "T_app ",
+        "T_local ",
+        "HA_ex",
     ];
 
     /// Proof-mode `.v` for one fixture, driven entirely in-process.
@@ -93,10 +102,12 @@ mod gate {
             module_name,
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"));
-        // Empty explicit map: the per-spec indices ride along in the embedded
-        // `inference.spec_funcs` custom section (see ROCQ_CONTRACT.md).
+        // Empty explicit maps: the per-spec indices and the hassert obligations
+        // both ride along in the embedded `inference.spec_funcs` /
+        // `inference.hspecs` custom sections (see ROCQ_CONTRACT.md).
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        inference::wasm_to_v(module_name, output.wasm(), &empty)
+        let empty_hspecs = inference::HSpecMap::default();
+        inference::wasm_to_v(module_name, output.wasm(), &empty, &empty_hspecs)
             .unwrap_or_else(|e| panic!("wasm_to_v failed for {file}: {e}"))
     }
 
@@ -156,13 +167,18 @@ mod gate {
         ok.then_some(candidate)
     }
 
-    /// Runs `coqc -Q <stub_root> Wasm <file>` and returns combined stdout/stderr
-    /// on failure.
-    fn coqc_compile(coqc: &str, stub_root: &Path, file: &Path) -> Result<(), String> {
+    /// Runs `coqc -Q <work>/wasm Wasm -Q <work>/wasm_verifier WasmVerifier
+    /// <file>` and returns combined stdout/stderr on failure. Both logical roots
+    /// are mapped so the emitted `From Wasm …` / `From WasmVerifier …` imports
+    /// resolve.
+    fn coqc_compile(coqc: &str, work: &Path, file: &Path) -> Result<(), String> {
         let output = Command::new(coqc)
             .arg("-Q")
-            .arg(stub_root)
+            .arg(work.join("wasm"))
             .arg("Wasm")
+            .arg("-Q")
+            .arg(work.join("wasm_verifier"))
+            .arg("WasmVerifier")
             .arg(file)
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn {coqc}: {e}"));
@@ -212,18 +228,34 @@ mod gate {
         let work =
             std::env::temp_dir().join(format!("inference_rocq_typecheck_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(&work).expect("create work dir");
+        std::fs::create_dir_all(work.join("wasm")).expect("create work/wasm dir");
+        std::fs::create_dir_all(work.join("wasm_verifier")).expect("create work/wasm_verifier dir");
         let src_stub = stub_dir();
-        for module in ["bytes", "numerics", "datatypes", "verifier"] {
-            let name = format!("{module}.v");
-            std::fs::copy(src_stub.join(&name), work.join(&name))
-                .unwrap_or_else(|e| panic!("copy stub {name}: {e}"));
+        // The stub is a two-namespace tree: `wasm/` (`Wasm.*`, the WASM datatypes)
+        // and `wasm_verifier/` (`WasmVerifier.*`, the assertion language and the
+        // proof-obligation predicates). Copy both, then compile each `.v` in
+        // dependency order (`Wasm` first, since `WasmVerifier` imports it).
+        let stub_modules: &[(&str, &str)] = &[
+            ("wasm", "bytes"),
+            ("wasm", "numerics"),
+            ("wasm", "datatypes"),
+            ("wasm", "host"),
+            ("wasm_verifier", "Assertions"),
+            ("wasm_verifier", "Verifier"),
+        ];
+        for (dir, module) in stub_modules {
+            let rel = format!("{dir}/{module}.v");
+            std::fs::copy(
+                src_stub.join(dir).join(format!("{module}.v")),
+                work.join(&rel),
+            )
+            .unwrap_or_else(|e| panic!("copy stub {rel}: {e}"));
         }
-        for module in ["bytes", "numerics", "datatypes", "verifier"] {
-            let file = work.join(format!("{module}.v"));
+        for (dir, module) in stub_modules {
+            let file = work.join(dir).join(format!("{module}.v"));
             if let Err(log) = coqc_compile(&coqc, &work, &file) {
                 panic!(
-                    "vendored stub failed to compile ({module}.v):\n{log}\n\
+                    "vendored stub failed to compile ({dir}/{module}.v):\n{log}\n\
                      work dir kept for inspection: {}",
                     work.display()
                 );
@@ -245,5 +277,101 @@ mod gate {
         }
 
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Committed `.v` golden for the PrimeExample fixture — the repository's first
+    /// checked-in Rocq artifact. Regenerate with the `#[ignore]`d
+    /// [`regenerate::regenerate_prime_example_v`] after an intentional emitter
+    /// change.
+    fn prime_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("rocq_prime_example.v")
+    }
+
+    /// The proof-mode `.v` for the PrimeExample fixture must match a committed
+    /// golden byte-for-byte, and that golden must carry the wasm-verifier contract
+    /// shape: the module record omits the spec function (only `is_prime` survives),
+    /// the obligation is a first-class `hassert` whose cross-call resolves to the
+    /// defined function at index 0, an existential arm introduces an `HA_ex`
+    /// binder, and both the module- and spec-level theorems are present.
+    #[test]
+    fn prime_example_matches_committed_v_golden() {
+        let generated = generate_v("rocq_prime_example.inf", "rocq_prime_example");
+        let golden_path = prime_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_prime_example_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for rocq_prime_example.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_prime_example_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Belt-and-braces on the golden's contract shape, independent of the byte
+        // compare so a future regeneration cannot silently launder a contract
+        // regression into the committed file.
+        assert_eq!(
+            golden.matches(": module_func").count(),
+            1,
+            "the module record must contain exactly one function body (`is_prime`); \
+             the spec function must be omitted:\n{golden}"
+        );
+        assert!(
+            !golden.contains("Definition prime_spec"),
+            "the spec function `prime_spec` must not appear as a module definition:\n{golden}"
+        );
+        assert!(
+            golden.contains("rocq_prime_example__prime_properties_hspec1 : hassert"),
+            "the obligation must be emitted as a first-class `hassert`:\n{golden}"
+        );
+        assert!(
+            golden.contains("T_app 0 ((T_local 0%N) :: nil)"),
+            "the `is_prime` cross-call must resolve to defined-fn index 0:\n{golden}"
+        );
+        assert!(
+            golden.contains("HA_ex"),
+            "the existential else arm must introduce an `HA_ex` binder:\n{golden}"
+        );
+        assert!(
+            golden.contains("Theorem valid_rocq_prime_example : ValidModule rocq_prime_example."),
+            "the 1-ary module-validity theorem must be present:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Theorem valid_rocq_prime_example__prime_properties : \
+                 ValidSpec rocq_prime_example rocq_prime_example__prime_properties_specs."
+            ),
+            "the spec-validity theorem must be present:\n{golden}"
+        );
+    }
+
+    /// Regeneration helper for the committed `.v` golden. `#[ignore]`d by design
+    /// (per CONTRIBUTING.md): it is not a behavioral test but rewrites the golden
+    /// from current emitter output. Run explicitly after an intentional change:
+    /// `cargo test -p inference-tests regenerate_prime_example_v -- --ignored`.
+    #[cfg(test)]
+    mod regenerate {
+        use super::{generate_v, prime_golden_path};
+
+        #[test]
+        #[ignore]
+        fn regenerate_prime_example_v() {
+            let v = generate_v("rocq_prime_example.inf", "rocq_prime_example");
+            let path = prime_golden_path();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+            }
+            std::fs::write(&path, &v).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            println!("Regenerated: {} ({} bytes)", path.display(), v.len());
+        }
     }
 }

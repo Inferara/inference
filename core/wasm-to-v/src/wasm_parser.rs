@@ -92,6 +92,7 @@ use inf_wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
+use inference_hassert::HSpecMap;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
@@ -162,6 +163,7 @@ pub fn translate_bytes(
     mod_name: &str,
     bytes: &[u8],
     spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
+    hspecs_by_spec: &HSpecMap,
 ) -> anyhow::Result<String> {
     // API-boundary validation: every name we accept here is checked once,
     // up front. Names that come from the embedded `inference.spec_funcs`
@@ -173,7 +175,12 @@ pub fn translate_bytes(
         validate_rocq_identifier(spec_name)?;
     }
 
-    match parse(mod_name.to_string(), bytes, spec_funcs_by_spec.clone()) {
+    match parse(
+        mod_name.to_string(),
+        bytes,
+        spec_funcs_by_spec.clone(),
+        hspecs_by_spec.clone(),
+    ) {
         Ok(mut parse_data) => parse_data.translate(),
         Err(e) => {
             if e.downcast_ref::<WasmToVError>().is_some() {
@@ -227,11 +234,14 @@ fn parse(
     mod_name: String,
     data: &'_ [u8],
     spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
+    hspecs_by_spec: HSpecMap,
 ) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
     let explicit_non_empty = !spec_funcs_by_spec.is_empty();
-    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec);
+    let explicit_hspecs_non_empty = !hspecs_by_spec.is_empty();
+    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec, hspecs_by_spec);
     let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
+    let mut embedded_hspecs: Option<HSpecMap> = None;
     let mut seen_name_section = false;
 
     for payload in parser.parse_all(data) {
@@ -324,6 +334,21 @@ fn parse(
                         ))));
                     }
                     embedded_spec_funcs = Some(decode_spec_funcs_section(custom_section.data())?);
+                } else if custom_section.name() == inference_hassert::HSPECS_SECTION_NAME {
+                    if embedded_hspecs.is_some() {
+                        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                            "duplicate `{}` custom section",
+                            inference_hassert::HSPECS_SECTION_NAME
+                        ))));
+                    }
+                    embedded_hspecs = Some(
+                        inference_hassert::decode(custom_section.data()).map_err(|e| {
+                            anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                                "{} section: {e}",
+                                inference_hassert::HSPECS_SECTION_NAME
+                            )))
+                        })?,
+                    );
                 } else if let inf_wasmparser::KnownCustom::Name(name_section) =
                     custom_section.as_known()
                 {
@@ -346,6 +371,7 @@ fn parse(
                             }
                             inf_wasmparser::Name::Function(func_names) => {
                                 let mut func_names_map = HashMap::new();
+                                let mut raw_func_names_map = HashMap::new();
                                 for func_name in func_names {
                                     let func_name = func_name?;
                                     // Function names are emitted verbatim as
@@ -360,9 +386,19 @@ fn parse(
                                         func_name.index,
                                         sanitize_rocq_identifier(func_name.name),
                                     );
+                                    // Retain the RAW, unsanitized name-section
+                                    // string too: an `inference.hspecs`
+                                    // obligation references a callee by exactly
+                                    // this symbol (`FnKey::Display`, e.g.
+                                    // `lib.arith.add`), and `T_app` resolution
+                                    // keys on it — sanitization would break the
+                                    // match.
+                                    raw_func_names_map
+                                        .insert(func_name.index, func_name.name.to_string());
                                 }
                                 if !func_names_map.is_empty() {
                                     wasm_parse_data.func_names_map = Some(func_names_map);
+                                    wasm_parse_data.raw_func_names_map = Some(raw_func_names_map);
                                 }
                             }
                             inf_wasmparser::Name::Local(locals) => {
@@ -416,6 +452,39 @@ fn parse(
             }
         } else {
             wasm_parse_data.spec_funcs_by_spec = embedded;
+        }
+    }
+
+    // Same explicit-vs-embedded reconciliation for `inference.hspecs` as for
+    // `inference.spec_funcs` above: an explicit non-empty map must match the
+    // embedded section exactly; an empty explicit map adopts the embedded one
+    // (the post-link CLI path, where the linker rewrote the section); an
+    // explicit map with no embedded section wins (a pre-link translation).
+    if let Some(embedded) = embedded_hspecs {
+        if explicit_hspecs_non_empty {
+            if wasm_parse_data.hspecs_by_spec != embedded {
+                return Err(anyhow::anyhow!(WasmToVError::EmbeddedHspecsMismatch {
+                    explicit: wasm_parse_data.hspecs_by_spec.clone(),
+                    embedded,
+                }));
+            }
+        } else {
+            wasm_parse_data.hspecs_by_spec = embedded;
+        }
+    }
+
+    // Cross-invariant: every spec carrying obligations must be a spec the
+    // `inference.spec_funcs` section knows about. It is a subset, not an
+    // equality — a spec block may contain only methods (function indices but no
+    // free-function obligations), so a spec name can appear in `spec_funcs`
+    // with no matching `hspecs` entry, but never the reverse. A `.wasm` whose
+    // two sections disagree here is a corrupt proof artifact.
+    for spec_name in wasm_parse_data.hspecs_by_spec.keys() {
+        if !wasm_parse_data.spec_funcs_by_spec.contains_key(spec_name) {
+            return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                "spec `{spec_name}` carries obligations but is absent from the \
+                 `inference.spec_funcs` section"
+            ))));
         }
     }
 

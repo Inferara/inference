@@ -1,0 +1,36 @@
+// Exercises the hassert obligation shapes the wasm-verifier contract
+// introduces, keeping their coqc-gate needles satisfiable in one fixture:
+//   - an `assume` antecedent and an `if` guard each lower to `Himpl`;
+//   - a cross-call in a spec term (`check(n)`) is a `T_app` into mod_funcs;
+//   - a universal `@` (`let n: i32 = @`) is a `T_local`;
+//   - a `==` under universal quantification carries a `term_eq`;
+//   - a nested `exists` block introduces an `HA_ex` binder.
+// The non-deterministic constructs live inside a `spec` declaration, where the
+// language permits them (analysis rule A042); `check` is executable, called
+// from `main`, so it survives in the emitted module record as a `T_app` target.
+fn check(n: i32) -> i32 {
+    if n < 2 {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn main() -> i32 {
+    return check(3);
+}
+
+spec Shapes {
+    fn shape_prop() forall {
+        let n: i32 = @;
+        assume {
+            assert(n > 1);
+        }
+        if check(n) == 1 {
+            assert(n > 0);
+        }
+        exists {
+            let m: i32 = @;
+            assert(m == n);
+        }
+    }
+}

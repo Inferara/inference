@@ -42,9 +42,20 @@
 //! reaches the translator, since an external body must additionally survive tier
 //! classification (a memory access through a non-parameter address is rejected as
 //! Tier C). Direct `call` is inherent in every fixture (the main module calls the
-//! satisfied import, whose body is merged in). The non-det/uzumaki proof-path
-//! opcodes are legal only in the main module, which carries them as Rocq proof
-//! scaffolding the merge preserves verbatim.
+//! satisfied import, whose body is merged in).
+//!
+//! ## Non-deterministic instructions are translatable only by omission
+//!
+//! The verification-only opcodes (`forall`/`exists`/`assume`/`unique` and
+//! `i32`/`i64.uzumaki`) have no counterpart in the vanilla WasmCert proof model
+//! `wasm-to-v` targets. They reach the `.v` path only inside a `spec` function's
+//! body, which the translator OMITS from the module record entirely — so they are
+//! "translatable" purely by not being emitted. A non-det instruction in a
+//! surviving (executable, non-spec) body has no lowering and is a fail-closed
+//! `wasm-to-v` rejection. The linker still admits these opcodes (its allow-list is
+//! unchanged, so a main module carrying them still links); the phase agreement
+//! they must uphold is therefore that such an output *is rejected*, not that it
+//! translates — [`proof_path_nondet_and_uzumaki_is_rejected`] pins that.
 
 use inference_wasm_linker::link as raw_link;
 use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
@@ -98,7 +109,8 @@ fn assert_output_translates(label: &str, main: &[u8]) {
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        translate_bytes("Prog", &linked, &empty)
+        let empty_hspecs = inference_hassert::HSpecMap::default();
+        translate_bytes("Prog", &linked, &empty, &empty_hspecs)
     }));
 
     match result {
@@ -114,6 +126,47 @@ fn assert_output_translates(label: &str, main: &[u8]) {
              core/wasm-linker/src/safety.rs without a translator lowering — either add the \
              lowering in core/wasm-to-v/src/translator.rs or remove the family from the \
              allow-list"
+        ),
+    }
+}
+
+/// The dual of [`assert_output_translates`] for the non-deterministic families:
+/// the linker accepts `main`, but because the opcodes sit in a surviving
+/// (non-spec) body, `wasm-to-v` must reject the linked output with a recoverable
+/// [`inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature`]
+/// naming the vanilla-WasmCert limitation — never a panic, never a silent
+/// success.
+fn assert_output_rejected_as_nondet(label: &str, main: &[u8]) {
+    let linked = link_against_mathlib(main);
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let empty_hspecs = inference_hassert::HSpecMap::default();
+        translate_bytes("Prog", &linked, &empty, &empty_hspecs)
+    }));
+
+    match result {
+        Ok(Err(e)) => {
+            let downcast = e.downcast_ref::<inference_wasm_to_v_translator::errors::WasmToVError>();
+            assert!(
+                matches!(
+                    downcast,
+                    Some(
+                        inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature { .. }
+                    )
+                ),
+                "{label}: a non-deterministic instruction in a surviving body must be a \
+                 recoverable UnsupportedFeature rejection; got {e:?}"
+            );
+        }
+        Ok(Ok(_)) => panic!(
+            "{label}: a non-deterministic instruction in a surviving (non-spec) body must be \
+             rejected by wasm-to-v (the vanilla WasmCert proof model has no such construct), \
+             but translation succeeded"
+        ),
+        Err(_) => panic!(
+            "{label}: wasm-to-v PANICKED on a non-deterministic instruction instead of \
+             returning a recoverable UnsupportedFeature error"
         ),
     }
 }
@@ -490,13 +543,17 @@ fn ref_func_translates() {
 // preservation, add a `call_indirect` entry here.
 
 #[test]
-fn proof_path_nondet_and_uzumaki_translate() {
+fn proof_path_nondet_and_uzumaki_is_rejected() {
     // The verification-only proof-path opcodes (forall/exists/assume/unique and
-    // i32.uzumaki/i64.uzumaki) are legal only in the main module, which carries
-    // them as Rocq proof scaffolding the merge preserves verbatim. `wat` cannot
-    // assemble these custom `0xfc`-prefixed opcodes, so the body is hand-encoded.
+    // i32.uzumaki/i64.uzumaki) have no counterpart in the vanilla WasmCert proof
+    // model. Here they sit in the main module's *surviving* (non-spec) body — the
+    // module carries no `inference.spec_funcs` section, so nothing is omitted —
+    // and `wasm-to-v` must reject the linked output rather than translate it. The
+    // linker still admits the opcodes (its allow-list is unchanged), so the phase
+    // agreement is a clean rejection, not a lowering. `wat` cannot assemble these
+    // custom `0xfc`-prefixed opcodes, so the body is hand-encoded.
     let main = proof_mode_main_with_nondet_and_uzumaki();
-    assert_output_translates("non-det blocks + uzumaki (proof path)", &main);
+    assert_output_rejected_as_nondet("non-det blocks + uzumaki (proof path)", &main);
 }
 
 /// Builds a proof-mode MAIN module that imports `mathlib::sum` and whose own

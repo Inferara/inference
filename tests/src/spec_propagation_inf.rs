@@ -126,14 +126,15 @@ mod fixture_spec_method {
         // Round-trip via the embedded section into Rocq; the per-spec
         // Definition + Theorem pair must materialize.
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+        let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
+            .expect("translate ok");
         assert!(
             v.contains("Definition specmethod__Geometry_specs"),
             "per-spec definition for Geometry must be emitted:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_specmethod__Geometry : ValidModule specmethod specmethod__Geometry_specs."),
-            "per-spec ValidModule theorem missing:\n{v}"
+            v.contains("Theorem valid_specmethod__Geometry : ValidSpec specmethod specmethod__Geometry_specs."),
+            "per-spec ValidSpec theorem missing:\n{v}"
         );
     }
 }
@@ -188,12 +189,21 @@ mod fixture_spec_calls_top {
             "top-level main must also call helper at 0; observed: {main_call_target}"
         );
 
-        // Round-trip must emit Caller's per-spec list with exactly one index.
+        // Round-trip: `caller`'s body is a `return helper()`, which contributes
+        // no obligation term, so `caller` yields a trivial `HA_true` obligation
+        // gathered into Caller's `_specs`. The spec function itself is omitted
+        // from the module record (the WASM-level call index checked above is on
+        // the executable bytes, which retain it).
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+        let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
+            .expect("translate ok");
         assert!(
-            v.contains("Definition calltop__Caller_specs : list N := (2 :: nil)%N."),
-            "Caller_specs should list exactly index 2:\n{v}"
+            v.contains("Definition calltop__Caller_specs : list hassert := (calltop__Caller_hspec1 :: nil)."),
+            "Caller_specs should gather its single obligation:\n{v}"
+        );
+        assert!(
+            v.contains("Theorem valid_calltop__Caller : ValidSpec calltop calltop__Caller_specs."),
+            "Caller must get its ValidSpec theorem:\n{v}"
         );
     }
 }
@@ -235,7 +245,8 @@ mod fixture_three_specs {
         // Translate via the embedded section. The output must contain all
         // three per-spec definitions, sorted alphabetically by spec name.
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+        let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
+            .expect("translate ok");
 
         let pos_alpha = v.find("Definition threespecs__Alpha_specs");
         let pos_beta = v.find("Definition threespecs__Beta_specs");
@@ -248,17 +259,18 @@ mod fixture_three_specs {
             "definitions must be emitted alphabetically (Alpha < Beta < Gamma):\n{v}"
         );
 
-        // The empty spec is emitted with `(@nil N)` (NOT `[]%N`); this is
-        // load-bearing for consumer modules without `Open Scope N_scope`.
+        // Gamma (empty) and Beta (methods only, no free-fn obligation) both
+        // render their obligation lists as `(@nil hassert)`; Alpha's free fn
+        // yields a trivial obligation, so its list is non-empty.
         assert!(
-            v.contains("Definition threespecs__Gamma_specs : list N := (@nil N)."),
-            "empty spec must emit `(@nil N)`:\n{v}"
+            v.contains("Definition threespecs__Gamma_specs : list hassert := (@nil hassert)."),
+            "empty spec must emit `(@nil hassert)`:\n{v}"
         );
 
-        // Each spec also gets its `valid_<mod>__<Spec>` theorem.
+        // Each spec also gets its `valid_<mod>__<Spec>` ValidSpec theorem.
         for spec in &["Alpha", "Beta", "Gamma"] {
             let needle = format!(
-                "Theorem valid_threespecs__{spec} : ValidModule threespecs threespecs__{spec}_specs."
+                "Theorem valid_threespecs__{spec} : ValidSpec threespecs threespecs__{spec}_specs."
             );
             assert!(
                 v.contains(&needle),
@@ -355,130 +367,139 @@ mod fixture_with_spec_smoke {
         );
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+        let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
+            .expect("translate ok");
         assert!(
             v.contains("Definition withspec__MySpec_specs"),
             "MySpec per-spec definition must appear:\n{v}"
         );
 
-        // The `forall` wrapping `prop`'s body must lower to the verifier
-        // library's 1-ary `BI_forall : list basic_instruction -> _`. The
-        // renderer appends the body as the sole `( … )` argument, so a correct
-        // emission reads `BI_forall (` immediately followed by the body — it
-        // must NOT carry a `block_type` argument (`BI_forall (BT_…`), which
-        // would apply the 1-ary constructor to two arguments and break the
-        // `coqc` type-check against the essence library.
+        // `prop`'s `forall { let i = @; assert(foo(i) == i); }` becomes an
+        // obligation, not module-record WASM: the spec function is OMITTED from
+        // the emitted module, so no `BI_forall`/`BI_uzumaki` appears in the `.v`.
+        // The obligation is `nz(relop Eq (foo(i)) i)` = `HA_not (term_eq …)`,
+        // where `foo(i)` is a `T_app` into `mod_funcs` and `i` is the universal
+        // `T_local 0`.
         assert!(
-            v.contains("BI_forall (\n"),
-            "forall body must lower to the bare 1-ary `BI_forall ( <body> )`:\n{v}"
+            v.contains("Definition withspec__MySpec_hspec1 : hassert :="),
+            "MySpec's obligation must be emitted:\n{v}"
         );
         assert!(
-            !v.contains("BI_forall (BT"),
-            "BI_forall must NOT carry a block_type argument (it is 1-ary):\n{v}"
+            !v.contains("BI_forall") && !v.contains("BI_uzumaki"),
+            "the omitted spec function must contribute no non-det WASM to the `.v`:\n{v}"
         );
-        // The quantified `let i = @` lowers to the nondeterministic-value
-        // instruction, which must sit INSIDE the forall body.
         assert!(
-            v.contains("BI_uzumaki_num T_i32"),
-            "the `@` value must lower to BI_uzumaki_num:\n{v}"
+            v.contains("term_eq") && v.contains("T_app ") && v.contains("T_local 0%N"),
+            "the obligation must apply `foo` (T_app) to the universal slot (T_local 0):\n{v}"
+        );
+        assert!(
+            v.contains(
+                "Theorem valid_withspec__MySpec : ValidSpec withspec withspec__MySpec_specs."
+            ),
+            "MySpec must get its ValidSpec theorem:\n{v}"
         );
     }
 }
 
 // ============================================================================
-// Fixture 6: spec_nondet_blocks.inf — Rocq arity of forall / exists / assume
+// Fixture 6: spec_nondet_blocks.inf — inline non-det block lowering + omission
 // ============================================================================
 #[cfg(test)]
-mod fixture_nondet_block_arity {
-    use super::helpers::compile_inf;
+mod fixture_nondet_block_lowering {
+    use super::helpers::{compile_inf, wasm_contains};
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
-    /// The three non-deterministic quantifier blocks — here inline inside spec
-    /// functions — must lower to verifier constructors with the exact arity the
-    /// WasmCert-Coq-Essence library declares in `theories/datatypes.v`:
-    ///   - `BI_forall : list basic_instruction -> _`            (NO block_type)
-    ///   - `BI_exists : list basic_instruction -> _`            (NO block_type)
-    ///   - `BI_assume : block_type -> list basic_instruction -> _` (keeps it)
-    ///
-    /// This is a regression guard for the codegen bug where `forall`/`exists`
-    /// were emitted as `BI_forall (BT_…) ( <body> )` — two arguments to a
-    /// 1-ary constructor — so every real compiled spec produced a `.v` that
-    /// could not be `coqc`-checked against the essence library.
+    /// The three inline non-deterministic blocks (`forall`/`exists`/`assume`
+    /// inside plain spec functions) lower to the custom `0xfc`-prefixed WASM
+    /// opcodes in the module's bytes — that lowering coverage lives at the byte
+    /// level now. In the emitted `.v`, however, spec functions are OMITTED from
+    /// the module record, so none of the `BI_forall`/`BI_exists`/`BI_assume`
+    /// constructors appear; each spec function contributes its `hassert`
+    /// obligation instead. This pins both halves: the WASM carries the opcodes,
+    /// the `.v` carries the obligations and omits the spec bodies.
     #[test]
-    fn forall_exists_drop_blocktype_assume_keeps_it() {
+    fn inline_blocks_lower_to_wasm_opcodes_and_are_omitted_from_v() {
         let output = compile_inf("spec_nondet_blocks.inf", CompilationMode::Proof, "nondet");
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
 
-        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+        // WASM-byte lowering coverage: forall (0xfc 0x3a), exists (0xfc 0x3b),
+        // assume (0xfc 0x3c), and the uzumaki rvalue (0xfc 0x31) each appear.
+        assert!(
+            wasm_contains(wasm, &[0xfc, 0x3a]),
+            "forall opcode must lower"
+        );
+        assert!(
+            wasm_contains(wasm, &[0xfc, 0x3b]),
+            "exists opcode must lower"
+        );
+        assert!(
+            wasm_contains(wasm, &[0xfc, 0x3c]),
+            "assume opcode must lower"
+        );
+        assert!(
+            wasm_contains(wasm, &[0xfc, 0x31]),
+            "i32.uzumaki opcode must lower"
+        );
 
-        // forall: 1-ary, body is the sole argument.
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
+            .expect("translate ok");
+
+        // The spec bodies are omitted, so no non-det constructor reaches the `.v`.
         assert!(
-            v.contains("BI_forall (\n") && !v.contains("BI_forall (BT"),
-            "BI_forall must be emitted 1-ary (no block_type):\n{v}"
+            !v.contains("BI_forall") && !v.contains("BI_exists") && !v.contains("BI_assume"),
+            "omitted spec bodies must not leave any non-det constructor in the `.v`:\n{v}"
         );
-        // exists: 1-ary, body is the sole argument.
+        // Each spec function contributes its obligation instead.
         assert!(
-            v.contains("BI_exists (\n") && !v.contains("BI_exists (BT"),
-            "BI_exists must be emitted 1-ary (no block_type):\n{v}"
-        );
-        // assume: 2-ary, the leading block_type is preserved (matches the
-        // library's `BI_assume : block_type -> list basic_instruction -> _`).
-        assert!(
-            v.contains("BI_assume (BT"),
-            "BI_assume must keep its leading block_type argument:\n{v}"
+            v.contains("Definition nondet__NondetBlocks_specs : list hassert :=")
+                && v.contains("Theorem valid_nondet__NondetBlocks : ValidSpec nondet nondet__NondetBlocks_specs."),
+            "the spec's obligations and theorem must be emitted:\n{v}"
         );
     }
 }
 
 // ============================================================================
-// Fixture 7: spec_nondet_body_modifiers.inf — function-body MODIFIER lowering path
+// Fixture 7: spec_nondet_body_modifiers.inf — exists/assume body modifiers reject
 // ============================================================================
 #[cfg(test)]
-mod fixture_nondet_body_modifier {
-    use super::helpers::compile_inf;
-    use inference_wasm_codegen::CompilationMode;
-    use rustc_hash::FxHashMap;
+mod fixture_nondet_body_modifier_rejected {
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+    use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
-    /// A function-body modifier (`fn f() forall { … }`, here on spec functions)
-    /// records its kind on the function's body block, which `wasm-codegen` lowers
-    /// via `visit_function_definition_body` — a *different* path than the inline
-    /// `forall { … }` statement (which flows through `lower_block`, covered by
-    /// `fixture_nondet_block_arity`). Fixture 6 only reaches the inline path,
-    /// and `with_spec.inf` only exercises the `forall` modifier, so this test
-    /// pins the modifier path for `exists`/`assume` too — a typo in the new
-    /// `EXISTS_OPCODE`/`ASSUME_OPCODE` arm would otherwise go undetected.
-    ///
-    /// `cov_mark::check_count!` confirms the body-modifier branch fires the same
-    /// per-kind marks as `lower_block` (so the new path is observable), and the
-    /// `.v` assertions confirm each modifier emits its wrapper with the correct
-    /// arity (`BI_forall`/`BI_exists` 1-ary, `BI_assume` keeping its block_type).
+    /// A spec function whose *body modifier* is `exists`/`assume`
+    /// (`fn f() exists { … }`) carries a proof obligation with no milestone-1
+    /// `hassert` encoding — only `forall`-quantified (or plain) spec functions
+    /// translate. Proof-mode codegen must reject it with `P001`, naming both the
+    /// `exists`- and `assume`-modified functions. (Previously this fixture rode
+    /// the coqc corpus while the obligation pass was additive; the flip to fatal
+    /// makes it a hard error, so it is a negative test now.)
     #[test]
-    fn body_modifiers_emit_wrappers_with_correct_arity() {
-        cov_mark::check_count!(wasm_codegen_emit_forall_block, 1);
-        cov_mark::check_count!(wasm_codegen_emit_exists_block, 1);
-        cov_mark::check_count!(wasm_codegen_emit_assume_block, 1);
-
-        let output = compile_inf("spec_nondet_body_modifiers.inf", CompilationMode::Proof, "nbm");
-        let wasm = output.wasm();
-        inf_wasmparser::validate(wasm).expect("WASM must validate");
-
-        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
-
+    fn exists_and_assume_body_modifiers_are_rejected() {
+        let path = crate::utils::get_test_data_path()
+            .join("inf")
+            .join("spec_nondet_body_modifiers.inf");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let arena = build_ast(source);
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type check should succeed")
+            .typed_context();
+        let err = inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "nbm",
+        )
+        .expect_err("exists/assume body-modifier specs have no assertion encoding");
+        let msg = err.to_string();
         assert!(
-            v.contains("BI_forall (\n") && !v.contains("BI_forall (BT"),
-            "forall modifier must lower to a 1-ary BI_forall wrapper:\n{v}"
-        );
-        assert!(
-            v.contains("BI_exists (\n") && !v.contains("BI_exists (BT"),
-            "exists modifier must lower to a 1-ary BI_exists wrapper:\n{v}"
-        );
-        assert!(
-            v.contains("BI_assume (BT"),
-            "assume modifier must lower to a BI_assume wrapper keeping its block_type:\n{v}"
+            msg.contains("P001") && msg.contains("exists_fn") && msg.contains("assume_fn"),
+            "expected a P001 rejection naming both body-modifier functions; got:\n{msg}"
         );
     }
 }

@@ -16,6 +16,8 @@ Cargo.lock
 *_output/
 
 *.v
+# Committed Rocq `.v` goldens live here; `*.v` above still ignores compiler output.
+!/tests/test_data/rocq/*.v
 out
 test_data/**/*.json
 

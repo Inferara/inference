@@ -88,6 +88,30 @@ pub enum WasmToVError {
         embedded: rustc_hash::FxHashMap<String, Vec<u32>>,
     },
 
+    /// `translate_bytes` was called with an explicit non-empty hspec map and
+    /// the WASM binary also embeds an `inference.hspecs` section, but the two
+    /// disagree. The sibling of [`Self::EmbeddedSpecMismatch`] for the
+    /// obligation payload; we refuse to silently override either side.
+    ///
+    /// * `explicit` — map passed by the caller (empty post-link, populated
+    ///   pre-link for the cross-check).
+    /// * `embedded` — map decoded from the WASM custom section.
+    #[error("explicit hspec map disagrees with the embedded `inference.hspecs` section")]
+    EmbeddedHspecsMismatch {
+        /// Obligation map supplied by the caller of `translate_bytes`.
+        explicit: inference_hassert::HSpecMap,
+        /// Obligation map decoded from the WASM `inference.hspecs` section.
+        embedded: inference_hassert::HSpecMap,
+    },
+
+    /// A hspec obligation names, or a spec-name set disagrees with, something
+    /// the emitted module cannot represent: a spec name absent from
+    /// `inference.spec_funcs`, or a `T_app`/`HA_app_ok` symbol that resolves to
+    /// zero, more than one, an imported, or an omitted (spec) function. A
+    /// corrupt or inconsistent proof artifact, rejected fail-closed.
+    #[error("inconsistent `inference.hspecs` obligations: {0}")]
+    HspecInconsistent(String),
+
     /// A WASM parser error surfaced during the parse phase.
     #[error("WASM parse error: {0}")]
     WasmParse(String),

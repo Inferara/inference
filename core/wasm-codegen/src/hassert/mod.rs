@@ -14,18 +14,20 @@
 //! The translation scheme lives in [`translate`]; the diagnostics registry in
 //! [`diag`].
 //!
-//! ## Untranslatable specifications are skipped, not fatal
+//! ## Untranslatable specifications are fatal
 //!
 //! A specification function that cannot be encoded as an obligation (a
 //! quantified body modifier, a struct or method value, an `external` call, …)
-//! contributes *no* obligation and records `P0xx` diagnostics, but does **not**
-//! abort code generation. Proof-mode codegen serves more than obligation
-//! emission — a specification is also lowered to WASM for the verifier and the
-//! Rocq translator — so a spec that only compiles must stay compilable. Keeping
-//! the pass additive is what preserves proof-mode byte-identity across the whole
-//! existing corpus. The collected diagnostics are returned to the caller for a
-//! later phase to surface (as warnings, or as errors once every proof-mode
-//! fixture that relies on an untranslatable spec has been migrated).
+//! contributes *no* obligation and records `P0xx` diagnostics. Those
+//! diagnostics are collected here but surfaced by the caller
+//! ([`crate::codegen`]) as a hard code-generation error: the obligation is a
+//! required proof-mode deliverable, so a module whose specifications are
+//! silently unverifiable must not be emitted. The pass itself is still read-only
+//! over the AST and type information — it computes obligations without touching
+//! the compiler's byte output — so a proof-mode `.wasm` that *does* codegen is
+//! byte-identical to before; the flip only decides whether codegen succeeds at
+//! all. Every diagnostic is gathered before failing so a spec with several
+//! mistakes surfaces them all at once.
 //!
 //! ## A note for the section-emission phase
 //!
@@ -120,8 +122,9 @@ impl CalleeIndex {
 /// Returns the obligations grouped by folded specification name in source order,
 /// paired with every `P0xx` diagnostic raised. A specification function that
 /// raised any diagnostic contributes no obligation (its partial tree would be
-/// unsound), but the pass keeps going — the diagnostics are the caller's to
-/// surface, never a reason to fail code generation here.
+/// unsound); the pass itself keeps going so it can collect every diagnostic in
+/// one pass, and the caller ([`crate::codegen`]) turns a non-empty diagnostic
+/// list into a hard error.
 pub(crate) fn translate_spec_fns(
     ctx: &TypedContext,
     buckets: &EmittableFunctions,

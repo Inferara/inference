@@ -321,12 +321,21 @@ fn traverse_t_ast_with_compiler(
     // compiler's output, so proof-mode bytes are unchanged. In compile mode the
     // spec buckets are empty, so the obligation map is empty.
     //
-    // The pass is additive and non-fatal: an untranslatable spec function
-    // contributes no obligation but never fails codegen, so a spec that compiles
-    // only for its WASM/Rocq representation is unaffected. The diagnostics are
-    // discarded here pending a later phase's decision on how to surface them.
+    // The obligation is a required proof-mode deliverable: a spec function that
+    // cannot be translated (a `P0xx` diagnostic) fails code generation rather
+    // than silently emitting a module whose specifications are unverifiable.
+    // Every diagnostic is collected first, so a spec with several mistakes
+    // surfaces them all at once.
     if mode == CompilationMode::Proof {
-        let (hspecs, _diagnostics) = hassert::translate_spec_fns(typed_context, &buckets);
+        let (hspecs, diagnostics) = hassert::translate_spec_fns(typed_context, &buckets);
+        if !diagnostics.is_empty() {
+            let rendered = diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(CodegenError::UntranslatableSpec(rendered));
+        }
         Ok(hspecs)
     } else {
         Ok(HSpecMap::default())

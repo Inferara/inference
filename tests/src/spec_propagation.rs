@@ -6,7 +6,7 @@
 //!   2.  Export gating
 //!   3.  Custom WASM section round-trip
 //!   4.  Per-spec emission ordering and theorems
-//!   5.  Empty list `(@nil N)`
+//!   5.  Empty list `(@nil hassert)`
 //!   6.  Invalid module names
 //!   7.  No regressions (verified out-of-band via `cargo test`)
 //!   8.  Compile-mode emits no spec section
@@ -47,6 +47,28 @@ mod helpers {
             module_name,
         )
         .expect("codegen should succeed")
+    }
+
+    /// Like [`compile`] but returns the codegen `Result` instead of unwrapping,
+    /// for tests asserting a proof-mode obligation-translation rejection (a
+    /// `P0xx` diagnostic is now a hard codegen error). Type-checking must still
+    /// succeed — the construct is legal WASM, it only lacks an assertion
+    /// encoding.
+    pub(super) fn try_compile(
+        source: &str,
+        mode: CompilationMode,
+    ) -> anyhow::Result<CodegenOutput> {
+        let arena = build_ast(source.to_string());
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type check should succeed")
+            .typed_context();
+        inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            mode,
+            OptLevel::O3,
+            "output",
+        )
     }
 
     /// Returns true if `wasm` contains the byte slice `needle`.
@@ -231,18 +253,20 @@ mod scenario_2_export_gating {
     }
 }
 
-// Field-position uzumaki inside a spec compiles in proof mode
+// A spec whose body builds or reads a struct has no assertion encoding, so
+// proof-mode codegen now rejects it (the obligation is a required deliverable).
 #[cfg(test)]
-mod spec_field_position_uzumaki {
-    use super::helpers::compile;
+mod spec_struct_value_is_rejected {
+    use super::helpers::try_compile;
     use inference_wasm_codegen::CompilationMode;
 
-    /// A field-position uzumaki (`Point { x: @, y: @ }`) inside a spec's `forall`
-    /// must compile in proof mode. The field's declared type is threaded onto the
-    /// uzumaki node during type-checking, so proof-mode codegen finds the type info
-    /// and emits the right uzumaki opcode rather than panicking on a missing type.
+    /// A struct literal (with field-position uzumaki) and a subsequent field
+    /// access in a spec `forall` body have no `hassert` encoding, so proof-mode
+    /// codegen fails with `P002`. (Previously this compiled to WASM because the
+    /// obligation pass was additive; the flip to fatal makes an untranslatable
+    /// spec a hard error.)
     #[test]
-    fn field_position_uzumaki_in_spec_forall_proof_mode_compiles() {
+    fn field_position_uzumaki_struct_in_spec_forall_is_rejected() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             spec S {
@@ -252,16 +276,19 @@ mod spec_field_position_uzumaki {
                 }
             }
         "#;
-        let output = compile(source, CompilationMode::Proof);
-        inf_wasmparser::validate(output.wasm())
-            .expect("field-position uzumaki in a spec must produce valid proof-mode WASM");
+        let err = try_compile(source, CompilationMode::Proof)
+            .expect_err("a struct-valued spec body has no assertion encoding");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("P002") && msg.contains("struct"),
+            "expected a P002 rejection naming the struct construct; got:\n{msg}"
+        );
     }
 
-    /// The typed-let form (`let a: i32 = @; Point { x: a }`) is the established
-    /// workaround; it must keep compiling so the field-position fix is an addition,
-    /// not a replacement.
+    /// The typed-let form (`let a: i32 = @; Point { x: a }`) reads a struct field
+    /// in the assertion, so it is rejected for the same reason.
     #[test]
-    fn typed_let_uzumaki_in_spec_forall_proof_mode_still_compiles() {
+    fn typed_let_struct_in_spec_forall_is_rejected() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             spec S {
@@ -273,9 +300,13 @@ mod spec_field_position_uzumaki {
                 }
             }
         "#;
-        let output = compile(source, CompilationMode::Proof);
-        inf_wasmparser::validate(output.wasm())
-            .expect("typed-let uzumaki in a spec must still produce valid proof-mode WASM");
+        let err = try_compile(source, CompilationMode::Proof)
+            .expect_err("a struct-valued spec body has no assertion encoding");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("P002"),
+            "expected a P002 rejection for the struct construct; got:\n{msg}"
+        );
     }
 }
 
@@ -318,8 +349,13 @@ mod scenario_3_custom_section_round_trip {
         let output = compile(source, CompilationMode::Proof);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty)
-            .expect("wasm_to_v should succeed");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("wasm_to_v should succeed");
 
         assert!(
             v.contains("Definition output__A_specs"),
@@ -433,7 +469,7 @@ mod scenario_4_per_spec_emission {
     use rustc_hash::FxHashMap;
 
     /// Two specs `A` and `B` produce per-spec definitions and theorems sorted
-    /// alphabetically. Each spec yields a `ValidModule <mod> <mod>__<Spec>_specs`
+    /// alphabetically. Each spec yields a `ValidSpec <mod> <mod>__<Spec>_specs`
     /// theorem.
     ///
     /// Note: the codegen always embeds module name `"output"` into the WASM
@@ -447,7 +483,8 @@ mod scenario_4_per_spec_emission {
 
         // Pass the in-memory map explicitly to bypass the binary embedding path.
         let map = output.spec_func_indices_by_spec().clone();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &map).expect("translate ok");
+        let v = inference::wasm_to_v("Mod", output.wasm(), &map, &inference::HSpecMap::default())
+            .expect("translate ok");
 
         let pos_a = v.find("Definition output__A_specs");
         let pos_b = v.find("Definition output__B_specs");
@@ -458,11 +495,11 @@ mod scenario_4_per_spec_emission {
             "specs should be emitted alphabetically (A before B):\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__A : ValidModule output output__A_specs."),
+            v.contains("Theorem valid_output__A : ValidSpec output output__A_specs."),
             "per-spec theorem for A missing:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__B : ValidModule output output__B_specs."),
+            v.contains("Theorem valid_output__B : ValidSpec output output__B_specs."),
             "per-spec theorem for B missing:\n{v}"
         );
     }
@@ -634,18 +671,30 @@ mod scenario_4_per_spec_emission {
     fn explicit_map_two_specs_via_inference_api() {
         let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
         let output = compile(source, CompilationMode::Proof);
-        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        map.insert("A".to_string(), vec![0]);
-        map.insert("B".to_string(), vec![1]);
+        // The explicit spec map must match the binary's embedded section (the
+        // real indices), since a spec map now drives function omission; feed the
+        // codegen-recorded map so the explicit path is exercised without
+        // disagreeing with the embedded one. Obligations ride along in the
+        // embedded `inference.hspecs` section (empty explicit hspecs adopts it).
+        let map = output.spec_func_indices_by_spec().clone();
         // mod_name argument is overridden by the embedded "output" module name.
-        let v = inference::wasm_to_v("M", output.wasm(), &map).expect("translate ok");
+        let v = inference::wasm_to_v("M", output.wasm(), &map, &inference::HSpecMap::default())
+            .expect("translate ok");
         assert!(
-            v.contains("Definition output__A_specs : list N := (0 :: nil)%N."),
+            v.contains("Definition output__A_specs : list hassert :="),
             "A def:\n{v}"
         );
         assert!(
-            v.contains("Definition output__B_specs : list N := (1 :: nil)%N."),
+            v.contains("Definition output__B_specs : list hassert :="),
             "B def:\n{v}"
+        );
+        assert!(
+            v.contains("Theorem valid_output__A : ValidSpec output output__A_specs."),
+            "A theorem:\n{v}"
+        );
+        assert!(
+            v.contains("Theorem valid_output__B : ValidSpec output output__B_specs."),
+            "B theorem:\n{v}"
         );
     }
 }
@@ -658,50 +707,57 @@ mod scenario_5_empty_list {
     use rustc_hash::FxHashMap;
 
     /// When the spec map is empty, the translator must emit no `_specs` line
-    /// at all (no per-spec definition). The `(@nil N)` literal is only relevant
-    /// once a spec exists but has no surviving inner functions; the current
+    /// at all (no per-spec definition). The `(@nil hassert)` literal is only
+    /// relevant once a spec exists but has no free-function obligations; the
     /// emission strategy is to skip `Definition` lines entirely when the map
     /// is empty.
     ///
     /// The codegen embeds module name `"output"` into the WASM name section,
     /// so even though we pass `"Empty"`, the module definition is named
-    /// `output`. With no specs, the translator emits no theorems at all
-    /// (each `ValidModule <mod> <mod>__<Spec>_specs` theorem is per-spec).
+    /// `output`. With no specs, the translator emits no per-spec `ValidSpec`
+    /// theorem — only the always-present 1-ary `ValidModule` one.
     #[test]
     fn empty_map_yields_no_spec_definition() {
         let source = r#"pub fn main() -> i32 { return 0; }"#;
         let output = compile(source, CompilationMode::Proof);
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Empty", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Empty",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
         assert!(
-            !v.contains("_specs : list N"),
+            !v.contains("_specs : list hassert"),
             "no per-spec definitions expected when map is empty:\n{v}"
         );
         assert!(
-            !v.contains("Theorem valid_"),
-            "no theorems expected when the spec map is empty:\n{v}"
+            !v.contains("ValidSpec "),
+            "no per-spec theorem expected when the spec map is empty:\n{v}"
+        );
+        // The 1-ary module theorem is always emitted, spec-bearing or not.
+        assert!(
+            v.contains("Theorem valid_output : ValidModule output."),
+            "the module theorem must always be present:\n{v}"
         );
     }
 
-    /// `(@nil N)` is emitted when an explicit spec is present but its indices
-    /// list is empty. Asserts that NO `[]%N` substring leaks through.
+    /// `(@nil hassert)` is emitted when an explicit spec is present but its
+    /// obligation list is empty (a method-only or empty spec).
     #[test]
-    fn explicit_spec_with_empty_indices_emits_at_nil_n_not_bracket_pct_n() {
+    fn explicit_spec_with_empty_indices_emits_at_nil_hassert() {
         let source = r#"pub fn main() -> i32 { return 0; }"#;
         let output = compile(source, CompilationMode::Proof);
         let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         // Avoid `S` here: it shadows the Peano successor constructor and is
         // now rejected by `validate_rocq_identifier`.
         map.insert("MySpec".to_string(), Vec::new());
-        let v = inference::wasm_to_v("Mod", output.wasm(), &map).expect("translate ok");
+        let v = inference::wasm_to_v("Mod", output.wasm(), &map, &inference::HSpecMap::default())
+            .expect("translate ok");
         assert!(
-            v.contains("(@nil N)"),
-            "expected `(@nil N)` for empty spec indices list:\n{v}"
-        );
-        assert_eq!(
-            v.matches("[]%N").count(),
-            0,
-            "no `[]%N` decoration should remain anywhere in the output:\n{v}"
+            v.contains("Definition output__MySpec_specs : list hassert := (@nil hassert)."),
+            "expected `(@nil hassert)` for an empty spec obligation list:\n{v}"
         );
     }
 }
@@ -723,7 +779,8 @@ mod scenario_6_invalid_module_name {
     fn module_name_with_dash_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("list-utils", &wasm, &empty);
+        let result =
+            inference::wasm_to_v("list-utils", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for `list-utils`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -744,7 +801,7 @@ mod scenario_6_invalid_module_name {
     fn module_name_stdlib_shadow_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("list", &wasm, &empty);
+        let result = inference::wasm_to_v("list", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for `list`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -764,7 +821,8 @@ mod scenario_6_invalid_module_name {
     fn module_name_reserved_keyword_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("Definition", &wasm, &empty);
+        let result =
+            inference::wasm_to_v("Definition", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for `Definition`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -788,7 +846,8 @@ mod scenario_6_invalid_module_name {
     fn module_name_with_double_underscore_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("foo__bar", &wasm, &empty);
+        let result =
+            inference::wasm_to_v("foo__bar", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for `foo__bar`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -809,7 +868,7 @@ mod scenario_6_invalid_module_name {
     fn empty_module_name_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("", &wasm, &empty);
+        let result = inference::wasm_to_v("", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for empty module name");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -832,7 +891,7 @@ mod scenario_6_invalid_module_name {
     fn module_name_with_leading_underscore_is_rejected() {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("_foo", &wasm, &empty);
+        let result = inference::wasm_to_v("_foo", &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for `_foo`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -854,7 +913,7 @@ mod scenario_6_invalid_module_name {
         let wasm = valid_wasm();
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let long = "a".repeat(256);
-        let result = inference::wasm_to_v(&long, &wasm, &empty);
+        let result = inference::wasm_to_v(&long, &wasm, &empty, &inference::HSpecMap::default());
         let err = result.expect_err("expected error for 256-char module name");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1007,7 +1066,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("expected decode-boundary rejection of `foo__bar`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1037,7 +1096,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, "name", &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("ValidMod", &wasm, &empty)
+        let err = inference::wasm_to_v("ValidMod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("expected re-validation rejection of embedded `bad-name`");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1068,7 +1127,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("truncated LEB128 must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1096,7 +1155,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("overflowing count must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1123,7 +1182,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("invalid UTF-8 spec name must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1156,7 +1215,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("unsupported spec_funcs version must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1186,7 +1245,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload_b);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("duplicate `inference.spec_funcs` sections must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1220,7 +1279,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("trailing bytes must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1253,7 +1312,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("over-large idx_count must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1281,7 +1340,7 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, "name", &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+        let err = inference::wasm_to_v("Mod", &wasm, &empty, &inference::HSpecMap::default())
             .expect_err("duplicate `name` sections must be rejected");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1309,8 +1368,9 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, "name", &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v_output = inference::wasm_to_v("Caller", &wasm, &empty)
-            .expect("override-then-validate must succeed for a valid embedded name");
+        let v_output =
+            inference::wasm_to_v("Caller", &wasm, &empty, &inference::HSpecMap::default())
+                .expect("override-then-validate must succeed for a valid embedded name");
         assert!(
             v_output.contains("Definition Embedded : module"),
             "embedded module name should drive the module identifier; got:\n{v_output}"
@@ -1331,8 +1391,8 @@ mod scenario_7_empty_spec {
 
     /// A user-authored empty `spec MySpec { }` must surface a per-spec entry
     /// with an empty index list, so the Rocq translator still emits both a
-    /// `Definition output__MySpec_specs : list N := (@nil N).` line and a
-    /// `Theorem valid_output__MySpec : ValidModule output output__MySpec_specs.`
+    /// `Definition output__MySpec_specs : list hassert := (@nil hassert).` line
+    /// and a `Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs.`
     /// theorem. Without `ensure_spec_registered`, the spec vanished silently
     /// from the proof artifact because the bucket iteration only recorded
     /// entries for non-empty inner defs.
@@ -1353,23 +1413,30 @@ mod scenario_7_empty_spec {
         );
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
         assert!(
-            v.contains("Definition output__MySpec_specs : list N := (@nil N)."),
-            "empty spec must emit the `(@nil N)` definition line:\n{v}"
+            v.contains("Definition output__MySpec_specs : list hassert := (@nil hassert)."),
+            "empty spec must emit the `(@nil hassert)` definition line:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__MySpec : ValidModule output output__MySpec_specs."),
+            v.contains("Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs."),
             "empty spec must emit the per-spec theorem:\n{v}"
         );
     }
 
     /// T1: mixing an empty spec with a non-empty one must produce both kinds
     /// of `Definition` line in the generated Rocq output, in alphabetical
-    /// order. The empty list renders as `(@nil N)`, the non-empty as
-    /// `(idx :: nil)%N`. This guards a regression where empty-spec handling could
-    /// short-circuit the per-spec emission loop and drop the non-empty entry
-    /// (or vice versa).
+    /// order. The empty spec's list renders as `(@nil hassert)`; the non-empty
+    /// spec's `fn f() -> i32 { return 1; }` translates to a trivial `HA_true`
+    /// obligation gathered into `(output__B_hspec1 :: nil)`. This guards a
+    /// regression where empty-spec handling could short-circuit the per-spec
+    /// emission loop and drop the non-empty entry (or vice versa).
     #[test]
     fn mixed_empty_and_non_empty_specs_yield_both_kinds() {
         let source = r#"pub fn main() -> i32 { return 0; } spec A { } spec B { fn f() -> i32 { return 1; } }"#;
@@ -1384,18 +1451,26 @@ mod scenario_7_empty_spec {
             1,
             "B should have one inner fn"
         );
-        let b_idx = by_spec["B"][0];
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
         assert!(
-            v.contains("Definition output__A_specs : list N := (@nil N)."),
-            "empty spec A must render `(@nil N)`:\n{v}"
+            v.contains("Definition output__A_specs : list hassert := (@nil hassert)."),
+            "empty spec A must render `(@nil hassert)`:\n{v}"
         );
-        let expected_b = format!("Definition output__B_specs : list N := ({b_idx} :: nil)%N.");
         assert!(
-            v.contains(&expected_b),
-            "non-empty spec B must render `({b_idx} :: nil)%N`:\n{v}"
+            v.contains("Definition output__B_hspec1 : hassert :="),
+            "non-empty spec B must emit an hspec obligation:\n{v}"
+        );
+        assert!(
+            v.contains("Definition output__B_specs : list hassert := (output__B_hspec1 :: nil)."),
+            "non-empty spec B must gather its obligation into `_specs`:\n{v}"
         );
         let pos_a = v.find("Definition output__A_specs").unwrap();
         let pos_b = v.find("Definition output__B_specs").unwrap();
@@ -1455,7 +1530,13 @@ mod scenario_7b_spec_methods {
         );
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
         assert!(
             v.contains("Definition output__MySpec_specs"),
             "per-spec definition for MySpec must be emitted:\n{v}"
@@ -1511,9 +1592,15 @@ mod scenario_8_compile_mode_no_section {
         );
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
         assert_eq!(
-            v.matches("_specs : list N").count(),
+            v.matches("_specs : list hassert").count(),
             0,
             "compile-mode .v output must contain zero per-spec definitions:\n{v}",
         );
@@ -1537,9 +1624,21 @@ mod scenario_9_explicit_vs_embedded {
         let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
         let output = compile(source, CompilationMode::Proof);
         let explicit = output.spec_func_indices_by_spec().clone();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &explicit).expect("translate ok");
-        assert!(v.contains("Definition output__A_specs"), "A def missing:\n{v}");
-        assert!(v.contains("Definition output__B_specs"), "B def missing:\n{v}");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &explicit,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
+        assert!(
+            v.contains("Definition output__A_specs"),
+            "A def missing:\n{v}"
+        );
+        assert!(
+            v.contains("Definition output__B_specs"),
+            "B def missing:\n{v}"
+        );
     }
 
     /// Mismatch case: the caller passes a non-empty explicit map that
@@ -1558,7 +1657,12 @@ mod scenario_9_explicit_vs_embedded {
         bogus.insert("A".to_string(), vec![99]);
         bogus.insert("B".to_string(), vec![100]);
 
-        let result = inference::wasm_to_v("Mod", output.wasm(), &bogus);
+        let result = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &bogus,
+            &inference::HSpecMap::default(),
+        );
         let err = result.expect_err("expected EmbeddedSpecMismatch for a mismatched explicit map");
         let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
             err.downcast_ref();
@@ -1583,9 +1687,10 @@ mod scenario_10_wasm_to_v_compile_mode {
     use rustc_hash::FxHashMap;
 
     /// Compile a spec-bearing source in compile mode and feed the bytes to
-    /// `wasm_to_v` with an empty explicit map. Result: NO per-spec definitions
-    /// and NO theorems at all (the `ValidModule <mod> <mod>__<Spec>_specs`
-    /// theorems are strictly per-spec, so a specless translation emits none).
+    /// `wasm_to_v` with an empty explicit map. Compile mode embeds neither
+    /// custom section, so the result carries NO per-spec definitions and NO
+    /// per-spec `ValidSpec` theorem. The 1-ary `ValidModule` theorem, however,
+    /// is emitted for every module regardless of specs.
     ///
     /// The WASM-embedded module name `"output"` overrides `mod_name`.
     #[test]
@@ -1593,18 +1698,29 @@ mod scenario_10_wasm_to_v_compile_mode {
         let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
         let output = compile(source, CompilationMode::Compile);
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let v = inference::wasm_to_v("Mod", output.wasm(), &empty).expect("translate ok");
+        let v = inference::wasm_to_v(
+            "Mod",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("translate ok");
 
-        // No per-spec definition or theorem lines.
+        // No per-spec definition or per-spec theorem lines.
         assert_eq!(
-            v.matches("_specs : list N").count(),
+            v.matches("_specs : list hassert").count(),
             0,
             "no per-spec definitions expected:\n{v}"
         );
         assert_eq!(
-            v.matches("Theorem valid_").count(),
+            v.matches("ValidSpec ").count(),
             0,
-            "no theorems expected for a specless translation:\n{v}"
+            "no per-spec theorems expected for a specless translation:\n{v}"
+        );
+        // The module theorem is always present.
+        assert!(
+            v.contains("Theorem valid_output : ValidModule output."),
+            "the module theorem must always be present:\n{v}"
         );
     }
 }

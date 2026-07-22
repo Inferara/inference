@@ -117,11 +117,15 @@ Record memarg : Type := {
 (* ------------------------------------------------------------------ *)
 (* Instructions                                                       *)
 (*                                                                    *)
-(* Arities below are the contract the emitter writes. In particular   *)
-(* the quantifier blocks `BI_forall`/`BI_exists` are ONE-ary (they    *)
-(* carry only a body, no `block_type`), whereas `BI_assume`/          *)
-(* `BI_unique` are two-ary (leading `block_type` + body). This is the *)
-(* #230 fix, pinned so a re-broken arity fails `coqc` here.           *)
+(* Arities below are the contract the emitter writes. The fork-only    *)
+(* non-deterministic constructors `BI_forall`/`BI_exists`/`BI_assume`/ *)
+(* `BI_unique`/`BI_uzumaki_num` are DELIBERATELY ABSENT: the emitter    *)
+(* omits `spec` functions from the module record, and rejects any      *)
+(* non-deterministic instruction reaching a surviving (executable)     *)
+(* body, so no reachable emitter output mentions them. Their absence is *)
+(* itself the regression guard — should a non-det instruction ever leak *)
+(* into the module record again, it becomes an "unbound constructor"    *)
+(* `coqc` error here rather than a silently type-checking term.         *)
 (* ------------------------------------------------------------------ *)
 
 (* This stub never performs induction over `basic_instruction`; suppressing the
@@ -142,14 +146,9 @@ Inductive basic_instruction : Type :=
 | BI_memory_fill : basic_instruction
 | BI_select : option (list value_type) -> basic_instruction
 | BI_const_num : value_num -> basic_instruction
-| BI_uzumaki_num : number_type -> basic_instruction
 | BI_block : block_type -> list basic_instruction -> basic_instruction
 | BI_loop : block_type -> list basic_instruction -> basic_instruction
 | BI_if : block_type -> list basic_instruction -> list basic_instruction -> basic_instruction
-| BI_forall : list basic_instruction -> basic_instruction
-| BI_exists : list basic_instruction -> basic_instruction
-| BI_assume : block_type -> list basic_instruction -> basic_instruction
-| BI_unique : block_type -> list basic_instruction -> basic_instruction
 | BI_br : N -> basic_instruction
 | BI_br_if : N -> basic_instruction
 | BI_br_table : list N -> basic_instruction

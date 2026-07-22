@@ -200,6 +200,7 @@
 //!         module_name,
 //!         codegen_output.wasm(),
 //!         codegen_output.spec_func_indices_by_spec(),
+//!         codegen_output.hspecs(),
 //!     )?;
 //!     Ok(rocq_code)
 //! }
@@ -212,8 +213,8 @@
 //!
 //! fn compile_nondet_example() -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let source = r#"
-//!         pub fn verify_property() {
-//!             forall {
+//!         spec Ordering {
+//!             fn verify_property() forall {
 //!                 let x: i32 = @;
 //!                 let y: i32 = @;
 //!                 assume {
@@ -316,6 +317,11 @@ pub use inference_wasm_linker::LinkError;
 /// downstream consumers (CLI tools, integration tests) share a single source
 /// of truth with the codegen and translator crates.
 pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VERSION};
+
+/// Re-export of the per-program `hassert` obligation map so consumers of
+/// [`wasm_to_v`] can construct the argument (empty post-link, populated for the
+/// pre-link cross-check) without depending on `inference-hassert` directly.
+pub use inference_wasm_codegen::HSpecMap;
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
@@ -739,6 +745,7 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 ///     "EvenChecker",
 ///     codegen_output.wasm(),
 ///     codegen_output.spec_func_indices_by_spec(),
+///     codegen_output.hspecs(),
 /// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -749,8 +756,8 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 /// use inference::{parse, type_check, codegen, wasm_to_v};
 ///
 /// let source = r#"
-///     pub fn verify_commutativity() {
-///         forall {
+///     spec Commutativity {
+///         fn verify_commutativity() forall {
 ///             let x: i32 = @;
 ///             let y: i32 = @;
 ///             assert(x + y == y + x);
@@ -765,6 +772,7 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 ///     "CommutativityProof",
 ///     codegen_output.wasm(),
 ///     codegen_output.spec_func_indices_by_spec(),
+///     codegen_output.hspecs(),
 /// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -850,6 +858,12 @@ pub fn wasm_to_v(
     mod_name: &str,
     wasm: &[u8],
     spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
+    hspecs_by_spec: &HSpecMap,
 ) -> anyhow::Result<String> {
-    inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm, spec_funcs_by_spec)
+    inference_wasm_to_v_translator::wasm_parser::translate_bytes(
+        mod_name,
+        wasm,
+        spec_funcs_by_spec,
+        hspecs_by_spec,
+    )
 }

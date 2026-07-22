@@ -151,6 +151,18 @@ pub(crate) enum CodegenError {
         function: String,
         max: usize,
     },
+
+    /// One or more specification functions could not be translated into a
+    /// `hassert` verification obligation: a construct with no assertion
+    /// encoding (`loop`, `break`, a `unique` block, `**`, memory access), an
+    /// `exists`/`unique`/`assume`-quantified body, a reassignment, a non-scalar
+    /// term or `@`, an untranslatable call, or a quantified spec method. In
+    /// proof mode the obligation is a required deliverable, so codegen refuses
+    /// to emit a module whose specifications are silently unverifiable. The
+    /// message is the newline-joined `P0xx` diagnostics, each in the same
+    /// `[file:]line:col: error[P00x]: message` shape analysis diagnostics use.
+    #[error("{0}")]
+    UntranslatableSpec(String),
 }
 
 /// The boxed payload of [`CodegenError::SpecNameReservesSeparator`]. Boxed so the

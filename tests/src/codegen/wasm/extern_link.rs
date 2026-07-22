@@ -111,15 +111,26 @@ mod extern_link_tests {
         // translation contains an `Mi` record. This makes the post-link absence
         // of `Mi` a real difference rather than a vacuous pass.
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let pre_link_rocq = wasm_to_v(module_name, codegen_output.wasm(), &empty)
-            .expect("unlinked wasm-to-v succeeds");
+        let pre_link_rocq = wasm_to_v(
+            module_name,
+            codegen_output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("unlinked wasm-to-v succeeds");
         assert!(
             pre_link_rocq.contains("Mi "),
             "the unlinked module must still carry an import record; .v was:\n{pre_link_rocq}"
         );
 
         let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
-        let rocq = wasm_to_v(module_name, &unified, &empty).expect("wasm-to-v succeeds");
+        let rocq = wasm_to_v(
+            module_name,
+            &unified,
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("wasm-to-v succeeds");
         (unified, rocq)
     }
 
@@ -259,15 +270,18 @@ mod extern_link_tests {
     }
 
     #[test]
-    fn proof_mode_spec_indices_name_the_spec_function_not_the_merged_extern() {
+    fn proof_mode_spec_omission_renumbers_the_call_to_the_merged_extern() {
         // C1: a proof-mode program that binds an extern AND declares a spec.
-        // Codegen records the spec function's index in the *pre-link* space,
-        // which counts the import (`spec_func_base = import_count + ...`). After
-        // the link removes the import and shifts indices down, the embedded
-        // `inference.spec_funcs` section the linker rewrites must name the spec
-        // function `check` (post-link index 1), not the merged extern `sum`
-        // (post-link index 2). Translating with an empty explicit map makes the
-        // translator adopt the embedded post-link section as the source of truth.
+        // Post-link function order is add_three=0, spec `check`=1, merged `sum`=2
+        // (the import is removed and the external appended). The spec function is
+        // OMITTED from the emitted `.v` module record, so `sum` (index 2) shifts
+        // down to instantiated index 1 — and `add_three`'s executable call to
+        // `sum` must be renumbered to `BI_call 1%N`. This pins two things at once:
+        // that the embedded `inference.spec_funcs` section names `check` (so the
+        // *right* function is omitted — omitting `sum` instead would fail-close on
+        // `add_three`'s now-dangling call), and that the omission-driven call
+        // renumbering is correct. Translating with empty explicit maps adopts the
+        // post-link embedded sections as the source of truth.
         let lib_wasm = compile_wasm(
             "pub fn sum(a: i32, b: i32) -> i32 { return a + b; }",
             "arith",
@@ -275,11 +289,15 @@ mod extern_link_tests {
         let lib_dir = TempLibDir::new("c1_spec");
         lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
 
+        // `check` must be translatable to an obligation, so it does not call the
+        // extern (an external call has no verified body — `P005`). `add_three`
+        // (executable) carries the extern call whose operand the omission
+        // renumbers.
         let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
              use { sum } from arith;\n\
              pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
              spec MySpec {\n\
-                 fn check(x: i32) -> i32 { return sum(x, x); }\n\
+                 fn check(x: i32) -> i32 { return x; }\n\
              }";
 
         let arena = parse(main_source).expect("main parses");
@@ -308,16 +326,125 @@ mod extern_link_tests {
         let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
 
-        // Empty explicit map: the post-link embedded section is the source of
+        // Empty explicit maps: the post-link embedded sections are the source of
         // truth (the pre-link codegen indices would be stale here).
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let rocq = wasm_to_v("c1prog", &unified, &empty).expect("wasm-to-v succeeds");
+        let rocq = wasm_to_v("c1prog", &unified, &empty, &inference::HSpecMap::default())
+            .expect("wasm-to-v succeeds");
 
-        // Post-link indices: add_three=0, check=1, merged sum=2.
+        // MySpec surfaces with the new obligation-list shape.
         assert!(
-            rocq.contains("Definition c1prog__MySpec_specs : list N := (1 :: nil)%N."),
-            "MySpec_specs must name `check` at post-link index 1, not the merged \
-             extern at 2; .v was:\n{rocq}"
+            rocq.contains("Definition c1prog__MySpec_specs : list hassert :="),
+            "MySpec must surface a per-spec obligation list; .v was:\n{rocq}"
+        );
+        // The omission of the spec function at index 1 renumbers `sum` from
+        // instantiated index 2 to 1, so `add_three`'s call reads `BI_call 1%N`.
+        assert!(
+            rocq.contains("BI_call 1%N"),
+            "add_three's call to the merged `sum` must be renumbered past the \
+             omitted spec function (to instantiated index 1); .v was:\n{rocq}"
+        );
+        // The merged `sum` executable body (its `a + b`) survives in the record.
+        assert!(
+            rocq.contains("BI_binop T_i32 (Binop_i BOI_add)"),
+            "the merged extern `sum` body must survive into the module record; .v was:\n{rocq}"
+        );
+    }
+
+    #[test]
+    fn proof_mode_hspec_t_app_resolves_across_the_link() {
+        // The companion to `proof_mode_spec_omission_renumbers_the_call_to_the_merged_extern`:
+        // that test pins the *executable* `BI_call` renumbering but its spec is a
+        // plain helper (a trivially-true obligation with no cross-call). This one
+        // adds the load-bearing half — an obligation whose `T_app` must resolve
+        // through the same post-link remap.
+        //
+        // Post-link function order is add_three=0, is_prime=1, spec `prop`=2,
+        // merged `sum`=3. The spec function is OMITTED from the `.v` module record,
+        // so both index streams shift: `add_three`'s executable call to `sum`
+        // renumbers to `BI_call 2%N`, and the obligation's call to the surviving
+        // `is_prime` resolves by its verbatim name-section symbol to defined-fn
+        // index 1 (`T_app 1`) — proving the obligation and the executable body
+        // agree on the post-link numbering. Translating with empty explicit maps
+        // adopts the post-link embedded `inference.spec_funcs` / `inference.hspecs`
+        // sections as the source of truth (the CLI-equivalent, defer-to-embedded
+        // flow), which is what makes the `T_app` resolution genuinely post-link.
+        let lib_wasm = compile_wasm(
+            "pub fn sum(a: i32, b: i32) -> i32 { return a + b; }",
+            "arith",
+        );
+        let lib_dir = TempLibDir::new("hspec_tapp");
+        lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
+
+        // `add_three` (executable) carries the extern call the omission renumbers;
+        // `is_prime` (executable, defined) is the obligation's `T_app` target — it
+        // does not call the extern, since a spec obligation cannot reference an
+        // unverified external body (`P005`).
+        let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
+             use { sum } from arith;\n\
+             pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
+             fn is_prime(n: i32) -> bool { return n > 1; }\n\
+             spec MySpec {\n\
+                 fn prop() forall {\n\
+                     let n: i32 = @;\n\
+                     assume { assert(n > 1); }\n\
+                     assert(is_prime(n));\n\
+                 }\n\
+             }";
+
+        let arena = parse(main_source).expect("main parses");
+        let typed = type_check(arena).expect("main type-checks");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let externals = resolve_external_modules(&typed, &search_path, None)
+            .expect("external modules resolve");
+        let external_bytes: Vec<(&str, &[u8])> = externals
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+
+        let target = inference_wasm_codegen::Target::default();
+        let mode = inference_wasm_codegen::CompilationMode::Proof;
+        let codegen_output = inference_wasm_codegen::codegen(
+            &typed,
+            target,
+            mode,
+            target.default_opt_level(),
+            "hprog",
+        )
+        .expect("proof-mode codegen succeeds");
+
+        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+
+        // Empty explicit maps: the post-link embedded sections are the source of
+        // truth (the pre-link codegen indices are stale after the merge).
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let rocq = wasm_to_v("hprog", &unified, &empty, &inference::HSpecMap::default())
+            .expect("wasm-to-v succeeds");
+
+        // The obligation is emitted as a first-class `hassert` for `MySpec`.
+        assert!(
+            rocq.contains("Definition hprog__MySpec_hspec1 : hassert :="),
+            "MySpec must surface a first-class hassert obligation; .v was:\n{rocq}"
+        );
+        // Executable stream: `add_three`'s call to the merged `sum` renumbers past
+        // the omitted spec function to instantiated index 2.
+        assert!(
+            rocq.contains("BI_call 2%N"),
+            "add_three's call to the merged `sum` must renumber to index 2; .v was:\n{rocq}"
+        );
+        // Obligation stream: the `is_prime` cross-call resolves by its post-link
+        // name to defined-fn index 1 — the same numbering the executable bodies use.
+        assert!(
+            rocq.contains("T_app 1 ((T_local 0%N) :: nil)"),
+            "the obligation's `is_prime` call must resolve to defined-fn index 1; .v was:\n{rocq}"
+        );
+        // The `T_app` target's own body survives in the record (a `> 1` compare).
+        assert!(
+            rocq.contains("BI_relop T_i32 (Relop_i (ROI_gt SX_S))"),
+            "the `is_prime` body must survive into the module record; .v was:\n{rocq}"
         );
     }
 }
