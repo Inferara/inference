@@ -1,0 +1,15 @@
+[package]
+name = "inference-hassert"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "hassert verification-obligation IR and its inference.hspecs custom-section codec, shared across the Inference proof pipeline"
+keywords = ["compiler", "wasm", "verification", "rocq"]
+categories = ["compilers"]
+
+[dependencies]
+leb128 = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
