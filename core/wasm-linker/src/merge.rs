@@ -665,6 +665,21 @@ impl Plan {
             });
         }
 
+        // `inference.hspecs` section: the obligation payload references functions
+        // by symbolic name, not index, so — unlike `spec_funcs` — the merge
+        // carries it through with no remap. The main module's function names
+        // survive the rebuilt name section verbatim (only merged external names
+        // are synthesized), so every symbol stays resolvable post-link. It was
+        // validated at parse time; re-encoding the decoded map reproduces the
+        // canonical bytes.
+        if let Some(hspecs) = &main.hspecs {
+            let payload = inference_hassert::encode(hspecs);
+            module.section(&wasm_encoder::CustomSection {
+                name: inference_hassert::HSPECS_SECTION_NAME.into(),
+                data: (&payload[..]).into(),
+            });
+        }
+
         Ok(module.finish())
     }
 

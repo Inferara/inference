@@ -334,6 +334,97 @@ mod scenario_3_custom_section_round_trip {
     }
 }
 
+// Scenario 3b: `inference.hspecs` obligation section round-trip
+#[cfg(test)]
+mod scenario_3b_hspecs_section {
+    use super::helpers::{compile, wasm_contains};
+    use inference_hassert::HSPECS_SECTION_NAME;
+    use inference_wasm_codegen::CompilationMode;
+
+    /// A single regular-kind spec free function, which contributes one
+    /// trivially-true (`HA_true`) obligation — enough to make the obligation map
+    /// non-empty so the section is emitted.
+    const ONE_SPEC: &str = r#"spec S { fn obligation() -> i32 { return 1; } }"#;
+
+    /// Extracts the raw payload of the custom section named `name`, if present.
+    fn custom_section(wasm: &[u8], name: &str) -> Option<Vec<u8>> {
+        for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+            if let Ok(inf_wasmparser::Payload::CustomSection(reader)) = payload
+                && reader.name() == name
+            {
+                return Some(reader.data().to_vec());
+            }
+        }
+        None
+    }
+
+    /// Proof mode embeds `inference.hspecs` exactly when the obligation map is
+    /// non-empty — here, a spec function makes it non-empty.
+    #[test]
+    fn proof_mode_embeds_hspecs_when_map_non_empty() {
+        let output = compile(ONE_SPEC, CompilationMode::Proof);
+        assert!(
+            !output.hspecs().is_empty(),
+            "a proof-mode spec function must populate the obligation map"
+        );
+        assert!(
+            wasm_contains(output.wasm(), HSPECS_SECTION_NAME.as_bytes()),
+            "proof-mode WASM must embed the inference.hspecs section when the map is non-empty"
+        );
+    }
+
+    /// The other direction of the "iff": a proof-mode program with no
+    /// specifications has an empty obligation map, so the section is absent.
+    #[test]
+    fn proof_mode_omits_hspecs_when_map_empty() {
+        let output = compile(r#"pub fn main() { }"#, CompilationMode::Proof);
+        assert!(
+            output.hspecs().is_empty(),
+            "a program with no specs must have an empty obligation map"
+        );
+        assert!(
+            !wasm_contains(output.wasm(), HSPECS_SECTION_NAME.as_bytes()),
+            "proof-mode WASM must not embed the section when the map is empty"
+        );
+    }
+
+    /// Compile mode strips specs, so the obligation map is empty and the section
+    /// is never emitted — even for a program that carries a spec.
+    #[test]
+    fn compile_mode_never_embeds_hspecs() {
+        let output = compile(ONE_SPEC, CompilationMode::Compile);
+        assert!(
+            output.hspecs().is_empty(),
+            "compile mode strips specs, so the obligation map must be empty"
+        );
+        assert!(
+            !wasm_contains(output.wasm(), HSPECS_SECTION_NAME.as_bytes()),
+            "compile-mode WASM must never embed the inference.hspecs section"
+        );
+    }
+
+    /// The embedded section is the self-describing artifact: decoding it must
+    /// reproduce the exact obligation map codegen recorded in memory, so no
+    /// obligation is lost or reordered on the wire.
+    #[test]
+    fn embedded_section_round_trips_to_the_output_map() {
+        let source = r#"
+            spec Alpha { fn a() -> i32 { return 1; } }
+            spec Beta { fn b() -> i32 { return 2; } fn c() -> i32 { return 3; } }
+        "#;
+        let output = compile(source, CompilationMode::Proof);
+        let data = custom_section(output.wasm(), HSPECS_SECTION_NAME)
+            .expect("proof-mode WASM must carry the inference.hspecs section");
+        let decoded =
+            inference_hassert::decode(&data).expect("the embedded hspecs section must decode");
+        assert_eq!(
+            &decoded,
+            output.hspecs(),
+            "decoding the embedded section must reproduce the in-memory obligation map"
+        );
+    }
+}
+
 // Scenario 4: Per-spec emission ordering and theorems
 #[cfg(test)]
 mod scenario_4_per_spec_emission {

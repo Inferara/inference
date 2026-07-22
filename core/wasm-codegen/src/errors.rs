@@ -133,6 +133,24 @@ pub(crate) enum CodegenError {
         fix_hint = .0.fix_hint,
     )]
     SpecNameReservesSeparator(Box<SpecNameSeparatorDetails>),
+
+    /// A spec function's translated `hassert` obligation nests deeper than the
+    /// `inference.hspecs` codec's decode-time depth cap. The encoder is
+    /// infallible, so an over-deep tree would serialize into a section that the
+    /// codec's own hardened decoder — in the linker and the Rocq translator —
+    /// rejects as corrupt. Codegen refuses to write such an artifact, naming the
+    /// offending spec and function. Realistic specifications never approach the
+    /// cap; only a pathologically long statement chain can reach it.
+    #[error(
+        "the verification obligation for function '{function}' in spec '{spec}' nests deeper \
+         than the maximum of {max} the inference.hspecs section supports; \
+         simplify the specification"
+    )]
+    HspecTreeTooDeep {
+        spec: String,
+        function: String,
+        max: usize,
+    },
 }
 
 /// The boxed payload of [`CodegenError::SpecNameReservesSeparator`]. Boxed so the

@@ -2075,6 +2075,221 @@ fn two_spec_funcs_sections_in_main_are_a_clean_error_not_a_silent_overwrite() {
     );
 }
 
+// -- inference.hspecs section ------------------------------------------------
+
+/// One obligation, keyed under spec `S` and owned by the function symbol
+/// `compute`, whose assertion also *references* `compute` via a `T_app`. The
+/// symbol therefore appears both as the entry owner and inside the tree, so the
+/// merge must carry it through untouched for the reference to stay resolvable.
+fn one_hspec_referencing(symbol: &str) -> inference_hassert::HSpecMap {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm};
+    let mut map = HSpecMap::default();
+    map.insert(
+        "S".to_string(),
+        vec![HSpecEntry::new(
+            HFnRef(symbol.to_string()),
+            HAssert::nz(HTerm::App(
+                HFnRef(symbol.to_string()),
+                vec![HTerm::Local(0), HTerm::Local(1)],
+            )),
+        )],
+    );
+    map
+}
+
+/// A main module importing `sum`, with a local `compute` (named in the `name`
+/// section) and an `inference.hspecs` section carrying `payload`. Built through
+/// `wasm_encoder` — rather than the WAT `main_importing_sum` — so it carries the
+/// function name the symbolic obligation must survive against.
+fn main_named_with_hspecs(payload: &[u8]) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        ImportSection, Instruction, Module, NameMap, NameSection, TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    module.section(&types);
+
+    let mut imports = ImportSection::new();
+    imports.import("mathlib", "sum", wasm_encoder::EntityType::Function(0));
+    module.section(&imports);
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0); // local func -> global index 1 (after the one import)
+    module.section(&funcs);
+
+    let mut exports = ExportSection::new();
+    exports.export("compute", ExportKind::Func, 1);
+    module.section(&exports);
+
+    let mut code = CodeSection::new();
+    let mut compute = Function::new([]);
+    compute.instruction(&Instruction::LocalGet(0));
+    compute.instruction(&Instruction::LocalGet(1));
+    compute.instruction(&Instruction::Call(0));
+    compute.instruction(&Instruction::End);
+    code.function(&compute);
+    module.section(&code);
+
+    let mut names = NameSection::new();
+    names.module("main");
+    let mut func_names = NameMap::new();
+    func_names.append(1, "compute");
+    names.functions(&func_names);
+    module.section(&names);
+
+    module.section(&CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: payload.into(),
+    });
+
+    module.finish()
+}
+
+/// The main module's `inference.hspecs` payload references functions by symbol,
+/// not index, so the merge must carry it through byte-for-byte (no remap) while
+/// preserving the main function names the symbols resolve against.
+#[test]
+fn main_hspecs_section_survives_the_merge_byte_for_byte() {
+    let map = one_hspec_referencing("compute");
+    let payload = inference_hassert::encode(&map);
+    let main = main_named_with_hspecs(&payload);
+
+    let lib = mathlib_pure();
+    let linked = link(&main, &[&lib]).expect("link must preserve the hspecs section");
+    assert_valid(&linked);
+
+    let carried = custom_section_data(&linked, inference_hassert::HSPECS_SECTION_NAME)
+        .expect("the linked module must still carry the inference.hspecs section");
+    assert_eq!(
+        carried, payload,
+        "the symbolic hspecs payload must survive the merge verbatim (no remap)"
+    );
+    assert_eq!(
+        inference_hassert::decode(&carried).expect("carried hspecs must decode"),
+        map,
+        "the round-tripped obligation map must equal the original"
+    );
+
+    // The referenced symbol `compute` must still name a defined function post-link
+    // (shifted from pre-link index 1 to 0 once the `sum` import is removed), so the
+    // Rocq translator can later resolve the symbolic `T_app` to its `mod_funcs`
+    // index.
+    assert!(
+        function_names(&linked).contains(&(0, "compute".to_string())),
+        "the main function the obligation names must survive the merge verbatim, got {:?}",
+        function_names(&linked)
+    );
+}
+
+/// An external's `inference.hspecs` section is verification-only scaffolding for
+/// a module never emitted whole; building an executable must strip it, never
+/// merge it into the output.
+#[test]
+fn external_hspecs_section_is_stripped_when_building_an_executable() {
+    use wasm_encoder::{
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        Instruction, Module, TypeSection, ValType,
+    };
+
+    let lib = {
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32], [ValType::I32]);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut exports = ExportSection::new();
+        exports.export("sum", ExportKind::Func, 0);
+        module.section(&exports);
+        let mut code = CodeSection::new();
+        let mut sum = Function::new([]);
+        sum.instruction(&Instruction::LocalGet(0));
+        sum.instruction(&Instruction::LocalGet(1));
+        sum.instruction(&Instruction::I32Add);
+        sum.instruction(&Instruction::End);
+        code.function(&sum);
+        module.section(&code);
+        let payload = inference_hassert::encode(&one_hspec_referencing("sum"));
+        module.section(&CustomSection {
+            name: inference_hassert::HSPECS_SECTION_NAME.into(),
+            data: (&payload[..]).into(),
+        });
+        module.finish()
+    };
+
+    let main = main_importing_sum();
+    let linked =
+        link(&main, &[&lib]).expect("an external carrying an hspecs section must still link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert!(
+        custom_section_data(&linked, inference_hassert::HSPECS_SECTION_NAME).is_none(),
+        "an external's hspecs section must not be merged into the executable output"
+    );
+}
+
+#[test]
+fn corrupt_main_hspecs_section_is_a_clean_link_error() {
+    // A main `inference.hspecs` section is a verification deliverable: a corrupt
+    // payload must fail the link with a clean error, never a corrupt artifact the
+    // Rocq translator later chokes on. Version byte 2 is past the codec's
+    // supported version 1, so the shared decoder rejects it.
+    let corrupt = [2u8, 0, 0];
+    let mut main = main_importing_sum();
+    use wasm_encoder::Section as _;
+    wasm_encoder::CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: (&corrupt[..]).into(),
+    }
+    .append_to(&mut main);
+
+    let lib = mathlib_pure();
+    let err = link(&main, &[&lib])
+        .expect_err("a corrupt main hspecs section must be a clean rejection");
+    assert!(
+        matches!(&err, LinkError::Parse(msg) if msg.contains("hspecs")),
+        "expected a Parse error naming the hspecs section, got {err:?}"
+    );
+}
+
+#[test]
+fn two_hspecs_sections_in_main_are_a_clean_error_not_a_silent_overwrite() {
+    // Like the duplicate `spec_funcs` case: two `inference.hspecs` sections would
+    // let a last-wins assignment silently drop the first section's obligations.
+    // The parser must reject the duplicate rather than vanish obligations.
+    let first = inference_hassert::encode(&one_hspec_referencing("compute"));
+    let second = inference_hassert::encode(&one_hspec_referencing("other"));
+    let mut main = main_importing_sum();
+    use wasm_encoder::Section as _;
+    wasm_encoder::CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: (&first[..]).into(),
+    }
+    .append_to(&mut main);
+    wasm_encoder::CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: (&second[..]).into(),
+    }
+    .append_to(&mut main);
+
+    let lib = mathlib_pure();
+    let err = link(&main, &[&lib])
+        .expect_err("a duplicate hspecs section must be rejected, never silently overwritten");
+    assert!(
+        matches!(&err, LinkError::Parse(msg) if msg.contains("hspecs")),
+        "expected a clean error naming the duplicate hspecs section, got {err:?}"
+    );
+}
+
 #[test]
 fn malformed_main_with_out_of_range_type_index_is_a_clean_error_not_a_panic() {
     // S3: the public `link` API accepts arbitrary main bytes. A main whose

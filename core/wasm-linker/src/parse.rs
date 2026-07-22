@@ -149,6 +149,13 @@ pub(crate) struct ParsedModule {
     /// still names the correct spec functions (the input to formal verification).
     /// Only the main module carries one; externals never do.
     pub spec_funcs: Option<Vec<(String, Vec<u32>)>>,
+    /// The decoded `inference.hspecs` custom section: per-spec `hassert`
+    /// obligations keyed by folded spec name. Unlike `spec_funcs`, the payload
+    /// references functions by symbolic name, not index, so the merge carries it
+    /// through unchanged — no remap. Decoded (validated) here so a corrupt main
+    /// section fails the link; the merge re-encodes it canonically. Only the
+    /// main module carries one; an external's is stripped.
+    pub hspecs: Option<inference_hassert::HSpecMap>,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.
     /// The merge matches each main-module import's recorded `(module, field)`
@@ -319,14 +326,16 @@ fn collect_types(group: &RecGroup, out: &mut Vec<TypeEntry>) {
 
 /// Mines a custom section for everything the merge must carry through: the
 /// `name` section's module/function/local subsections, and (for the main module
-/// only) the `inference.spec_funcs` section that drives proof-mode translation.
+/// only) the `inference.spec_funcs` and `inference.hspecs` sections that drive
+/// proof-mode translation.
 ///
 /// The `name` subsections are best-effort (an unparseable one is skipped). The
-/// main module's `inference.spec_funcs` payload, by contrast, is a verification
-/// deliverable: a malformed one is a hard [`LinkError`], never silently dropped.
-/// An external module's spec section is verification-only scaffolding the merge
-/// strips, so it is skipped here without decoding — its presence never fails the
-/// link, and a malformed one in an irrelevant external cannot block the merge.
+/// main module's `inference.spec_funcs`/`inference.hspecs` payloads, by contrast,
+/// are verification deliverables: a malformed one is a hard [`LinkError`], never
+/// silently dropped. An external module's verification sections are
+/// verification-only scaffolding the merge strips, so they are skipped here
+/// without decoding — their presence never fails the link, and a malformed one
+/// in an irrelevant external cannot block the merge.
 fn collect_custom_section(
     custom: &CustomSectionReader,
     module: &mut ParsedModule,
@@ -349,6 +358,28 @@ fn collect_custom_section(
         }
         let decoded = crate::spec_funcs::decode(custom.data())?;
         module.spec_funcs = Some(decoded);
+        return Ok(());
+    }
+
+    if custom.name() == inference_hassert::HSPECS_SECTION_NAME {
+        if role == ModuleRole::External {
+            return Ok(());
+        }
+        // As with `spec_funcs`, a duplicate would silently drop the first
+        // section's obligations. Reject it rather than overwrite.
+        if module.hspecs.is_some() {
+            return Err(LinkError::Parse(
+                "main module declares more than one inference.hspecs section; \
+                 its proof obligations would be silently dropped"
+                    .into(),
+            ));
+        }
+        // Decode to validate: a corrupt payload is a hard error here rather than
+        // a corrupt artifact the Rocq translator chokes on later. The merge
+        // re-encodes the decoded map canonically.
+        let decoded = inference_hassert::decode(custom.data())
+            .map_err(|e| LinkError::Parse(format!("inference.hspecs section: {e}")))?;
+        module.hspecs = Some(decoded);
         return Ok(());
     }
 
