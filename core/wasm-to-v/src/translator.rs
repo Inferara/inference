@@ -531,60 +531,8 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
-        // Emit per-spec lists of WASM function indices, sorted by spec name
-        // for deterministic output. Spec names were validated against the
-        // Rocq identifier rules at the top of `translate()` so that
-        // `<mod>__<SpecName>_specs` is always a syntactically legal Rocq
-        // identifier.
-        let mut spec_entries: Vec<(&String, &Vec<u32>)> =
-            self.spec_funcs_by_spec.iter().collect();
-        spec_entries.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (spec_name, indices) in &spec_entries {
-            res.push('\n');
-            if indices.is_empty() {
-                // (@nil N): no literals to disambiguate, and works regardless
-                // of scope state at the Require site.
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := (@nil N).\n"
-                    )
-                    .as_str(),
-                );
-            } else {
-                let indices_str = indices
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" :: ");
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := ({indices_str} :: nil)%N.\n"
-                    )
-                    .as_str(),
-                );
-            }
-        }
-
-        // Generate Theorems
-        res.push('\n');
-        res.push_str("Section Host.\n");
-        res.push_str("Context `{ho: host}.\n");
-        res.push('\n');
-        for (spec_name, _) in &spec_entries {
-            res.push('\n');
-            res.push_str(
-                format!(
-                    "Theorem valid_{module_name}__{spec_name} : ValidModule {module_name} {module_name}__{spec_name}_specs.\n"
-                )
-                .as_str(),
-            );
-            res.push_str("Proof.\n");
-            res.push_str("  (* TODO: fill the proof *)\n");
-            res.push_str("Qed.\n");
-        }
-        res.push('\n');
-        res.push_str("End Host.\n");
+        self.emit_spec_definitions(&mut res);
+        self.emit_theorems(&mut res);
 
         // Fail-closed: any section error means the assembled module is
         // incomplete (e.g. a function body that hit an unsupported operator).
@@ -594,6 +542,72 @@ impl WasmParseData<'_> {
             return Err(first);
         }
         Ok(res)
+    }
+
+    /// Spec entries paired with their WASM function indices, sorted by spec
+    /// name so both the `list N` definitions and the theorems iterate in the
+    /// same deterministic order.
+    fn sorted_spec_entries(&self) -> Vec<(&String, &Vec<u32>)> {
+        let mut spec_entries: Vec<(&String, &Vec<u32>)> = self.spec_funcs_by_spec.iter().collect();
+        spec_entries.sort_by(|a, b| a.0.cmp(b.0));
+        spec_entries
+    }
+
+    /// Appends the per-spec lists of WASM function indices to `out`.
+    ///
+    /// Spec names were validated against the Rocq identifier rules at the top
+    /// of `translate()` so that `<mod>__<SpecName>_specs` is always a
+    /// syntactically legal Rocq identifier.
+    fn emit_spec_definitions(&self, out: &mut String) {
+        let module_name = &self.mod_name;
+        for (spec_name, indices) in self.sorted_spec_entries() {
+            out.push('\n');
+            if indices.is_empty() {
+                // (@nil N): no literals to disambiguate, and works regardless
+                // of scope state at the Require site.
+                out.push_str(
+                    format!("Definition {module_name}__{spec_name}_specs : list N := (@nil N).\n")
+                        .as_str(),
+                );
+            } else {
+                let indices_str = indices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" :: ");
+                out.push_str(
+                    format!(
+                        "Definition {module_name}__{spec_name}_specs : list N := ({indices_str} :: nil)%N.\n"
+                    )
+                    .as_str(),
+                );
+            }
+        }
+    }
+
+    /// Appends the `Section Host` block with one `ValidModule` theorem per spec
+    /// to `out`, consuming the `<mod>__<SpecName>_specs` definitions emitted by
+    /// [`Self::emit_spec_definitions`].
+    fn emit_theorems(&self, out: &mut String) {
+        let module_name = &self.mod_name;
+        out.push('\n');
+        out.push_str("Section Host.\n");
+        out.push_str("Context `{ho: host}.\n");
+        out.push('\n');
+        for (spec_name, _) in self.sorted_spec_entries() {
+            out.push('\n');
+            out.push_str(
+                format!(
+                    "Theorem valid_{module_name}__{spec_name} : ValidModule {module_name} {module_name}__{spec_name}_specs.\n"
+                )
+                .as_str(),
+            );
+            out.push_str("Proof.\n");
+            out.push_str("  (* TODO: fill the proof *)\n");
+            out.push_str("Qed.\n");
+        }
+        out.push('\n');
+        out.push_str("End Host.\n");
     }
 
     /// Number of imported functions, which occupy the lowest function indices
@@ -662,13 +676,12 @@ impl WasmParseData<'_> {
             }
             modfunc_locals.push_str("nil");
 
-            let modfunc_body = match &self.func_locals_name_map {
-                Some(func_locals_name_map) => translate_expr(
-                    &mut function_body.get_operators_reader()?,
-                    func_locals_name_map.get(&modfunc_type).cloned(),
-                )?,
-                None => translate_expr(&mut function_body.get_operators_reader()?, None)?,
-            };
+            let local_name_map = self
+                .func_locals_name_map
+                .as_ref()
+                .and_then(|func_locals_name_map| func_locals_name_map.get(&modfunc_type).cloned());
+            let ctx = OperatorContext { local_name_map };
+            let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?, ctx)?;
 
             self.translated_functions_string
                 .push_str(format!("Definition {func_name} : module_func := ").as_str());
@@ -841,7 +854,10 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
 fn translate_global(global: &Global) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
-    let mg_init = translate_expr(&mut global.init_expr.get_operators_reader(), None)?;
+    let mg_init = translate_expr(
+        &mut global.init_expr.get_operators_reader(),
+        OperatorContext::default(),
+    )?;
     Ok(format!("Mg {tg_mut} ({tg_t}) ({mg_init})"))
 }
 
@@ -852,7 +868,10 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
             memory_index,
             offset_expr,
         } => {
-            let expression = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
+            let expression = translate_expr(
+                &mut offset_expr.get_operators_reader(),
+                OperatorContext::default(),
+            )?;
             format!("MD_active {memory_index}%N ({expression})")
         }
         DataKind::Passive => "MD_passive".to_string(),
@@ -877,10 +896,21 @@ struct ConditionExpr<'a> {
     else_arm: Expression<'a>,
 }
 
+/// Per-function data the operator translators consult while rendering a
+/// function body. Bundling it in one struct keeps the operator-translation
+/// signatures stable as body-level state accrues, instead of widening each
+/// signature independently.
+#[derive(Default)]
+struct OperatorContext {
+    /// Local index → source name, used to annotate `BI_local_*` with the
+    /// original variable name as a Rocq comment.
+    local_name_map: Option<HashMap<u32, String>>,
+}
+
 #[derive(Default)]
 struct Expression<'a> {
     parts: Vec<ExpressionPart<'a>>,
-    local_name_map: Option<HashMap<u32, String>>,
+    ctx: OperatorContext,
 }
 
 impl Expression<'_> {
@@ -909,15 +939,13 @@ impl Expression<'_> {
                     Operator::Else | Operator::End => {}
                     _ => {
                         res.push_str(offset.as_str());
-                        res.push_str(translate_basic_operator(op, &self.local_name_map)?.as_str());
+                        res.push_str(translate_basic_operator(op, &self.ctx)?.as_str());
                         res.push_str(LIST_EXT);
                     }
                 },
                 ExpressionPart::Block(block) => {
                     res.push_str(offset.as_str());
-                    res.push_str(
-                        translate_basic_operator(&block.label, &self.local_name_map)?.as_str(),
-                    );
+                    res.push_str(translate_basic_operator(&block.label, &self.ctx)?.as_str());
                     res.push_str(" (\n");
                     res.push_str(block.parts.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
                     res.push_str(") ");
@@ -925,9 +953,7 @@ impl Expression<'_> {
                 }
                 ExpressionPart::Condition(cond) => {
                     res.push_str(offset.as_str());
-                    res.push_str(
-                        translate_basic_operator(&cond.label, &self.local_name_map)?.as_str(),
-                    );
+                    res.push_str(translate_basic_operator(&cond.label, &self.ctx)?.as_str());
                     res.push_str(" (\n");
                     res.push_str(cond.then_arm.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
                     res.push_str(") (\n");
@@ -1022,11 +1048,11 @@ fn translate_expression<'a>(
 
 fn translate_expr(
     operators_reader: &mut OperatorsReader,
-    local_name_map: Option<HashMap<u32, String>>,
+    ctx: OperatorContext,
 ) -> anyhow::Result<String> {
     let mut peekable_operators_reader = operators_reader.clone().into_iter();
     let mut expression = translate_expression(&mut peekable_operators_reader, 0)?;
-    expression.local_name_map = local_name_map;
+    expression.ctx = ctx;
     // Render through the fallible `print_with_offset` directly rather than the
     // `Display` impl, so that an unsupported operator surfaces as a returned
     // `WasmToVError` instead of being swallowed into placeholder text.
@@ -1062,7 +1088,10 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             offset_expr,
         } => {
             let tableidx = table_index.unwrap_or_default();
-            let expr = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
+            let expr = translate_expr(
+                &mut offset_expr.get_operators_reader(),
+                OperatorContext::default(),
+            )?;
             format!("ME_active {tableidx}%N ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
@@ -1075,7 +1104,10 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, expr_reader) = result?;
-                let expr = translate_expr(&mut expr_reader.get_operators_reader(), None)?;
+                let expr = translate_expr(
+                    &mut expr_reader.get_operators_reader(),
+                    OperatorContext::default(),
+                )?;
                 expr_list.push_str(format!("({expr})").as_str());
                 expr_list.push_str(" ::\n");
             }
@@ -1165,10 +1197,7 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
 }
 
 //Inductive basic_instruction
-fn translate_basic_operator(
-    operator: &Operator,
-    local_name_map: &Option<HashMap<u32, String>>,
-) -> anyhow::Result<String> {
+fn translate_basic_operator(operator: &Operator, ctx: &OperatorContext) -> anyhow::Result<String> {
     let operator = match operator {
         inf_wasmparser::Operator::Nop => "BI_nop".to_string(),
         inf_wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
@@ -1247,7 +1276,7 @@ fn translate_basic_operator(
         Operator::Drop => "BI_drop".to_string(),
         Operator::Select => "BI_select None".to_string(),
         Operator::LocalGet { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_get {local_index}%N (*{}*)",
@@ -1261,7 +1290,7 @@ fn translate_basic_operator(
             }
         }
         Operator::LocalSet { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_set {local_index}%N (*{}*)",
@@ -1275,7 +1304,7 @@ fn translate_basic_operator(
             }
         }
         Operator::LocalTee { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_tee {local_index}%N (*{}*)",
