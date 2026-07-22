@@ -84,12 +84,22 @@ pub const HSPECS_SECTION_NAME: &str = "inference.hspecs";
 /// instead of silently misparsing.
 pub const HSPECS_SECTION_VERSION: u32 = 1;
 
-/// Upper bound, in bytes, on a single symbol or spec name.
+/// Upper bound, in bytes, on a single name in the payload — a spec-name key or,
+/// chiefly, a function symbol.
 ///
-/// Matches the `inference.spec_funcs` decoders' cap so the two `inference.*`
-/// sections agree; a hand-crafted payload advertising a longer name is
-/// rejected before any allocation.
-pub const MAX_NAME_LEN: usize = 255;
+/// This is a sanity bound, not an allocation bound: the decoder already caps
+/// each name at the remaining payload length, so a hand-crafted over-advertised
+/// length is rejected before allocation regardless. The value is deliberately
+/// **larger** than `inference.spec_funcs`' 255-byte *spec-name* cap because an
+/// `inference.hspecs` function symbol is a different, longer kind of string — a
+/// folded spec name (itself up to 255 bytes) joined with struct/function
+/// identifiers (`{spec}.{fn}`, `{spec}.{Struct}.{method}`). A symbol built from
+/// a max-length spec name necessarily exceeds 255, so a 255-byte cap would
+/// reject obligations for specs that `inference.spec_funcs` accepts. The cap
+/// therefore only rejects absurdly long identifiers, well past anything a real
+/// program produces, while still bounding the value for the fail-closed
+/// producers that mirror it.
+pub const MAX_NAME_LEN: usize = 1024;
 
 /// Maximum nesting depth of a decoded assertion or term tree.
 ///
@@ -108,12 +118,30 @@ pub const MAX_TREE_DEPTH: usize = 256;
 /// so two maps that are equal (regardless of how they were built) encode to
 /// identical bytes.
 ///
+/// # Contract
+///
+/// The map **must** satisfy [`validate`] — every name non-empty and within
+/// [`MAX_NAME_LEN`], every tree within [`MAX_TREE_DEPTH`]. That is exactly the
+/// input contract [`decode`] enforces, so an unvalidated map could otherwise
+/// serialize into a payload the codec's own hardened decoder rejects (a corrupt
+/// artifact), or overflow the stack while encoding a pathologically deep tree.
+/// Callers pass either data that came from [`decode`] (which is guaranteed to
+/// pass, see the crate tests) or data they have run through [`validate`]
+/// themselves and turned into their own diagnostic. Code generation, the one
+/// producer of fresh maps, gates on [`validate`] before reaching here.
+///
 /// # Panics
 ///
-/// Panics only if a map holds more than `u32::MAX` symbols, specs, entries, or
-/// call arguments — unreachable for any real WASM module.
+/// Panics if the map violates [`validate`] — a documented contract breach that
+/// is strictly safer than emitting a decode-rejected artifact or overflowing
+/// the stack. Also panics if a map holds more than `u32::MAX` symbols, specs,
+/// entries, or call arguments, all unreachable for any real WASM module.
 #[must_use = "the encoded payload is the return value"]
 pub fn encode(map: &HSpecMap) -> Vec<u8> {
+    if let Err(err) = validate(map) {
+        panic!("inference.hspecs: refusing to encode a map its own decoder would reject: {err}");
+    }
+
     // The symbol table is the sorted, de-duplicated union of every function
     // symbol referenced anywhere: each entry's own symbol plus every
     // `App`/`AppOk` symbol inside every tree.
@@ -151,6 +179,136 @@ pub fn encode(map: &HSpecMap) -> Vec<u8> {
     }
 
     out
+}
+
+/// Verifies that `map` satisfies [`decode`]'s input contract, so [`encode`] can
+/// serialize it into a payload the decoder accepts.
+///
+/// Enforces, over the whole map, exactly the limits [`decode`] checks:
+///
+/// - every spec name and every function symbol (an obligation's own symbol and
+///   every `App`/`AppOk` symbol inside its tree) is non-empty and at most
+///   [`MAX_NAME_LEN`] bytes;
+/// - every obligation's assertion/term tree nests at most [`MAX_TREE_DEPTH`]
+///   deep, measured exactly as the decoder counts it.
+///
+/// Specs are visited in sorted-name order, so the first reported violation is
+/// deterministic. The tree walk is depth-limited — it stops descending past the
+/// cap — so validating an adversarially deep map cannot itself overflow the
+/// stack.
+///
+/// # Errors
+///
+/// Returns the first [`PayloadError`] found, or `Ok(())` when the map is
+/// encodable.
+pub fn validate(map: &HSpecMap) -> Result<(), PayloadError> {
+    let mut spec_names: Vec<&String> = map.keys().collect();
+    spec_names.sort_unstable();
+    for spec in spec_names {
+        if !name_len_ok(spec) {
+            return Err(PayloadError::SpecName {
+                name: spec.clone(),
+                len: spec.len(),
+            });
+        }
+        for entry in &map[spec] {
+            let symbol = &entry.fn_symbol.0;
+            if !name_len_ok(symbol) {
+                return Err(PayloadError::FunctionSymbol {
+                    spec: spec.clone(),
+                    symbol: symbol.clone(),
+                    len: symbol.len(),
+                });
+            }
+            validate_assert(spec, symbol, &entry.hassert, 1)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name`'s byte length is in the `1..=MAX_NAME_LEN` range the decoder
+/// requires (`read_name` rejects both empty and over-cap names).
+fn name_len_ok(name: &str) -> bool {
+    (1..=MAX_NAME_LEN).contains(&name.len())
+}
+
+/// Validates one obligation's assertion tree in a single depth-limited pass:
+/// the depth cap (mirroring `decode_assert`) plus the name contract on every
+/// `App`/`AppOk` symbol reached. `spec`/`function` identify the obligation for a
+/// [`PayloadError::TreeTooDeep`]. The early return past the cap bounds the
+/// recursion, so it cannot overflow on a deep input.
+fn validate_assert(
+    spec: &str,
+    function: &str,
+    a: &HAssert,
+    depth: usize,
+) -> Result<(), PayloadError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(PayloadError::TreeTooDeep {
+            spec: spec.to_string(),
+            function: function.to_string(),
+        });
+    }
+    match a {
+        HAssert::True | HAssert::False => Ok(()),
+        HAssert::Not(x) | HAssert::Ex(x) => validate_assert(spec, function, x, depth + 1),
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            validate_assert(spec, function, l, depth + 1)?;
+            validate_assert(spec, function, r, depth + 1)
+        }
+        HAssert::TermEq(l, r) => {
+            validate_term(spec, function, l, 1)?;
+            validate_term(spec, function, r, 1)
+        }
+        HAssert::HasType(t, _) | HAssert::Defined(t) => validate_term(spec, function, t, 1),
+        HAssert::AppOk(f, args) => {
+            check_symbol(spec, &f.0)?;
+            for arg in args {
+                validate_term(spec, function, arg, 1)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Validates a term tree entered at `depth` 1 from its assertion position: the
+/// depth cap (mirroring `decode_term`, which budgets terms from a fresh
+/// counter) plus the name contract on every `App` symbol. Bounded like
+/// [`validate_assert`].
+fn validate_term(spec: &str, function: &str, t: &HTerm, depth: usize) -> Result<(), PayloadError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(PayloadError::TreeTooDeep {
+            spec: spec.to_string(),
+            function: function.to_string(),
+        });
+    }
+    match t {
+        HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => Ok(()),
+        HTerm::App(f, args) => {
+            check_symbol(spec, &f.0)?;
+            for arg in args {
+                validate_term(spec, function, arg, depth + 1)?;
+            }
+            Ok(())
+        }
+        HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
+            validate_term(spec, function, l, depth + 1)?;
+            validate_term(spec, function, r, depth + 1)
+        }
+    }
+}
+
+/// Enforces the name contract on a function symbol referenced within `spec`.
+fn check_symbol(spec: &str, symbol: &str) -> Result<(), PayloadError> {
+    if name_len_ok(symbol) {
+        Ok(())
+    } else {
+        Err(PayloadError::FunctionSymbol {
+            spec: spec.to_string(),
+            symbol: symbol.to_string(),
+            len: symbol.len(),
+        })
+    }
 }
 
 /// Decodes an `inference.hspecs` payload back into an [`HSpecMap`].
@@ -683,6 +841,36 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Why an [`HSpecMap`] would not survive an [`encode`]/[`decode`] round-trip:
+/// the ways it can violate the decoder's input contract that [`validate`]
+/// checks before [`encode`] serializes it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PayloadError {
+    /// A spec name (map key) is empty or exceeds [`MAX_NAME_LEN`] bytes.
+    #[error(
+        "spec name {name:?} has invalid length {len} \
+         (inference.hspecs names must be non-empty and within the byte cap)"
+    )]
+    SpecName { name: String, len: usize },
+    /// A function symbol — an obligation's own symbol or one referenced by an
+    /// `App`/`AppOk` inside its tree — is empty or exceeds [`MAX_NAME_LEN`]
+    /// bytes.
+    #[error(
+        "function symbol {symbol:?} in spec {spec:?} has invalid length {len} \
+         (inference.hspecs names must be non-empty and within the byte cap)"
+    )]
+    FunctionSymbol {
+        spec: String,
+        symbol: String,
+        len: usize,
+    },
+    /// An obligation's assertion/term tree nests past [`MAX_TREE_DEPTH`].
+    #[error(
+        "the obligation for {function:?} in spec {spec:?} nests past the inference.hspecs depth cap"
+    )]
+    TreeTooDeep { spec: String, function: String },
+}
+
 /// Every way an `inference.hspecs` payload can be malformed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
@@ -947,11 +1135,14 @@ mod tests {
 
     #[test]
     fn rejects_a_tree_beyond_the_depth_cap() {
-        let map = map_of(vec![(
-            "s",
-            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH + 1))],
-        )]);
-        assert_eq!(decode(&encode(&map)), Err(DecodeError::TreeTooDeep));
+        // Hand-built payload: spec "s", entry symbol "f" (table index 0), then a
+        // `Not` spine one level past the cap. Built directly rather than via
+        // `encode`, which now refuses an over-deep tree by contract (see
+        // `encode_panics_on_a_tree_beyond_the_depth_cap`).
+        let mut bytes = vec![1, 1, 1, b'f', 1, 1, b's', 1, 0];
+        bytes.resize(bytes.len() + MAX_TREE_DEPTH, 0x02); // MAX_TREE_DEPTH `Not` tags
+        bytes.push(0x00); // a `True` leaf: total depth MAX_TREE_DEPTH + 1
+        assert_eq!(decode(&bytes), Err(DecodeError::TreeTooDeep));
     }
 
     #[test]
@@ -1045,10 +1236,16 @@ mod tests {
 
     #[test]
     fn rejects_an_over_long_name() {
-        // version=1, sym_count=1, name_len=256 (LEB 0x80 0x02) with no bytes.
+        // version=1, sym_count=1, then an advertised name length one past the
+        // cap (LEB-encoded, so the test tracks the constant) with no bytes: the
+        // cap is checked before the payload-length bound, so no name body is
+        // needed.
+        let mut bytes = vec![1, 1];
+        leb128::write::unsigned(&mut bytes, (MAX_NAME_LEN + 1) as u64)
+            .expect("writing to a Vec is infallible");
         assert_eq!(
-            decode(&[1, 1, 0x80, 0x02]),
-            Err(DecodeError::NameTooLong(256))
+            decode(&bytes),
+            Err(DecodeError::NameTooLong(MAX_NAME_LEN + 1))
         );
     }
 
@@ -1183,5 +1380,193 @@ mod tests {
             ],
         )]);
         assert_eq!(decode(&encode(&map)).unwrap(), map);
+    }
+
+    // -- validate: the encode-side contract -------------------------------
+
+    #[test]
+    fn validate_accepts_a_well_formed_map() {
+        let map = map_of(vec![(
+            "props",
+            vec![
+                HSpecEntry::new(href("first"), kitchen_sink()),
+                HSpecEntry::new(href("second"), every_operator()),
+            ],
+        )]);
+        assert_eq!(validate(&map), Ok(()));
+    }
+
+    #[test]
+    fn validate_accepts_names_at_the_length_cap() {
+        let name = "a".repeat(MAX_NAME_LEN);
+        let mut map = HSpecMap::default();
+        map.insert(
+            name.clone(),
+            vec![HSpecEntry::new(
+                HFnRef(name.clone()),
+                HAssert::AppOk(HFnRef(name), vec![]),
+            )],
+        );
+        assert_eq!(validate(&map), Ok(()));
+        // ...and the whole thing round-trips, so the cap is truly the boundary.
+        assert_eq!(decode(&encode(&map)).unwrap(), map);
+    }
+
+    #[test]
+    fn validate_rejects_an_over_long_spec_name() {
+        let name = "a".repeat(MAX_NAME_LEN + 1);
+        let map = map_of(vec![(
+            name.as_str(),
+            vec![HSpecEntry::new(href("f"), HAssert::True)],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::SpecName {
+                name,
+                len: MAX_NAME_LEN + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_spec_name() {
+        let map = map_of(vec![("", vec![HSpecEntry::new(href("f"), HAssert::True)])]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::SpecName {
+                name: String::new(),
+                len: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_over_long_entry_symbol() {
+        let symbol = "z".repeat(MAX_NAME_LEN + 1);
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(HFnRef(symbol.clone()), HAssert::True)],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::FunctionSymbol {
+                spec: "s".to_string(),
+                symbol,
+                len: MAX_NAME_LEN + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_entry_symbol() {
+        let map = map_of(vec![("s", vec![HSpecEntry::new(href(""), HAssert::True)])]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::FunctionSymbol {
+                spec: "s".to_string(),
+                symbol: String::new(),
+                len: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_over_long_symbol_referenced_in_a_tree() {
+        // The entry's own symbol is fine, but an `App` inside its tree names an
+        // over-long symbol — which the decoder would also reject, since it
+        // enters the symbol table.
+        let callee = "c".repeat(MAX_NAME_LEN + 1);
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::nz(HTerm::App(HFnRef(callee.clone()), vec![HTerm::Local(0)])),
+            )],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::FunctionSymbol {
+                spec: "s".to_string(),
+                symbol: callee,
+                len: MAX_NAME_LEN + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_accepts_a_tree_at_the_depth_cap() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH))],
+        )]);
+        assert_eq!(validate(&map), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_a_tree_beyond_the_depth_cap() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH + 1))],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::TreeTooDeep {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "depth cap")]
+    fn encode_panics_on_a_tree_beyond_the_depth_cap() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH + 1))],
+        )]);
+        let _ = encode(&map);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid length")]
+    fn encode_panics_on_an_over_long_name() {
+        let name = "a".repeat(MAX_NAME_LEN + 1);
+        let map = map_of(vec![(
+            name.as_str(),
+            vec![HSpecEntry::new(href("f"), HAssert::True)],
+        )]);
+        let _ = encode(&map);
+    }
+
+    /// The load-bearing invariant for the linker's decode-then-re-encode path
+    /// (`merge.rs`): anything `decode` accepts satisfies `validate`, so the
+    /// re-encode can never trip `encode`'s contract panic. Exercised across the
+    /// representative round-trip corpus.
+    #[test]
+    fn every_decoded_map_satisfies_validate() {
+        let name_at_cap = "a".repeat(MAX_NAME_LEN);
+        let corpus = vec![
+            HSpecMap::default(),
+            map_of(vec![("s", vec![])]),
+            map_of(vec![(
+                "props",
+                vec![
+                    HSpecEntry::new(href("first"), kitchen_sink()),
+                    HSpecEntry::new(href("second"), every_operator()),
+                ],
+            )]),
+            map_of(vec![(
+                "s",
+                vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH))],
+            )]),
+            map_of(vec![(
+                name_at_cap.as_str(),
+                vec![HSpecEntry::new(HFnRef(name_at_cap.clone()), HAssert::True)],
+            )]),
+        ];
+        for map in corpus {
+            let decoded = decode(&encode(&map)).expect("valid map round-trips");
+            assert_eq!(validate(&decoded), Ok(()), "decoded map must validate");
+        }
     }
 }

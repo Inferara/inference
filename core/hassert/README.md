@@ -72,11 +72,21 @@ pub const HSPECS_SECTION_VERSION: u32 = 1;
 
 pub fn encode(map: &HSpecMap) -> Vec<u8>;
 pub fn decode(data: &[u8]) -> Result<HSpecMap, DecodeError>;
+pub fn validate(map: &HSpecMap) -> Result<(), PayloadError>;
 ```
 
 `encode` produces the section *payload* (the enclosing custom-section framing is added by the emitter). The encoding is **canonical**: the symbol table and spec list are sorted, so equal maps encode to identical bytes regardless of insertion order, and `decode` rejects any non-canonical ordering — the two are mutual inverses on well-formed input.
 
 The wire format is LEB128 throughout, version-led, with a shared function-symbol table followed by the specs. The full tag table lives in the `codec` module documentation.
+
+### The `encode` contract
+
+`encode` is infallible by signature but carries a contract: the map must satisfy `validate` — every spec name and function symbol non-empty and at most `MAX_NAME_LEN` bytes, every obligation tree at most `MAX_TREE_DEPTH` deep. This is exactly the input contract `decode` enforces. An unvalidated map could otherwise serialize into a payload the codec's own hardened decoder rejects (a corrupt artifact), or overflow the stack while encoding a pathologically deep tree, so `encode` calls `validate` first and **panics** on a violation. A documented contract panic is strictly safer than either alternative.
+
+Callers therefore pass one of:
+
+- **Decode output.** Anything `decode` accepts satisfies `validate` (pinned by the crate test `every_decoded_map_satisfies_validate`), so re-encoding a decoded map — as the linker's merge does — can never panic.
+- **Data run through `validate` first**, lifting the returned `PayloadError` into the caller's own diagnostic. Code generation, the one producer of fresh maps, does this: it gates on `validate` before emitting the section and turns a violation into a clean `CodegenError` (`HspecTreeTooDeep` / `HspecNameTooLong`) naming the offending spec and identifier, rather than reaching the panic.
 
 ### Hardening
 

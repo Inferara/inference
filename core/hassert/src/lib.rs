@@ -50,7 +50,7 @@ mod codec;
 mod ir;
 
 pub use codec::{
-    DecodeError, HSPECS_SECTION_NAME, HSPECS_SECTION_VERSION, MAX_NAME_LEN, MAX_TREE_DEPTH, decode,
-    encode,
+    DecodeError, HSPECS_SECTION_NAME, HSPECS_SECTION_VERSION, MAX_NAME_LEN, MAX_TREE_DEPTH,
+    PayloadError, decode, encode, validate,
 };
 pub use ir::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm};

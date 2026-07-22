@@ -152,6 +152,25 @@ pub(crate) enum CodegenError {
         max: usize,
     },
 
+    /// A spec name or a spec-function symbol carried in a `hassert` obligation
+    /// falls outside the `inference.hspecs` codec's name-length contract (at
+    /// most `max` bytes; a non-empty minimum that source identifiers always
+    /// meet). The encoder is infallible, so an out-of-range name would serialize
+    /// into a section the codec's own decoder — in the linker and the Rocq
+    /// translator — rejects. Codegen refuses to write such an artifact, naming
+    /// the offending identifier and its spec. Only a pathologically long
+    /// identifier reaches this; realistic names are far shorter.
+    #[error(
+        "the inference.hspecs name '{name}' in spec '{spec}' is {len} bytes, outside the \
+         1..={max} bytes the section permits; shorten the identifier"
+    )]
+    HspecNameTooLong {
+        spec: String,
+        name: String,
+        len: usize,
+        max: usize,
+    },
+
     /// One or more specification functions could not be translated into a
     /// `hassert` verification obligation: a construct with no assertion
     /// encoding (`loop`, `break`, a `unique` block, `**`, memory access), an

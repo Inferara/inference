@@ -387,19 +387,24 @@ two `HSpecMap`s that are equal (regardless of insertion or map-iteration
 order) encode to identical bytes.
 
 **Decoder hardening**: both the leading `version` (rejecting anything but
-`1`), and, specific to `inference.hspecs`: a 255-byte cap on any symbol
-or spec name (`MAX_NAME_LEN`), a 256-level cap on assertion/term nesting
+`1`), and, specific to `inference.hspecs`: a 1024-byte sanity cap on any
+symbol or spec-name key (`MAX_NAME_LEN` — deliberately larger than
+`inference.spec_funcs`' 255-byte spec-name cap, because an hspecs function
+symbol combines a spec name with function identifiers and so is a longer
+kind of string), a 256-level cap on assertion/term nesting
 (`MAX_TREE_DEPTH`, matching `wasm-to-v`'s unrelated
 `MAX_EXPRESSION_DEPTH` WASM-body-nesting cap only by coincidence of
 value), strict-ascending-and-thus-unique ordering on both the symbol
 table and the spec list, bounds-checked counts (an advertised count is
 rejected before any allocation it would drive), and full UTF-8/trailing-byte
 validation. Because [`encode`] is infallible but [`decode`] enforces the
-depth cap, codegen runs its own pre-encode check
-(`hspecs_section::check_tree_depths`, `CodegenError::HspecTreeTooDeep`)
-so an over-deep obligation is refused with an actionable diagnostic
-naming the offending spec and function, rather than silently producing a
-`.wasm` that fails its own downstream decode.
+depth cap and a non-empty, capped-length name contract, codegen runs its
+own pre-encode check (`hspecs_section::check_payload`, delegating to the
+shared `inference_hassert::validate`) so an over-deep obligation or an
+over-long identifier is refused with an actionable diagnostic
+(`CodegenError::HspecTreeTooDeep` / `HspecNameTooLong`) naming the
+offending spec and function, rather than silently producing a `.wasm`
+that fails its own downstream decode.
 
 ### Explicit-vs-embedded merge (both sections)
 

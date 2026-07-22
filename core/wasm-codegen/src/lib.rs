@@ -167,18 +167,12 @@ pub fn codegen(
 
     // Refuse to write an `inference.hspecs` section the codec's own decoder
     // would reject: `inference_hassert::encode` is infallible, but its hardened
-    // decoder caps tree depth, so an over-deep obligation would serialize into a
-    // corrupt-at-decode artifact. Surfacing it here names the offending spec and
-    // function instead of leaving a `.wasm` that fails its own downstream
-    // link/translate step.
-    if let Err(too_deep) = hspecs_section::check_tree_depths(&hspecs) {
-        return Err(CodegenError::HspecTreeTooDeep {
-            spec: too_deep.spec,
-            function: too_deep.function,
-            max: inference_hassert::MAX_TREE_DEPTH,
-        }
-        .into());
-    }
+    // decoder enforces an input contract (bounded tree depth, non-empty names
+    // within a byte cap), so an unchecked obligation would serialize into a
+    // corrupt-at-decode artifact. Gating on the shared validator here names the
+    // offending spec and identifier instead of leaving a `.wasm` that fails its
+    // own downstream link/translate step.
+    hspecs_section::check_payload(&hspecs)?;
 
     // Snapshot `has_main` before `finish_and_take` consumes the compiler:
     // the section is emitted in a single pass that moves out the recorded

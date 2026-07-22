@@ -503,3 +503,47 @@ mod fixture_nondet_body_modifier_rejected {
         );
     }
 }
+
+// ============================================================================
+// A spec-function identifier long enough that its `inference.hspecs` symbol
+// (`{spec}.{fn}`) overflows the codec's name cap is a clean codegen error, not
+// a panic from the infallible encoder.
+// ============================================================================
+#[cfg(test)]
+mod over_long_spec_function_name_rejected {
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+    use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
+
+    /// An arbitrarily long spec-function name is legal source — the lexer and
+    /// type checker impose no identifier-length limit (verified: this module
+    /// type-checks the fixture before codegen) — so nothing upstream stops it.
+    /// Its `inference.hspecs` function symbol is `{spec}.{fn}`; once the
+    /// identifier pushes that symbol past the shared codec's byte cap, the
+    /// fail-closed pre-encode validator turns it into a clean `HspecNameTooLong`
+    /// codegen error rather than letting the infallible encoder panic on a
+    /// decode-rejected artifact. The name is sized off `MAX_NAME_LEN` so the
+    /// test tracks the cap.
+    #[test]
+    fn over_long_spec_function_name_is_a_clean_codegen_error() {
+        let long_name = "f".repeat(inference_hassert::MAX_NAME_LEN + 64);
+        let source = format!("spec S {{ fn {long_name}() -> i32 {{ return 1; }} }}");
+        let arena = build_ast(source);
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("a long identifier is legal source and must type-check")
+            .typed_context();
+        let err = inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "olsfn",
+        )
+        .expect_err("a 300-char spec function name overflows the inference.hspecs name cap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("inference.hspecs") && msg.contains(&long_name),
+            "expected an HspecNameTooLong diagnostic naming the identifier; got:\n{msg}"
+        );
+    }
+}
