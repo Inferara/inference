@@ -723,9 +723,12 @@ impl<'s> Lowering<'s> {
     /// The nesting is built right-to-left: the `else` chain starts at the
     /// bare-`else` block (if any), then arms `k-1 … 0` are folded in, wrapping
     /// every arm but the outermost in a synthetic block so it can serve as the
-    /// previous arm's `else_block`. Each synthetic wrapper and `Stmt::If` takes
-    /// its own arm's location so diagnostics point at the right arm. At least one
-    /// arm is always emitted so malformed input (missing condition or body) still
+    /// previous arm's `else_block`. The outermost `Stmt::If` spans the whole
+    /// if-statement, so a hit anywhere in the statement (its condition or any
+    /// arm) descends into it. Every nested `else if` arm (and its synthetic
+    /// wrapper) spans from its own condition to the end of the statement, since
+    /// that arm's subtree always reaches the final `else`. At least one arm is
+    /// always emitted so malformed input (missing condition or body) still
     /// lowers to an `if`, keeping lowering total.
     fn lower_if_statement(&mut self, node: &SyntaxNode, location: Location) -> StmtId {
         let conditions = self.if_conditions(node);
@@ -740,11 +743,23 @@ impl<'s> Lowering<'s> {
 
         let mut outermost = None;
         for i in (0..arm_count.max(1)).rev() {
-            let arm_location = blocks
-                .get(i)
-                .map(|block| block.loc)
-                .or_else(|| conditions.get(i).map(|cond| cond.loc))
-                .unwrap_or(location);
+            let arm_location = if i == 0 {
+                location
+            } else {
+                let start_loc = conditions
+                    .get(i)
+                    .map(|cond| cond.loc)
+                    .or_else(|| blocks.get(i).map(|block| block.loc))
+                    .unwrap_or(location);
+                Location::new(
+                    start_loc.offset_start,
+                    location.offset_end,
+                    start_loc.start_line,
+                    start_loc.start_column,
+                    location.end_line,
+                    location.end_column,
+                )
+            };
             let condition = if let Some(cond) = conditions.get(i) {
                 self.lower_expression(cond)
             } else {
