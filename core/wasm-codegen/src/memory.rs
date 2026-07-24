@@ -376,6 +376,15 @@ pub(crate) struct FrameLayout {
     pub struct_offsets: FxHashMap<String, StructSlot>,
     /// WASM local index of the synthetic `__frame_ptr` local.
     pub frame_ptr_local: u32,
+    /// Byte offset of a shared staging region used to build a self-referential
+    /// compound reassignment (`p = P { x: p.y, y: p.x }`) before copying it into
+    /// the destination slot. `None` unless the function body contains at least
+    /// one such assignment, so functions without one stay byte-identical.
+    ///
+    /// One region is reused across every self-referential assignment in the body:
+    /// each build-then-copy is sequential and the region is dead after each copy,
+    /// so it is sized to the largest such destination.
+    pub scratch_offset: Option<u32>,
 }
 
 /// Returns the byte size of a single element for the given type.
@@ -1056,6 +1065,7 @@ mod tests {
             array_offsets: FxHashMap::default(),
             struct_offsets: FxHashMap::default(),
             frame_ptr_local: 0,
+            scratch_offset: None,
         };
         assert_eq!(layout.total_size, 16);
         assert!(layout.array_offsets.is_empty());

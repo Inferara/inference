@@ -3644,6 +3644,144 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn struct_self_ref_reassign_test() {
+        let test_name = "struct_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_self_ref_reassign_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // Each destination is reassigned from a literal that reads its own
+        // pre-assignment fields; the whole RHS must be evaluated against that
+        // pristine state. Before the fix these returned the clobbered values
+        // (swap_y=222, expr_y=100, rotate_b=?, nested_swap=3).
+        let cases: &[(&str, i64)] = &[
+            ("swap_y", 111),
+            ("expr_x", 107),
+            ("expr_y", 93),
+            ("rotate_a", 3),
+            ("rotate_b", 1),
+            ("rotate_c", 2),
+            ("nested_swap", 1),
+        ];
+        for &(name, expected) in cases {
+            let f: TypedFunc<(), i64> = instance
+                .get_typed_func(&mut store, name)
+                .unwrap_or_else(|_| panic!("Failed to get '{name}'"));
+            let result = f
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("{name} failed: {e}"));
+            assert_eq!(result, expected, "{name} should return {expected}");
+        }
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        assert_eq!(
+            stack_pointer.get(&mut store).i32().unwrap(),
+            65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn array_self_ref_reassign_test() {
+        let test_name = "array_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_self_ref_reassign_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "array_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // `a = [a[1], a[0]]` swaps against the pristine array. Before the fix the
+        // first store clobbered a[0], so swap01 returned 909 and rotate3 332.
+        let swap01: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "swap01")
+            .expect("Failed to get 'swap01'");
+        assert_eq!(
+            swap01.call(&mut store, ()).expect("swap01 failed"),
+            905,
+            "swap01 should return 905 (a=[9,5])"
+        );
+
+        let rotate3: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "rotate3")
+            .expect("Failed to get 'rotate3'");
+        assert_eq!(
+            rotate3.call(&mut store, ()).expect("rotate3 failed"),
+            312,
+            "rotate3 should return 312 (b=[3,1,2])"
+        );
+
+        let swap01_i64: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "swap01_i64")
+            .expect("Failed to get 'swap01_i64'");
+        assert_eq!(
+            swap01_i64.call(&mut store, ()).expect("swap01_i64 failed"),
+            905,
+            "swap01_i64 should return 905 (c=[9,5])"
+        );
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        assert_eq!(
+            stack_pointer.get(&mut store).i32().unwrap(),
+            65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
     fn struct_params_test() {
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 5);
         cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
@@ -7994,6 +8132,46 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_assign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_self_ref_reassign_wasm() {
+        let dir = base_test_dir().join("struct_self_ref_reassign");
+        let source_code = std::fs::read_to_string(dir.join("struct_self_ref_reassign.inf"))
+            .expect("Failed to read struct_self_ref_reassign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_self_ref_reassign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_self_ref_reassign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_self_ref_reassign_wasm() {
+        let dir = base_test_dir().join("array_self_ref_reassign");
+        let source_code = std::fs::read_to_string(dir.join("array_self_ref_reassign.inf"))
+            .expect("Failed to read array_self_ref_reassign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_self_ref_reassign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_self_ref_reassign");
     }
 
     #[test]
