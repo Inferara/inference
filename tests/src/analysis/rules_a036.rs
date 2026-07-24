@@ -399,7 +399,15 @@ mod analysis_rules_tests {
     /// An `n`-element array literal whose first element reads `a[0]` (making the
     /// literal self-referential) and whose remaining elements are zeros.
     fn array_selfref_literal(n: usize) -> String {
-        let mut elems = vec!["a[0]".to_string()];
+        array_selfref_reading("a", n)
+    }
+
+    /// An `n`-element array literal whose first element reads `{var}[0]` (making
+    /// the literal self-referential in `var`) and whose remaining elements are
+    /// zeros. Lets a test place two self-referential reassignments of distinct
+    /// destinations in one function.
+    fn array_selfref_reading(var: &str, n: usize) -> String {
+        let mut elems = vec![format!("{var}[0]")];
         elems.extend(std::iter::repeat_n("0".to_string(), n.saturating_sub(1)));
         format!("[{}]", elems.join(", "))
     }
@@ -740,6 +748,42 @@ mod analysis_rules_tests {
         assert!(
             !has_stack_depth_exceeded(&source),
             "a non-self-referential reassign reserves no scratch, so the ~40 KB frame fits"
+        );
+    }
+
+    /// Two sequential self-referential reassignments of distinct large arrays in
+    /// one function. Codegen reserves a single shared scratch region sized to the
+    /// *larger* destination (~18 KB), reused for both build-then-copy sequences,
+    /// so the real frame is the two destination slots plus that one region.
+    ///
+    /// The estimator must mirror that shared region with a single MAX charge, not
+    /// a per-assignment SUM. With the two ~18 KB / ~17.6 KB destinations plus a
+    /// single ~18 KB scratch charge the estimate (~53.6 KB) fits under the 64 KB
+    /// budget, so A036 must accept. A sum-based scratch charge (two ~18 KB / ~17.6
+    /// KB regions on top of the destinations, ~71 KB) would cross the budget and
+    /// falsely reject this valid frame. Guards against re-introducing the
+    /// sum-based scratch over-counting.
+    #[test]
+    fn a036_two_self_ref_reassigns_share_one_scratch_accepted() {
+        let zeros_a = repeat_zeros(4500);
+        let zeros_b = repeat_zeros(4400);
+        let selfref_a = array_selfref_reading("a", 4500);
+        let selfref_b = array_selfref_reading("b", 4400);
+        let source = format!(
+            r#"
+                fn s() -> i32 {{
+                    let mut a: [i32; 4500] = {zeros_a};
+                    let mut b: [i32; 4400] = {zeros_b};
+                    a = {selfref_a};
+                    b = {selfref_b};
+                    return a[0] + b[0];
+                }}
+            "#
+        );
+        assert!(
+            !has_stack_depth_exceeded(&source),
+            "two self-referential reassigns share one scratch region (max, not sum), \
+             so the frame fits and A036 must accept"
         );
     }
 

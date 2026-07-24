@@ -222,8 +222,10 @@ pub fn estimate_frame_sizes(ctx: &TypedContext) -> FxHashMap<FnKey, u32> {
 ///
 /// Mirrors codegen's slot rules: array/struct/custom params, a mutable `self`,
 /// and array/struct/custom `let`/`const` bindings each get a slot; scalars and
-/// enums get none. See the module-level soundness note for why this is always
-/// at least codegen's real `FrameLayout.total_size`.
+/// enums get none. Self-referential compound reassignments add codegen's single
+/// shared scratch region on top (one max charge, see [`max_self_ref_scratch`]).
+/// See the module-level soundness note for why this is always at least codegen's
+/// real `FrameLayout.total_size`.
 fn estimate_frame_size(ctx: &TypedContext, node: &FnNode) -> u32 {
     let arena = ctx.arena();
     let mut bytes: u32 = 0;
@@ -238,6 +240,7 @@ fn estimate_frame_size(ctx: &TypedContext, node: &FnNode) -> u32 {
     }
 
     bytes = bytes.saturating_add(body_frame_bytes(ctx, node.body, &node.module_path));
+    bytes = bytes.saturating_add(max_self_ref_scratch(ctx, node.body, &node.module_path));
 
     if bytes == 0 {
         return 0;
@@ -311,12 +314,39 @@ fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId, module_path: &[String
                 };
                 bytes = bytes.saturating_add(branch_bytes);
             }
-            // A self-referential compound reassignment (`p = P { x: p.y, y: p.x }`)
-            // forces codegen to stage the literal in a scratch frame region before
-            // copying it to the destination, growing the real frame by one more
-            // slot. Charge it so the estimate stays an upper bound. Codegen reuses a
-            // single shared scratch region across all such assignments (the max),
-            // so summing here (one slot per assignment) can only over-approximate.
+            _ => {}
+        }
+    }
+    bytes
+}
+
+/// Returns the size of codegen's single shared self-referential-reassignment
+/// scratch region for the whole function body: the **maximum** slot size over
+/// every self-referential compound-literal reassignment
+/// (`p = P { x: p.y, y: p.x }`, `a = [a[1], a[0]]`), or `0` if there are none.
+///
+/// A self-referential compound reassignment forces codegen to stage the literal
+/// in an in-frame scratch region before copying it to the destination, since
+/// building it field-by-field directly into the destination would clobber the
+/// operands mid-build. Codegen reserves exactly **one** such region per function
+/// (`scan_self_ref_scratch` in `core/wasm-codegen/src/compiler.rs`), reused
+/// sequentially and sized to the largest such destination — not one region per
+/// assignment. Taking the max here therefore mirrors codegen's real frame,
+/// whereas summing (one charge per assignment) would over-count a function with
+/// two or more such reassignments and could falsely exceed the budget.
+///
+/// The walk descends `Block`/`Loop` and **both** `if`/`else` branches with a flat
+/// max (not branch-aware). A flat max over the whole body is a sound upper bound
+/// of codegen's shared region regardless of branch structure — a max over a
+/// superset is never below the max over whichever subset a run actually reaches —
+/// and equals it in the common case. `slot_bytes` (exact size plus the worst-case
+/// per-slot leading padding) upper-bounds the aligned scratch region the same way
+/// it bounds every other slot.
+fn max_self_ref_scratch(ctx: &TypedContext, block_id: BlockId, module_path: &[String]) -> u32 {
+    let arena = ctx.arena();
+    let mut scratch: u32 = 0;
+    for &stmt_id in &arena[block_id].stmts {
+        match &arena[stmt_id].kind {
             Stmt::Assign { left, right } => {
                 if let Expr::Identifier(ident_id) = &arena[*left].kind {
                     let dest = &arena[*ident_id].name;
@@ -332,23 +362,38 @@ fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId, module_path: &[String
                     if self_ref
                         && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(*right))
                     {
-                        bytes = bytes
-                            .saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
+                        scratch = scratch.max(slot_bytes(ctx, &type_info.kind, module_path));
                     }
+                }
+            }
+            Stmt::Block(inner) => {
+                scratch = scratch.max(max_self_ref_scratch(ctx, *inner, module_path));
+            }
+            Stmt::Loop { body, .. } => {
+                scratch = scratch.max(max_self_ref_scratch(ctx, *body, module_path));
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                scratch = scratch.max(max_self_ref_scratch(ctx, *then_block, module_path));
+                if let Some(else_id) = else_block {
+                    scratch = scratch.max(max_self_ref_scratch(ctx, *else_id, module_path));
                 }
             }
             _ => {}
         }
     }
-    bytes
+    scratch
 }
 
 /// Returns `true` if `expr_id` lexically reads the variable named `dest`.
 ///
 /// Duplicates the codegen predicate `Compiler::expr_reads_var`
 /// (`core/wasm-codegen/src/compiler.rs`); the two crates cannot share it. See
-/// the [`body_frame_bytes`] `Stmt::Assign` arm for why the estimate must charge
-/// scratch for a self-referential compound reassignment.
+/// [`max_self_ref_scratch`] for why the estimate must charge scratch for a
+/// self-referential compound reassignment.
 fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
     match &arena[expr_id].kind {
         Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
