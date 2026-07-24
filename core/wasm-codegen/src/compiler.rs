@@ -2073,8 +2073,12 @@ impl Compiler {
             cov_mark::hit!(wasm_codegen_emit_struct_copy);
             self.lower_struct_copy_var_init(arena, value_expr_id, local_idx, name, ctx);
         } else {
-            // init_zero_elision must not leak past lower_expression; reset before LocalSet runs.
-            self.init_zero_elision = true;
+            // Elide syntactic-zero leaf stores only when this binding is not inside a loop.
+            // The prologue memory.fill zeroes the frame once per call, so a loop-scoped compound
+            // literal must emit explicit zero stores to re-initialize each iteration;
+            // loop_exit_depths is non-empty exactly while lowering inside a loop. Reset before
+            // LocalSet so the flag never leaks past lower_expression.
+            self.init_zero_elision = self.loop_ctx.loop_exit_depths.is_empty();
             self.lower_expression(arena, value_expr_id, ctx, Some(name));
             self.init_zero_elision = false;
             self.func().instruction(&Instruction::LocalSet(local_idx));
