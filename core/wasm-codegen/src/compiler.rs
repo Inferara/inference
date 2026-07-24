@@ -1695,6 +1695,34 @@ impl Compiler {
             module_path,
         )?;
 
+        // Reserve one shared staging region, appended after every named slot, for
+        // self-referential compound reassignments. Existing slot offsets are
+        // unchanged, so functions without such an assignment stay byte-identical:
+        // the region is present (and `total_size` grows) only when the scan finds
+        // one. Alignment is at most 8, keeping real padding within A036's per-slot
+        // model.
+        let mut scratch_size: u32 = 0;
+        let mut scratch_align: u32 = 1;
+        Self::scan_self_ref_scratch(
+            arena,
+            block_id,
+            ctx,
+            &struct_offsets,
+            &array_offsets,
+            module_path,
+            &mut scratch_size,
+            &mut scratch_align,
+        )?;
+        let scratch_offset = if scratch_size > 0 {
+            let aligned = align_to(current_offset, scratch_align);
+            current_offset = aligned.checked_add(scratch_size).expect(
+                "Frame offset overflow: scratch allocation exceeds u32::MAX",
+            );
+            Some(aligned)
+        } else {
+            None
+        };
+
         if current_offset == 0 {
             return Ok(None);
         }
@@ -1710,6 +1738,7 @@ impl Compiler {
             array_offsets,
             struct_offsets,
             frame_ptr_local: frame_ptr_local_idx,
+            scratch_offset,
         }))
     }
 
@@ -1907,6 +1936,118 @@ impl Compiler {
                         }
                     }
                 },
+            }
+        }
+        Ok(())
+    }
+
+    /// Scans `block_id` (and its nested blocks) for self-referential compound
+    /// reassignments — `dest = StructLiteral { .. }` / `dest = ArrayLiteral { .. }`
+    /// where a field value or element reads `dest` — accumulating the maximum size
+    /// and alignment of the scratch region needed to stage such a literal before
+    /// copying it into the destination slot.
+    ///
+    /// Descent mirrors [`Self::collect_compound_slots`] (including `if`/`loop`
+    /// bodies) so no reassignment is missed. A single shared region is sound: each
+    /// build-then-copy is sequential and the region is dead after each copy, so the
+    /// per-assignment max (not the sum) is charged.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_self_ref_scratch(
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+        struct_offsets: &FxHashMap<String, StructSlot>,
+        array_offsets: &FxHashMap<String, ArraySlot>,
+        module_path: &[String],
+        max_size: &mut u32,
+        max_align: &mut u32,
+    ) -> Result<(), CodegenError> {
+        for &stmt_id in &arena[block_id].stmts {
+            if let Stmt::Assign { left, right } = &arena[stmt_id].kind
+                && let Expr::Identifier(ident_id) = &arena[*left].kind
+            {
+                let dest = &arena[*ident_id].name;
+                match &arena[*right].kind {
+                    Expr::StructLiteral { fields, .. }
+                        if fields
+                            .iter()
+                            .any(|(_, fe)| Self::expr_reads_var(arena, *fe, dest)) =>
+                    {
+                        if let Some(slot) = struct_offsets.get(dest) {
+                            *max_size = (*max_size).max(slot.total_size);
+                            *max_align =
+                                (*max_align).max(memory::max_struct_alignment(&slot.fields));
+                        }
+                    }
+                    Expr::ArrayLiteral { elements }
+                        if elements
+                            .iter()
+                            .any(|e| Self::expr_reads_var(arena, *e, dest)) =>
+                    {
+                        if let Some(slot) = array_offsets.get(dest) {
+                            let size = slot.elem_size.checked_mul(slot.length).expect(
+                                "Array byte size overflow: elem_size * length exceeds u32::MAX",
+                            );
+                            // Element natural alignment (at most 8) drives the scratch
+                            // region's alignment. Derive it from the element type; the
+                            // 8-byte fallback is a sound over-alignment for the
+                            // unreachable case of missing type info.
+                            let elem_align = match ctx
+                                .get_node_typeinfo(NodeId::Expr(*right))
+                                .map(|info| info.kind)
+                            {
+                                Some(TypeInfoKind::Array(elem, _)) => {
+                                    natural_alignment_for_type(&elem.kind, ctx, module_path)?
+                                }
+                                _ => 8,
+                            };
+                            *max_size = (*max_size).max(size);
+                            *max_align = (*max_align).max(elem_align);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            match Self::nested_blocks(&arena[stmt_id].kind) {
+                NestedBlocks::None => {}
+                NestedBlocks::Sequential(block) => Self::scan_self_ref_scratch(
+                    arena,
+                    block,
+                    ctx,
+                    struct_offsets,
+                    array_offsets,
+                    module_path,
+                    max_size,
+                    max_align,
+                )?,
+                NestedBlocks::Alternatives {
+                    then_block,
+                    else_block,
+                } => {
+                    Self::scan_self_ref_scratch(
+                        arena,
+                        then_block,
+                        ctx,
+                        struct_offsets,
+                        array_offsets,
+                        module_path,
+                        max_size,
+                        max_align,
+                    )?;
+                    if let Some(else_block) = else_block {
+                        Self::scan_self_ref_scratch(
+                            arena,
+                            else_block,
+                            ctx,
+                            struct_offsets,
+                            array_offsets,
+                            module_path,
+                            max_size,
+                            max_align,
+                        )?;
+                    }
+                }
             }
         }
         Ok(())
@@ -3071,9 +3212,25 @@ impl Compiler {
                     .frame_layout
                     .as_ref()
                     .is_some_and(|layout| layout.array_offsets.contains_key(name));
-                if is_struct_literal {
+                // A literal RHS that reads the destination must be evaluated against
+                // the pre-assignment state: storing field-by-field into the
+                // destination's own slot would let a later initializer read data an
+                // earlier one already clobbered. Such literals are staged in the
+                // frame's scratch region and copied over instead.
+                let self_ref = match &arena[right].kind {
+                    Expr::StructLiteral { fields, .. } => fields
+                        .iter()
+                        .any(|(_, fe)| Self::expr_reads_var(arena, *fe, name)),
+                    Expr::ArrayLiteral { elements } => elements
+                        .iter()
+                        .any(|e| Self::expr_reads_var(arena, *e, name)),
+                    _ => false,
+                };
+                if is_struct_literal && !self_ref {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
+                } else if is_struct_literal {
+                    self.lower_self_ref_struct_reassign(arena, right, name, local_idx, ctx);
                 } else if is_struct_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.struct_offsets[name];
@@ -3083,9 +3240,11 @@ impl Compiler {
                     // src = RHS expression (struct pointer)
                     self.lower_expression(arena, right, ctx, None);
                     self.emit_memory_copy(byte_size);
-                } else if is_array_literal {
+                } else if is_array_literal && !self_ref {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
+                } else if is_array_literal {
+                    self.lower_self_ref_array_reassign(arena, right, name, local_idx, ctx);
                 } else if is_array_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.array_offsets[name];
@@ -3115,6 +3274,118 @@ impl Compiler {
             }
             _ => todo!("Assignment to non-identifier targets not yet supported"),
         }
+    }
+
+    /// Lowers a struct-literal reassignment whose fields read the destination
+    /// (`p = P { x: p.y, y: p.x }`).
+    ///
+    /// The literal is built into the frame's scratch region — reading the
+    /// still-pristine destination — then copied over it, so every field observes
+    /// the pre-assignment state (per statements.md 9.1.1). Storing field-by-field
+    /// into the destination's own slot would let a later field read data an
+    /// earlier one already clobbered.
+    fn lower_self_ref_struct_reassign(
+        &mut self,
+        arena: &AstArena,
+        right: ExprId,
+        name: &str,
+        local_idx: u32,
+        ctx: &TypedContext,
+    ) {
+        let layout = self.frame_layout.as_ref().unwrap();
+        let dest_slot = &layout.struct_offsets[name];
+        let field_slots = dest_slot.fields.clone();
+        let total_size = dest_slot.total_size;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let scratch_off = layout.scratch_offset.expect(
+            "self-referential struct reassignment requires a scratch region reserved \
+             in compute_frame_layout",
+        );
+        let rhs_fields: Vec<(IdentId, ExprId)> = match &arena[right].kind {
+            Expr::StructLiteral { fields, .. } => {
+                fields.iter().map(|(id, expr)| (*id, *expr)).collect()
+            }
+            _ => unreachable!("caller guarantees a StructLiteral RHS"),
+        };
+        self.lower_struct_literal_fields(
+            arena,
+            &rhs_fields,
+            &field_slots,
+            frame_ptr_local,
+            scratch_off,
+            ctx,
+            name,
+            0,
+            false,
+        );
+        self.func().instruction(&Instruction::LocalGet(local_idx));
+        emit_ptr_offset_addr(self.func(), frame_ptr_local, scratch_off);
+        self.emit_memory_copy(total_size);
+    }
+
+    /// Lowers an array-literal reassignment whose elements read the destination
+    /// (`a = [a[1], a[0]]`).
+    ///
+    /// Mirrors [`Self::lower_self_ref_struct_reassign`]: the literal is built into
+    /// the frame's scratch region against the pristine destination, then copied
+    /// over it. Struct-element and scalar/nested-element arrays reuse the same
+    /// element-store routines as the non-self-referential path, targeting scratch.
+    fn lower_self_ref_array_reassign(
+        &mut self,
+        arena: &AstArena,
+        right: ExprId,
+        name: &str,
+        local_idx: u32,
+        ctx: &TypedContext,
+    ) {
+        let layout = self.frame_layout.as_ref().unwrap();
+        let dest_slot = &layout.array_offsets[name];
+        let elem_size = dest_slot.elem_size;
+        let length = dest_slot.length;
+        let element_layout = dest_slot.element_layout.clone();
+        let frame_ptr_local = layout.frame_ptr_local;
+        let scratch_off = layout.scratch_offset.expect(
+            "self-referential array reassignment requires a scratch region reserved \
+             in compute_frame_layout",
+        );
+        let total_size = elem_size.checked_mul(length).expect(
+            "Array byte size overflow: elem_size * length exceeds u32::MAX",
+        );
+        let elements: Vec<ExprId> = match &arena[right].kind {
+            Expr::ArrayLiteral { elements } => elements.clone(),
+            _ => unreachable!("caller guarantees an ArrayLiteral RHS"),
+        };
+        if let Some(field_slots) = element_layout {
+            self.lower_array_literal_struct_elements(
+                arena,
+                &elements,
+                &field_slots,
+                frame_ptr_local,
+                scratch_off,
+                elem_size,
+                ctx,
+                false,
+            );
+        } else {
+            let elem_kind = match ctx.get_node_typeinfo(NodeId::Expr(right)).map(|info| info.kind) {
+                Some(TypeInfoKind::Array(elem, _)) => elem.kind,
+                other => panic!(
+                    "array literal reassignment '{name}' has non-array type info: {other:?}"
+                ),
+            };
+            self.store_array_literal_elements(
+                arena,
+                &elements,
+                &elem_kind,
+                scratch_off,
+                frame_ptr_local,
+                ctx,
+                false,
+            );
+        }
+        self.func().instruction(&Instruction::LocalGet(local_idx));
+        emit_ptr_offset_addr(self.func(), frame_ptr_local, scratch_off);
+        self.emit_memory_copy(total_size);
     }
 
     /// Lowers the return expression in an sret function (array or struct return).
@@ -4178,6 +4449,59 @@ impl Compiler {
                 expr,
             } => Self::is_syntactic_zero(arena, *expr),
             _ => false,
+        }
+    }
+
+    /// Returns `true` if `expr_id` lexically reads the variable named `dest`.
+    ///
+    /// A struct/array literal whose field or element initializers read the
+    /// destination of the assignment they belong to (`p = P { x: p.y, y: p.x }`)
+    /// must be evaluated against the pre-assignment state, so codegen builds it in
+    /// a scratch region first rather than storing field-by-field into the
+    /// destination's own slot. This predicate detects that self-reference.
+    ///
+    /// It is the exhaustive expression walk mirrored from
+    /// `inference_analysis::rules::method_never_accesses_self`, specialized to a
+    /// leaf identifier equal to `dest`. Because member-access and array-index
+    /// bases are themselves `Identifier` nodes, the single leaf check catches a
+    /// bare read (`p`), a field read (`p.x`), and an element read (`p.arr[i]`).
+    /// Inference has no references, pointers, or globals, so a lexical name read
+    /// is the only way an expression can alias `dest`: a call cannot return `dest`
+    /// by reference, and a call argument that reads `dest` is caught by the
+    /// `FunctionCall` recursion.
+    fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_reads_var(arena, *left, dest)
+                    || Self::expr_reads_var(arena, *right, dest)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => Self::expr_reads_var(arena, *expr, dest),
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_reads_var(arena, *function, dest)
+                    || args
+                        .iter()
+                        .any(|(_, arg_expr)| Self::expr_reads_var(arena, *arg_expr, dest))
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_reads_var(arena, *array, dest)
+                    || Self::expr_reads_var(arena, *index, dest)
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, field_expr)| Self::expr_reads_var(arena, *field_expr, dest)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|elem| Self::expr_reads_var(arena, *elem, dest)),
+            Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
         }
     }
 

@@ -43,8 +43,9 @@
 
 use std::collections::HashSet;
 
-use inference_ast::ids::{BlockId, NodeId};
-use inference_ast::nodes::{ArgData, ArgKind, Def, Location, Stmt};
+use inference_ast::arena::AstArena;
+use inference_ast::ids::{BlockId, ExprId, NodeId};
+use inference_ast::nodes::{ArgData, ArgKind, Def, Expr, Location, Stmt};
 use inference_fn_key::FnKey;
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::StructInfo;
@@ -310,10 +311,76 @@ fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId, module_path: &[String
                 };
                 bytes = bytes.saturating_add(branch_bytes);
             }
+            // A self-referential compound reassignment (`p = P { x: p.y, y: p.x }`)
+            // forces codegen to stage the literal in a scratch frame region before
+            // copying it to the destination, growing the real frame by one more
+            // slot. Charge it so the estimate stays an upper bound. Codegen reuses a
+            // single shared scratch region across all such assignments (the max),
+            // so summing here (one slot per assignment) can only over-approximate.
+            Stmt::Assign { left, right } => {
+                if let Expr::Identifier(ident_id) = &arena[*left].kind {
+                    let dest = &arena[*ident_id].name;
+                    let self_ref = match &arena[*right].kind {
+                        Expr::StructLiteral { fields, .. } => fields
+                            .iter()
+                            .any(|(_, fe)| expr_reads_var(arena, *fe, dest)),
+                        Expr::ArrayLiteral { elements } => elements
+                            .iter()
+                            .any(|e| expr_reads_var(arena, *e, dest)),
+                        _ => false,
+                    };
+                    if self_ref
+                        && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(*right))
+                    {
+                        bytes = bytes
+                            .saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
+                    }
+                }
+            }
             _ => {}
         }
     }
     bytes
+}
+
+/// Returns `true` if `expr_id` lexically reads the variable named `dest`.
+///
+/// Duplicates the codegen predicate `Compiler::expr_reads_var`
+/// (`core/wasm-codegen/src/compiler.rs`); the two crates cannot share it. See
+/// the [`body_frame_bytes`] `Stmt::Assign` arm for why the estimate must charge
+/// scratch for a self-referential compound reassignment.
+fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
+    match &arena[expr_id].kind {
+        Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
+        Expr::Binary { left, right, .. } => {
+            expr_reads_var(arena, *left, dest) || expr_reads_var(arena, *right, dest)
+        }
+        Expr::PrefixUnary { expr, .. }
+        | Expr::Parenthesized { expr }
+        | Expr::MemberAccess { expr, .. }
+        | Expr::TypeMemberAccess { expr, .. } => expr_reads_var(arena, *expr, dest),
+        Expr::FunctionCall { function, args, .. } => {
+            expr_reads_var(arena, *function, dest)
+                || args
+                    .iter()
+                    .any(|(_, arg_expr)| expr_reads_var(arena, *arg_expr, dest))
+        }
+        Expr::ArrayIndexAccess { array, index } => {
+            expr_reads_var(arena, *array, dest) || expr_reads_var(arena, *index, dest)
+        }
+        Expr::StructLiteral { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| expr_reads_var(arena, *field_expr, dest)),
+        Expr::ArrayLiteral { elements } => elements
+            .iter()
+            .any(|elem| expr_reads_var(arena, *elem, dest)),
+        Expr::NumberLiteral { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::StringLiteral { .. }
+        | Expr::UnitLiteral
+        | Expr::Uzumaki
+        | Expr::Type(_) => false,
+    }
 }
 
 /// Returns the upper-bound slot contribution for a binding/parameter of the
