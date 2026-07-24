@@ -719,9 +719,11 @@ impl<'s> Lowering<'s> {
     /// special handling for else-if.
     ///
     /// With `k` conditions, arm `i` pairs `conditions[i]` with `blocks[i]`; a
-    /// bare `else` is present iff there is one block beyond the `k` arm blocks.
-    /// The nesting is built right-to-left: the `else` chain starts at the
-    /// bare-`else` block (if any), then arms `k-1 … 0` are folded in, wrapping
+    /// bare `else` is present iff there is at least one arm and one block beyond
+    /// the `k` arm blocks. The nesting is built right-to-left: the `else` chain
+    /// starts at the bare-`else` block (only seeded when `k > 0`, so a lone
+    /// block on a conditionless `if` stays the synthetic arm's body rather than
+    /// being lowered twice), then arms `k-1 … 0` are folded in, wrapping
     /// every arm but the outermost in a synthetic block so it can serve as the
     /// previous arm's `else_block`. The outermost `Stmt::If` spans the whole
     /// if-statement, so a hit anywhere in the statement (its condition or any
@@ -735,7 +737,7 @@ impl<'s> Lowering<'s> {
         let blocks = self.if_arm_blocks(node);
         let arm_count = conditions.len();
 
-        let mut else_chain = if blocks.len() > arm_count {
+        let mut else_chain = if arm_count > 0 && blocks.len() > arm_count {
             Some(self.lower_block(blocks[arm_count]))
         } else {
             None
@@ -2578,6 +2580,41 @@ mod tests {
         let arena = lower("fn f() { if c { x = 1; } }");
         match single_stmt(&arena) {
             Stmt::If { else_block, .. } => assert!(else_block.is_none()),
+            other => panic!("expected if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditionless_if_lowers_its_block_once() {
+        // Pins error-recovery for a conditionless `if`: the parser attaches a
+        // single block and no condition, so lowering must consume that block
+        // exactly once, as the synthetic arm's `then_block`. A seed that also
+        // lowered a trailing block into an `else_block` when there is no arm to
+        // pair it against would lower the same source block twice, giving it two
+        // `BlockId`s whose statements downstream per-statement passes would then
+        // visit twice. Uses `parse` directly since the input is malformed.
+        let result = parse("fn f() { if else { return 2; } }");
+        assert!(
+            !result.errors.is_empty(),
+            "a conditionless if must report a parse error"
+        );
+        match single_stmt(&result.arena) {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                let then_stmts = &result.arena[*then_block].stmts;
+                assert_eq!(then_stmts.len(), 1, "the single block is the then-arm");
+                assert!(matches!(
+                    result.arena[then_stmts[0]].kind,
+                    Stmt::Return { .. }
+                ));
+                assert!(
+                    else_block.is_none(),
+                    "the block must not be lowered a second time as an else"
+                );
+            }
             other => panic!("expected if, got {other:?}"),
         }
     }
