@@ -702,6 +702,87 @@ mod loops_tests {
         // no element > 100, returns 0
         call!("loop_return_array", i32, 100_i32, 0_i32);
     }
+
+    // A compound `let`/`const` whose literal has syntactic-zero leaves, declared inside a loop,
+    // must be re-zeroed every iteration. The prologue `memory.fill` only zeroes the frame once
+    // per call, so loop-scoped zero leaves need explicit stores; eliding them makes the slot keep
+    // the previous iteration's value and accumulate. These goldens pin the explicit-store output.
+    #[test]
+    fn loop_zero_init_test() {
+        let test_name = "loop_zero_init";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn loop_zero_init_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "loop_zero_init";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+            }};
+        }
+
+        // Every loop-scoped compound binding re-zeroes each iteration; without the fix these
+        // accumulate the previous iteration's leaves and return larger, wrong values.
+
+        // arr: `[i64;1]=[0]` accumulator, adds 1 per iteration => n.
+        call!("arr", i64, 5_i32, 5_i64);
+        call!("arr", i64, 1000_i32, 1000_i64);
+
+        // strct: struct with zero fields, adds 1 to `a` per iteration => n.
+        call!("strct", i64, 5_i32, 5_i64);
+        call!("strct", i64, 1000_i32, 1000_i64);
+
+        // boolarr: `[bool;2]=[false,false]` reset means `b[0]` is always false at the check => 0.
+        call!("boolarr", i32, 5_i32, 0_i32);
+        call!("boolarr", i32, 1000_i32, 0_i32);
+
+        // partial: `[i32;3]=[5,0,0]`, adds a[0]+a[1] = 5+1 = 6 per iteration => 6n.
+        call!("partial", i32, 5_i32, 30_i32);
+        call!("partial", i32, 1000_i32, 6000_i32);
+
+        // twod: `[[i32;2];2]` all-zero, adds g[0][0]+g[1][1] = 1+1 = 2 per iteration => 2n.
+        call!("twod", i32, 5_i32, 10_i32);
+        call!("twod", i32, 1000_i32, 2000_i32);
+
+        // nested: inner loop runs twice per outer iteration, each adds 1 => 2n.
+        call!("nested", i64, 5_i32, 10_i64);
+        call!("nested", i64, 1000_i32, 2000_i64);
+
+        // if_in_loop: compound binding inside an if inside the loop, adds 1 per iteration => n.
+        call!("if_in_loop", i64, 5_i32, 5_i64);
+        call!("if_in_loop", i64, 1000_i32, 1000_i64);
+    }
 }
 
 /// Test data regeneration helper.
@@ -971,6 +1052,27 @@ mod regenerate {
     #[ignore]
     fn regenerate_loop_return_array() {
         let name = "loop_return_array";
+        let dir = test_dir(name);
+        let source_code =
+            std::fs::read_to_string(dir.join(format!("{name}.inf"))).expect("Failed to read .inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join(format!("{name}.wasm"));
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, name);
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_loop_zero_init() {
+        let name = "loop_zero_init";
         let dir = test_dir(name);
         let source_code =
             std::fs::read_to_string(dir.join(format!("{name}.inf"))).expect("Failed to read .inf");
