@@ -297,7 +297,7 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Thirty-eight rules are registered in `all_rules()`. Thirty-three are
+Forty rules are registered in `all_rules()`. Thirty-five are
 error-severity — they block compilation — and five are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned. The tables below group the rules
@@ -394,12 +394,17 @@ is statically known.
 | A032 | top-level `const` declarations are not yet supported |
 | A033 | combined unary operators are prohibited |
 | A041 | a function-local name is declared at most once per function body |
+| A042 | non-deterministic constructs (`forall`/`exists`/`assume`/`unique`) are only valid inside a `spec` declaration |
+| A043 | an entry-file top-level `pub fn` may not use a reserved export name (`memory`, `__stack_pointer`) |
 
 These are honesty rules: each rejects, with a named diagnostic, a construct
 the pipeline does not (or does not yet) support — rather than letting it fail
 obscurely further down. A025 and A041 also remove whole classes of ambiguity
 (reads of uninitialized memory, shadowing) that would otherwise need proof
-obligations of their own.
+obligations of their own. A042 and A043 are permanent rather than
+not-yet-supported restrictions: non-deterministic blocks are proof-only by
+design, and the two reserved names collide with codegen's own synthetic WASM
+exports.
 
 ### Advisory rules
 

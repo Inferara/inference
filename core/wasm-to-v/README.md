@@ -335,6 +335,30 @@ forall.end
 (* Rocq representation with forall block and uzumaki *)
 ```
 
+### Narrow-Typed Domain Constraints
+
+A scalar uzumaki draw always produces a full-width `i32`/`i64` value. When the
+declared type is narrower — `i8`/`u8`/`i16`/`u16`/`bool`/an enum — the WASM
+instruction stream carries a short domain-mapping sequence between the draw
+and the `local.set` (mask for `u8`/`u16`, `shl`+`shr_s` for `i8`/`i16`, `and 1`
+for `bool`, `rem_u <variant count>` for a non-empty enum), and the translator
+carries that sequence into Rocq unchanged — it is ordinary `BI_binop`
+arithmetic, not a special uzumaki form. Compiling `let a: u8 = @;` inside a
+`spec` block produces:
+
+```coq
+BI_uzumaki_num T_i32 ::
+BI_const_num (Vi32 255) ::
+BI_binop T_i32 (Binop_i BOI_and) ::
+BI_local_set 0%N ::
+```
+
+and a `let f: Color = @;` draw over a 3-variant enum produces the same shape
+with `BI_const_num (Vi32 3)` and `BI_binop T_i32 (Binop_i (BOI_rem SX_U))` in
+place of the mask. `i32`/`u32`/`i64`/`u64` draws carry no extra instructions —
+their value set already spans the full width. (Fragment taken from compiling
+`tests/test_data/inf/spec_narrow_uzumaki.inf`.)
+
 ## Testing
 
 The crate includes comprehensive test coverage using WASM test modules in `test_data/`.

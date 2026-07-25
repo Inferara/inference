@@ -153,6 +153,25 @@ The uzumaki opcode is selected by consulting `TypedContext::is_node_i64`. If the
 typed as `i64` or `u64`, `UZUMAKI_I64_OPCODE (0x32)` is used; otherwise
 `UZUMAKI_I32_OPCODE (0x31)` is used.
 
+For a declared type narrower than `i32` (`i8`/`u8`/`i16`/`u16`/`bool`/an enum), the
+draw is followed by a domain-constraint sequence before the `local.set`, so the
+drawn value is confined to the declared type's value set instead of the full
+32-bit draw range. For example, `let c: u8 = @;` lowers to:
+
+```text
+0xfc 0x31     ; i32.uzumaki
+i32.const 255 ; 0xFF
+i32.and
+local.set 2
+```
+
+`i8`/`i16` use `shl`+`shr_s` (sign-narrow) instead of `and`; `bool` uses `and 1`;
+a non-empty enum uses `rem_u <variant count>` (an empty enum is uninhabited and
+left unconstrained, since `rem_u 0` would trap). `i32`/`u32`/`i64`/`u64` draws —
+including both examples above — need no constraint, since their value set
+already spans the full draw width. See `emit_uzumaki_domain_constraint` in
+`compiler.rs`.
+
 ## The `lower_literal` Type-Dispatch Logic
 
 `lower_literal` is a shared helper called by both `ConstantDefinition` and
@@ -225,6 +244,10 @@ exercised in tests:
 | `wasm_codegen_emit_variable_definition` | `lower_statement`, `VariableDefinition` arm | A `let` statement was lowered |
 | `wasm_codegen_variable_definition_uzumaki_i32` | uzumaki branch, i32 path | `let x: i32 = @` was lowered |
 | `wasm_codegen_variable_definition_uzumaki_i64` | uzumaki branch, i64 path | `let x: i64 = @` was lowered |
+| `wasm_codegen_uzumaki_domain_narrow_int` | `emit_uzumaki_domain_constraint`, sub-i32 arm | An `i8`/`u8`/`i16`/`u16` draw was mask/shift-narrowed |
+| `wasm_codegen_uzumaki_domain_bool` | `emit_uzumaki_domain_constraint`, `bool` arm | A `bool` draw was constrained via `and 1` |
+| `wasm_codegen_uzumaki_domain_enum` | `emit_uzumaki_domain_constraint`, non-empty enum arm | A non-empty enum draw was constrained via `rem_u <variant count>` |
+| `wasm_codegen_uzumaki_domain_enum_empty` | `emit_uzumaki_domain_constraint`, empty enum arm | A variantless enum draw was left unconstrained |
 | `wasm_codegen_emit_constant_definition` | `lower_statement`, `ConstantDefinition` arm | A `const` statement was lowered |
 
 The `local_variables_test` in `tests/src/codegen/wasm/base.rs` checks that
