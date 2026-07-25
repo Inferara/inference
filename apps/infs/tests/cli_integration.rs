@@ -3262,7 +3262,7 @@ fn wasm_opt_rejects_leaked_verification_construct() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("forall").and(predicate::str::contains("spec")));
+        .stderr(predicate::str::contains("'forall' block").and(predicate::str::contains("spec")));
 
     assert!(
         optimizer_invocations(log.path()).is_empty(),
@@ -3307,7 +3307,7 @@ fn build_rejects_nondet_in_imported_module_file() {
 
     cmd.assert().failure().stderr(
         predicate::str::contains("A042")
-            .and(predicate::str::contains("forall"))
+            .and(predicate::str::contains("'forall' block"))
             .and(predicate::str::contains("lib")),
     );
 
