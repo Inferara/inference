@@ -216,6 +216,9 @@ pub enum AnalysisDiagnostic {
         location: Location,
         first_location: Location,
     },
+
+    #[error("entry-file `pub fn {name}` collides with the reserved export name `{name}`; the compiled module reserves `memory` for its linear memory export and `__stack_pointer` for its stack pointer global, which WebAssembly hosts rely on; rename the function, or remove `pub` if it does not need to be exported")]
+    ReservedExportName { name: String, location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -260,7 +263,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::RecursionDetected { location, .. }
             | AnalysisDiagnostic::StackDepthExceeded { location, .. }
             | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. }
-            | AnalysisDiagnostic::DuplicateLocalName { location, .. } => location,
+            | AnalysisDiagnostic::DuplicateLocalName { location, .. }
+            | AnalysisDiagnostic::ReservedExportName { location, .. } => location,
         }
     }
 
@@ -309,6 +313,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::StructUzumakiAsArgument { .. } => "A039",
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { .. } => "A040",
             AnalysisDiagnostic::DuplicateLocalName { .. } => "A041",
+            AnalysisDiagnostic::ReservedExportName { .. } => "A043",
         }
     }
 }
@@ -1239,6 +1244,38 @@ mod tests {
             "A041 diagnostic must not use shadowing terminology, got: {text}"
         );
         assert_eq!(err.rule_id(), "A041");
+    }
+
+    #[test]
+    fn display_reserved_export_name() {
+        let err = AnalysisDiagnostic::ReservedExportName {
+            name: "memory".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        // The leading fragment pins the OFFENDING name; the bare word "memory"
+        // also appears later in the why-clause, so match the full phrase.
+        assert!(
+            text.contains("entry-file `pub fn memory` collides"),
+            "A043 diagnostic must name the offending function, got: {text}"
+        );
+        assert!(
+            text.contains("reserved export name"),
+            "A043 diagnostic must explain the name is reserved, got: {text}"
+        );
+        assert!(
+            text.contains("`__stack_pointer`"),
+            "A043 diagnostic must explain both reserved names, got: {text}"
+        );
+        assert!(
+            text.contains("rename the function"),
+            "A043 diagnostic must suggest renaming the function, got: {text}"
+        );
+        assert!(
+            text.contains("remove `pub`"),
+            "A043 diagnostic must suggest removing `pub`, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A043");
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod method_never_accesses_self;
 pub mod missing_return;
 pub mod nested_compound_depth;
 pub mod recursion;
+pub mod reserved_export_name;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod stack_depth;
@@ -60,6 +61,7 @@ use method_never_accesses_self::MethodNeverAccessesSelf;
 use missing_return::MissingReturn;
 use nested_compound_depth::NestedCompoundDepth;
 use recursion::RecursionDetected;
+use reserved_export_name::ReservedExportName;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use stack_depth::StackDepthExceeded;
@@ -123,5 +125,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &StructUzumakiAsArgument,
         &UzumakiOnCompoundArrayElement,
         &DuplicateLocalName,
+        &ReservedExportName,
     ]
 }
