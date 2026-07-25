@@ -1,0 +1,5 @@
+pub fn uzumaki_u32() {
+    forall {
+        let x: u32 = @;
+    }
+}

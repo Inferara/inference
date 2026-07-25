@@ -52,6 +52,7 @@ mod gate {
         ("mixed_compile_proof.inf", "mixed_compile_proof"),
         ("rocq_control_flow.inf", "rocq_control_flow"),
         ("rocq_unique.inf", "rocq_unique"),
+        ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
     ];
 
     /// Constructors the corpus must keep exercising. These are the

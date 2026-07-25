@@ -1,0 +1,41 @@
+pub fn uzumaki_u8() {
+    forall {
+        let a: u8 = @;
+    }
+}
+
+pub fn uzumaki_i8() {
+    forall {
+        let a: i8 = @;
+    }
+}
+
+pub fn uzumaki_u16() {
+    forall {
+        let a: u16 = @;
+    }
+}
+
+pub fn uzumaki_i16() {
+    forall {
+        let a: i16 = @;
+    }
+}
+
+pub fn uzumaki_bool() {
+    forall {
+        let a: bool = @;
+    }
+}
+
+pub fn uzumaki_u8_array() {
+    forall {
+        let xs: [u8; 2] = @;
+    }
+}
+
+pub fn uzumaki_bool_array() {
+    forall {
+        let bs: [bool; 2] = @;
+    }
+}
