@@ -210,7 +210,7 @@ mod bounds_check_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod extended {
-    use crate::utils::codegen_with_full_config;
+    use crate::utils::codegen_with_full_config_no_analysis;
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
     use wasmtime::{Engine, Instance, Module, Store, Trap, TypedFunc};
 
@@ -218,8 +218,13 @@ mod extended {
     /// guard is emitted, and returns the WASM bytes. The guard is emitted in
     /// every Compile-mode build, so the `O0` vs `O3` choice is immaterial here;
     /// `release_wasm` exercises the default path for parity.
+    ///
+    /// Analysis is skipped: some sources here place a dynamic index inside a
+    /// `forall` block to exercise guard emission at various block depths, which
+    /// A042 rejects outside a `spec`. The guard is a codegen concern, so the
+    /// analysis pass is not what these tests exercise.
     fn debug_wasm(source: &str) -> Vec<u8> {
-        codegen_with_full_config(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O0)
+        codegen_with_full_config_no_analysis(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O0)
             .expect("O0 codegen failed")
             .wasm()
             .to_vec()
@@ -227,9 +232,10 @@ mod extended {
 
     /// Compiles `source` under the Release profile (`O3`). The guard is emitted
     /// for every Compile-mode build, so Release output is guarded identically to
-    /// Debug; this helper confirms the default path is checked.
+    /// Debug; this helper confirms the default path is checked. Analysis is
+    /// skipped for the same reason as [`debug_wasm`].
     fn release_wasm(source: &str) -> Vec<u8> {
-        codegen_with_full_config(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O3)
+        codegen_with_full_config_no_analysis(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O3)
             .expect("O3 codegen failed")
             .wasm()
             .to_vec()

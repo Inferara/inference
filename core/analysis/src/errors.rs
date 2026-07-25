@@ -217,6 +217,12 @@ pub enum AnalysisDiagnostic {
         first_location: Location,
     },
 
+    #[error("non-deterministic '{block_kind}' block is only valid inside a spec declaration; non-deterministic constructs (forall, exists, assume, unique) describe specifications and cannot appear in executable code; move this logic into a function inside a `spec` declaration")]
+    NonDetOutsideSpec {
+        location: Location,
+        block_kind: &'static str,
+    },
+
     #[error("entry-file `pub fn {name}` collides with the reserved export name `{name}`; the compiled module reserves `memory` for its linear memory export and `__stack_pointer` for its stack pointer global, which WebAssembly hosts rely on; rename the function, or remove `pub` if it does not need to be exported")]
     ReservedExportName { name: String, location: Location },
 }
@@ -264,6 +270,7 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::StackDepthExceeded { location, .. }
             | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. }
             | AnalysisDiagnostic::DuplicateLocalName { location, .. }
+            | AnalysisDiagnostic::NonDetOutsideSpec { location, .. }
             | AnalysisDiagnostic::ReservedExportName { location, .. } => location,
         }
     }
@@ -313,6 +320,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::StructUzumakiAsArgument { .. } => "A039",
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { .. } => "A040",
             AnalysisDiagnostic::DuplicateLocalName { .. } => "A041",
+            AnalysisDiagnostic::NonDetOutsideSpec { .. } => "A042",
             AnalysisDiagnostic::ReservedExportName { .. } => "A043",
         }
     }
@@ -1244,6 +1252,42 @@ mod tests {
             "A041 diagnostic must not use shadowing terminology, got: {text}"
         );
         assert_eq!(err.rule_id(), "A041");
+    }
+
+    #[test]
+    fn display_non_det_outside_spec() {
+        let err = AnalysisDiagnostic::NonDetOutsideSpec {
+            location: test_location(),
+            block_kind: "forall",
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("'forall' block"),
+            "A042 diagnostic must name the offending block kind, got: {text}"
+        );
+        assert!(
+            text.contains("spec declaration"),
+            "A042 diagnostic must point to a spec declaration, got: {text}"
+        );
+        assert!(
+            text.contains("forall, exists, assume, unique"),
+            "A042 diagnostic must enumerate the non-deterministic constructs, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A042");
+    }
+
+    #[test]
+    fn display_non_det_outside_spec_names_each_kind() {
+        for kind in ["forall", "exists", "assume", "unique"] {
+            let err = AnalysisDiagnostic::NonDetOutsideSpec {
+                location: test_location(),
+                block_kind: kind,
+            };
+            assert!(
+                err.to_string().contains(&format!("'{kind}' block")),
+                "A042 diagnostic must name the `{kind}` block kind"
+            );
+        }
     }
 
     #[test]

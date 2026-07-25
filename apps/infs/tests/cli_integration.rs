@@ -2657,7 +2657,9 @@ fn list_handles_corrupted_metadata() {
     );
 }
 
-/// QA: TC-13.1 - Verify compilation of uzumaki operator (@).
+/// QA: TC-13.1 - Verify a project whose non-deterministic constructs (including
+/// the uzumaki operator `@`) live in a `spec` builds in compile mode: the
+/// proof-only spec is stripped and the executable `main` is compiled.
 ///
 /// **Expected behavior**: Exit code 0, WASM binary generated.
 #[test]
@@ -2869,9 +2871,10 @@ fn build_handles_nested_paths() {
 const WASM_OPT_INVOCATION_MARKER: &str = "--- wasm-opt invocation ---";
 
 /// `src/main.inf` that leaks a verification-only construct (a `forall` block
-/// with an uzumaki `@`) into an ordinary function. Compile-mode codegen
-/// preserves the `0xfc` opcode, so the post-build scan must reject it before
-/// wasm-opt ever sees the artifact.
+/// with an uzumaki `@`) into an ordinary function. Analysis rule A042 rejects a
+/// non-deterministic block outside a `spec`, so the build fails before codegen —
+/// wasm-opt is never reached, which is the guarantee the optimization step relies
+/// on. (The post-build `0xfc` scan itself is unit-tested in `commands::wasm_opt`.)
 const PROJECT_MAIN_NONDET_SRC: &str =
     "pub fn main() -> i32 {\n    forall {\n        let x: i32 = @;\n    }\n    return 0;\n}\n";
 
@@ -3229,10 +3232,12 @@ fn wasm_opt_skipped_for_v_flag() {
     );
 }
 
-/// A verification construct that leaks into an ordinary function is a hard error
-/// when optimization is enabled: the pre-scan names the construct (`forall`) and
-/// points at `spec` blocks, the optimizer is never spawned, and the unoptimized
-/// `out/main.wasm` infc wrote is left in place.
+/// A verification construct that leaks into an ordinary function is a hard error:
+/// analysis rule A042 rejects the non-deterministic `forall` block outside a
+/// `spec` before codegen runs, so the build fails naming the construct and
+/// pointing at `spec`, no artifact is written, and the optimizer is never
+/// spawned. This preserves the optimization step's precondition (a leaked
+/// verification construct never reaches wasm-opt) at the earliest possible gate.
 #[test]
 fn wasm_opt_rejects_leaked_verification_construct() {
     let Some(infc_path) = require_infc() else {
@@ -3255,18 +3260,60 @@ fn wasm_opt_rejects_leaked_verification_construct() {
         .current_dir(temp.path())
         .arg("build");
 
-    cmd.assert().failure().stderr(
-        predicate::str::contains("verification-only construct `forall`")
-            .and(predicate::str::contains("spec")),
-    );
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("forall").and(predicate::str::contains("spec")));
 
     assert!(
         optimizer_invocations(log.path()).is_empty(),
-        "the pre-scan must reject before wasm-opt is spawned"
+        "analysis must reject before wasm-opt is spawned"
     );
     assert!(
-        temp.child("out").child("main.wasm").path().exists(),
-        "the unoptimized artifact must be left in place after the scan error"
+        !temp.child("out").child("main.wasm").path().exists(),
+        "no artifact is written when analysis rejects the program before codegen"
+    );
+}
+
+/// A non-deterministic block in an *imported* module file (not just the entry
+/// file) is rejected end-to-end through project-mode `infs build`: analysis rule
+/// A042 fires on the `forall` in `src/lib.inf`, the rendered diagnostic names the
+/// offending module by its file label (`lib`), and no artifact is written. This
+/// pins that the whole import closure — not only `src/main.inf` — is held to the
+/// rule.
+#[test]
+fn build_rejects_nondet_in_imported_module_file() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "use lib;\n\npub fn main() -> i32 {\n    return lib::helper();\n}\n",
+        "",
+    );
+    temp.child("src")
+        .child("lib.inf")
+        .write_str(
+            "pub fn helper() -> i32 {\n    forall {\n        let x: i32 = 1;\n    }\n    return 7;\n}\n",
+        )
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("A042")
+            .and(predicate::str::contains("forall"))
+            .and(predicate::str::contains("lib")),
+    );
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "no artifact must be written when analysis rejects the build"
     );
 }
 

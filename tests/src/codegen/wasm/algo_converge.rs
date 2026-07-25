@@ -42,7 +42,7 @@
 mod algo_converge_tests {
     use crate::utils::{
         assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
-        get_test_wasm_path, wasm_codegen,
+        get_test_wasm_path, wasm_codegen, wasm_codegen_no_analysis,
     };
 
     #[test]
@@ -60,7 +60,10 @@ mod algo_converge_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        // The fixture's `spec_division` puts a `forall`/`assume` in a plain function,
+        // which A042 rejects; this test exercises codegen lowering, so it bypasses
+        // analysis (the golden stays byte-identical).
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -150,7 +153,7 @@ mod algo_converge_tests {
 /// Test data regeneration helper.
 #[cfg(test)]
 mod regenerate {
-    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen};
+    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen_no_analysis};
 
     fn test_dir() -> std::path::PathBuf {
         get_test_data_path()
@@ -165,7 +168,7 @@ mod regenerate {
         let dir = test_dir();
         let source_code = std::fs::read_to_string(dir.join("algo_converge.inf"))
             .expect("Failed to read algo_converge.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("algo_converge.wasm");

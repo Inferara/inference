@@ -285,9 +285,12 @@ mod analysis_rules_tests {
     fn a039_scalar_uzumaki_argument_accepted() {
         let source = r#"
             fn consume(x: i32) -> i32 { return x; }
-            fn main() {
-                forall {
-                    let r: i32 = consume(@);
+            fn main() {}
+            spec S {
+                fn check() {
+                    forall {
+                        let r: i32 = consume(@);
+                    }
                 }
             }
         "#;
