@@ -642,6 +642,20 @@ pub enum TypeCheckError {
     )]
     NonLiteralArraySize { name: String, location: Location },
 
+    /// The power operator `**` used anywhere in an expression: `a ** b`.
+    ///
+    /// `**` parses (right-associative, binds tightest) but has no code
+    /// generation: WASM has no native power instruction, and no lowering via
+    /// a runtime helper or compile-time evaluation exists yet. Reported by
+    /// the type checker instead of a former codegen panic, for every operand
+    /// shape — including operands whose types fail to infer. Compute the
+    /// power with repeated multiplication in a loop instead (recursion is
+    /// rejected by analysis rule A035).
+    #[error(
+        "{location}: the power operator `**` is not yet supported; compute the power with repeated multiplication in a loop"
+    )]
+    PowOperatorNotSupported { location: Location },
+
     /// A required field is missing from a struct literal.
     #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
     MissingStructField {
@@ -807,6 +821,7 @@ impl TypeCheckError {
             | TypeCheckError::VariableShadowed { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::NonLiteralArraySize { location, .. }
+            | TypeCheckError::PowOperatorNotSupported { location }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
             | TypeCheckError::DuplicateStructField { location, .. }
@@ -1509,6 +1524,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: array size must be an integer literal; named constant `N` is not yet supported as an array size"
+        );
+    }
+
+    #[test]
+    fn pow_operator_not_supported_display() {
+        let err = TypeCheckError::PowOperatorNotSupported {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: the power operator `**` is not yet supported; compute the power with repeated multiplication in a loop"
         );
     }
 

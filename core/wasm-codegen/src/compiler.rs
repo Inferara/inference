@@ -4379,9 +4379,9 @@ impl Compiler {
                 (false, false) => Instruction::I32ShrS,
             },
             OperatorKind::Pow => {
-                todo!(
-                    "Power operator (`**`) deferred -- no native WASM instruction; \
-                     see .claude/plans/codegen/new-pow-operator/master_plan.md"
+                unreachable!(
+                    "`**` (power) has no lowering; the type checker rejects every use of \
+                     `**` (PowOperatorNotSupported), so codegen never sees this operator"
                 )
             }
         };
