@@ -131,6 +131,29 @@ pub fn example() -> i32 {
 - `i32.uzumaki` → `0xfc 0x31`
 - `i64.uzumaki` → `0xfc 0x32`
 
+The draw always produces a full-width value, so a declared type narrower than
+`i32`/`i64` gets a domain-constraint sequence emitted immediately after the
+draw, mapping the raw draw onto the type's value set:
+
+| Declared type | Emitted after the draw | Resulting domain |
+|---|---|---|
+| `i8`, `i16` | `shl <32-width>`, `shr_s <32-width>` (sign-narrow) | full signed sub-range |
+| `u8`, `u16` | `and <width bitmask>` | full unsigned sub-range |
+| `bool` | `and 1` | `{0, 1}` |
+| enum, N ≥ 1 variants | `rem_u N` | tags `0..N-1` |
+| enum, 0 variants | none (uninhabited; `rem_u 0` would trap) | — |
+| `i32`, `u32`, `i64`, `u64` | none | full 32/64-bit width |
+
+This reuses the same mask / `shl`+`shr_s` shapes used to normalize sub-i32
+arithmetic results at their producing instruction (binops, unary negation,
+unary bitwise-not), rather than `i32.extend8_s`/`extend16_s`, which the
+`wasm-to-v` translator does not implement. A compound (array/struct) uzumaki
+leaf gets the same `bool`/enum constraint before its store; narrow-int
+compound leaves need no constraint, since the element's `store8`/`store16`
+truncation plus its sign/zero-extending typed load already realize the
+domain. See [docs/local-variables-lowering.md](docs/local-variables-lowering.md)
+and [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
+
 ### Forall Block
 
 Universal quantification - all execution paths inside the block must be reachable.

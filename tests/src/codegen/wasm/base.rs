@@ -7425,6 +7425,104 @@ mod base_codegen_tests {
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }
+
+    #[test]
+    fn narrow_uzumaki_test() {
+        // Scalars (u8/i8/u16/i16/bool) each draw through the i32 uzumaki arm; the
+        // two arrays draw through the array-uzumaki path instead.
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 5);
+        // u8/i8/u16/i16 scalars mask/sign-extend; the `[u8; 2]` leaves must NOT
+        // (store8 already realizes the 0..255 domain).
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_narrow_int, 4);
+        // One scalar `bool` plus the two `[bool; 2]` leaves.
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_bool, 3);
+        let test_name = "narrow_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // A `[u8; 2]` uzumaki leaf is a bare draw (`FC 31`) immediately followed
+        // by `i32.store8` (`3A`) — no `41 FF 01 71` mask is inserted, because the
+        // store truncates to the byte domain. Pins the compound narrow-int
+        // exclusion at the byte level.
+        assert!(
+            actual.windows(3).any(|w| w == [0xFC, 0x31, 0x3A]),
+            "u8 array uzumaki leaf must be a bare draw immediately followed by store8"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn enum_uzumaki_domain_test() {
+        // Color scalar + One scalar + two Color array leaves + one Color struct
+        // field (Item.status) = five enum-domain constraints.
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_enum, 5);
+        let test_name = "enum_uzumaki_domain";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // Color has 3 variants → `i32.const 3; i32.rem_u`; One has 1 variant →
+        // `i32.const 1; i32.rem_u`. `41 01 70` (rem_u) is distinct from the bool
+        // shape `41 01 71` (and).
+        assert!(
+            actual.windows(5).any(|w| w == [0xFC, 0x31, 0x41, 0x03, 0x70]),
+            "Color uzumaki must draw then `i32.const 3; i32.rem_u`"
+        );
+        assert!(
+            actual.windows(5).any(|w| w == [0xFC, 0x31, 0x41, 0x01, 0x70]),
+            "One uzumaki must draw then `i32.const 1; i32.rem_u`"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn u32_uzumaki_test() {
+        let test_name = "u32_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // u32 occupies every bit pattern: the draw stays mask-free. No `i32.const`
+        // (`41`) may trail the `FC 31` draw.
+        assert!(
+            !actual.windows(3).any(|w| w == [0xFC, 0x31, 0x41]),
+            "u32 uzumaki must be a bare draw with no domain constraint"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn enum_uzumaki_empty_enum_unconstrained_test() {
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_enum_empty, 1);
+        let source = r#"
+            enum Empty {}
+            pub fn nondet_empty() {
+                forall {
+                    let e: Empty = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes).unwrap();
+        // No rem_u may follow the draw: rem_u 0 would trap.
+        assert!(!wasm_bytes.windows(3).any(|w| w == [0x41, 0x00, 0x70]));
+    }
 }
 
 /// Test data regeneration helpers.
@@ -8418,10 +8516,12 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_struct_nondet_wasm() {
+        // Uses wasm_codegen_no_analysis: the fixture drives struct uzumaki from a
+        // top-level `forall`, which analysis rejects (non-det outside a spec).
         let dir = base_test_dir().join("struct_nondet");
         let source_code = std::fs::read_to_string(dir.join("struct_nondet.inf"))
             .expect("Failed to read struct_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("struct_nondet.wasm");
@@ -8433,6 +8533,72 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_narrow_uzumaki_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("narrow_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("narrow_uzumaki.inf"))
+            .expect("Failed to read narrow_uzumaki.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("narrow_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "narrow_uzumaki");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_uzumaki_domain_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("enum_uzumaki_domain");
+        let source_code = std::fs::read_to_string(dir.join("enum_uzumaki_domain.inf"))
+            .expect("Failed to read enum_uzumaki_domain.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_uzumaki_domain.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_uzumaki_domain");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_u32_uzumaki_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("u32_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("u32_uzumaki.inf"))
+            .expect("Failed to read u32_uzumaki.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("u32_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "u32_uzumaki");
     }
 
     #[test]

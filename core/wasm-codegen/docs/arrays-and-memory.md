@@ -301,6 +301,14 @@ i32.store
 - `compute_frame_layout()` pre-computes all array offsets
 - Result: all elements of the array hold non-deterministic values
 
+**Domain constraint for `bool`/enum elements**: a `bool`- or enum-typed leaf
+element gets an `and 1` / `rem_u <variant count>` constraint between the draw
+and the store (`emit_compound_uzumaki_domain_constraint`, inserted where the
+example above shows `i32.store`). A narrow-int leaf (`i8`/`u8`/`i16`/`u16`)
+needs no such constraint: its `store8`/`store16` truncation plus the
+sign/zero-extending typed load used to read it back already realize the
+domain on every round trip through memory.
+
 ## Array Type Representation
 
 In the type-checker's `TypeInfoKind`:
@@ -882,6 +890,8 @@ local.set $p
 
 Fields with `i64` types emit `i64.uzumaki` (0xfc 0x32) followed by `i64.store`. Field types use the same type dispatch as regular struct literal stores.
 
+A `bool`- or enum-typed field gets a domain-constraint sequence between the uzumaki draw and the store — `and 1` for `bool`, `rem_u <variant count>` for a non-empty enum (an empty enum is left unconstrained, since it is uninhabited and `rem_u 0` would trap). Narrow-int fields (`i8`/`u8`/`i16`/`u16`) need no such constraint: the field's `store8`/`store16` truncation and its sign/zero-extending typed load already realize the domain on every round trip through memory. See `emit_compound_uzumaki_domain_constraint` in `compiler.rs`.
+
 ### Struct Uzumaki with Array Fields (`lower_struct_uzumaki`)
 
 When a struct has array-typed fields (e.g., `struct HasArray { arr: [i32; 3]; val: i32; }`), uzumaki initialization stores non-deterministic values element-by-element for each array field. For each element of the array field, the compiler emits the appropriate uzumaki opcode and a store at the element's computed address within the field:
@@ -912,6 +922,10 @@ i32.store
 ```
 
 The total element count across all fields is bounded by `MAX_UZUMAKI_UNROLL_ELEMENTS` (65 536). If a struct's fields collectively exceed this limit, `CodegenError::ArrayTooLargeForUzumaki` is returned.
+
+As with a scalar struct field, a `bool`- or enum-typed array element gets its
+`and 1` / `rem_u <variant count>` domain constraint between the draw and the
+store; narrow-int elements need none, for the same store-truncation reason.
 
 ## Compound Field Layout
 
@@ -989,6 +1003,8 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_member_access_read` | `lower_member_access()` | Struct field read via load |
 | `wasm_codegen_emit_member_access_write` | `lower_member_access_write()` | Struct field write via store |
 | `wasm_codegen_emit_struct_uzumaki` | `lower_struct_uzumaki()` | Non-deterministic struct initialization (field-wise uzumaki stores) |
+| `wasm_codegen_uzumaki_domain_bool` | `emit_compound_uzumaki_domain_constraint()` → `emit_uzumaki_domain_constraint()` | A `bool` array or struct-field uzumaki leaf was constrained via `and 1` before its store |
+| `wasm_codegen_uzumaki_domain_enum` | `emit_compound_uzumaki_domain_constraint()` → `emit_uzumaki_domain_constraint()` | A non-empty-enum array or struct-field uzumaki leaf was constrained via `rem_u <variant count>` before its store |
 
 ## Examples
 

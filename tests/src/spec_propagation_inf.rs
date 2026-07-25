@@ -482,3 +482,103 @@ mod fixture_nondet_body_modifier {
         );
     }
 }
+
+// ============================================================================
+// Fixture 8: spec_narrow_uzumaki.inf — narrow-typed uzumaki domain constraints
+// ============================================================================
+#[cfg(test)]
+mod fixture_narrow_uzumaki_domain {
+    use super::helpers::compile_inf;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// Returns the `.v` slice for the `Definition <name> …` block: everything
+    /// from `Definition <name>` up to (but not including) the next `Definition`.
+    /// Scoping the assertions to one function block keeps a shape from one
+    /// function satisfying an assertion meant for another.
+    fn definition_block<'v>(v: &'v str, name: &str) -> &'v str {
+        let start = v
+            .find(&format!("Definition {name}"))
+            .unwrap_or_else(|| panic!("missing `Definition {name}` in:\n{v}"));
+        let after_header = start + "Definition ".len();
+        match v[after_header..].find("Definition ") {
+            Some(off) => &v[start..after_header + off],
+            None => &v[start..],
+        }
+    }
+
+    /// A narrow-typed scalar `@` must constrain its raw i32 draw to the declared
+    /// type's value set, so the Rocq quantifier ranges over the domain rather
+    /// than all 2^32 bit patterns. Full-width types (i32/u32/i64/u64) must stay
+    /// bare. Each block-scoped assertion mirrors the codegen sequences:
+    /// mask (u8/u16), shl+shr_s (i8/i16), `and 1` (bool), `rem_u N` (enum).
+    #[test]
+    fn narrow_scalar_uzumaki_constrains_domain_in_v() {
+        let output =
+            compile_inf("spec_narrow_uzumaki.inf", CompilationMode::Proof, "narrowuzu");
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
+
+        // narrow_ints: u8 mask, i8 shl+shr_s, u16 mask, i16 shl+shr_s.
+        let narrow_ints = definition_block(&v, "narrow_ints");
+        assert!(
+            narrow_ints.contains("BI_const_num (Vi32 255)")
+                && narrow_ints.contains("BI_binop T_i32 (Binop_i BOI_and)"),
+            "u8 draw must mask with 255:\n{narrow_ints}"
+        );
+        assert!(
+            narrow_ints.contains("BI_const_num (Vi32 24)")
+                && narrow_ints.contains("BI_binop T_i32 (Binop_i BOI_shl)")
+                && narrow_ints.contains("BI_binop T_i32 (Binop_i (BOI_shr SX_S))"),
+            "i8 draw must sign-extend via shl 24 / shr_s 24:\n{narrow_ints}"
+        );
+        assert!(
+            narrow_ints.contains("BI_const_num (Vi32 65535)"),
+            "u16 draw must mask with 65535:\n{narrow_ints}"
+        );
+        assert!(
+            narrow_ints.contains("BI_const_num (Vi32 16)"),
+            "i16 draw must sign-extend via shl 16 / shr_s 16:\n{narrow_ints}"
+        );
+
+        // narrow_bool_enum: bool → `and 1`; enum Color (3 variants) → `rem_u 3`.
+        let narrow_bool_enum = definition_block(&v, "narrow_bool_enum");
+        assert!(
+            narrow_bool_enum.contains("BI_const_num (Vi32 1)")
+                && narrow_bool_enum.contains("BI_binop T_i32 (Binop_i BOI_and)"),
+            "bool draw must map onto {{0,1}} via `and 1`:\n{narrow_bool_enum}"
+        );
+        assert!(
+            narrow_bool_enum.contains("BI_const_num (Vi32 3)")
+                && narrow_bool_enum.contains("BI_binop T_i32 (Binop_i (BOI_rem SX_U))"),
+            "enum draw must map onto 0..N-1 via `rem_u 3`:\n{narrow_bool_enum}"
+        );
+
+        // full_width: i32/u32/i64/u64 stay bare — four draws, no domain op.
+        let full_width = definition_block(&v, "full_width");
+        assert_eq!(
+            full_width.matches("BI_uzumaki_num").count(),
+            4,
+            "full_width must draw four bare uzumaki values:\n{full_width}"
+        );
+        assert_eq!(
+            full_width.matches("BI_uzumaki_num T_i32").count(),
+            2,
+            "full_width must have two i32-family draws:\n{full_width}"
+        );
+        assert_eq!(
+            full_width.matches("BI_uzumaki_num T_i64").count(),
+            2,
+            "full_width must have two i64-family draws:\n{full_width}"
+        );
+        assert!(
+            !full_width.contains("BOI_and")
+                && !full_width.contains("BOI_shl")
+                && !full_width.contains("BOI_rem"),
+            "full-width draws must carry no domain constraint:\n{full_width}"
+        );
+    }
+}

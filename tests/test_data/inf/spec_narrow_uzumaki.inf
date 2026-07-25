@@ -1,0 +1,26 @@
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+spec NarrowUzu {
+    fn narrow_ints() forall {
+        let a: u8 = @;
+        let b: i8 = @;
+        let c: u16 = @;
+        let d: i16 = @;
+    }
+
+    fn narrow_bool_enum() forall {
+        let e: bool = @;
+        let f: Color = @;
+    }
+
+    fn full_width() forall {
+        let g: i32 = @;
+        let h: u32 = @;
+        let i: i64 = @;
+        let j: u64 = @;
+    }
+}

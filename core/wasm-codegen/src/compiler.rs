@@ -2634,6 +2634,7 @@ impl Compiler {
                     | TypeInfoKind::Enum(_, _) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                        self.emit_uzumaki_domain_constraint(&type_info.kind, ctx);
                     }
                     TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
@@ -2649,7 +2650,7 @@ impl Compiler {
                             )
                         });
                         if let Err(e) =
-                            self.lower_array_uzumaki(arena, &elem_type, length, var_name)
+                            self.lower_array_uzumaki(arena, &elem_type, length, var_name, ctx)
                         {
                             panic!("array uzumaki lowering failed: {e}");
                         }
@@ -3905,6 +3906,7 @@ impl Compiler {
         elem_type: &TypeInfo,
         length: u32,
         enclosing_var_name: &str,
+        ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         let total = total_leaf_count(&elem_type.kind, length);
         if total > MAX_UZUMAKI_UNROLL_ELEMENTS {
@@ -3948,6 +3950,7 @@ impl Compiler {
             leaf_size,
             uzumaki_opcode,
             &store_instr,
+            ctx,
         );
 
         self.func()
@@ -3977,6 +3980,7 @@ impl Compiler {
         leaf_size: u32,
         uzumaki_opcode: u8,
         store_instr: &Instruction<'_>,
+        ctx: &TypedContext,
     ) {
         match kind {
             TypeInfoKind::Array(inner_elem, inner_len) => {
@@ -4000,6 +4004,7 @@ impl Compiler {
                         leaf_size,
                         uzumaki_opcode,
                         store_instr,
+                        ctx,
                     );
                 }
             }
@@ -4018,6 +4023,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
                     self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_compound_uzumaki_domain_constraint(kind, ctx);
                     self.func().instruction(store_instr);
                 }
             }
@@ -4061,12 +4067,12 @@ impl Compiler {
                 let (_, computed_fields) =
                     compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
                 for field in &computed_fields {
-                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
+                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
                 }
             }
         } else {
             for field in &field_slots {
-                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
             }
         }
 
@@ -4092,6 +4098,7 @@ impl Compiler {
         frame_ptr_local: u32,
         struct_base_offset: u32,
         field: &memory::StructFieldSlot,
+        ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         if let TypeInfoKind::Array(ref _elem, length) = field.type_kind
             && length > MAX_UZUMAKI_UNROLL_ELEMENTS
@@ -4122,6 +4129,7 @@ impl Compiler {
                 self.func().instruction(&Instruction::I32Const(byte_offset));
                 self.func().instruction(&Instruction::I32Add);
                 self.emit_uzumaki(uzumaki_opcode);
+                self.emit_compound_uzumaki_domain_constraint(&field.type_kind, ctx);
                 self.func().instruction(&store_instr);
             }
             CompoundFieldLayout::NestedArray {
@@ -4148,6 +4156,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
                     self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_compound_uzumaki_domain_constraint(elem_kind, ctx);
                     self.func().instruction(&store_instr);
                 }
             }
@@ -4160,6 +4169,82 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Constrains a raw 32-bit uzumaki draw on the stack to the declared
+    /// type's value set.
+    ///
+    /// The uzumaki opcode always draws a full-width i32. For types whose value
+    /// set is narrower — sub-i32 integers, `bool`, and enums — the raw draw must
+    /// be mapped onto the type's domain, otherwise the Rocq-side quantifiers
+    /// (`forall`/`exists`) range over all 2^32 bit patterns instead of the
+    /// declared type's values. Every mapping below is surjective onto the target
+    /// domain, so quantifying over the raw draw and then mapping is equivalent to
+    /// quantifying over the domain itself.
+    ///
+    /// - Sub-i32 integers reuse the same mask / `shl`+`shr_s` shapes as
+    ///   [`memory::emit_sub_i32_narrowing`], matching the convention that narrow
+    ///   values are normalized at the producing instruction.
+    /// - `bool` maps onto {0, 1} via `i32.and 1`.
+    /// - Enums map onto the tag range `0..N-1` via `i32.rem_u N`. Tags are
+    ///   assigned by declaration position and cannot be customized, so the range
+    ///   is always contiguous from zero.
+    /// - A variantless enum is uninhabited; `i32.rem_u 0` would trap, so the draw
+    ///   is deliberately left unconstrained for that degenerate case (the enum
+    ///   definition itself already carries a diagnostic).
+    /// - i32/u32/i64/u64 draws occupy every bit pattern; no-op.
+    fn emit_uzumaki_domain_constraint(&mut self, kind: &TypeInfoKind, ctx: &TypedContext) {
+        match kind {
+            TypeInfoKind::Number(
+                NumberType::I8 | NumberType::U8 | NumberType::I16 | NumberType::U16,
+            ) => {
+                cov_mark::hit!(wasm_codegen_uzumaki_domain_narrow_int);
+                memory::emit_sub_i32_narrowing(self.func(), kind);
+            }
+            TypeInfoKind::Bool => {
+                cov_mark::hit!(wasm_codegen_uzumaki_domain_bool);
+                self.func().instruction(&Instruction::I32Const(1));
+                self.func().instruction(&Instruction::I32And);
+            }
+            TypeInfoKind::Enum(name, key) => {
+                let enum_info = ctx
+                    .lookup_enum(key)
+                    .or_else(|| ctx.lookup_enum_in(name, &self.current_module_path))
+                    .unwrap_or_else(|| {
+                        panic!("Uzumaki over unknown enum type `{name}` (key `{key}`)")
+                    });
+                let variant_count = enum_info.variants.len();
+                if variant_count == 0 {
+                    cov_mark::hit!(wasm_codegen_uzumaki_domain_enum_empty);
+                } else {
+                    cov_mark::hit!(wasm_codegen_uzumaki_domain_enum);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let n = variant_count as i32;
+                    self.func().instruction(&Instruction::I32Const(n));
+                    self.func().instruction(&Instruction::I32RemU);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Domain constraint for a raw i32 uzumaki draw that is about to be stored
+    /// into a compound (array/struct) leaf slot.
+    ///
+    /// Only `bool` and enum leaves need an explicit constraint here: the narrow
+    /// integer widths are excluded because the following `store8`/`store16`
+    /// truncates the value and the typed load re-extends it, so the memory
+    /// round-trip already realizes those domains. Emitting the constraint before
+    /// the store also normalizes the stored bytes (a `bool` slot holds only 0 or
+    /// 1).
+    fn emit_compound_uzumaki_domain_constraint(
+        &mut self,
+        kind: &TypeInfoKind,
+        ctx: &TypedContext,
+    ) {
+        if matches!(kind, TypeInfoKind::Bool | TypeInfoKind::Enum(_, _)) {
+            self.emit_uzumaki_domain_constraint(kind, ctx);
+        }
     }
 
     /// Lowers a binary expression to WASM stack instructions.

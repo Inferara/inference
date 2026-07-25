@@ -127,9 +127,22 @@ func.instruction(&Instruction::I32Const(val));
 
 ### Sub-i32 Types (i8, i16, u8, u16)
 
-Sub-i32 types are promoted to `i32` for all arithmetic. Inference does not emit truncation or masking instructions after arithmetic on sub-i32 types. The WASM `i32.add` instruction operates on the full 32-bit value, and the result is stored back as a 32-bit local. This means that arithmetic on `i8` variables can produce results outside the range -128..127 without any compiler-inserted truncation.
+Sub-i32 types are promoted to `i32` for all arithmetic. The WASM `i32.add` instruction operates on the full 32-bit value, so a result that would overflow the sub-type's declared width is possible immediately after the raw operation.
 
-This is a known gap tracked in the project. A complete implementation would emit `i32.extend8_s` or a masking sequence after arithmetic on sub-i32 types. The current behavior matches C's integer promotion rules (arithmetic is done in the promoted width) but does not truncate back to the sub-type width on store.
+Inference closes that gap by re-narrowing the result at the producing instruction, immediately after the operation and before it is stored to a local. `memory::emit_sub_i32_narrowing` (`core/wasm-codegen/src/memory.rs:652`) emits the shape appropriate to the type:
+
+- **Signed (`i8`, `i16`)**: `shl <32-width>` then `shr_s <32-width>` — shifting the value up so the sub-type's sign bit lands in bit 31, then an arithmetic shift back down, which sign-extends from that bit. For `i8` this is `shl 24` / `shr_s 24`; for `i16`, `shl 16` / `shr_s 16`.
+- **Unsigned (`u8`, `u16`)**: `and 0xFF` / `and 0xFFFF` — a zero-extending bitmask.
+
+`i32.extend8_s`/`i32.extend16_s` would express the signed case more directly, but Inference does not use them: the `wasm-to-v` translator has no case for those opcodes (`Operator::I32Extend8S | Operator::I32Extend16S => todo!()` in `core/wasm-to-v/src/translator.rs:1534-1535`, similarly for the `i64` variants at 1536-1538). `shl`/`shr_s` decompose the same sign-extension into two instructions the translator already handles as ordinary binops, keeping the emitted code translatable to Rocq in proof mode.
+
+This narrowing is emitted at every place a sub-i32 value is produced, not just arithmetic:
+
+- Binary expressions (`lower_binary_expression`, `core/wasm-codegen/src/compiler.rs:4404`) — for every operator except comparisons (`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`, which produce `bool`, not the operand's sub-type), `Mod`, `And`, `Or`, and `Shr`.
+- Unary negation (`core/wasm-codegen/src/compiler.rs:4439`) and unary bitwise-not (`core/wasm-codegen/src/compiler.rs:4456`).
+- A scalar uzumaki (`@`) draw of a narrow type — see [Sub-i32 Truncation](#sub-i32-truncation) below; `bool` and enum draws get an analogous `and 1` / `rem_u <variant count>` constraint rather than this mask/shift shape, since their domains aren't sub-i32 integer ranges.
+
+The current behavior therefore matches C's integer promotion rule (arithmetic is done in the promoted width) *and* truncates back to the sub-type's width immediately afterward, so a sub-i32 local never holds a value outside its declared range.
 
 ### Division and Modulo
 
@@ -295,15 +308,20 @@ Non-deterministic blocks (`forall`, `exists`, `unique`) operate over all possibl
 
 ### Sub-i32 Truncation
 
-A correctness-oriented future change is to emit truncation after arithmetic on sub-i32 types. For `i8` addition, the correct sequence is:
+Sub-i32 truncation after arithmetic is implemented (see [Sub-i32 Types](#sub-i32-types-i8-i16-u8-u16) above); for `i8` addition, the emitted sequence is:
 
 ```wat
 local.get $a     ;; i8 stored as i32
 local.get $b     ;; i8 stored as i32
 i32.add
-i32.const 0xff   ;; mask low 8 bits
-i32.and
-i32.extend8_s    ;; sign-extend from 8 bits (requires sign-ext proposal)
+i32.const 24     ;; shl/shr_s width for i8
+i32.shl
+i32.const 24
+i32.shr_s        ;; sign-extend from 8 bits without the sign-ext proposal
 ```
 
-Without this truncation, `i8` variables can hold values outside `-128..127` after arithmetic. The current behavior matches C's promotion rules but not the semantic expectation of a typed language with distinct `i8` and `i32` types.
+The last producer that did not follow this convention was the scalar uzumaki (`@`) draw: the draw opcode always yields a full-width value, so a narrow-typed `let x: i8 = @;` previously left the drawn value ranging over all of `i32`, not just `-128..127`. `emit_uzumaki_domain_constraint` (`core/wasm-codegen/src/compiler.rs:4196`) now closes this by emitting the same mask / `shl`+`shr_s` shapes immediately after the draw for `i8`/`u8`/`i16`/`u16`, plus two constraints outside the sub-i32-integer case: `bool` gets `i32.and 1`, and a non-empty `enum` gets `i32.rem_u <variant count>` (variant tags are assigned by declaration position, so the range `0..N-1` is always contiguous). A variantless enum draw is left unconstrained — the type is uninhabited, and `rem_u 0` would trap.
+
+The same `bool`/enum constraint is applied to a compound (array/struct) uzumaki leaf before its store (`emit_compound_uzumaki_domain_constraint`, `core/wasm-codegen/src/compiler.rs:4240`). A compound narrow-int leaf needs no separate constraint: the element's `store8`/`store16` truncation, combined with the sign- or zero-extending typed load used to read it back, already realizes the domain on every round trip through memory.
+
+This matters specifically for the non-deterministic blocks in [Overflow Checks in Non-Deterministic Blocks](#overflow-checks-in-non-deterministic-blocks) above: a `forall`/`exists`/`unique` quantifier ranges over every value the draw can produce, so an unconstrained draw of a narrow type made the Rocq-side quantifier range over all `2^32` bit patterns rather than the declared type's actual value set — a soundness gap for exactly the constructs this document's proof-obligation sections depend on. Every mapping above is surjective onto the target domain, so quantifying over the raw draw and then mapping is equivalent to quantifying over the domain directly.
