@@ -160,11 +160,13 @@ mod analysis_rules_tests {
     #[test]
     fn a030_removed_3d_array_uzumaki_accepted() {
         let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let c: [[[i32; 2]; 3]; 4] = @;
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn check() {
+                    forall {
+                        let c: [[[i32; 2]; 3]; 4] = @;
+                    }
                 }
-                return 0;
             }
         "#;
         let result = analyze(source);
@@ -174,11 +176,13 @@ mod analysis_rules_tests {
     #[test]
     fn a030_removed_4d_array_uzumaki_accepted() {
         let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let d: [[[[i32; 2]; 3]; 4]; 5] = @;
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn check() {
+                    forall {
+                        let d: [[[[i32; 2]; 3]; 4]; 5] = @;
+                    }
                 }
-                return 0;
             }
         "#;
         let result = analyze(source);
@@ -188,11 +192,13 @@ mod analysis_rules_tests {
     #[test]
     fn a030_removed_uzumaki_in_exists_block_accepted() {
         let source = r#"
-            fn main() -> i32 {
-                exists {
-                    let c: [[[i32; 2]; 3]; 4] = @;
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn check() {
+                    exists {
+                        let c: [[[i32; 2]; 3]; 4] = @;
+                    }
                 }
-                return 0;
             }
         "#;
         let result = analyze(source);

@@ -139,6 +139,14 @@ A compound (struct or array) `@` is lowered by writing into a *named* frame slot
 
 A041 rejects a function-local name introduced more than once in a single function body, even when the two declarations sit in disjoint sibling blocks (`if`/`else` arms, sequential `if`s, `loop` bodies, or non-deterministic blocks) and are individually well-typed — the type checker's scope-based shadowing check never flags them, since sibling scopes never coexist. The conflict surfaces one phase later: `core/wasm-codegen` flattens every body local into a single name-keyed WebAssembly local namespace, so two sibling declarations of the same name would otherwise collide. This is a simplicity and auditability rule, not a proof-soundness requirement — the Rocq translation addresses locals by numeric index, so the flat namespace exists only to preserve a 1:1 mapping between source name, WASM local, and proof index for humans reading traces and proofs. The diagnostic cites both declaration sites and suggests renaming one of them or hoisting a single declaration above the blocks.
 
+### Non-Deterministic Constructs Outside `spec` (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A042 | `NonDetOutsideSpec` | error | a non-deterministic block (`forall`/`exists`/`assume`/`unique`), inline or as a function-body modifier, used lexically outside a `spec` declaration |
+
+A042 enforces that the non-deterministic block forms — inline `forall`/`exists`/`assume`/`unique` statement blocks and the function-body-modifier form (`fn f() forall { … }`) — appear only lexically inside a `spec` declaration, where they describe formal specifications rather than executable code. A block in a top-level function, a top-level struct method, or nested inside either is rejected. The check is purely lexical (it never inspects types), so it is independent of the compilation mode and runs in both compile and proof modes. Only the outermost non-det block on each path is reported: a `forall { exists { … } }` outside a spec yields one diagnostic, not two. Uzumaki (`@`) outside a spec is covered transitively — `@` already requires an enclosing non-det block (A006), and A042 rejects that block — so no separate `@` check lives in this rule.
+
 ## Diagnostic Output Format
 
 ```
@@ -240,6 +248,7 @@ Test files are organized by rule group:
 | `rules_a039.rs` | A039 (struct uzumaki passed as function argument) |
 | `rules_a040.rs` | A040 (uzumaki as compound element of an array literal) |
 | `rules_a041.rs` | A041 (duplicate function-local name across sibling blocks) |
+| `rules_a042.rs` | A042 (non-deterministic construct outside a `spec` declaration) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

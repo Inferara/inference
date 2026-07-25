@@ -265,12 +265,12 @@ mod type_def_statement {
 }
 
 mod uzumaki_compound_types {
-    use crate::utils::{try_codegen, try_codegen_no_analysis, wasm_codegen};
+    use crate::utils::{try_codegen, try_codegen_no_analysis, wasm_codegen_no_analysis};
 
     #[test]
     fn uzumaki_struct_in_forall() {
         cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
-        let wasm_bytes = wasm_codegen(
+        let wasm_bytes = wasm_codegen_no_analysis(
             "struct P { x: i32; }\npub fn test() { forall { let p: P = @; } }",
         );
         inf_wasmparser::validate(&wasm_bytes)

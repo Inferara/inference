@@ -496,7 +496,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -1089,7 +1089,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -4185,7 +4185,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -4202,7 +4202,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -4222,7 +4222,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i32 WASM is invalid: {e}"));
     }
@@ -4238,7 +4238,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i64 WASM is invalid: {e}"));
     }
@@ -4254,7 +4254,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki mixed fields WASM is invalid: {e}"));
     }
@@ -4274,7 +4274,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Field-position uzumaki WASM is invalid: {e}"));
     }
@@ -4291,7 +4291,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Mixed-width field uzumaki WASM is invalid: {e}"));
     }
@@ -4307,7 +4307,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct with array field uzumaki WASM is invalid: {e}"));
     }
@@ -4323,7 +4323,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct with i64 array field uzumaki WASM is invalid: {e}"));
     }
@@ -4339,7 +4339,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct with multiple array fields uzumaki WASM is invalid: {e}"));
     }
@@ -4355,7 +4355,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct with only array fields uzumaki WASM is invalid: {e}"));
     }
@@ -4371,7 +4371,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct with bool array field uzumaki WASM is invalid: {e}"));
     }
@@ -5960,7 +5960,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -5979,7 +5979,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Multidim array uzumaki i32 WASM is invalid: {e}"));
     }
@@ -5994,7 +5994,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Multidim array uzumaki i64 WASM is invalid: {e}"));
     }
@@ -6009,7 +6009,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("3D array uzumaki WASM is invalid: {e}"));
     }
@@ -6024,16 +6024,17 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
     }
 
     // Array-element uzumaki: a scalar `@` element of an array literal (`[0, @]`)
-    // must compile end-to-end (type-check threads the element type onto the `@`,
-    // analysis A040 permits scalar elements, codegen lowers it to a single scalar
-    // uzumaki opcode). These run through `wasm_codegen` (analysis ON), so they
-    // also guard that A040 does not reject the scalar element position.
+    // must lower (type-check threads the element type onto the `@`, codegen lowers
+    // it to a single scalar uzumaki opcode). These bypass analysis: the enclosing
+    // `forall` sits outside a `spec`, which A042 rejects at the pipeline level, so
+    // the codegen path is exercised directly. That A040 accepts a scalar element
+    // position is covered by the analysis rule tests (`rules_a040`).
 
     #[test]
     fn array_element_uzumaki_i32_compiles() {
@@ -6045,7 +6046,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("scalar i32 array-element uzumaki WASM is invalid: {e}"));
     }
@@ -6060,7 +6061,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("scalar i64 array-element uzumaki WASM is invalid: {e}"));
     }
@@ -6075,7 +6076,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("scalar bool array-element uzumaki WASM is invalid: {e}"));
     }
@@ -6090,7 +6091,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| {
             panic!("nested-array inner scalar element uzumaki WASM is invalid: {e}")
         });
@@ -6107,7 +6108,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| {
             panic!("scalar array-element uzumaki in struct field literal WASM is invalid: {e}")
         });
@@ -6127,7 +6128,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("enum array-element uzumaki WASM is invalid: {e}"));
     }
@@ -6145,7 +6146,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("const scalar array-element uzumaki WASM is invalid: {e}"));
     }
@@ -7371,7 +7372,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }
@@ -7386,7 +7387,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }
@@ -7402,7 +7403,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }
@@ -7420,7 +7421,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(source);
+        let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }

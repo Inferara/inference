@@ -215,6 +215,19 @@ pub(crate) fn codegen_with_full_config(
     codegen_impl(source_code, target, mode, opt_level, AnalysisMode::Run)
 }
 
+/// Like [`codegen_with_full_config`] but skips the analysis pass, for codegen
+/// tests that exercise a construct analysis legitimately rejects (e.g. a
+/// non-deterministic block outside a `spec`, which A042 rejects) while still
+/// needing an explicit target, mode, and optimization level.
+pub(crate) fn codegen_with_full_config_no_analysis(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+    opt_level: inference_wasm_codegen::OptLevel,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    codegen_impl(source_code, target, mode, opt_level, AnalysisMode::Skip)
+}
+
 /// Generates WebAssembly bytes from source code for a specific target.
 ///
 /// Uses the specified target with default compilation mode (`Compile`).

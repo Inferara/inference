@@ -386,7 +386,7 @@ mod fixture_with_spec_smoke {
 }
 
 // ============================================================================
-// Fixture 6: nondet_blocks.inf — Rocq arity of forall / exists / assume
+// Fixture 6: spec_nondet_blocks.inf — Rocq arity of forall / exists / assume
 // ============================================================================
 #[cfg(test)]
 mod fixture_nondet_block_arity {
@@ -394,9 +394,9 @@ mod fixture_nondet_block_arity {
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
-    /// The three non-deterministic quantifier blocks must lower to verifier
-    /// constructors with the exact arity the WasmCert-Coq-Essence library
-    /// declares in `theories/datatypes.v`:
+    /// The three non-deterministic quantifier blocks — here inline inside spec
+    /// functions — must lower to verifier constructors with the exact arity the
+    /// WasmCert-Coq-Essence library declares in `theories/datatypes.v`:
     ///   - `BI_forall : list basic_instruction -> _`            (NO block_type)
     ///   - `BI_exists : list basic_instruction -> _`            (NO block_type)
     ///   - `BI_assume : block_type -> list basic_instruction -> _` (keeps it)
@@ -407,7 +407,7 @@ mod fixture_nondet_block_arity {
     /// could not be `coqc`-checked against the essence library.
     #[test]
     fn forall_exists_drop_blocktype_assume_keeps_it() {
-        let output = compile_inf("nondet_blocks.inf", CompilationMode::Proof, "nondet");
+        let output = compile_inf("spec_nondet_blocks.inf", CompilationMode::Proof, "nondet");
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
 
@@ -434,7 +434,7 @@ mod fixture_nondet_block_arity {
 }
 
 // ============================================================================
-// Fixture 7: nondet_body_modifiers.inf — function-body MODIFIER lowering path
+// Fixture 7: spec_nondet_body_modifiers.inf — function-body MODIFIER lowering path
 // ============================================================================
 #[cfg(test)]
 mod fixture_nondet_body_modifier {
@@ -442,9 +442,9 @@ mod fixture_nondet_body_modifier {
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
-    /// A function-body modifier (`fn f() forall { … }`) records its kind on the
-    /// function's body block, which `wasm-codegen` lowers via
-    /// `visit_function_definition_body` — a *different* path than the inline
+    /// A function-body modifier (`fn f() forall { … }`, here on spec functions)
+    /// records its kind on the function's body block, which `wasm-codegen` lowers
+    /// via `visit_function_definition_body` — a *different* path than the inline
     /// `forall { … }` statement (which flows through `lower_block`, covered by
     /// `fixture_nondet_block_arity`). Fixture 6 only reaches the inline path,
     /// and `with_spec.inf` only exercises the `forall` modifier, so this test
@@ -461,7 +461,7 @@ mod fixture_nondet_body_modifier {
         cov_mark::check_count!(wasm_codegen_emit_exists_block, 1);
         cov_mark::check_count!(wasm_codegen_emit_assume_block, 1);
 
-        let output = compile_inf("nondet_body_modifiers.inf", CompilationMode::Proof, "nbm");
+        let output = compile_inf("spec_nondet_body_modifiers.inf", CompilationMode::Proof, "nbm");
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
 

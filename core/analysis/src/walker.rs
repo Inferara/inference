@@ -22,7 +22,7 @@ pub(crate) struct WalkContext {
     pub module_path: Vec<String>,
 }
 
-fn block_kind_label(kind: BlockKind) -> &'static str {
+pub(crate) fn block_kind_label(kind: BlockKind) -> &'static str {
     match kind {
         BlockKind::Forall => "forall",
         BlockKind::Exists => "exists",

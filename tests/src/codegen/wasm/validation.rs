@@ -12,9 +12,10 @@ mod codegen_validation_tests {
     use crate::utils::{
         codegen_output, codegen_output_no_analysis, codegen_output_with_mode,
         codegen_output_with_mode_no_analysis, codegen_with_full_config,
-        codegen_with_target_mode, codegen_with_target_mode_no_analysis,
+        codegen_with_target_mode, codegen_with_target_mode_no_analysis, wasm_codegen,
         wasm_codegen_no_analysis,
     };
+    use inf_wasmparser::{Operator, Parser, Payload};
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
     // WASM content tests ---
@@ -118,6 +119,58 @@ mod codegen_validation_tests {
             wasm_contains_bytes(wasm, b"regular"),
             "WASM should export regular function"
         );
+    }
+
+    /// A spec-wrapped non-det program built in compile mode (analysis ON) must not
+    /// leak any verification operator into the executable module: the `spec` is
+    /// proof-only and stripped, so a well-formed compile-mode artifact carries none
+    /// of the custom `0xfc` opcodes that fail standard wasm validation. Walk every
+    /// function body's operators and assert none is one of the six verification
+    /// operators. The i32 + i64 uzumaki cover both uzumaki opcodes; `forall` and
+    /// `exists` cover the block operators.
+    #[test]
+    fn compile_mode_spec_nondet_emits_no_verification_operators() {
+        let source = r#"
+            spec S {
+                fn check() -> i32 {
+                    forall {
+                        let x: i32 = @;
+                    }
+                    exists {
+                        let y: i64 = @;
+                    }
+                    return 0;
+                }
+            }
+            pub fn main() -> i32 {
+                return 0;
+            }
+        "#;
+        let wasm = wasm_codegen(source);
+        for payload in Parser::new(0).parse_all(&wasm) {
+            let payload = payload.unwrap_or_else(|e| panic!("failed to parse emitted wasm: {e}"));
+            let Payload::CodeSectionEntry(body) = payload else {
+                continue;
+            };
+            let operators = body
+                .get_operators_reader()
+                .unwrap_or_else(|e| panic!("failed to read a function body: {e}"));
+            for op in operators {
+                let op = op.unwrap_or_else(|e| panic!("failed to decode an operator: {e}"));
+                assert!(
+                    !matches!(
+                        op,
+                        Operator::Forall { .. }
+                            | Operator::Exists { .. }
+                            | Operator::Assume { .. }
+                            | Operator::Unique { .. }
+                            | Operator::I32Uzumaki { .. }
+                            | Operator::I64Uzumaki { .. }
+                    ),
+                    "compile-mode module must contain no verification operators, found: {op:?}"
+                );
+            }
+        }
     }
 
     // Proof mode non-det tests ---
@@ -333,7 +386,7 @@ mod codegen_validation_tests {
     fn nested_nondet_forall_inside_exists_produces_valid_wasm() {
         let source =
             r#"pub fn nested_forall_in_exists() { exists { forall { const a: i32 = 42; } } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested non-det WASM is invalid: {e}"));
@@ -350,7 +403,7 @@ mod codegen_validation_tests {
     #[test]
     fn nested_nondet_forall_inside_forall_produces_valid_wasm() {
         let source = r#"pub fn nested_forall() { forall { forall { const a: i32 = 42; } } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested forall-in-forall WASM is invalid: {e}"));
@@ -364,7 +417,7 @@ mod codegen_validation_tests {
     #[test]
     fn nested_nondet_expression_drop_uses_innermost_block() {
         let source = r#"pub fn nested_drop_test() -> i32 { exists { forall { const x: i32 = 99; } } return 0; }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Nested non-det with const WASM is invalid: {e}"));
@@ -421,7 +474,7 @@ mod codegen_validation_tests {
     #[test]
     fn nondet_void_block_trailing_expression_emits_drop() {
         let source = r#"pub fn drop_test() { forall { const a: i32 = 42; a; } }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).unwrap_or_else(|e| panic!("Drop-path WASM is invalid: {e}"));
         assert!(
@@ -823,7 +876,7 @@ mod codegen_validation_tests {
             fn do_nothing() { }
             pub fn caller() { forall { do_nothing(); } }
         "#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Void call in non-det block WASM is invalid: {e}"));
@@ -889,7 +942,7 @@ mod codegen_validation_tests {
             fn get_value() -> i32 { return 42; }
             pub fn spec() { forall { let x: i32 = get_value(); } }
         "#;
-        let wasm = codegen_output(source).wasm().to_vec();
+        let wasm = codegen_output_no_analysis(source).wasm().to_vec();
         inf_wasmparser::validate(&wasm).unwrap_or_else(|e| {
             panic!("Value-returning call in non-det block with let WASM is invalid: {e}")
         });

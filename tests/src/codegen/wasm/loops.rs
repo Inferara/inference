@@ -29,7 +29,7 @@
 mod loops_tests {
     use crate::utils::{
         assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
-        get_test_wasm_path, wasm_codegen,
+        get_test_wasm_path, wasm_codegen, wasm_codegen_no_analysis,
     };
 
     #[test]
@@ -611,7 +611,7 @@ mod loops_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -632,7 +632,7 @@ mod loops_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);

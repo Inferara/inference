@@ -1,30 +1,41 @@
-pub fn hello_uzumaki() -> i32 {
-    forall {
-        let x: i32 = @;
-    }
+// A spec bundling every non-deterministic construct (forall/exists/assume/unique
+// and the uzumaki `@`). Non-deterministic constructs are valid only inside a spec
+// declaration, so they live here. A proof-mode build (`-v`) compiles the spec and
+// emits Rocq alongside the WASM; a compile-mode build strips the proof-only spec
+// and emits only the executable `main`.
+pub fn main() -> i32 {
     return 0;
 }
 
-pub fn hello_world() {
-    forall {
-        const a: i32 = 42;
+spec NonDetFeatures {
+    fn hello_uzumaki() -> i32 {
+        forall {
+            let x: i32 = @;
+        }
+        return 0;
     }
-}
 
-pub fn hello_exists() {
-    exists {
-        const a: i32 = 42;
+    fn hello_world() {
+        forall {
+            const a: i32 = 42;
+        }
     }
-}
 
-pub fn hello_assume() {
-    assume {
-        const a: i32 = 42;
+    fn hello_exists() {
+        exists {
+            const a: i32 = 42;
+        }
     }
-}
 
-pub fn hello_unique() {
-    unique {
-        const a: i32 = 42;
+    fn hello_assume() {
+        assume {
+            const a: i32 = 42;
+        }
+    }
+
+    fn hello_unique() {
+        unique {
+            const a: i32 = 42;
+        }
     }
 }
