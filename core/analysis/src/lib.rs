@@ -94,6 +94,16 @@
 //!   rule — it preserves a 1:1 source-name to local to proof-index mapping per
 //!   function — not a proof-soundness requirement.
 //!
+//! ### Reserved Export Names (A043)
+//!
+//! - A043: An entry-file top-level `pub fn` may not be named `memory` or
+//!   `__stack_pointer`. Codegen exports such a function under its plain source
+//!   name and separately reserves those names for the module's synthetic linear
+//!   memory and stack-pointer exports; a user function with either name would
+//!   produce a duplicate export name (invalid wasm) or hijack the standard
+//!   `memory` export with a Function. The check is unconditional so the ABI
+//!   surface does not depend on whether the program happens to use memory.
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -208,6 +218,7 @@ mod tests {
             AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { ty: "Point".to_string(), location: dummy_location() },
             AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
+            AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
