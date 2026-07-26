@@ -2425,6 +2425,24 @@ impl TypeChecker {
                         });
                     }
                 }
+                // `**` has no code generation (no native WASM power
+                // instruction and no lowering yet), so every use is rejected
+                // here, before codegen can be reached. The check runs before
+                // the two-`Some` operand guard below so it also fires when an
+                // operand's type fails to infer (e.g. a `@` operand, which
+                // infers `None` without an error of its own). Operand-shape
+                // diagnostics are deliberately skipped for `**`: the operator
+                // itself is the error regardless of its operands. The
+                // expression falls back to the left operand's type so
+                // surrounding inference can continue.
+                if matches!(op, OperatorKind::Pow) {
+                    self.push_error(TypeCheckError::PowOperatorNotSupported { location });
+                    if let Some(res_type) = left_type {
+                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), res_type.clone());
+                        return Some(res_type);
+                    }
+                    return None;
+                }
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
                     if left_type != right_type {
                         self.push_error(TypeCheckError::BinaryOperandTypeMismatch {
@@ -2474,8 +2492,10 @@ impl TypeChecker {
                                 type_params: vec![],
                             }
                         }
-                        OperatorKind::Pow
-                        | OperatorKind::Add
+                        OperatorKind::Pow => {
+                            unreachable!("`**` is rejected above with PowOperatorNotSupported before operand checks")
+                        }
+                        OperatorKind::Add
                         | OperatorKind::Sub
                         | OperatorKind::Mul
                         | OperatorKind::Div

@@ -917,14 +917,18 @@ mod expression_coverage {
     }
 
     #[test]
-    fn test_binary_arithmetic_pow() {
+    fn test_binary_arithmetic_pow_rejected() {
         let source = r#"fn test() -> i32 { return 2 ** 3; }"#;
         let result = try_type_check(source);
-        assert!(
-            result.is_ok(),
-            "Power operation should work, got: {:?}",
-            result.err()
-        );
+        assert!(result.is_err(), "Power operator should be rejected");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("the power operator `**` is not yet supported"),
+                "Error should mention the unsupported power operator: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]
