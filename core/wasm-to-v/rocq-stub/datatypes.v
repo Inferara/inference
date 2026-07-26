@@ -119,9 +119,14 @@ Record memarg : Type := {
 (*                                                                    *)
 (* Arities below are the contract the emitter writes. In particular   *)
 (* the quantifier blocks `BI_forall`/`BI_exists` are ONE-ary (they    *)
-(* carry only a body, no `block_type`), whereas `BI_assume`/          *)
-(* `BI_unique` are two-ary (leading `block_type` + body). This is the *)
-(* #230 fix, pinned so a re-broken arity fails `coqc` here.           *)
+(* carry only a body, no `block_type`), whereas `BI_assume` is        *)
+(* two-ary (leading `block_type` + body). This is the #230 fix,       *)
+(* pinned so a re-broken arity fails `coqc` here.                     *)
+(*                                                                    *)
+(* `BI_unique` is deliberately ABSENT — the wasm-verifier library     *)
+(* does not define it and the translator rejects the `unique` block   *)
+(* rather than emitting it, so any regression that re-emits           *)
+(* `BI_unique` fails `coqc` here as an unbound constructor.           *)
 (* ------------------------------------------------------------------ *)
 
 (* This stub never performs induction over `basic_instruction`; suppressing the
@@ -149,7 +154,6 @@ Inductive basic_instruction : Type :=
 | BI_forall : list basic_instruction -> basic_instruction
 | BI_exists : list basic_instruction -> basic_instruction
 | BI_assume : block_type -> list basic_instruction -> basic_instruction
-| BI_unique : block_type -> list basic_instruction -> basic_instruction
 | BI_br : N -> basic_instruction
 | BI_br_if : N -> basic_instruction
 | BI_br_table : list N -> basic_instruction

@@ -1,5 +1,5 @@
-//! Invariant: anything `inference_wasm_linker::link()` accepts can be lowered to
-//! Rocq by `wasm-to-v` without panicking.
+//! Invariant: anything `inference_wasm_linker::link()` accepts is either lowered
+//! to Rocq by `wasm-to-v` or rejected with a recoverable error — never a panic.
 //!
 //! The linker copies the main module's body verbatim and folds external function
 //! bodies in after gating every operator through the fail-closed allow-list
@@ -42,9 +42,22 @@
 //! reaches the translator, since an external body must additionally survive tier
 //! classification (a memory access through a non-parameter address is rejected as
 //! Tier C). Direct `call` is inherent in every fixture (the main module calls the
-//! satisfied import, whose body is merged in). The non-det/uzumaki proof-path
-//! opcodes are legal only in the main module, which carries them as Rocq proof
+//! satisfied import, whose body is merged in). The translatable proof-path
+//! opcodes — the `forall`/`exists`/`assume` blocks and both uzumaki rvalues —
+//! are legal only in the main module, which carries them as Rocq proof
 //! scaffolding the merge preserves verbatim.
+//!
+//! ## `unique` is linkable but rejected at translation
+//!
+//! The `unique` block (`0xfc 0x3d`) is the one deliberate exception: the
+//! wasm-verifier library defines no `BI_unique` constructor, so `wasm-to-v`
+//! rejects it with a recoverable `UnsupportedFeature` error instead of
+//! lowering it to a constructor the real library cannot type-check. The
+//! linker is unchanged — a main module carrying `unique` as proof scaffolding
+//! still links (externals carrying it are rejected by the allow-list as
+//! before) — so the phase agreement for `unique` is a clean rejection, never
+//! a panic and never a silently un-verifiable `.v`.
+//! [`proof_path_unique_is_rejected_at_translation`] pins that.
 
 use inference_wasm_linker::link as raw_link;
 use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
@@ -114,6 +127,42 @@ fn assert_output_translates(label: &str, main: &[u8]) {
              core/wasm-linker/src/safety.rs without a translator lowering — either add the \
              lowering in core/wasm-to-v/src/translator.rs or remove the family from the \
              allow-list"
+        ),
+    }
+}
+
+/// The dual of [`assert_output_translates`] for `unique`: the linker accepts
+/// `main`, but wasm-to-v must reject the linked output with a recoverable
+/// `WasmToVError::UnsupportedFeature` — never a panic, never a silent success.
+fn assert_output_rejected_as_nondet(label: &str, main: &[u8]) {
+    let linked = link_against_mathlib(main);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        translate_bytes("Prog", &linked, &empty)
+    }));
+    match result {
+        Ok(Err(e)) => {
+            let downcast =
+                e.downcast_ref::<inference_wasm_to_v_translator::errors::WasmToVError>();
+            assert!(
+                matches!(
+                    downcast,
+                    Some(inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature { .. })
+                ),
+                "{label}: expected a recoverable UnsupportedFeature rejection; got {e:?}"
+            );
+            assert!(
+                e.to_string().contains("`unique`"),
+                "{label}: the rejection must name the `unique` block; got {e:?}"
+            );
+        }
+        Ok(Ok(_)) => panic!(
+            "{label}: wasm-to-v must reject a linked output carrying `unique` (the \
+             wasm-verifier library has no `BI_unique` constructor), but translation succeeded"
+        ),
+        Err(_) => panic!(
+            "{label}: wasm-to-v PANICKED instead of returning a recoverable \
+             UnsupportedFeature error"
         ),
     }
 }
@@ -491,20 +540,25 @@ fn ref_func_translates() {
 
 #[test]
 fn proof_path_nondet_and_uzumaki_translate() {
-    // The verification-only proof-path opcodes (forall/exists/assume/unique and
+    // The translatable proof-path opcodes (forall/exists/assume and
     // i32.uzumaki/i64.uzumaki) are legal only in the main module, which carries
     // them as Rocq proof scaffolding the merge preserves verbatim. `wat` cannot
     // assemble these custom `0xfc`-prefixed opcodes, so the body is hand-encoded.
+    // `unique` (`0xfc 0x3d`) has no honest lowering and is exercised separately
+    // by its own rejection fixture, [`proof_path_unique_is_rejected_at_translation`].
     let main = proof_mode_main_with_nondet_and_uzumaki();
     assert_output_translates("non-det blocks + uzumaki (proof path)", &main);
 }
 
 /// Builds a proof-mode MAIN module that imports `mathlib::sum` and whose own
-/// exported body carries every verification-only opcode the proof path uses — the
-/// four non-det blocks (`forall`/`exists`/`assume`/`unique`) and both uzumaki
-/// rvalues (`i32.uzumaki`/`i64.uzumaki`) — alongside an executable `call` to the
-/// import. `wat` cannot assemble the custom opcodes, so the module is hand-encoded
-/// byte-by-byte, mirroring the encoding in `link.rs`.
+/// exported body carries the translatable verification-only opcodes the proof
+/// path uses — the three non-det blocks (`forall`/`exists`/`assume`) and both
+/// uzumaki rvalues (`i32.uzumaki`/`i64.uzumaki`) — alongside an executable `call`
+/// to the import. `unique` (`0xfc 0x3d`) is deliberately excluded: it has no
+/// honest Rocq lowering, so it is exercised by its own rejection fixture
+/// ([`main_with_unique_block`]) rather than here. `wat` cannot assemble the
+/// custom opcodes, so the module is hand-encoded byte-by-byte, mirroring the
+/// encoding in `link.rs`.
 fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
@@ -535,8 +589,9 @@ fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     let mut code = CodeSection::new();
     let mut f = Function::new([]);
     // Each non-det block (`0xfc <sub_opcode> 0x40` = empty block type) opens a
-    // region closed by `End`; the empty block has no stack effect.
-    for sub_opcode in [0x3a_u8, 0x3b, 0x3c, 0x3d] {
+    // region closed by `End`; the empty block has no stack effect. `unique`
+    // (`0x3d`) is omitted here — its rejection is pinned separately.
+    for sub_opcode in [0x3a_u8, 0x3b, 0x3c] {
         f.raw([0xfc, sub_opcode, 0x40]);
         f.instruction(&Instruction::End);
     }
@@ -546,6 +601,67 @@ fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     f.instruction(&Instruction::Drop);
     f.raw([0xfc, 0x32]); // i64.uzumaki
     f.instruction(&Instruction::Drop);
+    // Executable tail: sum(arg0, arg1) via the (to-be-merged) import.
+    f.instruction(&Instruction::LocalGet(0));
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::Call(0));
+    f.instruction(&Instruction::End);
+    code.function(&f);
+    module.section(&code);
+
+    module.finish()
+}
+
+#[test]
+fn proof_path_unique_is_rejected_at_translation() {
+    // `unique` (0xfc 0x3d) links fine in a main module's proof scaffolding but
+    // has no honest Rocq lowering, so the linked output must be rejected by
+    // wasm-to-v with a recoverable error. `wat` cannot assemble the custom
+    // opcode, so the body is hand-encoded.
+    let main = main_with_unique_block();
+    assert_output_rejected_as_nondet("unique block (proof path)", &main);
+}
+
+/// Builds a proof-mode MAIN module that imports `mathlib::sum` and whose own
+/// exported body carries a single `unique` block (`0xfc 0x3d 0x40`) closed by
+/// `End`, alongside an executable `call` to the import. The linker admits this
+/// (a main module's proof scaffolding is re-encoded verbatim), but wasm-to-v
+/// must reject it — there is no `BI_unique` constructor to lower it to. `wat`
+/// cannot assemble the custom opcode, so the module is hand-encoded, mirroring
+/// [`proof_mode_main_with_nondet_and_uzumaki`].
+fn main_with_unique_block() -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
+        Instruction, Module, TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    module.section(&types);
+
+    let mut imports = ImportSection::new();
+    imports.import("mathlib", "sum", EntityType::Function(0));
+    module.section(&imports);
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+
+    let mut exports = ExportSection::new();
+    // The import is output index 0; the local function is index 1.
+    exports.export("compute", ExportKind::Func, 1);
+    module.section(&exports);
+
+    let mut code = CodeSection::new();
+    let mut f = Function::new([]);
+    // The one `unique` block (`0xfc 0x3d 0x40` = empty block type), closed by
+    // `End`; the empty block has no stack effect.
+    f.raw([0xfc, 0x3d, 0x40]);
+    f.instruction(&Instruction::End);
     // Executable tail: sum(arg0, arg1) via the (to-be-merged) import.
     f.instruction(&Instruction::LocalGet(0));
     f.instruction(&Instruction::LocalGet(1));

@@ -1,8 +1,10 @@
-// A spec bundling every non-deterministic construct (forall/exists/assume/unique
-// and the uzumaki `@`). Non-deterministic constructs are valid only inside a spec
-// declaration, so they live here. A proof-mode build (`-v`) compiles the spec and
-// emits Rocq alongside the WASM; a compile-mode build strips the proof-only spec
-// and emits only the executable `main`.
+// A spec bundling the translatable non-deterministic constructs (forall/exists/
+// assume and the uzumaki `@`). Non-deterministic constructs are valid only inside
+// a spec declaration, so they live here. A proof-mode build (`-v`) compiles the
+// spec and emits Rocq alongside the WASM; a compile-mode build strips the
+// proof-only spec and emits only the executable `main`. The `unique` block has no
+// Rocq lowering and is rejected in proof mode; that negative path lives in
+// `nondet_unique.inf`.
 pub fn main() -> i32 {
     return 0;
 }
@@ -29,12 +31,6 @@ spec NonDetFeatures {
 
     fn hello_assume() {
         assume {
-            const a: i32 = 42;
-        }
-    }
-
-    fn hello_unique() {
-        unique {
             const a: i32 = 42;
         }
     }

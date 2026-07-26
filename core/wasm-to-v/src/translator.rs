@@ -1205,18 +1205,26 @@ fn translate_basic_operator(
             let blockty = translate_block_type(blockty)?;
             format!("BI_assume ({blockty})")
         }
-        // NOTE: the verifier library currently has no `BI_unique` constructor
-        // (it is commented out in `theories/datatypes.v`), so this lowering
-        // emits a reference that does not type-check in proof mode. It is left
-        // as-is here because `unique` is an allow-listed *proof-only* family in
-        // `core/wasm-linker/src/safety.rs` whose linker↔translator agreement is
-        // pinned by `core/wasm-linker/tests/v_alignment.rs` (every allow-listed
-        // family must translate without error). Honestly rejecting `unique`
-        // belongs with that allow-list/contract, not with this arity fix —
-        // tracked as separate follow-up.
-        Operator::Unique { blockty } => {
-            let blockty = translate_block_type(blockty)?;
-            format!("BI_unique ({blockty})")
+        // The wasm-verifier library defines no `BI_unique` constructor (it is
+        // commented out in its `theories/datatypes.v`), so there is no honest
+        // Rocq lowering for a `unique` block: emitting `BI_unique` would
+        // produce a `.v` that can never type-check against the real library.
+        // Reject with a recoverable error instead. The linker deliberately
+        // still admits the opcode in a main module's proof scaffolding (the
+        // merge allow-list never applied to the main re-encode path), so the
+        // linker<->translator agreement pinned by
+        // `core/wasm-linker/tests/v_alignment.rs` is that a linked output
+        // carrying `unique` is rejected here — never lowered, never a panic.
+        Operator::Unique { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "the `unique` non-deterministic block (the wasm-verifier proof \
+                              library defines no `BI_unique` constructor, so a uniqueness \
+                              obligation cannot be expressed in the emitted `.v`; \
+                              `forall`/`exists`/`assume` blocks still translate — restate the \
+                              property without `unique`, or build without `-v`, which strips \
+                              spec functions)"
+                    .to_string(),
+            }));
         }
         Operator::I32Uzumaki { .. } => String::from("BI_uzumaki_num T_i32"),
         Operator::I64Uzumaki { .. } => String::from("BI_uzumaki_num T_i64"),

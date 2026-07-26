@@ -13,7 +13,7 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 - **Complete WASM module translation**: Functions, types, imports, exports, tables, memory, globals, data segments, and elements
 - **Custom name section support**: Preserves function and local variable names from WASM debug information
 - **Expression tree reconstruction**: Converts linear WASM instructions into structured Rocq expressions
-- **Non-deterministic instruction support**: Handles Inference's extended WASM instructions (forall, exists, uzumaki, assume, unique)
+- **Non-deterministic instruction support**: Handles Inference's extended WASM instructions (forall, exists, uzumaki, assume); the `unique` block is rejected in proof mode, as the verifier library defines no matching constructor
 - **Partial output on error**: Section entries that fail to translate are skipped rather than aborting the entire module
 - **Zero-copy parsing**: Efficiently processes WASM bytecode using streaming parser
 
@@ -300,7 +300,7 @@ Inference extends WebAssembly with custom instructions for non-deterministic com
 | `forall` | `0xfc 0x3a` | Begin universal quantification block | Forall block construct |
 | `exists` | `0xfc 0x3b` | Begin existential quantification block | Exists block construct |
 | `assume` | `0xfc 0x3c` | Filter execution paths by constraint | Assume statement |
-| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists | Unique constraint |
+| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists | Rejected in proof mode: no `BI_unique` constructor in the verifier library |
 | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value | Uzumaki constructor |
 | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value | Uzumaki constructor |
 
