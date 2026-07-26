@@ -2329,4 +2329,47 @@ mod tests {
             "custom page size",
         );
     }
+
+    #[test]
+    fn unique_operator_is_rejected_as_unsupported() {
+        // A `unique` block has no honest Rocq lowering — the verifier library
+        // defines no `BI_unique` constructor — so the arm rejects it with a
+        // recoverable error naming both the construct and the missing
+        // constructor, never lowering it and never panicking.
+        let err = translate_basic_operator(&Operator::Unique { blockty: BlockType::Empty }, &None)
+            .expect_err("a `unique` block must be rejected, not lowered");
+        assert!(
+            matches!(
+                err.downcast_ref::<WasmToVError>(),
+                Some(WasmToVError::UnsupportedFeature { .. })
+            ),
+            "expected UnsupportedFeature, got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("`unique`"), "names the construct: {text}");
+        assert!(text.contains("BI_unique"), "names the missing constructor: {text}");
+        assert!(text.contains("still translate"), "offers a recovery hint: {text}");
+    }
+
+    #[test]
+    fn forall_exists_assume_still_translate() {
+        // Only `unique` is rejected: the sibling proof-path blocks keep their
+        // honest lowerings, so each must still produce its exact constructor —
+        // a regression that broadened the rejection would fail here.
+        assert_eq!(
+            translate_basic_operator(&Operator::Forall { blockty: BlockType::Empty }, &None)
+                .expect("forall still translates"),
+            "BI_forall"
+        );
+        assert_eq!(
+            translate_basic_operator(&Operator::Exists { blockty: BlockType::Empty }, &None)
+                .expect("exists still translates"),
+            "BI_exists"
+        );
+        assert_eq!(
+            translate_basic_operator(&Operator::Assume { blockty: BlockType::Empty }, &None)
+                .expect("assume still translates"),
+            "BI_assume (BT_valtype None)"
+        );
+    }
 }
