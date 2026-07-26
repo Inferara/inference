@@ -8,7 +8,7 @@
 // Key patterns tested:
 // - 8-level left-associative addition chain: ((((((((1+2)+3)+4)+5)+6)+7)+8)+9) = 45
 // - Mixed arithmetic in nested groups: ((a+b)*(c-d)) + ((a-b)*(c+d))
-// - Boolean connectives over nested comparisons: (a>b) && ((c<d) || (a==c))
+// - Short-circuit boolean connectives over nested comparisons: (a>b) && ((c<d) || (a==c))
 // - Function calls as subexpressions: (f(x) + f(x+1)) * 2
 // - 4-level left-associative parenthesized addition: ((((1+2)+3)+4)+5) = 15
 

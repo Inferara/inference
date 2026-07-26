@@ -12,8 +12,9 @@
 /// - `bitnot_and(~a & b)`: `local.get $a; i32.const -1; i32.xor; local.get $b; i32.and`
 ///   BitNot lowers as `x ^ -1`, then bitwise AND follows.
 ///
-/// - `not_and(!a && b)`: `local.get $a; i32.eqz; local.get $b; i32.and`
-///   Logical NOT via `i32.eqz`, then non-short-circuit AND via `i32.and`.
+/// - `not_and(!a && b)`: `local.get $a; i32.eqz; if (result i32) local.get $b else i32.const 0 end`
+///   Logical NOT via `i32.eqz` as the condition, then short-circuit `&&` as a
+///   valued `if (result i32)` block ($b runs only when `!a` is true).
 #[cfg(test)]
 mod binops_unary_combos_tests {
     use crate::utils::{

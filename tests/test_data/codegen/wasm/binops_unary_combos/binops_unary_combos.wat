@@ -110,24 +110,33 @@
   (func $not_and (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
     local.get $a
     i32.eqz
-    local.get $b
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
   (func $not_or (;9;) (type 9) (param $a i32) (param $b i32) (result i32)
     local.get $a
     i32.eqz
-    local.get $b
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
     return
     unreachable
   )
   (func $and_not (;10;) (type 10) (param $a i32) (param $b i32) (result i32)
     local.get $a
-    local.get $b
-    i32.eqz
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $b
+      i32.eqz
+    else
+      i32.const 0
+    end
     return
     unreachable
   )

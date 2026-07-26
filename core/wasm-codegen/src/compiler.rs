@@ -4261,6 +4261,11 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
+        if matches!(op, OperatorKind::And | OperatorKind::Or) {
+            self.lower_short_circuit_binary(arena, left, right, op, ctx);
+            return;
+        }
+
         self.lower_expression(arena, left, ctx, None);
         self.lower_expression(arena, right, ctx, None);
 
@@ -4304,8 +4309,9 @@ impl Compiler {
                 (false, true) => Instruction::I32RemU,
                 (false, false) => Instruction::I32RemS,
             },
-            OperatorKind::And => Instruction::I32And,
-            OperatorKind::Or => Instruction::I32Or,
+            OperatorKind::And | OperatorKind::Or => {
+                unreachable!("`&&`/`||` lower via the short-circuit path above")
+            }
             OperatorKind::Eq => {
                 if is_i64 {
                     Instruction::I64Eq
@@ -4397,12 +4403,76 @@ impl Compiler {
                 | OperatorKind::Gt
                 | OperatorKind::Ge
                 | OperatorKind::Mod
-                | OperatorKind::And
-                | OperatorKind::Or
                 | OperatorKind::Shr
         ) {
             memory::emit_sub_i32_narrowing(self.func(), &left_type_info.kind);
         }
+    }
+
+    /// Lowers `&&`/`||` with short-circuit evaluation.
+    ///
+    /// The right operand is emitted inside a valued `if (result i32)` block, so
+    /// at runtime it executes only when the left operand does not already decide
+    /// the result:
+    ///
+    /// ```wat
+    /// ;; a && b                      ;; a || b
+    /// <a>                            <a>
+    /// if (result i32)                if (result i32)
+    ///   <b>                            i32.const 1
+    /// else                           else
+    ///   i32.const 0                    <b>
+    /// end                            end
+    /// ```
+    ///
+    /// Correctness leans on two invariants. The type checker admits only `bool`
+    /// operands here, and every bool producer emits a canonical 0/1 (comparisons,
+    /// `i32.eqz`, bool literals, uzumaki domain constraints), so the constant in
+    /// the decided branch is exact and the pass-through operand needs no
+    /// renormalization. That canonicity is a property of in-language values: a
+    /// host calling an exported function does not normalize a narrow `bool`
+    /// parameter at entry, so an out-of-domain argument (e.g. `2`) can pass
+    /// through the evaluated branch. This is a pre-existing property of every
+    /// narrow entry parameter, not specific to this lowering — the previous
+    /// bitwise form mishandled the same inputs (`i32.and` could flip a truthy
+    /// value to `0`). Do not replace this shape with `select` or bitwise
+    /// `i32.and`/`i32.or`: both evaluate the right operand unconditionally, which
+    /// re-introduces the traps the guard idiom exists to avoid
+    /// (`x != 0 && y / x > 0`, `i < len && arr[i] != 0`).
+    ///
+    /// Left-associative chains lower flat: `(a && b) && c` emits two sequential
+    /// valued ifs, the first block's 0/1 result serving as the second `if`'s
+    /// condition, so nesting depth does not grow with chain length.
+    #[allow(clippy::needless_pass_by_value)]
+    fn lower_short_circuit_binary(
+        &mut self,
+        arena: &AstArena,
+        left: ExprId,
+        right: ExprId,
+        op: OperatorKind,
+        ctx: &TypedContext,
+    ) {
+        self.lower_expression(arena, left, ctx, None);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Result(ValType::I32)));
+        self.loop_ctx.wasm_block_depth += 1;
+        match op {
+            OperatorKind::And => {
+                cov_mark::hit!(wasm_codegen_emit_short_circuit_and);
+                self.lower_expression(arena, right, ctx, None);
+                self.func().instruction(&Instruction::Else);
+                self.func().instruction(&Instruction::I32Const(0));
+            }
+            OperatorKind::Or => {
+                cov_mark::hit!(wasm_codegen_emit_short_circuit_or);
+                self.func().instruction(&Instruction::I32Const(1));
+                self.func().instruction(&Instruction::Else);
+                self.lower_expression(arena, right, ctx, None);
+            }
+            _ => unreachable!("only `&&`/`||` take the short-circuit lowering"),
+        }
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
     }
 
     /// Lowers a prefix unary expression to WASM stack instructions.

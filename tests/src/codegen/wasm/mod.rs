@@ -25,4 +25,5 @@ mod loops;
 mod multi_file;
 mod multi_file_golden;
 mod negative;
+mod short_circuit;
 mod validation;

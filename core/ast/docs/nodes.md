@@ -653,8 +653,8 @@ pub enum OperatorKind {
     Mul,      // *
     Div,      // /
     Mod,      // %
-    And,      // &&  — lowers to i32.and (no short-circuit)
-    Or,       // ||  — lowers to i32.or  (no short-circuit)
+    And,      // &&  — short-circuit logical and
+    Or,       // ||  — short-circuit logical or
     Eq,       // ==
     Ne,       // !=
     Lt,       // <
@@ -673,8 +673,12 @@ pub enum OperatorKind {
 
 - `Pow` (`**`) is not yet implemented in the WASM backend. Attempting to lower a
   binary expression with this operator will panic with a `todo!()`.
-- `And` and `Or` lower to WebAssembly `i32.and`/`i32.or` bitwise instructions.
-  Both operands are always evaluated — there is no short-circuit evaluation.
+- `And` and `Or` lower to a valued WebAssembly `if (result i32)` block and
+  short-circuit: `a && b` evaluates `a` and evaluates `b` only when `a` is true
+  (the result is `0` otherwise); `a || b` evaluates `a` and evaluates `b` only
+  when `a` is false (the result is `1` otherwise). Evaluation is left-to-right
+  and the result is always a canonical `0`/`1`. Bitwise `&`/`|` are unaffected
+  and always evaluate both operands.
 
 **Example source:**
 ```inference

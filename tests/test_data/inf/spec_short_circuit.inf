@@ -1,0 +1,39 @@
+// Short-circuit `&&`/`||` in proof mode. The executable functions `guard_div`
+// and `either` lower `&&`/`||` to valued `if (result i32)` blocks, so their
+// proof-mode translation is the first producer of
+// `BI_if (BT_valtype (Some (T_num T_i32)))` in the coqc corpus, and it survives
+// a future change that omits spec-function bodies from the module record. No
+// `&&`/`||` anywhere lowers to a term-level `Binop_i BOI_and` — that shape now
+// comes only from bitwise `&`/`|` and narrowing masks, which this fixture has
+// none of — so the coqc gate pins the valued-`BI_if` shape without one.
+
+fn guard_div(x: i32) -> bool {
+    return x != 0 && 100 / x > 1;
+}
+
+fn either(a: bool, b: bool) -> bool {
+    return a || b;
+}
+
+pub fn main() -> i32 {
+    if guard_div(5) {
+        return 1;
+    }
+    return 0;
+}
+
+spec ShortCircuitSpec {
+    fn guard_prop() forall {
+        let x: i32 = @;
+        assume {
+            assert(x > 0 && x < 1000);
+        }
+        assert(guard_div(x) == guard_div(x));
+    }
+    fn either_prop() forall {
+        let a: i32 = @;
+        if either(a > 0, a < 0) {
+            assert(a != 0);
+        }
+    }
+}

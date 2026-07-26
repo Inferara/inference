@@ -1,21 +1,27 @@
-// WASM bytecode verified via binary inspection (opcode hex values):
+// WASM lowering shapes for this fixture, verified by binary inspection and the
+// execution truth tables below.
 //
-// and3(a,b,c):        local.get 0, local.get 1, i32.and(0x71), local.get 2, i32.and(0x71)
-//                     Two i32.and for chained &&.
-// or3(a,b,c):         local.get 0, local.get 1, i32.or(0x72),  local.get 2, i32.or(0x72)
-//                     Two i32.or for chained ||.
-// de_morgan_and(a,b): local.get 0, local.get 1, i32.and(0x71), i32.eqz(0x45)
-//                     Single i32.eqz for outer !, applied to i32.and result.
-// de_morgan_or(a,b):  local.get 0, local.get 1, i32.or(0x72),  i32.eqz(0x45)
-//                     Single i32.eqz for outer !, applied to i32.or result.
-// not_and_or(a,b,c):  local.get 0, i32.eqz(0x45), local.get 1, local.get 2, i32.or(0x72), i32.and(0x71)
-//                     i32.eqz on first operand (!a), then i32.or and i32.and.
-// implies(a,b):       local.get 0, i32.eqz(0x45), local.get 1, i32.or(0x72)
-//                     !a lowered as i32.eqz, then i32.or with b.
-// xor_bool(a,b):      (a||b) lowered as i32.or, then !(a&&b) lowered as i32.and + i32.eqz,
-//                     final i32.and combines the two sub-results.
-// between(x,lo,hi):   i32.ge_s(0x4E) + i32.le_s(0x4C) + i32.and(0x71)
-// all_same_sign(a,b):  Two i32.ge_s(0x4E) comparisons with 0, then i32.eq(0x46)
+// `&&` and `||` short-circuit: each lowers to a valued `if (result i32)` block
+// whose right operand runs only when the left operand does not decide the
+// result. `a && b` yields 0 without evaluating `b` when `a` is false; `a || b`
+// yields 1 without evaluating `b` when `a` is true. Left-associative chains
+// lower flat — sequential valued ifs, each block's 0/1 result feeding the next
+// if's condition.
+//
+// and3(a,b,c):        (a && b) && c — two sequential valued ifs.
+// or3(a,b,c):         (a || b) || c — two sequential valued ifs.
+// de_morgan_and(a,b): the `a && b` valued if, then i32.eqz for the outer `!`.
+// de_morgan_or(a,b):  the `a || b` valued if, then i32.eqz for the outer `!`.
+// not_and_or(a,b,c):  i32.eqz on a (`!a`) as the `&&` if's condition, its true
+//                     arm holding the `b || c` valued if.
+// implies(a,b):       i32.eqz on a (`!a`) as the `||` if's condition, with b in
+//                     the else arm.
+// xor_bool(a,b):      the `a || b` valued if feeds a `&&` valued if whose true
+//                     arm holds `!(a && b)` (the `a && b` valued if, then i32.eqz).
+// between(x,lo,hi):   (x >= lo) i32.ge_s as the `&&` if's condition, its true arm
+//                     holding (x <= hi) i32.le_s.
+// all_same_sign(a,b): two i32.ge_s comparisons with 0, then i32.eq — bool
+//                     equality, not a logical connective, so unchanged.
 
 #[cfg(test)]
 mod binops_bool_tests {
@@ -198,7 +204,6 @@ mod binops_bool_tests {
         let dir = get_test_data_path()
             .join("codegen")
             .join("wasm")
-            .join("binops_bool")
             .join("binops_bool");
         let source_code = std::fs::read_to_string(dir.join("binops_bool.inf"))
             .expect("Failed to read binops_bool.inf");
