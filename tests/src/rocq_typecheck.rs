@@ -55,6 +55,7 @@ mod gate {
         ("mixed_compile_proof.inf", "mixed_compile_proof"),
         ("rocq_control_flow.inf", "rocq_control_flow"),
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
+        ("spec_short_circuit.inf", "spec_short_circuit"),
     ];
 
     /// Constructors the corpus must keep exercising. These are the
@@ -76,6 +77,7 @@ mod gate {
         "BI_testop ",
         "BI_uzumaki_num ",
         "ValidModule ",
+        "BT_valtype (Some",
     ];
 
     /// Proof-mode `.v` for one fixture, driven entirely in-process.
@@ -247,6 +249,26 @@ mod gate {
         }
 
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// `&&`/`||` lower to a valued `if (result i32)` block, which proof-mode
+    /// translation renders as a valued `BI_if`. This fixture is the first corpus
+    /// producer of `BT_valtype (Some ...)`; assert the exact valued shape and
+    /// that the fixture emits no term-level `Binop_i BOI_and` — since `&&`/`||`
+    /// no longer lower to `i32.and`/`i32.or`, that shape would only reappear from
+    /// bitwise `&`/`|` or narrowing masks (which this fixture has none of), so a
+    /// regression to strict `i32.and` lowering surfaces here rather than silently.
+    #[test]
+    fn short_circuit_emits_valued_bi_if() {
+        let v = generate_v("spec_short_circuit.inf", "spec_short_circuit");
+        assert!(
+            v.contains("BI_if (BT_valtype (Some (T_num T_i32)))"),
+            "expected a valued `BI_if` from short-circuit `&&`/`||` lowering; got:\n{v}"
+        );
+        assert!(
+            !v.contains("Binop_i BOI_and"),
+            "short-circuit lowering must not emit a term-level `Binop_i BOI_and`; got:\n{v}"
+        );
     }
 
     /// `unique` has no honest Rocq lowering (the wasm-verifier library defines

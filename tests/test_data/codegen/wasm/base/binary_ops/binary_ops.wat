@@ -144,15 +144,21 @@
   )
   (func $and_bool (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
     local.get $a
-    local.get $b
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
   (func $or_bool (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
     local.get $a
-    local.get $b
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
     return
     unreachable
   )
