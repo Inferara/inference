@@ -1164,6 +1164,17 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     Ok(res)
 }
 
+/// Diagnostic emitted when a `unique` block is reached during proof-mode
+/// translation: the wasm-verifier library defines no `BI_unique` constructor,
+/// so there is no honest Rocq lowering. Hoisted to a `const` so the rejection
+/// arm stays compact.
+const UNIQUE_REJECTION_DESCRIPTION: &str = "the `unique` non-deterministic block (the wasm-verifier proof \
+     library defines no `BI_unique` constructor, so a uniqueness \
+     obligation cannot be expressed in the emitted `.v`; \
+     `forall`/`exists`/`assume` blocks still translate — restate the \
+     property without `unique`, or build without `-v`, which strips \
+     spec functions)";
+
 //Inductive basic_instruction
 fn translate_basic_operator(
     operator: &Operator,
@@ -1217,13 +1228,7 @@ fn translate_basic_operator(
         // carrying `unique` is rejected here — never lowered, never a panic.
         Operator::Unique { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-                description: "the `unique` non-deterministic block (the wasm-verifier proof \
-                              library defines no `BI_unique` constructor, so a uniqueness \
-                              obligation cannot be expressed in the emitted `.v`; \
-                              `forall`/`exists`/`assume` blocks still translate — restate the \
-                              property without `unique`, or build without `-v`, which strips \
-                              spec functions)"
-                    .to_string(),
+                description: UNIQUE_REJECTION_DESCRIPTION.to_string(),
             }));
         }
         Operator::I32Uzumaki { .. } => String::from("BI_uzumaki_num T_i32"),
