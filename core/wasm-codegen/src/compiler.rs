@@ -4429,7 +4429,13 @@ impl Compiler {
     /// operands here, and every bool producer emits a canonical 0/1 (comparisons,
     /// `i32.eqz`, bool literals, uzumaki domain constraints), so the constant in
     /// the decided branch is exact and the pass-through operand needs no
-    /// renormalization. Do not replace this shape with `select` or bitwise
+    /// renormalization. That canonicity is a property of in-language values: a
+    /// host calling an exported function does not normalize a narrow `bool`
+    /// parameter at entry, so an out-of-domain argument (e.g. `2`) can pass
+    /// through the evaluated branch. This is a pre-existing property of every
+    /// narrow entry parameter, not specific to this lowering — the previous
+    /// bitwise form mishandled the same inputs (`i32.and` could flip a truthy
+    /// value to `0`). Do not replace this shape with `select` or bitwise
     /// `i32.and`/`i32.or`: both evaluate the right operand unconditionally, which
     /// re-introduces the traps the guard idiom exists to avoid
     /// (`x != 0 && y / x > 0`, `i < len && arr[i] != 0`).
