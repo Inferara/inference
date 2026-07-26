@@ -1,0 +1,16 @@
+// A spec whose only non-deterministic construct is a `unique` block. `unique`
+// has no honest Rocq lowering (the wasm-verifier library defines no
+// `BI_unique` constructor), so a proof-mode build (`-v`) fails with a
+// recoverable diagnostic on stderr and writes no artifacts. A compile-mode
+// build strips the proof-only spec and succeeds.
+pub fn main() -> i32 {
+    return 0;
+}
+
+spec UniqueFeature {
+    fn only_unique() {
+        unique {
+            const a: i32 = 42;
+        }
+    }
+}

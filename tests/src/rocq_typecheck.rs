@@ -40,8 +40,11 @@ mod gate {
     /// Corpus fixtures under `tests/test_data/inf/`, paired with the module name
     /// each is translated under. Together they exercise the proof-mode surface
     /// the issue calls out: inline and function-body-modifier `forall`/`exists`/
-    /// `assume`, `unique`, cross-function calls (`BI_call`), comparisons,
-    /// `assert`, and structured control flow (`if`/`loop`).
+    /// `assume`, cross-function calls (`BI_call`), comparisons, `assert`, and
+    /// structured control flow (`if`/`loop`). The `unique` block is deliberately
+    /// absent — it has no honest Rocq lowering, so its proof-mode rejection is
+    /// pinned by [`unique_block_is_rejected_in_proof_mode`] below rather than by
+    /// a corpus entry that would compile against the stub.
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -51,7 +54,6 @@ mod gate {
         ("spec_method.inf", "spec_method"),
         ("mixed_compile_proof.inf", "mixed_compile_proof"),
         ("rocq_control_flow.inf", "rocq_control_flow"),
-        ("rocq_unique.inf", "rocq_unique"),
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
     ];
 
@@ -63,7 +65,6 @@ mod gate {
         "BI_forall (",
         "BI_exists (",
         "BI_assume (",
-        "BI_unique (",
         "BI_if (",
         "BI_loop (",
         "BI_block (",
@@ -246,5 +247,44 @@ mod gate {
         }
 
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// `unique` has no honest Rocq lowering (the wasm-verifier library defines
+    /// no `BI_unique` constructor), so proof-mode translation must reject it
+    /// with a recoverable `UnsupportedFeature` naming the construct — codegen
+    /// itself still succeeds, since the WASM-side `0xfc 0x3d` emission is
+    /// legitimate proof scaffolding.
+    #[test]
+    fn unique_block_is_rejected_in_proof_mode() {
+        let path = get_test_data_path().join("inf").join("rocq_unique.inf");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let arena = build_ast(source);
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .unwrap_or_else(|e| panic!("type check failed: {e}"))
+            .typed_context();
+        let output = inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "rocq_unique",
+        )
+        .unwrap_or_else(|e| panic!("codegen must still succeed for `unique`: {e}"));
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let err = inference::wasm_to_v("rocq_unique", output.wasm(), &empty)
+            .expect_err("proof-mode translation must reject `unique`");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> = err.downcast_ref();
+        assert!(
+            matches!(
+                typed,
+                Some(inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature { .. })
+            ),
+            "expected UnsupportedFeature; got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("`unique`"),
+            "must name the construct; got {err:?}"
+        );
     }
 }

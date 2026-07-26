@@ -1,14 +1,12 @@
-// Exercises the `unique` non-deterministic block, which lowers to the
-// `BI_unique` constructor. The verifier library currently has no `BI_unique`
-// (it is commented out in its `datatypes.v`), so this construct is a known
-// emitter-vs-library divergence: the vendored stub declares `BI_unique` with
-// the arity the emitter writes (`block_type -> list basic_instruction -> _`)
-// precisely so the arity stays pinned and current `main` type-checks. See the
-// stub README for the divergence note and the swap-to-real-library follow-up.
-//
-// The `unique` block lives inside a `spec` because non-deterministic constructs
-// are valid only inside a spec declaration; proof-mode codegen still lowers the
-// spec-function body, so `BI_unique` is emitted as before.
+// Negative proof-mode fixture: the `unique` non-deterministic block has no
+// honest Rocq lowering — the wasm-verifier library defines no `BI_unique`
+// constructor — so proof mode (`-v`) rejects it with a recoverable
+// `UnsupportedFeature` error instead of emitting a `.v` that could never
+// type-check against the real library. Compile mode is unaffected (specs are
+// stripped from codegen). The `unique` block lives inside a `spec` because
+// non-deterministic constructs are valid only there (analysis rule A042).
+// Pinned by `unique_block_is_rejected_in_proof_mode` in
+// tests/src/rocq_typecheck.rs.
 spec UniqueSpec {
     fn unique_fn() {
         unique {

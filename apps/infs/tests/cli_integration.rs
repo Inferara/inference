@@ -2731,6 +2731,84 @@ fn build_compiles_all_nondet_features() {
     );
 }
 
+/// QA: TC-13.7 - Verify a proof-mode build (`-v`) of a spec whose only
+/// non-deterministic construct is a `unique` block is rejected: the `unique`
+/// block has no honest Rocq lowering, so translation fails with a recoverable
+/// diagnostic naming the construct, and — because translation runs before any
+/// artifact write — no `.v` or `.wasm` is left behind.
+///
+/// **Expected behavior**: Exit code non-zero, stderr names `unique`, no output.
+#[test]
+fn build_v_rejects_unique_block() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique.inf");
+    let dest = temp.child("nondet_unique.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("unique"));
+
+    let v_output = temp.child("out").child("nondet_unique.v");
+    let wasm_output = temp.child("out").child("nondet_unique.wasm");
+    assert!(
+        !v_output.path().exists(),
+        "a rejected proof-mode build must write no V file, found: {:?}",
+        v_output.path()
+    );
+    assert!(
+        !wasm_output.path().exists(),
+        "a rejected proof-mode build must write no WASM file, found: {:?}",
+        wasm_output.path()
+    );
+}
+
+/// QA: TC-13.8 - Verify the same `unique`-only fixture compiles in compile mode
+/// (no `-v`): the proof-only spec is stripped and the executable `main` is
+/// compiled, so the mode boundary — rejected under `-v`, accepted without it —
+/// is pinned.
+///
+/// **Expected behavior**: Exit code 0, WASM binary generated.
+#[test]
+fn build_compiles_unique_block_without_v() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique.inf");
+    let dest = temp.child("nondet_unique.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let wasm_output = temp.child("out").child("nondet_unique.wasm");
+    assert!(
+        wasm_output.path().exists(),
+        "Expected WASM file at: {:?}",
+        wasm_output.path()
+    );
+}
+
 /// QA: TC-1.6 - Verify graceful error on unknown subcommand.
 ///
 /// **Expected behavior**: Exit code non-zero, error message indicates unknown subcommand.

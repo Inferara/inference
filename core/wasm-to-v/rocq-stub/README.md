@@ -49,7 +49,7 @@ coqc -Q . Wasm verifier.v
 The stub covers the **scalar + non-deterministic** instruction surface that
 Inference's proof-mode codegen actually emits — integer arithmetic and
 comparisons, memory/local/global access, structured control flow (`if`/`loop`/
-`br`), calls, and the `forall`/`exists`/`assume`/`unique`/uzumaki family — plus
+`br`), calls, and the `forall`/`exists`/`assume`/uzumaki family — plus
 every module and section record.
 
 Deliberately **out of scope**, because Inference code never lowers to them and
@@ -63,6 +63,10 @@ the corpus can never exercise them:
   emits no conversion instructions (no `wrap`/`extend`/`trunc`/...).
 - **SIMD/vector** (`T_v128`), **GC/reference-typing instructions**, and
   **atomics**.
+- **`BI_unique`** — the library does not define it and the translator rejects
+  the `unique` block with a recoverable error instead of emitting it; its
+  absence here is the regression guard (a re-emitted `BI_unique` is an
+  unbound-constructor `coqc` error).
 
 Their absence is a feature, not a gap: emitted terms are plain constructor
 applications, so a narrower stub type-checks exactly the same modules while
@@ -89,11 +93,6 @@ concerns tracked upstream, not something this stub tries to "fix":
   `ValidSpec : module -> list N -> Prop`. The stub matches the **emitter**, not
   the prose, because the stub's job is to type-check what is emitted today.
   Reconciling emitter, contract prose, and the real library is a follow-up.
-- **`BI_unique`** is declared (`block_type -> list basic_instruction -> _`,
-  mirroring `BI_assume`). The verifier library has it commented out in its
-  `datatypes.v`, so real proofs of `unique` modules do not compile against it;
-  the stub declares it anyway so the arity is pinned and `unique` fixtures
-  type-check here.
 
 ## Proofs are not closed here (`Qed.` → `Admitted.`)
 

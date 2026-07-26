@@ -1164,6 +1164,17 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     Ok(res)
 }
 
+/// Diagnostic emitted when a `unique` block is reached during proof-mode
+/// translation: the wasm-verifier library defines no `BI_unique` constructor,
+/// so there is no honest Rocq lowering. Hoisted to a `const` so the rejection
+/// arm stays compact.
+const UNIQUE_REJECTION_DESCRIPTION: &str = "the `unique` non-deterministic block (the wasm-verifier proof \
+     library defines no `BI_unique` constructor, so a uniqueness \
+     obligation cannot be expressed in the emitted `.v`; \
+     `forall`/`exists`/`assume` blocks still translate — restate the \
+     property without `unique`, or build without `-v`, which strips \
+     spec functions)";
+
 //Inductive basic_instruction
 fn translate_basic_operator(
     operator: &Operator,
@@ -1205,18 +1216,20 @@ fn translate_basic_operator(
             let blockty = translate_block_type(blockty)?;
             format!("BI_assume ({blockty})")
         }
-        // NOTE: the verifier library currently has no `BI_unique` constructor
-        // (it is commented out in `theories/datatypes.v`), so this lowering
-        // emits a reference that does not type-check in proof mode. It is left
-        // as-is here because `unique` is an allow-listed *proof-only* family in
-        // `core/wasm-linker/src/safety.rs` whose linker↔translator agreement is
-        // pinned by `core/wasm-linker/tests/v_alignment.rs` (every allow-listed
-        // family must translate without error). Honestly rejecting `unique`
-        // belongs with that allow-list/contract, not with this arity fix —
-        // tracked as separate follow-up.
-        Operator::Unique { blockty } => {
-            let blockty = translate_block_type(blockty)?;
-            format!("BI_unique ({blockty})")
+        // The wasm-verifier library defines no `BI_unique` constructor (it is
+        // commented out in its `theories/datatypes.v`), so there is no honest
+        // Rocq lowering for a `unique` block: emitting `BI_unique` would
+        // produce a `.v` that can never type-check against the real library.
+        // Reject with a recoverable error instead. The linker deliberately
+        // still admits the opcode in a main module's proof scaffolding (the
+        // merge allow-list never applied to the main re-encode path), so the
+        // linker<->translator agreement pinned by
+        // `core/wasm-linker/tests/v_alignment.rs` is that a linked output
+        // carrying `unique` is rejected here — never lowered, never a panic.
+        Operator::Unique { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: UNIQUE_REJECTION_DESCRIPTION.to_string(),
+            }));
         }
         Operator::I32Uzumaki { .. } => String::from("BI_uzumaki_num T_i32"),
         Operator::I64Uzumaki { .. } => String::from("BI_uzumaki_num T_i64"),
@@ -2314,6 +2327,49 @@ mod tests {
         assert_unsupported(
             translate_memory_type_limits(&mem(false, false, Some(0))),
             "custom page size",
+        );
+    }
+
+    #[test]
+    fn unique_operator_is_rejected_as_unsupported() {
+        // A `unique` block has no honest Rocq lowering — the verifier library
+        // defines no `BI_unique` constructor — so the arm rejects it with a
+        // recoverable error naming both the construct and the missing
+        // constructor, never lowering it and never panicking.
+        let err = translate_basic_operator(&Operator::Unique { blockty: BlockType::Empty }, &None)
+            .expect_err("a `unique` block must be rejected, not lowered");
+        assert!(
+            matches!(
+                err.downcast_ref::<WasmToVError>(),
+                Some(WasmToVError::UnsupportedFeature { .. })
+            ),
+            "expected UnsupportedFeature, got {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("`unique`"), "names the construct: {text}");
+        assert!(text.contains("BI_unique"), "names the missing constructor: {text}");
+        assert!(text.contains("still translate"), "offers a recovery hint: {text}");
+    }
+
+    #[test]
+    fn forall_exists_assume_still_translate() {
+        // Only `unique` is rejected: the sibling proof-path blocks keep their
+        // honest lowerings, so each must still produce its exact constructor —
+        // a regression that broadened the rejection would fail here.
+        assert_eq!(
+            translate_basic_operator(&Operator::Forall { blockty: BlockType::Empty }, &None)
+                .expect("forall still translates"),
+            "BI_forall"
+        );
+        assert_eq!(
+            translate_basic_operator(&Operator::Exists { blockty: BlockType::Empty }, &None)
+                .expect("exists still translates"),
+            "BI_exists"
+        );
+        assert_eq!(
+            translate_basic_operator(&Operator::Assume { blockty: BlockType::Empty }, &None)
+                .expect("assume still translates"),
+            "BI_assume (BT_valtype None)"
         );
     }
 }
