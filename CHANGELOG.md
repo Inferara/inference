@@ -559,6 +559,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Fix a hot-spin in the LSP e2e test client's message waits ([#296])
+  - `wait_for_response`/`wait_for_notification` looped over `recv_message`, which returns buffered messages before reading the wire. Once any non-matching message existed — most often a `publishDiagnostics` landing ahead of the awaited response — each iteration popped it from the buffer and pushed it straight back, so the loop never reached the wire again. The client burned 100% of a core indefinitely with no timeout, because `recv_timeout` was never called. This was misdiagnosed once as a server-side hang and forced a wire-direct `collect_responses` workaround in the cancellation tests
+  - Both waits now scan the buffer once up front and then read straight off the wire, appending each non-matching message to the back of the buffer so arrival order survives for later waits. Each wait is bounded by a single deadline covering the whole wait rather than per read, and expiry panics naming what was awaited and how many messages it stepped over. A new `recv_from_wire` is the one place a wait turns a reader-thread item into a failure; the two drains keep interpreting the same items quietly, as collectors rather than waits. `recv_message`'s own semantics (buffer first, then the wire, one timeout per call) are unchanged — the `#294` shutdown-silence test depends on them
+  - Seven harness self-tests pin the contract: stepping over buffered and over wire traffic on both the response and notification paths, retention order across the buffer/wire boundary, claiming an already-buffered target without a wire read, and giving up loudly when a target never comes. One of them runs the wait on its own thread under a watchdog, so a reintroduced spin fails red instead of hanging the suite. Determinism comes from seeding the buffer directly and from the server's own arrival-order contract, never from a sleep
 - Add a `coqc` round-trip gate for proof-mode `wasm-to-v` output ([#231])
   - Every prior `wasm-to-v` test string-matched the emitted `.v` and never type-checked it, so a mis-aritied or renamed Rocq constructor (the [#230] `BI_forall`/`BI_exists` arity class) passed CI and failed only on the paid prover worker
   - New vendored signature stub `core/wasm-to-v/rocq-stub/` provides the logical library `Wasm` (`bytes`, `numerics`, `datatypes`, `verifier`) as signatures only — no semantics, no proofs — encoding each external declaration with the arity/shape the emitter writes, so a regression becomes a `coqc` type error
@@ -1096,3 +1100,4 @@ Initial tagged release.
 [#254]: https://github.com/Inferara/inference/issues/254
 [#275]: https://github.com/Inferara/inference/issues/275
 [#306]: https://github.com/Inferara/inference/pull/306
+[#296]: https://github.com/Inferara/inference/issues/296

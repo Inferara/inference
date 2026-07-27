@@ -129,15 +129,14 @@ fn send_hover(client: &mut LspClient, uri: &str, position: Value) -> i64 {
     )
 }
 
-/// Collects the responses for `ids`, reading the wire directly so the result is
-/// immune to how the responses interleave with publishes.
+/// Collects the responses for `ids` in one pass, in whatever order they arrive.
 ///
-/// `wait_for_response` cannot span several outstanding async requests: it
-/// re-buffers non-matching messages and the underlying `recv_message` returns
-/// buffered items before the wire, so a publish (or a sibling response) landing
-/// ahead of the target livelocks it. This inspects each message exactly once,
-/// keeping matching responses and dropping everything else, so no arrival order can
-/// stall it. Every read stays bounded by the harness receive timeout.
+/// `wait_for_response` also spans interleaved traffic, but it awaits one id at a
+/// time and *retains* everything else for later waits. The tests here launch several
+/// requests at once and care about none of the surrounding traffic, so this inspects
+/// each message exactly once, keeps the matching responses and drops the rest —
+/// leaving nothing buffered to be accounted for afterwards. Every read stays bounded
+/// by the harness receive timeout.
 #[cfg(debug_assertions)]
 fn collect_responses(client: &mut LspClient, ids: &[i64]) -> std::collections::HashMap<i64, Value> {
     let mut found = std::collections::HashMap::new();
@@ -2389,9 +2388,9 @@ fn a_write_cancels_an_in_flight_pool_read() {
         "a write supersedes the in-flight read to -32801, got {response}"
     );
 
-    // The write applied and the session serves a repeat read. `collect_responses`
-    // is used (not the blocking hover) so an interleaved republish cannot livelock
-    // the wait.
+    // The write applied and the session serves a repeat read. `collect_responses` is
+    // used (not the blocking hover) so the republishes the write triggers are dropped
+    // rather than retained for a later wait to account for.
     let repeat_id = send_hover(&mut client, &doc_uri, json!({ "line": 1, "character": 3 }));
     let repeat = collect_responses(&mut client, &[repeat_id])
         .remove(&repeat_id)
@@ -2511,11 +2510,13 @@ fn shutdown_does_not_republish_a_stale_open_slow_dependent() {
     // The corrected mechanism (the issue's write-up said the server "loops forever";
     // it does not): salsa resets its cancellation token on every unwind, so the
     // drain's retry always completes and the server always answered `shutdown`. The
-    // apparent "hang" was client-side — a `wait_for_response` loop hot-spins when any
-    // publish (the trailing post-shutdown one) lands ahead of the response it awaits.
-    // This test therefore pins *protocol silence*, not termination: no diagnostics for
-    // the stale dependent once shutdown is in flight. It reads the wire directly
-    // (never `wait_for_response`) and brackets both drain sites with response
+    // apparent "hang" was client-side — the harness used to re-take the messages it
+    // had just buffered, so the trailing post-shutdown publish landing ahead of the
+    // awaited response spun it in place. Its waits now read past such traffic under
+    // one deadline, and this test pins *protocol silence*, not termination: no
+    // diagnostics for the stale dependent once shutdown is in flight. Because it must
+    // see every message rather than just the awaited ones, it drains in arrival order
+    // instead of awaiting one id, and brackets both drain sites with response
     // barriers, bounded by the harness receive timeout — a drained recompute fails
     // this within the seam bound rather than hanging the suite.
     let mut client = LspClient::spawn_with_env(&[(SLOW_ANALYSIS_ENV, SLOW_PATH_MARKER)]);
