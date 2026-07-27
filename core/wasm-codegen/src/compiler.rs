@@ -1209,6 +1209,26 @@ impl Compiler {
 
         self.func = Some(Function::new(local_declarations));
 
+        // Exported functions are the module's WebAssembly ABI boundary; canonicalize
+        // every narrow scalar parameter before anything else executes so the body
+        // only ever sees in-domain values. See memory::emit_entry_param_normalization.
+        if is_exportable_position {
+            for arg in &args {
+                if let ArgKind::Named { name, ty, .. } = &arg.kind {
+                    let arg_name = &arena[*name].name;
+                    let param_local = self
+                        .locals_map
+                        .get(arg_name)
+                        .expect("named parameter was inserted into locals_map above")
+                        .0;
+                    let ti = TypeInfo::from_type_id(arena, *ty);
+                    if memory::emit_entry_param_normalization(self.func(), &ti.kind, param_local) {
+                        cov_mark::hit!(wasm_codegen_entry_param_normalization);
+                    }
+                }
+            }
+        }
+
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
@@ -4275,6 +4295,15 @@ impl Compiler {
         let is_i64 = Self::is_i64_type(&left_type_info.kind);
         let is_unsigned = Self::is_unsigned_type(&left_type_info.kind);
 
+        // A shift count is taken modulo the operand type's bit width. Wasm's own
+        // shift already masks the count modulo 32/64, so only narrow types (which
+        // promote to i32) need an explicit mask to their declared width.
+        if matches!(op, OperatorKind::Shl | OperatorKind::Shr)
+            && memory::emit_shift_count_mask(self.func(), &left_type_info.kind)
+        {
+            cov_mark::hit!(wasm_codegen_shift_count_mask);
+        }
+
         let instruction = match op {
             OperatorKind::Add => {
                 if is_i64 {
@@ -4429,13 +4458,11 @@ impl Compiler {
     /// operands here, and every bool producer emits a canonical 0/1 (comparisons,
     /// `i32.eqz`, bool literals, uzumaki domain constraints), so the constant in
     /// the decided branch is exact and the pass-through operand needs no
-    /// renormalization. That canonicity is a property of in-language values: a
-    /// host calling an exported function does not normalize a narrow `bool`
-    /// parameter at entry, so an out-of-domain argument (e.g. `2`) can pass
-    /// through the evaluated branch. This is a pre-existing property of every
-    /// narrow entry parameter, not specific to this lowering — the previous
-    /// bitwise form mishandled the same inputs (`i32.and` could flip a truthy
-    /// value to `0`). Do not replace this shape with `select` or bitwise
+    /// renormalization. That canonicity holds at the ABI boundary as well:
+    /// exported functions normalize narrow parameters (including `bool`, by
+    /// truthiness) in their entry prologue, so an out-of-domain host argument is
+    /// canonical `0`/`1` before it can reach a pass-through branch. Do not
+    /// replace this shape with `select` or bitwise
     /// `i32.and`/`i32.or`: both evaluate the right operand unconditionally, which
     /// re-introduces the traps the guard idiom exists to avoid
     /// (`x != 0 && y / x > 0`, `i < len && arr[i] != 0`).

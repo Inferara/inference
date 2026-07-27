@@ -1,0 +1,45 @@
+pub fn id_u8(v: u8) -> u8 { return v; }
+pub fn id_i8(v: i8) -> i8 { return v; }
+pub fn id_u16(v: u16) -> u16 { return v; }
+pub fn id_i16(v: i16) -> i16 { return v; }
+pub fn id_bool(b: bool) -> bool { return b; }
+
+pub fn gt100_u8(v: u8) -> i32 {
+    const H: u8 = 100;
+    if v > H { return 1; }
+    return 0;
+}
+
+pub fn is_neg_i8(v: i8) -> i32 {
+    const L: i8 = 0;
+    if v < L { return 1; }
+    return 0;
+}
+
+pub fn bool_if(b: bool) -> i32 {
+    if b { return 1; }
+    return 0;
+}
+
+pub fn bool_eq_true(b: bool) -> i32 {
+    if b == true { return 1; }
+    return 0;
+}
+
+pub fn bool_and_pass(b: bool) -> i32 {
+    let t: bool = true;
+    let r: bool = t && b;
+    if r == true { return 1; }
+    return 0;
+}
+
+fn helper_u8(v: u8) -> u8 { return v; }
+
+pub fn call_helper(v: u8) -> u8 { return helper_u8(v); }
+
+pub fn mixed(a: u8, x: i32, b: bool) -> i32 {
+    if b { return x; }
+    const Z: u8 = 0;
+    if a > Z { return 1; }
+    return 0;
+}

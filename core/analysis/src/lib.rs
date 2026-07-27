@@ -230,6 +230,7 @@ mod tests {
             AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
             AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: "forall" },
             AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
