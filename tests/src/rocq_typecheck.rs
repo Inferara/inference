@@ -56,6 +56,7 @@ mod gate {
         ("rocq_control_flow.inf", "rocq_control_flow"),
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
         ("spec_short_circuit.inf", "spec_short_circuit"),
+        ("spec_narrow_abi.inf", "spec_narrow_abi"),
     ];
 
     /// Constructors the corpus must keep exercising. These are the

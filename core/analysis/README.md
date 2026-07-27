@@ -147,6 +147,14 @@ A041 rejects a function-local name introduced more than once in a single functio
 
 A042 enforces that the non-deterministic block forms — inline `forall`/`exists`/`assume`/`unique` statement blocks and the function-body-modifier form (`fn f() forall { … }`) — appear only lexically inside a `spec` declaration, where they describe formal specifications rather than executable code. A block in a top-level function, a top-level struct method, or nested inside either is rejected. The check is purely lexical (it never inspects types), so it is independent of the compilation mode and runs in both compile and proof modes. Only the outermost non-det block on each path is reported: a `forall { exists { … } }` outside a spec yields one diagnostic, not two. Uzumaki (`@`) outside a spec is covered transitively — `@` already requires an enclosing non-det block (A006), and A042 rejects that block — so no separate `@` check lives in this rule.
 
+### Shift Count Out of Range (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A044 | `ShiftCountOutOfRange` | error | a shift (`<<`/`>>`) whose count is a literal that is negative or `>=` the operand type's bit width |
+
+A044 rejects a shift whose count operand is a statically-known literal outside `0..width` for the operand type — `x << 32` or `x >> -1` on an `i32`. It complements the runtime rule that a shift count is taken modulo the operand type's bit width: a literal that lands outside the valid range is a program error, not a value to fold silently. Parenthesized and negated literals are resolved (`x << (33)`, `x >> -1`); dynamic counts and const-declared counts (`const K: i32 = 33; x << K`) are not detected, the same statically-known-literal scope as A022 and the division-by-zero check. Because the width is read from the operand type, the rule covers every integer width automatically, even though a literal count currently type-checks only for `i32`-typed shifts (binary operands do not coerce). Unparseable or out-of-`i128`-range literals are left to A022 to avoid double-reporting.
+
 ## Diagnostic Output Format
 
 ```
@@ -249,6 +257,7 @@ Test files are organized by rule group:
 | `rules_a040.rs` | A040 (uzumaki as compound element of an array literal) |
 | `rules_a041.rs` | A041 (duplicate function-local name across sibling blocks) |
 | `rules_a042.rs` | A042 (non-deterministic construct outside a `spec` declaration) |
+| `rules_a044.rs` | A044 (shift count literal out of range) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

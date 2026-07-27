@@ -35,6 +35,18 @@
   (export "ne_bool" (func $ne_bool))
   (func $and3 (;0;) (type 0) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
     if (result i32) ;; label = @1
       local.get $b
     else
@@ -49,6 +61,18 @@
     unreachable
   )
   (func $or3 (;1;) (type 1) (param $a i32) (param $b i32) (param $c i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
@@ -65,6 +89,18 @@
   )
   (func $and_or (;2;) (type 2) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
     if (result i32) ;; label = @1
       local.get $b
     else
@@ -79,6 +115,18 @@
     unreachable
   )
   (func $or_and (;3;) (type 3) (param $a i32) (param $b i32) (param $c i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
@@ -96,6 +144,18 @@
   (func $not_and_or (;4;) (type 4) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
     i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    i32.eqz
     if (result i32) ;; label = @1
       local.get $b
       if (result i32) ;; label = @2
@@ -111,6 +171,14 @@
   )
   (func $de_morgan_and (;5;) (type 5) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     if (result i32) ;; label = @1
       local.get $b
     else
@@ -121,6 +189,14 @@
     unreachable
   )
   (func $de_morgan_or (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
@@ -200,6 +276,14 @@
   )
   (func $xor_bool (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     if (result i32) ;; label = @1
       i32.const 1
     else
@@ -222,6 +306,14 @@
   (func $implies (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
     local.get $a
     i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    i32.eqz
     if (result i32) ;; label = @1
       i32.const 1
     else
@@ -231,6 +323,18 @@
     unreachable
   )
   (func $bool_majority3 (;14;) (type 14) (param $a i32) (param $b i32) (param $c i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
     local.get $a
     if (result i32) ;; label = @1
       local.get $b
@@ -262,12 +366,28 @@
   )
   (func $eq_bool (;15;) (type 15) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     local.get $b
     i32.eq
     return
     unreachable
   )
   (func $ne_bool (;16;) (type 16) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.ne

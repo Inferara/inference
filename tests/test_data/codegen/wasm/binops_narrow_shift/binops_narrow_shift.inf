@@ -1,0 +1,18 @@
+pub fn shl_u8(a: u8, k: u8) -> u8 { return a << k; }
+pub fn shr_u8(a: u8, k: u8) -> u8 { return a >> k; }
+pub fn shl_i8(a: i8, k: i8) -> i8 { return a << k; }
+pub fn shr_i8(a: i8, k: i8) -> i8 { return a >> k; }
+pub fn shl_u16(a: u16, k: u16) -> u16 { return a << k; }
+pub fn shr_u16(a: u16, k: u16) -> u16 { return a >> k; }
+pub fn shl_i16(a: i16, k: i16) -> i16 { return a << k; }
+pub fn shr_i16(a: i16, k: i16) -> i16 { return a >> k; }
+
+pub fn shl_u8_const(a: u8) -> u8 {
+    const K: u8 = 3;
+    return a << K;
+}
+
+pub fn shr_i16_const(a: i16) -> i16 {
+    const K: i16 = 15;
+    return a >> K;
+}

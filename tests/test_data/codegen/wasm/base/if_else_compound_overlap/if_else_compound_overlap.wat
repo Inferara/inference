@@ -7,6 +7,10 @@
   (export "__stack_pointer" (global 0))
   (func $if_else_compound_overlap (;0;) (type 0) (param $cond i32) (result i32)
     (local $a i32) (local $b i32) (local $__frame_ptr i32)
+    local.get $cond
+    i32.eqz
+    i32.eqz
+    local.set $cond
     global.get 0
     i32.const 16
     i32.sub

@@ -33,6 +33,18 @@
   (export "mod_u16" (func $mod_u16))
   (func $add_i8 (;0;) (type 0) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $b
+    local.get $a
     local.get $b
     i32.add
     i32.const 24
@@ -43,6 +55,18 @@
     unreachable
   )
   (func $sub_i8 (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $b
     local.get $a
     local.get $b
     i32.sub
@@ -55,6 +79,18 @@
   )
   (func $mul_i8 (;2;) (type 2) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $b
+    local.get $a
     local.get $b
     i32.mul
     i32.const 24
@@ -65,6 +101,18 @@
     unreachable
   )
   (func $div_i8 (;3;) (type 3) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $b
     local.get $a
     local.get $b
     i32.div_s
@@ -77,12 +125,32 @@
   )
   (func $lt_i8 (;4;) (type 4) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
+    local.set $b
+    local.get $a
     local.get $b
     i32.lt_s
     return
     unreachable
   )
   (func $add_u8 (;5;) (type 5) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 255
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 255
+    i32.and
+    local.set $b
     local.get $a
     local.get $b
     i32.add
@@ -93,6 +161,14 @@
   )
   (func $div_u8 (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 255
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 255
+    i32.and
+    local.set $b
+    local.get $a
     local.get $b
     i32.div_u
     i32.const 255
@@ -102,6 +178,14 @@
   )
   (func $lt_u8 (;7;) (type 7) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 255
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 255
+    i32.and
+    local.set $b
+    local.get $a
     local.get $b
     i32.lt_u
     return
@@ -109,12 +193,34 @@
   )
   (func $shr_u8 (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 255
+    i32.and
+    local.set $a
     local.get $b
+    i32.const 255
+    i32.and
+    local.set $b
+    local.get $a
+    local.get $b
+    i32.const 7
+    i32.and
     i32.shr_u
     return
     unreachable
   )
   (func $add_i16 (;9;) (type 9) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $b
     local.get $a
     local.get $b
     i32.add
@@ -127,6 +233,18 @@
   )
   (func $div_i16 (;10;) (type 10) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $b
+    local.get $a
     local.get $b
     i32.div_s
     i32.const 16
@@ -138,12 +256,32 @@
   )
   (func $lt_i16 (;11;) (type 11) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $a
+    local.get $b
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $b
+    local.get $a
     local.get $b
     i32.lt_s
     return
     unreachable
   )
   (func $add_u16 (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 65535
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 65535
+    i32.and
+    local.set $b
     local.get $a
     local.get $b
     i32.add
@@ -154,6 +292,14 @@
   )
   (func $div_u16 (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 65535
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 65535
+    i32.and
+    local.set $b
+    local.get $a
     local.get $b
     i32.div_u
     i32.const 65535
@@ -163,12 +309,28 @@
   )
   (func $gt_u16 (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.const 65535
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 65535
+    i32.and
+    local.set $b
+    local.get $a
     local.get $b
     i32.gt_u
     return
     unreachable
   )
   (func $mod_u16 (;15;) (type 15) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.const 65535
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 65535
+    i32.and
+    local.set $b
     local.get $a
     local.get $b
     i32.rem_u

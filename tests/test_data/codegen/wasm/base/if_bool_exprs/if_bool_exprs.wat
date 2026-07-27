@@ -33,6 +33,10 @@
   (export "if_else_complex" (func $if_else_complex))
   (func $if_bool_param (;0;) (type 0) (param $cond i32) (result i32)
     local.get $cond
+    i32.eqz
+    i32.eqz
+    local.set $cond
+    local.get $cond
     if ;; label = @1
       i32.const 1
       return
@@ -42,6 +46,10 @@
     unreachable
   )
   (func $if_not_param (;1;) (type 1) (param $cond i32) (result i32)
+    local.get $cond
+    i32.eqz
+    i32.eqz
+    local.set $cond
     local.get $cond
     i32.eqz
     if ;; label = @1
@@ -157,6 +165,14 @@
   )
   (func $if_demorgan_and (;7;) (type 7) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     if (result i32) ;; label = @1
       local.get $b
     else
@@ -173,6 +189,14 @@
     unreachable
   )
   (func $if_demorgan_or (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
@@ -247,6 +271,14 @@
   )
   (func $if_bool_eq (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     local.get $b
     i32.eq
     if ;; label = @1
@@ -259,6 +291,14 @@
     unreachable
   )
   (func $if_bool_ne (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.ne

@@ -225,6 +225,14 @@ pub enum AnalysisDiagnostic {
 
     #[error("entry-file `pub fn {name}` collides with the reserved export name `{name}`; the compiled module reserves `memory` for its linear memory export and `__stack_pointer` for its stack pointer global, which WebAssembly hosts rely on; rename the function, or remove `pub` if it does not need to be exported")]
     ReservedExportName { name: String, location: Location },
+
+    #[error("shift count `{value}` is out of range for type `{type_name}` (valid counts: 0..={max})")]
+    ShiftCountOutOfRange {
+        value: String,
+        type_name: String,
+        max: u32,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -271,7 +279,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. }
             | AnalysisDiagnostic::DuplicateLocalName { location, .. }
             | AnalysisDiagnostic::NonDetOutsideSpec { location, .. }
-            | AnalysisDiagnostic::ReservedExportName { location, .. } => location,
+            | AnalysisDiagnostic::ReservedExportName { location, .. }
+            | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. } => location,
         }
     }
 
@@ -322,6 +331,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::DuplicateLocalName { .. } => "A041",
             AnalysisDiagnostic::NonDetOutsideSpec { .. } => "A042",
             AnalysisDiagnostic::ReservedExportName { .. } => "A043",
+            AnalysisDiagnostic::ShiftCountOutOfRange { .. } => "A044",
         }
     }
 }
@@ -1320,6 +1330,30 @@ mod tests {
             "A043 diagnostic must suggest removing `pub`, got: {text}"
         );
         assert_eq!(err.rule_id(), "A043");
+    }
+
+    #[test]
+    fn display_shift_count_out_of_range() {
+        let err = AnalysisDiagnostic::ShiftCountOutOfRange {
+            value: "32".to_string(),
+            type_name: "i32".to_string(),
+            max: 31,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("shift count `32`"),
+            "A044 diagnostic must name the offending count, got: {text}"
+        );
+        assert!(
+            text.contains("type `i32`"),
+            "A044 diagnostic must name the operand type, got: {text}"
+        );
+        assert!(
+            text.contains("0..=31"),
+            "A044 diagnostic must state the valid count range, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A044");
     }
 
     #[test]

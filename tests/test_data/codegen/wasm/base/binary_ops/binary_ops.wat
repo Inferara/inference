@@ -144,6 +144,14 @@
   )
   (func $and_bool (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
     if (result i32) ;; label = @1
       local.get $b
     else
@@ -153,6 +161,14 @@
     unreachable
   )
   (func $or_bool (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
@@ -212,6 +228,10 @@
     unreachable
   )
   (func $not_bool (;22;) (type 22) (param $a i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $a
     i32.eqz
     return

@@ -169,6 +169,10 @@
   (func $mixed_not (;6;) (type 6) (param $a i32) (param $x i32) (result i32)
     local.get $a
     i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $a
+    i32.eqz
     if (result i32) ;; label = @1
       i32.const 100
       local.get $x
@@ -182,6 +186,18 @@
     unreachable
   )
   (func $prec_mix (;7;) (type 7) (param $a i32) (param $b i32) (param $c i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $c
+    i32.eqz
+    i32.eqz
+    local.set $c
     local.get $a
     if (result i32) ;; label = @1
       i32.const 1
