@@ -68,6 +68,7 @@ use inference_ast::nodes::{
     Visibility,
 };
 use inference_type_checker::{
+    EnumInfo,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -397,6 +398,16 @@ pub(crate) struct Compiler {
     /// frameless functions. Reset per function alongside the rest of the
     /// per-function state.
     bounds_check_scratch_local: Option<u32>,
+    /// WASM local index of the scratch i32 used to single-evaluate the promoted
+    /// quotient of a narrow (i8/i16) signed division for the overflow guard.
+    /// Reserved per-function in [`Self::visit_function_definition`] only when the
+    /// body actually contains a narrow signed division (the only case that emits
+    /// the guard), so functions without one stay byte-identical; `None`
+    /// otherwise. A dedicated local — not shared with the bounds-check scratch —
+    /// preserves each guard's single-owner invariant. Unlike the bounds scratch
+    /// it is not mode-gated: the guard emits in both Compile and Proof modes.
+    /// Reset per function alongside the rest of the per-function state.
+    narrow_div_scratch_local: Option<u32>,
 }
 
 /// The nested blocks a statement introduces, classified by how a frame-layout
@@ -459,6 +470,7 @@ impl Compiler {
             frame_sizes: FxHashMap::default(),
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
+            narrow_div_scratch_local: None,
         }
     }
 
@@ -1207,6 +1219,27 @@ impl Compiler {
             self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
 
+        // Reserve an i32 scratch local for the narrow signed division overflow
+        // guard so the promoted quotient can be single-evaluated via `local.tee`
+        // before the width check. It is reserved iff the body contains a narrow
+        // signed division (the only case that emits the guard — see
+        // `body_has_narrow_signed_div`, which mirrors that emission condition),
+        // so functions without one stay byte-identical. A dedicated local, not
+        // shared with the bounds scratch, preserves each guard's single-owner
+        // invariant. The scratch sits at the next free local after the named
+        // locals, the optional frame-pointer temp, and the optional bounds
+        // scratch, so its index and its push order agree. Unlike the bounds
+        // scratch this is not gated on `emit_bounds_checks`: division overflow
+        // must trap in both Compile and Proof modes.
+        if Self::body_has_narrow_signed_div(arena, body_id, ctx) {
+            local_declarations.push((1, ValType::I32));
+            self.narrow_div_scratch_local = Some(
+                local_idx
+                    + u32::from(has_frame)
+                    + u32::from(self.bounds_check_scratch_local.is_some()),
+            );
+        }
+
         self.func = Some(Function::new(local_declarations));
 
         // Exported functions are the module's WebAssembly ABI boundary; canonicalize
@@ -1224,6 +1257,10 @@ impl Compiler {
                     let ti = TypeInfo::from_type_id(arena, *ty);
                     if memory::emit_entry_param_normalization(self.func(), &ti.kind, param_local) {
                         cov_mark::hit!(wasm_codegen_entry_param_normalization);
+                    } else if let Some(enum_info) =
+                        Self::resolve_param_enum(ctx, &ti.kind, module_path)
+                    {
+                        self.emit_entry_enum_tag_guard(param_local, enum_info.variants.len());
                     }
                 }
             }
@@ -1375,6 +1412,7 @@ impl Compiler {
         self.frame_layout = None;
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
+        self.narrow_div_scratch_local = None;
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -1579,6 +1617,109 @@ impl Compiler {
             Expr::ArrayLiteral { elements } => elements
                 .iter()
                 .any(|&e| Self::expr_has_dynamic_array_index(arena, e)),
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
+    /// Returns `true` if the function body contains at least one narrow (i8/i16)
+    /// *signed* division — the only case [`Self::emit_narrow_div_overflow_guard`]
+    /// emits an overflow guard for, so the narrow-div scratch local is reserved
+    /// iff this returns `true`. Functions with no such division reserve no
+    /// scratch and stay byte-identical to an unguarded build.
+    ///
+    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
+    /// the same statements as local discovery and the bounds-index scan. Unlike
+    /// that scan this also descends into a `const` binding's initializer: a
+    /// function-scoped `const Q: i8 = a / b;` lowers through the same
+    /// `lower_named_binding_init` → `lower_expression` path as a `let`, so a
+    /// narrow signed division there emits the guard and must reserve the scratch;
+    /// missing it would panic the guard's `.expect` at emission.
+    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *e)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *left)
+                        || Self::expr_has_narrow_signed_div(arena, ctx, *right)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_has_narrow_signed_div(arena, ctx, v)),
+                Stmt::If { condition, .. } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *condition)
+                }
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_has_narrow_signed_div(arena, ctx, c)),
+                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
+                    Def::Constant { value, .. } => {
+                        Self::expr_has_narrow_signed_div(arena, ctx, *value)
+                    }
+                    _ => false,
+                },
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+            };
+        });
+        found
+    }
+
+    /// Recursively reports whether `expr_id` (or any sub-expression) is a narrow
+    /// (i8/i16) signed division. Supporting helper for
+    /// [`Self::body_has_narrow_signed_div`]; mirrors the expression-variant
+    /// coverage of [`Self::expr_has_dynamic_array_index`] so the reservation and
+    /// emission conditions descend through the same nodes.
+    ///
+    /// A node is a narrow signed division when it is `Expr::Binary { op: Div, .. }`
+    /// whose left operand's type info is `Number(I8 | I16)` — the exact predicate
+    /// [`Self::emit_narrow_div_overflow_guard`] gates on (unsigned narrow and
+    /// full-width divisions no-op there). Missing type info yields `false`.
+    fn expr_has_narrow_signed_div(arena: &AstArena, ctx: &TypedContext, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Binary { op, left, right } => {
+                (matches!(op, OperatorKind::Div)
+                    && matches!(
+                        ctx.get_node_typeinfo(NodeId::Expr(*left))
+                            .as_ref()
+                            .map(|ti| &ti.kind),
+                        Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
+                    ))
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *left)
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *right)
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *array)
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *index)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *expr)
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_has_narrow_signed_div(arena, ctx, *arg))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_has_narrow_signed_div(arena, ctx, *value)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&e| Self::expr_has_narrow_signed_div(arena, ctx, e)),
             Expr::Identifier(_)
             | Expr::NumberLiteral { .. }
             | Expr::BoolLiteral { .. }
@@ -3914,6 +4055,124 @@ impl Compiler {
         self.func().instruction(&Instruction::End);
     }
 
+    /// Emits the overflow guard for a narrow (i8/i16) signed division.
+    ///
+    /// Narrow division runs in the promoted i32 width, where the one overflowing
+    /// input pair (MIN, -1) yields +128 / +32768 — representable in i32, so wasm's
+    /// own `div_s` trap cannot fire, and the re-narrowing that follows would silently
+    /// sign-wrap it back to MIN: a wrong answer with no failure signal. Division
+    /// overflow must instead trap at every width, exactly as wasm itself traps
+    /// i32/i64 MIN / -1 (add/sub/mul wrap by policy; division overflow does not).
+    /// The guard tests the promoted quotient before narrowing:
+    ///
+    /// ```wat
+    /// local.tee $scratch    ;; [q]; $scratch = q
+    /// i32.const 128         ;; [q, 128]     (32768 for i16)
+    /// i32.eq                ;; [cond]
+    /// if (empty)            ;; []
+    ///   unreachable
+    /// end
+    /// local.get $scratch    ;; [q]
+    /// ```
+    ///
+    /// A single equality is exhaustive: operands are canonical sign-extended
+    /// values (ABI entry normalization, producing-instruction re-narrowing, and
+    /// sign-extending loads), so |q| <= |a| <= 2^(w-1), and q = +2^(w-1) is
+    /// reachable only from (MIN, -1). Running after `div_s` keeps the native
+    /// divide-by-zero trap; the guard itself traps as `unreachable`, while the
+    /// full widths report wasm's native integer-overflow trap — the trap-or-not
+    /// contract, not the trap code, is what is width-uniform.
+    fn emit_narrow_div_overflow_guard(&mut self, kind: &TypeInfoKind) {
+        let bound = match kind {
+            TypeInfoKind::Number(NumberType::I8) => 128,
+            TypeInfoKind::Number(NumberType::I16) => 32768,
+            _ => return,
+        };
+        cov_mark::hit!(wasm_codegen_narrow_div_overflow_guard);
+        let scratch = self.narrow_div_scratch_local.expect(
+            "narrow-div scratch local must be reserved: body_has_narrow_signed_div mirrors this \
+             guard's emission condition",
+        );
+        self.func().instruction(&Instruction::LocalTee(scratch));
+        self.func().instruction(&Instruction::I32Const(bound));
+        self.func().instruction(&Instruction::I32Eq);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+        self.func().instruction(&Instruction::LocalGet(scratch));
+    }
+
+    /// Resolves an exported parameter's type kind to its [`EnumInfo`], or `None`
+    /// when the parameter is not an enum.
+    ///
+    /// `from_type_id` yields pre-resolution carriers at the prologue — a bare
+    /// name (enum *or* struct) arrives as `Custom` and a `::`-qualified path as
+    /// `Qualified`, never `TypeInfoKind::Enum` — so this resolves the carrier.
+    /// A `Custom` name that resolves to a struct returns `None` and is correctly
+    /// skipped; `lookup_enum_in` is canonical-key-safe, resolving both
+    /// entry-file-local and item-imported enums. `TypeNode::QualifiedName` is the
+    /// dead parser variant, matched only to mirror the qualified-path idiom used
+    /// for qualified struct return types.
+    fn resolve_param_enum(
+        ctx: &TypedContext,
+        kind: &TypeInfoKind,
+        module_path: &[String],
+    ) -> Option<EnumInfo> {
+        match kind {
+            TypeInfoKind::Custom(name) => ctx.lookup_enum_in(name, module_path),
+            TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+                let segments: Vec<String> = path.split("::").map(ToString::to_string).collect();
+                ctx.lookup_enum_by_qualified_path(&segments, module_path)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emits the exported-fn prologue guard for one enum-typed parameter:
+    ///
+    /// ```wat
+    /// local.get $p
+    /// i32.const N          ;; declared variant count
+    /// i32.ge_u             ;; unsigned: also traps negative tags, which arrive as huge u32
+    /// if (empty)
+    ///   unreachable
+    /// end
+    /// ```
+    ///
+    /// A host may pass any i32 for an enum parameter, but only tags 0..N-1 name a
+    /// variant; every other value names nothing under any convention, so unlike the
+    /// narrow-int (low bits, the C ABI) and bool (truthiness) parameters — which are
+    /// canonicalized because a host convention already gives every wire value a
+    /// meaning — an out-of-range tag is rejected. Any mapping onto the tag range
+    /// (e.g. the `rem_u N` used for uzumaki draws, which are provenance-free
+    /// non-deterministic draws needing only a surjection onto the domain) would
+    /// silently relabel a concrete host input as a variant the host never named.
+    /// A variantless enum is uninhabited, so `p >= 0` is uniformly true and every
+    /// host call traps — the correct degenerate with no special case. In-language
+    /// callers always pass declaration-derived tags, so the guard never fires for
+    /// them.
+    fn emit_entry_enum_tag_guard(&mut self, param_local: u32, variant_count: usize) {
+        if variant_count == 0 {
+            cov_mark::hit!(wasm_codegen_entry_enum_tag_guard_empty);
+        } else {
+            cov_mark::hit!(wasm_codegen_entry_enum_tag_guard);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let n = variant_count as i32;
+        self.func().instruction(&Instruction::LocalGet(param_local));
+        self.func().instruction(&Instruction::I32Const(n));
+        self.func().instruction(&Instruction::I32GeU);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+    }
+
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
     ///
     /// Handles scalar arrays of any dimensionality by recursing through nested
@@ -4422,6 +4681,17 @@ impl Compiler {
         };
 
         self.func().instruction(&instruction);
+
+        // A narrow (i8/i16) signed division computes in the promoted i32 width,
+        // where the (MIN, -1) pair yields a quotient (+128 / +32768) that the
+        // following re-narrowing would silently sign-wrap back to MIN. Guard the
+        // promoted quotient here — after div_s, before narrowing — so division
+        // overflow traps at every width. Only `Div` is guarded: `Mod` never
+        // overflows (`MIN % -1 == 0` at every width) and unsigned narrow division
+        // cannot overflow (the guard method no-ops for those operand types).
+        if matches!(op, OperatorKind::Div) {
+            self.emit_narrow_div_overflow_guard(&left_type_info.kind);
+        }
 
         if !matches!(
             op,

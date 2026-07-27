@@ -701,7 +701,8 @@ pub(crate) fn emit_sub_i32_narrowing(func: &mut Function, kind: &TypeInfoKind) -
 /// calls (including entry-file sibling calls) are unchanged. i32/u32/i64/u64,
 /// enum, and compound parameters are not normalized (returns `false`, emits
 /// nothing): full-width ints need no truncation, and an enum tag has no
-/// bit-width truncation story (tag-domain validation is a separate concern).
+/// bit-width truncation story (tag-domain validation is emitted by the
+/// prologue's enum tag guard in the compiler).
 ///
 /// Returns `true` if normalization instructions were emitted.
 pub(crate) fn emit_entry_param_normalization(

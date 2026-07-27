@@ -101,6 +101,7 @@
     unreachable
   )
   (func $div_i8 (;3;) (type 3) (param $a i32) (param $b i32) (result i32)
+    (local i32)
     local.get $a
     i32.const 24
     i32.shl
@@ -116,6 +117,13 @@
     local.get $a
     local.get $b
     i32.div_s
+    local.tee 2
+    i32.const 128
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     i32.const 24
     i32.shl
     i32.const 24
@@ -232,6 +240,7 @@
     unreachable
   )
   (func $div_i16 (;10;) (type 10) (param $a i32) (param $b i32) (result i32)
+    (local i32)
     local.get $a
     i32.const 16
     i32.shl
@@ -247,6 +256,13 @@
     local.get $a
     local.get $b
     i32.div_s
+    local.tee 2
+    i32.const 32768
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 2
     i32.const 16
     i32.shl
     i32.const 16

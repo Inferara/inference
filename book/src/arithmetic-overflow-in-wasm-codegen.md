@@ -66,7 +66,7 @@ Shift amounts are masked to the bit width of the value being shifted. For `i32`,
 
 ## Inference's Current Approach
 
-Inference inherits WASM's wrapping semantics directly. The compiler emits bare arithmetic instructions with no additional guards. There is no compile-time overflow detection and no runtime overflow check.
+Inference inherits WASM's wrapping semantics for add, subtract, multiply, and negation: those emit bare arithmetic instructions with no overflow guard, and there is no compile-time overflow detection for them. Division is the one exception — signed division overflow (`MIN / -1`) traps at every width, natively for `i32`/`i64` and via a compiler-added guard for the narrow types (see [Division and Modulo](#division-and-modulo)). Separately, a dynamic (runtime-index) array access and a failing `assert` emit their own runtime traps.
 
 ### Binary Expression Lowering
 
@@ -142,11 +142,36 @@ This narrowing is emitted at every place a sub-i32 value is produced, not just a
 - Unary negation (`core/wasm-codegen/src/compiler.rs:4439`) and unary bitwise-not (`core/wasm-codegen/src/compiler.rs:4456`).
 - A scalar uzumaki (`@`) draw of a narrow type — see [Sub-i32 Truncation](#sub-i32-truncation) below; `bool` and enum draws get an analogous `and 1` / `rem_u <variant count>` constraint rather than this mask/shift shape, since their domains aren't sub-i32 integer ranges.
 
+Signed division is the one producer whose *promoted* result can fall outside the narrow type's range in a way this re-narrowing would silently mask rather than merely truncate: for `(MIN, -1)` the promoted quotient is `+128`/`+32768`, which the `shl`/`shr_s` re-narrowing would wrap back to `MIN` — the wrong answer, with no failure signal. That case is caught by an overflow guard emitted *before* the re-narrowing, so division overflow traps instead of wrapping. See [Division and Modulo](#division-and-modulo).
+
 The current behavior therefore matches C's integer promotion rule (arithmetic is done in the promoted width) *and* truncates back to the sub-type's width immediately afterward, so a sub-i32 local never holds a value outside its declared range.
 
 ### Division and Modulo
 
-Division and modulo instructions are emitted without compiler-added guards. The `div_s (MIN, -1)` trap and the division-by-zero trap pass through as WASM traps. When triggered, a runtime environment will report an unhandled WASM trap.
+Integer arithmetic wraps at every width, with one deliberate exception: **division overflow traps at every width**. Divide-by-zero and remainder-by-zero pass through as native WASM traps at every width, and so does signed division's single overflow case, `MIN / -1`.
+
+For `i32`/`i64`, wasm's own `div_s` already traps on `(MIN, -1)`. The narrow signed types (`i8`/`i16`) divide in the promoted i32 width, where the overflowing quotient (`+128`/`+32768`) is representable — so no wasm trap fires — and the mandatory re-narrowing would silently sign-wrap it back to `MIN`. The compiler closes that gap with a guard on the promoted quotient, emitted after `div_s` and before the re-narrowing:
+
+```wat
+i32.div_s
+local.tee $scratch    ;; single-evaluate the promoted quotient
+i32.const 128         ;; 32768 for i16
+i32.eq
+if (empty)
+  unreachable
+end
+local.get $scratch
+```
+
+A single equality is exhaustive because the operands are canonical sign-extended values (ABI entry normalization, producing-instruction re-narrowing, and sign-extending loads all keep a narrow local in range), so `|q| <= |a| <= 2^(w-1)` and the promoted quotient equals `+2^(w-1)` only for `(MIN, -1)`. Running the guard *after* `div_s` preserves the native divide-by-zero trap. The guard is emitted in both compile and proof modes, so a proof carries the same cannot-trap obligation at every width.
+
+`MIN % -1` is `0` at every width — the mathematically correct remainder, always representable — and is intentionally **not** trapped; only `x % 0` traps (natively). The trap *kind* differs by width: the narrow guard traps as `unreachable`, while `i32`/`i64` report wasm's native integer-overflow trap. It is the trap-or-not contract, not the trap code, that is width-uniform.
+
+### Exported ABI Parameter Guards
+
+At the WebAssembly ABI boundary a host may pass any i32 bit pattern for a parameter, so an exported function normalizes or validates each parameter in its prologue. The rule is: normalize where a host convention already assigns every wire value a meaning, and trap where the domain is partial. A narrow integer parameter takes its low bits (the C ABI) and a `bool` takes truthiness (any nonzero is `true`) — both are total maps, so they are normalized silently. An enum parameter is different: only tags `0..N-1` name a variant, so a tag `>= N` names nothing under any convention, and the prologue rejects it with `i32.const N; i32.ge_u; if; unreachable; end` (a negative tag arrives as a huge unsigned value and is caught by the same unsigned compare). A variantless enum is uninhabited, so its guard (`>= 0`) traps on every host call.
+
+This is the same `rem_u` opcode the uzumaki draw uses to constrain an enum draw to `0..N-1` (see [Sub-i32 Truncation](#sub-i32-truncation)), used in a different context. A non-deterministic draw is provenance-free: it needs only a surjection onto the variant domain, and `rem_u N` is a valid one. A host-supplied tag is a concrete input with provenance, so mapping it with `rem_u N` would silently relabel it as a variant the host never named — inventing data. Concrete out-of-domain inputs are therefore trapped, not folded.
 
 ## Comparison with Other Languages
 
@@ -160,7 +185,7 @@ Division and modulo instructions are emitted without compiler-added guards. The 
 | Zig (safe) | Panic via safety check | Panic | `@addWithOverflow` available explicitly |
 | Zig (unsafe) | Wrapping | Panic | `+%` wrapping operators available |
 | WASM | Defined wrapping | Trap | Full specification in WASM core spec §4.3.2 |
-| Inference | Inherits WASM wrapping | Inherits WASM trap | No compiler-added guards currently |
+| Inference | Defined wrapping | Trap | Signed division overflow traps at every width (narrow types via a compiler-added guard); add/sub/mul/neg wrap |
 
 The critical distinction is between *defined* behavior and *undefined* behavior. C's undefined behavior for signed overflow means the optimizer is allowed to assume overflow never occurs, leading to deleted bounds checks, eliminated branches, and silent wrong results. WASM has no such latitude — the specification fully defines every overflow result, making the behavior predictable regardless of optimization level.
 

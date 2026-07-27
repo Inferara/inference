@@ -4,6 +4,12 @@ pub fn shr_u16(x: u16, k: u16) -> u16 { return x >> k; }
 
 pub fn truthy(b: bool) -> bool { return b; }
 
+pub fn div_i8_abi(a: i8, b: i8) -> i8 { return a / b; }
+
+enum Gate { Off, On }
+
+pub fn gate_tag(g: Gate) -> bool { return g == Gate::On; }
+
 spec NarrowAbi {
     fn round_trip() forall {
         let v: u8 = @;
