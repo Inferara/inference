@@ -15,6 +15,12 @@
   )
   (func $assign_from_param (;1;) (type 1) (param $c i32) (result i32)
     (local $result i32)
+    local.get $c
+    i32.const 3
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 0
     local.set $result
     local.get $c

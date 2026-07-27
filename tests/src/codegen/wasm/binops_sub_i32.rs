@@ -26,6 +26,10 @@ mod binops_sub_i32_tests {
     #[test]
     fn binops_sub_i32_test() {
         cov_mark::check_count!(wasm_codegen_emit_binary_expression, 16);
+        // div_i8 and div_i16 are the two signed narrow divisions in the fixture,
+        // each emitting one overflow guard; the unsigned narrow divisions
+        // (div_u8, div_u16) emit none.
+        cov_mark::check_count!(wasm_codegen_narrow_div_overflow_guard, 2);
         let test_name = "binops_sub_i32";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -42,7 +46,7 @@ mod binops_sub_i32_tests {
 
     #[test]
     fn binops_sub_i32_execution_test() {
-        use wasmtime::{Engine, Module, Store, TypedFunc};
+        use wasmtime::{Engine, Module, Store, Trap, TypedFunc};
 
         let test_name = "binops_sub_i32";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -69,6 +73,25 @@ mod binops_sub_i32_tests {
                     result, $expected,
                     "{}({:?}) expected {:?}",
                     $name, $args, $expected
+                );
+            }};
+        }
+
+        macro_rules! call_trap {
+            ($name:expr, $args:expr, $expected_trap:expr) => {{
+                let f: TypedFunc<_, i32> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let err = f
+                    .call(&mut store, $args)
+                    .expect_err(&format!("{}({:?}) expected to trap", $name, $args));
+                let trap = err.downcast_ref::<Trap>().unwrap_or_else(|| {
+                    panic!("expected a wasmtime Trap from '{}', got: {err:?}", $name)
+                });
+                assert_eq!(
+                    *trap, $expected_trap,
+                    "{}({:?}) expected trap {:?}",
+                    $name, $args, $expected_trap
                 );
             }};
         }
@@ -123,6 +146,33 @@ mod binops_sub_i32_tests {
         // u16 unsigned remainder
         call!("mod_u16", (65535_i32, 1000_i32), 535_i32);
         call!("mod_u16", (10_i32, 3_i32), 1_i32);
+
+        // Narrow signed division overflow: the promoted quotient +128 / +32768 is
+        // reachable only from (MIN, -1), where the guard traps as `unreachable`.
+        call_trap!("div_i8", (-128_i32, -1_i32), Trap::UnreachableCodeReached);
+        call_trap!("div_i16", (-32768_i32, -1_i32), Trap::UnreachableCodeReached);
+
+        // The guard runs after `div_s`, so a zero divisor still trips wasm's
+        // native divide-by-zero trap (a distinct trap code) — the guard did not
+        // preempt it.
+        call_trap!("div_i8", (1_i32, 0_i32), Trap::IntegerDivisionByZero);
+        call_trap!("div_i16", (1_i32, 0_i32), Trap::IntegerDivisionByZero);
+
+        // Non-overflowing signed narrow divisions around the ±MIN/±MAX edges do
+        // NOT trap: only the exact (MIN, -1) quotient equals the width bound.
+        call!("div_i8", (-128_i32, 1_i32), -128_i32);
+        call!("div_i8", (127_i32, -1_i32), -127_i32);
+        call!("div_i8", (-127_i32, -1_i32), 127_i32);
+        call!("div_i8", (-128_i32, -128_i32), 1_i32);
+        call!("div_i16", (-32768_i32, 1_i32), -32768_i32);
+        call!("div_i16", (32767_i32, -1_i32), -32767_i32);
+        call!("div_i16", (-32768_i32, -2_i32), 16384_i32);
+
+        // Unsigned narrow division is never guarded: a quotient equal to the
+        // signed width bound (128 / 32768) must return, not trap — pins the
+        // signed-only gating.
+        call!("div_u8", (128_i32, 1_i32), 128_i32);
+        call!("div_u16", (32768_i32, 1_i32), 32768_i32);
     }
 }
 

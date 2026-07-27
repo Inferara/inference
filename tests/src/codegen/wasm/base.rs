@@ -2981,9 +2981,20 @@ mod base_codegen_tests {
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "div_i8_overflow")
             .expect("get func");
-        // i8: -128 / -1 = 128, which overflows to -128 (signed wrap)
-        let result = func.call(&mut store, (-128, -1)).expect("call");
-        assert_eq!(result, -128, "i8(-128) / i8(-1) should wrap to -128");
+        // i8: -128 / -1 overflows the type; division overflow traps at every
+        // width, so the narrow guard raises `unreachable` instead of wrapping.
+        let err = func
+            .call(&mut store, (-128, -1))
+            .expect_err("i8(-128) / i8(-1) must trap, not wrap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>()
+                .expect("trap, not a host error"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "narrow division overflow must trap via the overflow guard"
+        );
+        // The non-overflowing edge stays exact.
+        let ok = func.call(&mut store, (-128, 1)).expect("call");
+        assert_eq!(ok, -128, "i8(-128) / i8(1) is representable and exact");
     }
 
     // -- C2: Array-to-array copy (value semantics) --
@@ -6978,6 +6989,9 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_params_golden_test() {
+        // Dir has 4 variants; is_up, dir_to_int, and pass_through each take one
+        // Dir parameter, so the exported prologue emits three tag guards.
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 3);
         let test_name = "enum_params";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -6992,6 +7006,10 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_compare_golden_test() {
+        // Status has 2 variants; are_equal and are_not_equal each take two Status
+        // parameters and is_active takes one, so the prologue emits five tag
+        // guards (2 + 2 + 1).
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 5);
         let test_name = "enum_compare";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -7006,6 +7024,9 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_assign_golden_test() {
+        // Only assign_from_param takes a Color parameter (reassign takes none),
+        // so the prologue emits a single tag guard.
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 1);
         let test_name = "enum_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -7084,6 +7105,22 @@ mod base_codegen_tests {
             .expect("Failed to get 'pass_through'");
         assert_eq!(pass_through.call(&mut store, 0).unwrap(), 0, "pass_through should return same tag");
         assert_eq!(pass_through.call(&mut store, 2).unwrap(), 2, "pass_through should return same tag");
+        // Boundary tag N-1 (Right = 3) is a valid variant and passes through.
+        assert_eq!(pass_through.call(&mut store, 3).unwrap(), 3, "pass_through(Right) should return 3");
+
+        // Out-of-range enum tags trap at the exported prologue: N (4) is the
+        // first invalid tag, and a negative tag arrives as a huge u32 caught by
+        // the same unsigned compare. Dir has 4 variants.
+        for bad in [4_i32, 99_i32, -1_i32] {
+            let err = dir_to_int
+                .call(&mut store, bad)
+                .expect_err("out-of-range Dir tag must trap");
+            assert_eq!(
+                *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+                wasmtime::Trap::UnreachableCodeReached,
+                "dir_to_int({bad}) should trap as unreachable",
+            );
+        }
     }
 
     #[test]
@@ -7122,6 +7159,34 @@ mod base_codegen_tests {
             .expect("Failed to get 'is_active'");
         assert_eq!(is_active.call(&mut store, 0).unwrap(), 1, "Active should return true");
         assert_eq!(is_active.call(&mut store, 1).unwrap(), 0, "Inactive should return false");
+
+        // Status has 2 variants, so tag 2 is out of range. The guard is emitted
+        // per enum parameter, so it fires whether the bad tag is the first or the
+        // second argument.
+        let err = are_equal
+            .call(&mut store, (0, 2))
+            .expect_err("second-arg out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "are_equal((0, 2)) should trap on the second parameter",
+        );
+        let err = are_equal
+            .call(&mut store, (2, 0))
+            .expect_err("first-arg out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "are_equal((2, 0)) should trap on the first parameter",
+        );
+        let err = is_active
+            .call(&mut store, 2)
+            .expect_err("out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "is_active(2) should trap",
+        );
     }
 
     #[test]
@@ -7150,8 +7215,22 @@ mod base_codegen_tests {
         let assign_from_param: wasmtime::TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "assign_from_param")
             .expect("Failed to get 'assign_from_param'");
+        assert_eq!(assign_from_param.call(&mut store, 0).unwrap(), 0, "assign_from_param(Red) should return 0");
         assert_eq!(assign_from_param.call(&mut store, 1).unwrap(), 1, "assign_from_param(Green) should return 1");
         assert_eq!(assign_from_param.call(&mut store, 2).unwrap(), 2, "assign_from_param(Blue) should return 2");
+
+        // Color has 3 variants, so tags 3 and 99 are out of range and trap at
+        // the exported prologue.
+        for bad in [3_i32, 99_i32] {
+            let err = assign_from_param
+                .call(&mut store, bad)
+                .expect_err("out-of-range Color tag must trap");
+            assert_eq!(
+                *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+                wasmtime::Trap::UnreachableCodeReached,
+                "assign_from_param({bad}) should trap as unreachable",
+            );
+        }
     }
 
     #[test]
