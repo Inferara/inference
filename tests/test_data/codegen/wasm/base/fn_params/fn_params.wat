@@ -21,6 +21,10 @@
   )
   (func $identity_bool (;2;) (type 2) (param $x i32) (result i32)
     local.get $x
+    i32.eqz
+    i32.eqz
+    local.set $x
+    local.get $x
     return
     unreachable
   )

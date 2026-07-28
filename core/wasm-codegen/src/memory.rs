@@ -376,6 +376,15 @@ pub(crate) struct FrameLayout {
     pub struct_offsets: FxHashMap<String, StructSlot>,
     /// WASM local index of the synthetic `__frame_ptr` local.
     pub frame_ptr_local: u32,
+    /// Byte offset of a shared staging region used to build a self-referential
+    /// compound reassignment (`p = P { x: p.y, y: p.x }`) before copying it into
+    /// the destination slot. `None` unless the function body contains at least
+    /// one such assignment, so functions without one stay byte-identical.
+    ///
+    /// One region is reused across every self-referential assignment in the body:
+    /// each build-then-copy is sequential and the region is dead after each copy,
+    /// so it is sized to the largest such destination.
+    pub scratch_offset: Option<u32>,
 }
 
 /// Returns the byte size of a single element for the given type.
@@ -667,6 +676,90 @@ pub(crate) fn emit_sub_i32_narrowing(func: &mut Function, kind: &TypeInfoKind) -
         TypeInfoKind::Number(NumberType::U16) => {
             // Zero-extend from 16 bits: x & 0xFFFF
             func.instruction(&Instruction::I32Const(0xFFFF));
+            func.instruction(&Instruction::I32And);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Emits the ABI-entry normalization for one narrow scalar parameter of an
+/// exported function: `local.get p; <normalize>; local.set p`.
+///
+/// A WebAssembly host may pass any i32 bit pattern for a narrow parameter, so
+/// exported functions canonicalize before the body runs:
+/// - u8/u16: mask to the low bits (zero-extend), i8/i16: sign-extend from the
+///   low bits — the C "argument takes the low bits" convention, reusing the
+///   [`emit_sub_i32_narrowing`] shapes.
+/// - bool: truthiness (`p != 0`, encoded `i32.eqz; i32.eqz`) — any nonzero
+///   host value means `true`, matching C hosts and the existing `if`/`!`
+///   lowerings, which already treat any nonzero i32 as true. A `& 1` mask was
+///   rejected: it would map a host `2` to `false`, contradicting the existing
+///   `if b` behavior for the same argument.
+///
+/// Every shape is a fixed point on canonical in-language values, so in-domain
+/// calls (including entry-file sibling calls) are unchanged. i32/u32/i64/u64,
+/// enum, and compound parameters are not normalized (returns `false`, emits
+/// nothing): full-width ints need no truncation, and an enum tag has no
+/// bit-width truncation story (tag-domain validation is emitted by the
+/// prologue's enum tag guard in the compiler).
+///
+/// Returns `true` if normalization instructions were emitted.
+pub(crate) fn emit_entry_param_normalization(
+    func: &mut Function,
+    kind: &TypeInfoKind,
+    param_local: u32,
+) -> bool {
+    match kind {
+        TypeInfoKind::Bool => {
+            func.instruction(&Instruction::LocalGet(param_local));
+            func.instruction(&Instruction::I32Eqz);
+            func.instruction(&Instruction::I32Eqz);
+            func.instruction(&Instruction::LocalSet(param_local));
+            true
+        }
+        TypeInfoKind::Number(
+            NumberType::I8 | NumberType::I16 | NumberType::U8 | NumberType::U16,
+        ) => {
+            func.instruction(&Instruction::LocalGet(param_local));
+            emit_sub_i32_narrowing(func, kind);
+            func.instruction(&Instruction::LocalSet(param_local));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Emits the shift-count mask for a narrow-typed shift: `i32.const 7; i32.and`
+/// (8-bit) or `i32.const 15; i32.and` (16-bit) applied to the count on top of
+/// the operand stack.
+///
+/// The language rule is "a shift count is taken modulo the operand type's bit
+/// width". WebAssembly's `ishl`/`ishr` already mask the count modulo 32/64 —
+/// exactly the type width for i32/u32/i64/u64, so those types need nothing
+/// (returns `false`). Narrow types promote to i32, where wasm's mod-32 mask
+/// produces a cliff (`u8 x << 8` is 0 but `x << 32` is `x`); masking the count
+/// to the declared width first extends wasm's own semantics to the type.
+/// Applies to both `<<` and `>>`: `>>`'s exemption from result re-narrowing is
+/// a value-domain property (an in-domain operand stays in-domain under any
+/// effective count), which says nothing about which count is effective.
+///
+/// The mask is unconditional at narrow shift sites — a literal count for a
+/// narrow-typed shift cannot type-check today (bare literals are i32 and
+/// binary operands do not coerce) and const-declared counts reach codegen as
+/// opaque locals, so a provably-in-range constant that could skip the mask
+/// does not exist as an expressible shape.
+///
+/// Returns `true` if a mask was emitted.
+pub(crate) fn emit_shift_count_mask(func: &mut Function, kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Number(NumberType::I8 | NumberType::U8) => {
+            func.instruction(&Instruction::I32Const(7));
+            func.instruction(&Instruction::I32And);
+            true
+        }
+        TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => {
+            func.instruction(&Instruction::I32Const(15));
             func.instruction(&Instruction::I32And);
             true
         }
@@ -1056,6 +1149,7 @@ mod tests {
             array_offsets: FxHashMap::default(),
             struct_offsets: FxHashMap::default(),
             frame_ptr_local: 0,
+            scratch_offset: None,
         };
         assert_eq!(layout.total_size, 16);
         assert!(layout.array_offsets.is_empty());
@@ -1203,6 +1297,162 @@ mod tests {
         let mut func = Function::new(vec![]);
         let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Bool);
         assert!(!emitted, "should not emit narrowing for bool");
+    }
+
+    /// Raw instruction bytes emitted into a fresh (empty-locals) function.
+    fn body_of(build: impl FnOnce(&mut Function)) -> Vec<u8> {
+        let mut func = Function::new(vec![]);
+        build(&mut func);
+        func.into_raw_body()
+    }
+
+    #[test]
+    fn entry_param_normalization_bool_is_double_eqz() {
+        let actual = body_of(|f| {
+            let emitted = emit_entry_param_normalization(f, &TypeInfoKind::Bool, 3);
+            assert!(emitted, "bool parameter must be normalized");
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32Eqz);
+            f.instruction(&Instruction::I32Eqz);
+            f.instruction(&Instruction::LocalSet(3));
+        });
+        assert_eq!(actual, expected, "bool normalization must be `p != 0` around the local");
+    }
+
+    #[test]
+    fn entry_param_normalization_i8_sign_extends() {
+        let actual = body_of(|f| {
+            assert!(emit_entry_param_normalization(f, &TypeInfoKind::Number(NumberType::I8), 2));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Const(24));
+            f.instruction(&Instruction::I32Shl);
+            f.instruction(&Instruction::I32Const(24));
+            f.instruction(&Instruction::I32ShrS);
+            f.instruction(&Instruction::LocalSet(2));
+        });
+        assert_eq!(actual, expected, "i8 normalization must sign-extend the low byte");
+    }
+
+    #[test]
+    fn entry_param_normalization_i16_sign_extends() {
+        let actual = body_of(|f| {
+            assert!(emit_entry_param_normalization(f, &TypeInfoKind::Number(NumberType::I16), 0));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::I32Const(16));
+            f.instruction(&Instruction::I32Shl);
+            f.instruction(&Instruction::I32Const(16));
+            f.instruction(&Instruction::I32ShrS);
+            f.instruction(&Instruction::LocalSet(0));
+        });
+        assert_eq!(actual, expected, "i16 normalization must sign-extend the low 16 bits");
+    }
+
+    #[test]
+    fn entry_param_normalization_u8_masks_low_byte() {
+        let actual = body_of(|f| {
+            assert!(emit_entry_param_normalization(f, &TypeInfoKind::Number(NumberType::U8), 1));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32Const(0xFF));
+            f.instruction(&Instruction::I32And);
+            f.instruction(&Instruction::LocalSet(1));
+        });
+        assert_eq!(actual, expected, "u8 normalization must mask to the low byte");
+    }
+
+    #[test]
+    fn entry_param_normalization_u16_masks_low_16() {
+        let actual = body_of(|f| {
+            assert!(emit_entry_param_normalization(f, &TypeInfoKind::Number(NumberType::U16), 4));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Const(0xFFFF));
+            f.instruction(&Instruction::I32And);
+            f.instruction(&Instruction::LocalSet(4));
+        });
+        assert_eq!(actual, expected, "u16 normalization must mask to the low 16 bits");
+    }
+
+    #[test]
+    fn entry_param_normalization_wide_and_enum_emit_nothing() {
+        let untouched = body_of(|_| {});
+        for kind in [
+            TypeInfoKind::Number(NumberType::I32),
+            TypeInfoKind::Number(NumberType::U32),
+            TypeInfoKind::Number(NumberType::I64),
+            TypeInfoKind::Number(NumberType::U64),
+            TypeInfoKind::Enum("Color".to_string(), "Color".to_string()),
+        ] {
+            let body = body_of(|f| {
+                assert!(
+                    !emit_entry_param_normalization(f, &kind, 0),
+                    "{kind:?} parameter must not be normalized"
+                );
+            });
+            assert_eq!(body, untouched, "{kind:?} must emit no normalization instructions");
+        }
+    }
+
+    #[test]
+    fn shift_count_mask_8bit_masks_by_7() {
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::I32Const(7));
+            f.instruction(&Instruction::I32And);
+        });
+        for kind in [
+            TypeInfoKind::Number(NumberType::I8),
+            TypeInfoKind::Number(NumberType::U8),
+        ] {
+            let actual = body_of(|f| {
+                assert!(emit_shift_count_mask(f, &kind), "{kind:?} shift count must be masked");
+            });
+            assert_eq!(actual, expected, "{kind:?} shift count must mask by 7");
+        }
+    }
+
+    #[test]
+    fn shift_count_mask_16bit_masks_by_15() {
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::I32Const(15));
+            f.instruction(&Instruction::I32And);
+        });
+        for kind in [
+            TypeInfoKind::Number(NumberType::I16),
+            TypeInfoKind::Number(NumberType::U16),
+        ] {
+            let actual = body_of(|f| {
+                assert!(emit_shift_count_mask(f, &kind), "{kind:?} shift count must be masked");
+            });
+            assert_eq!(actual, expected, "{kind:?} shift count must mask by 15");
+        }
+    }
+
+    #[test]
+    fn shift_count_mask_wide_and_bool_emit_nothing() {
+        let untouched = body_of(|_| {});
+        for kind in [
+            TypeInfoKind::Number(NumberType::I32),
+            TypeInfoKind::Number(NumberType::U32),
+            TypeInfoKind::Number(NumberType::I64),
+            TypeInfoKind::Number(NumberType::U64),
+            TypeInfoKind::Bool,
+        ] {
+            let body = body_of(|f| {
+                assert!(
+                    !emit_shift_count_mask(f, &kind),
+                    "{kind:?} shift count must not be masked"
+                );
+            });
+            assert_eq!(body, untouched, "{kind:?} must emit no shift-count mask");
+        }
     }
 
     fn make_field(name: &str, kind: TypeInfoKind) -> StructFieldInfo {

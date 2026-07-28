@@ -325,6 +325,28 @@ impl TypedContext {
         }
     }
 
+    /// Resolves the `::`-qualified type path (`geo::Level`) to the [`EnumInfo`] it
+    /// names, as referenced from the file whose module path is `from_module_path`,
+    /// or `None` if the path does not name an enum. The enum twin of
+    /// [`Self::lookup_struct_by_qualified_path`].
+    ///
+    /// An exported parameter typed by a `::`-qualified path carries the path, not
+    /// a bare name; code generation resolves it here to recover the same
+    /// [`EnumInfo`] a bare annotation would yield, so the exported-prologue tag
+    /// guard validates qualified enum parameters exactly as it does bare ones.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_enum_by_qualified_path(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> Option<EnumInfo> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        match self.symbol_table.resolve_qualified_type_path(path, from_scope)? {
+            ResolvedNominalType::Enum(info, _) => Some(info),
+            ResolvedNominalType::Struct(..) => None,
+        }
+    }
+
     /// Resolves the `::`-qualified type path (`lib::big::Big`) to the
     /// [`StructInfo`] it names *and its canonical key*, as referenced from the
     /// file whose module path is `from_module_path`, or `None` if the path does

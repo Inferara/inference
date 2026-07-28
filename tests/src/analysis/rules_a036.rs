@@ -390,6 +390,28 @@ mod analysis_rules_tests {
         format!("[{elems}]")
     }
 
+    /// An `n`-element array literal of `i32` zeros, e.g. `[0, 0, 0]`.
+    fn repeat_zeros(n: usize) -> String {
+        let elems = std::iter::repeat_n("0", n).collect::<Vec<_>>().join(", ");
+        format!("[{elems}]")
+    }
+
+    /// An `n`-element array literal whose first element reads `a[0]` (making the
+    /// literal self-referential) and whose remaining elements are zeros.
+    fn array_selfref_literal(n: usize) -> String {
+        array_selfref_reading("a", n)
+    }
+
+    /// An `n`-element array literal whose first element reads `{var}[0]` (making
+    /// the literal self-referential in `var`) and whose remaining elements are
+    /// zeros. Lets a test place two self-referential reassignments of distinct
+    /// destinations in one function.
+    fn array_selfref_reading(var: &str, n: usize) -> String {
+        let mut elems = vec![format!("{var}[0]")];
+        elems.extend(std::iter::repeat_n("0".to_string(), n.saturating_sub(1)));
+        format!("[{}]", elems.join(", "))
+    }
+
     /// Genuine over-budget array-of-structs call chain. Each function holds a
     /// `[Pt; 5000]` literal local: `Pt { x: i32; y: i32; }` is 8 bytes, so the
     /// real frame is `8 * 5000 = 40000` bytes (< 64 KB, so codegen accepts each
@@ -611,10 +633,42 @@ mod analysis_rules_tests {
                 }}
             "#
         );
+
+        // Self-referential compound reassignments: codegen reserves a scratch
+        // frame region the size of the destination so the literal can be built
+        // against the pre-assignment state and copied over. The estimator must
+        // charge that scratch or `est < real` here. A large array-bearing struct
+        // and a large array analogue exercise the invariant on real ~24/20 KB
+        // scratch regions.
+        let big_zeros = repeat_zeros(6000);
+        let big_selfref_src = format!(
+            r#"
+                struct Big {{ data: [i32; 6000]; tag: i32; }}
+                fn bigs() -> i32 {{
+                    let mut b: Big = Big {{ data: {big_zeros}, tag: 0 }};
+                    b = Big {{ data: b.data, tag: b.tag }};
+                    return b.tag;
+                }}
+            "#
+        );
+        let arr_zeros = repeat_zeros(5000);
+        let arr_selfref = array_selfref_literal(5000);
+        let arr_selfref_src = format!(
+            r#"
+                fn arrs() -> i32 {{
+                    let mut a: [i32; 5000] = {arr_zeros};
+                    a = {arr_selfref};
+                    return a[0];
+                }}
+            "#
+        );
+
         let sources: Vec<&str> = corpus
             .iter()
             .copied()
             .chain(std::iter::once(aos_src.as_str()))
+            .chain(std::iter::once(big_selfref_src.as_str()))
+            .chain(std::iter::once(arr_selfref_src.as_str()))
             .collect();
 
         let mut saw_nonzero_real_frame = false;
@@ -644,6 +698,92 @@ mod analysis_rules_tests {
         assert!(
             saw_nonzero_real_frame,
             "parity corpus must exercise at least one non-zero real frame (non-vacuity)"
+        );
+    }
+
+    /// A single function whose destination struct (~40 KB) fits under the 64 KB
+    /// budget on its own, but the *self-referential* reassignment forces codegen
+    /// to stage the literal in a scratch region of the same size before copying it
+    /// to the destination. Charging that scratch pushes the estimate (~80 KB) over
+    /// budget, so A036 must reject. Paired with
+    /// `a036_non_self_ref_reassign_of_same_dest_accepted`, this proves the estimator
+    /// counts the scratch — the only difference between the two is the self-reference.
+    #[test]
+    fn a036_self_ref_reassign_scratch_pushes_over_budget_rejected() {
+        let zeros = repeat_zeros(10000);
+        let source = format!(
+            r#"
+                struct Big {{ data: [i32; 10000]; }}
+                fn s() -> i32 {{
+                    let mut b: Big = Big {{ data: {zeros} }};
+                    b = Big {{ data: b.data }};
+                    return 0;
+                }}
+            "#
+        );
+        assert!(
+            has_stack_depth_exceeded(&source),
+            "self-referential reassign must charge scratch: dest (~40 KB) + scratch (~40 KB) \
+             exceeds the 64 KB budget"
+        );
+    }
+
+    /// The control for `a036_self_ref_reassign_scratch_pushes_over_budget_rejected`:
+    /// the identical ~40 KB destination reassigned from a *non*-self-referential
+    /// literal needs no scratch, so the estimate stays under budget and A036
+    /// accepts. This isolates the self-reference as the cause of the rejection.
+    #[test]
+    fn a036_non_self_ref_reassign_of_same_dest_accepted() {
+        let zeros = repeat_zeros(10000);
+        let source = format!(
+            r#"
+                struct Big {{ data: [i32; 10000]; }}
+                fn s() -> i32 {{
+                    let mut b: Big = Big {{ data: {zeros} }};
+                    b = Big {{ data: {zeros} }};
+                    return 0;
+                }}
+            "#
+        );
+        assert!(
+            !has_stack_depth_exceeded(&source),
+            "a non-self-referential reassign reserves no scratch, so the ~40 KB frame fits"
+        );
+    }
+
+    /// Two sequential self-referential reassignments of distinct large arrays in
+    /// one function. Codegen reserves a single shared scratch region sized to the
+    /// *larger* destination (~18 KB), reused for both build-then-copy sequences,
+    /// so the real frame is the two destination slots plus that one region.
+    ///
+    /// The estimator must mirror that shared region with a single MAX charge, not
+    /// a per-assignment SUM. With the two ~18 KB / ~17.6 KB destinations plus a
+    /// single ~18 KB scratch charge the estimate (~53.6 KB) fits under the 64 KB
+    /// budget, so A036 must accept. A sum-based scratch charge (two ~18 KB / ~17.6
+    /// KB regions on top of the destinations, ~71 KB) would cross the budget and
+    /// falsely reject this valid frame. Guards against re-introducing the
+    /// sum-based scratch over-counting.
+    #[test]
+    fn a036_two_self_ref_reassigns_share_one_scratch_accepted() {
+        let zeros_a = repeat_zeros(4500);
+        let zeros_b = repeat_zeros(4400);
+        let selfref_a = array_selfref_reading("a", 4500);
+        let selfref_b = array_selfref_reading("b", 4400);
+        let source = format!(
+            r#"
+                fn s() -> i32 {{
+                    let mut a: [i32; 4500] = {zeros_a};
+                    let mut b: [i32; 4400] = {zeros_b};
+                    a = {selfref_a};
+                    b = {selfref_b};
+                    return a[0] + b[0];
+                }}
+            "#
+        );
+        assert!(
+            !has_stack_depth_exceeded(&source),
+            "two self-referential reassigns share one scratch region (max, not sum), \
+             so the frame fits and A036 must accept"
         );
     }
 

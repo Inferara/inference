@@ -4,49 +4,6 @@
 //! is correctly rejected (or panics) during WebAssembly code generation, and that the
 //! resulting error message contains the expected diagnostic substring.
 
-mod unimplemented_operators {
-    use crate::utils::try_codegen;
-
-    #[test]
-    fn power_operator_literals() {
-        let result = try_codegen("pub fn test() -> i32 { return 2 ** 3; }");
-        assert!(
-            result.is_err(),
-            "power operator on literals should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Power operator"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn power_operator_variables() {
-        let result = try_codegen("pub fn test(a: i32, b: i32) -> i32 { return a ** b; }");
-        assert!(
-            result.is_err(),
-            "power operator on variables should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Power operator"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn power_operator_i64() {
-        let result = try_codegen("pub fn test(a: i64, b: i64) -> i64 { return a ** b; }");
-        assert!(result.is_err(), "power operator on i64 should fail codegen");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Power operator"),
-            "unexpected error message: {err}"
-        );
-    }
-}
-
 mod uninitialized_variables {
     use crate::utils::build_ast;
     use inference_analysis::errors::AnalysisDiagnostic;

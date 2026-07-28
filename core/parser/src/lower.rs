@@ -708,38 +708,95 @@ impl<'s> Lowering<'s> {
         }
     }
 
-    /// Mirrors `Builder::build_statement`'s `if_statement` arm. Alloc order:
-    /// condition expression, then the `if_arm` block, then the optional
-    /// `else_arm` block. Our CST lays out child nodes as condition, then `Block`s
-    /// for each arm in source order; the first `Block` is the then-arm and (for a
-    /// plain `if/else`) the last is the else-arm.
+    /// Lowers an `if` / `else if` / `else` chain. The grammar flattens the whole
+    /// chain into a single `IfStatement` CST node whose node-children interleave,
+    /// in source order, as `cond0, block0, cond1, block1, …` followed by an
+    /// optional final block for a bare `else`. The AST has no dedicated else-if
+    /// form, so the chain is desugared into nested [`Stmt::If`]s: each `else if`
+    /// becomes the enclosing arm's `else_block`, a synthetic regular block that
+    /// wraps the nested `Stmt::If`. That is exactly the shape an explicit
+    /// `else { if … }` produces, so type checking, analysis and codegen need no
+    /// special handling for else-if.
+    ///
+    /// With `k` conditions, arm `i` pairs `conditions[i]` with `blocks[i]`; a
+    /// bare `else` is present iff there is at least one arm and one block beyond
+    /// the `k` arm blocks. The nesting is built right-to-left: the `else` chain
+    /// starts at the bare-`else` block (only seeded when `k > 0`, so a lone
+    /// block on a conditionless `if` stays the synthetic arm's body rather than
+    /// being lowered twice), then arms `k-1 … 0` are folded in, wrapping
+    /// every arm but the outermost in a synthetic block so it can serve as the
+    /// previous arm's `else_block`. The outermost `Stmt::If` spans the whole
+    /// if-statement, so a hit anywhere in the statement (its condition or any
+    /// arm) descends into it. Every nested `else if` arm (and its synthetic
+    /// wrapper) spans from its own condition to the end of the statement, since
+    /// that arm's subtree always reaches the final `else`. At least one arm is
+    /// always emitted so malformed input (missing condition or body) still
+    /// lowers to an `if`, keeping lowering total.
     fn lower_if_statement(&mut self, node: &SyntaxNode, location: Location) -> StmtId {
-        let condition = if let Some(condition_node) = self.if_condition(node) {
-            self.lower_expression(condition_node)
+        let conditions = self.if_conditions(node);
+        let blocks = self.if_arm_blocks(node);
+        let arm_count = conditions.len();
+
+        let mut else_chain = if arm_count > 0 && blocks.len() > arm_count {
+            Some(self.lower_block(blocks[arm_count]))
         } else {
-            self.push_error(node, "Missing if condition".to_string());
-            self.create_error_expr(node)
+            None
         };
-        let blocks: Vec<&SyntaxNode> = self.if_arm_blocks(node);
-        let then_block = if let Some(then_node) = blocks.first() {
-            self.lower_block(then_node)
-        } else {
-            self.push_error(node, "Missing if body".to_string());
-            self.arena.blocks.alloc(BlockData {
-                location,
-                block_kind: BlockKind::Regular,
-                stmts: vec![],
-            })
-        };
-        let else_block = self.if_else_block(node).map(|n| self.lower_block(n));
-        self.arena.stmts.alloc(StmtData {
-            location,
-            kind: Stmt::If {
-                condition,
-                then_block,
-                else_block,
-            },
-        })
+
+        let mut outermost = None;
+        for i in (0..arm_count.max(1)).rev() {
+            let arm_location = if i == 0 {
+                location
+            } else {
+                let start_loc = conditions
+                    .get(i)
+                    .map(|cond| cond.loc)
+                    .or_else(|| blocks.get(i).map(|block| block.loc))
+                    .unwrap_or(location);
+                Location::new(
+                    start_loc.offset_start,
+                    location.offset_end,
+                    start_loc.start_line,
+                    start_loc.start_column,
+                    location.end_line,
+                    location.end_column,
+                )
+            };
+            let condition = if let Some(cond) = conditions.get(i) {
+                self.lower_expression(cond)
+            } else {
+                self.push_error(node, "Missing if condition".to_string());
+                self.create_error_expr(node)
+            };
+            let then_block = if let Some(block) = blocks.get(i) {
+                self.lower_block(block)
+            } else {
+                self.push_error(node, "Missing if body".to_string());
+                self.arena.blocks.alloc(BlockData {
+                    location: arm_location,
+                    block_kind: BlockKind::Regular,
+                    stmts: vec![],
+                })
+            };
+            let stmt = self.arena.stmts.alloc(StmtData {
+                location: arm_location,
+                kind: Stmt::If {
+                    condition,
+                    then_block,
+                    else_block: else_chain,
+                },
+            });
+            if i > 0 {
+                else_chain = Some(self.arena.blocks.alloc(BlockData {
+                    location: arm_location,
+                    block_kind: BlockKind::Regular,
+                    stmts: vec![stmt],
+                }));
+            } else {
+                outermost = Some(stmt);
+            }
+        }
+        outermost.expect("if lowering always emits an outermost arm")
     }
 
     /// Mirrors `Builder::create_error_statement`: an `<error>` identifier
@@ -1466,36 +1523,24 @@ impl<'s> Lowering<'s> {
             .last()
     }
 
-    /// The `if` head condition: the first expression child, which sits before the
-    /// then-arm block. Further `else if` conditions follow their own arm blocks
-    /// and are matched positionally by [`Self::if_else_block`].
-    fn if_condition<'n>(&self, node: &'n SyntaxNode) -> Option<&'n SyntaxNode> {
-        node.node_children().find(|n| is_expression_node(n.kind))
+    /// The condition expressions of an `if` chain, in source order: `cond0` for
+    /// the head `if`, then one per `else if`. Paired positionally with the arm
+    /// blocks from [`Self::if_arm_blocks`] to reconstruct the nested arms.
+    fn if_conditions<'n>(&self, node: &'n SyntaxNode) -> Vec<&'n SyntaxNode> {
+        node.node_children()
+            .filter(|n| is_expression_node(n.kind))
+            .collect()
     }
 
-    /// The arm blocks of an `if` statement, in source order. The first is the
-    /// then-arm.
+    /// The arm blocks of an `if` chain, in source order: one block per condition
+    /// (`if` / `else if`), followed by an optional final block for a bare `else`.
+    /// So a block beyond the condition count is the bare-`else` arm; the caller
+    /// pairs the first `conditions.len()` blocks with the conditions and treats
+    /// any remaining block as the `else`.
     fn if_arm_blocks<'n>(&self, node: &'n SyntaxNode) -> Vec<&'n SyntaxNode> {
         node.node_children()
             .filter(|n| is_block_node(n.kind))
             .collect()
-    }
-
-    /// The trailing bare `else` arm block, if present. The grammar produces one
-    /// arm block per condition (`if`/`else if`) plus an optional final block for
-    /// a bare `else`; so an extra block beyond the condition count is the
-    /// else-arm.
-    fn if_else_block<'n>(&self, node: &'n SyntaxNode) -> Option<&'n SyntaxNode> {
-        let conditions = node
-            .node_children()
-            .filter(|n| is_expression_node(n.kind))
-            .count();
-        let blocks: Vec<&SyntaxNode> = self.if_arm_blocks(node);
-        if blocks.len() > conditions {
-            blocks.last().copied()
-        } else {
-            None
-        }
     }
 
     /// The member/type-member access name, lowered; or an `<error>` placeholder
@@ -1712,7 +1757,7 @@ mod tests {
 
     use crate::parse;
     use inference_ast::arena::AstArena;
-    use inference_ast::ids::{BlockId, DefId, TypeId};
+    use inference_ast::ids::{BlockId, DefId, ExprId, TypeId};
     use inference_ast::nodes::{
         ArgKind, BlockKind, Def, Directive, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
         UnaryOperatorKind, Visibility,
@@ -1773,6 +1818,22 @@ mod tests {
     /// Reads a `TypeNode` by ID (keeps the match arms below readable).
     fn type_kind(arena: &AstArena, ty: TypeId) -> &TypeNode {
         &arena[ty].kind
+    }
+
+    /// The single nested statement inside an else-arm block. Used by the else-if
+    /// chain tests to descend one nesting level at a time.
+    fn nested_if(arena: &AstArena, block: BlockId) -> &Stmt {
+        let stmts = &arena[block].stmts;
+        assert_eq!(stmts.len(), 1, "expected exactly one nested statement");
+        &arena[stmts[0]].kind
+    }
+
+    /// Asserts `condition` is an identifier expression named `name`.
+    fn assert_cond_ident(arena: &AstArena, condition: ExprId, name: &str) {
+        match &arena[condition].kind {
+            Expr::Identifier(id) => assert_eq!(arena.ident_name(*id), name),
+            other => panic!("expected identifier condition {name:?}, got {other:?}"),
+        }
     }
 
     // -- Items
@@ -2385,25 +2446,174 @@ mod tests {
 
     #[test]
     fn lowers_if_else_if() {
-        // `else if` is flattened by the grammar into the single if-statement
-        // (no nested if-node); lowering keeps the head condition and the trailing
-        // bare-`else` block as `else_block`.
+        // The grammar flattens the whole chain into one if-statement node;
+        // lowering desugars it into nested `Stmt::If`s. Each `else if` becomes the
+        // enclosing arm's `else_block` (a synthetic regular block wrapping the
+        // nested `if`), matching the shape of an explicit `else { if … }`.
         let arena =
             lower("fn f() { if a { return 1; } else if b { return 2; } else { return 3; } }");
-        match single_stmt(&arena) {
+        // Outer arm: `if a { return 1; } else <nested>`.
+        let (b_cond, b_else) = match single_stmt(&arena) {
             Stmt::If {
                 condition,
+                then_block,
                 else_block,
-                ..
             } => {
                 match &arena[*condition].kind {
                     Expr::Identifier(id) => assert_eq!(arena.ident_name(*id), "a"),
                     other => panic!("expected identifier condition, got {other:?}"),
                 }
-                let else_block = else_block.expect("trailing else arm");
-                let inner_stmts = &arena[else_block].stmts;
-                assert_eq!(inner_stmts.len(), 1);
-                assert!(matches!(arena[inner_stmts[0]].kind, Stmt::Return { .. }));
+                let then_stmts = &arena[*then_block].stmts;
+                assert_eq!(then_stmts.len(), 1);
+                assert!(matches!(arena[then_stmts[0]].kind, Stmt::Return { .. }));
+
+                let else_block = else_block.expect("else-if arm");
+                let else_stmts = &arena[else_block].stmts;
+                assert_eq!(else_stmts.len(), 1);
+                match &arena[else_stmts[0]].kind {
+                    Stmt::If {
+                        condition,
+                        else_block,
+                        ..
+                    } => (*condition, *else_block),
+                    other => panic!("expected nested if, got {other:?}"),
+                }
+            }
+            other => panic!("expected if, got {other:?}"),
+        };
+        // Nested arm: `if b { return 2; } else { return 3; }`.
+        match &arena[b_cond].kind {
+            Expr::Identifier(id) => assert_eq!(arena.ident_name(*id), "b"),
+            other => panic!("expected identifier condition, got {other:?}"),
+        }
+        let final_else = b_else.expect("trailing else arm");
+        let final_stmts = &arena[final_else].stmts;
+        assert_eq!(final_stmts.len(), 1);
+        assert!(matches!(arena[final_stmts[0]].kind, Stmt::Return { .. }));
+    }
+
+    #[test]
+    fn lowers_if_else_if_no_final_else() {
+        // An `if` / `else if` with no trailing bare `else`: the outer arm's
+        // `else_block` still wraps the nested `if`, whose own `else_block` is
+        // `None`.
+        let arena = lower("fn f() { if a { return 1; } else if b { return 2; } }");
+        let nested_else = match single_stmt(&arena) {
+            Stmt::If { else_block, .. } => {
+                let else_block = else_block.expect("else-if arm");
+                let else_stmts = &arena[else_block].stmts;
+                assert_eq!(else_stmts.len(), 1);
+                match &arena[else_stmts[0]].kind {
+                    Stmt::If {
+                        condition,
+                        else_block,
+                        ..
+                    } => {
+                        match &arena[*condition].kind {
+                            Expr::Identifier(id) => assert_eq!(arena.ident_name(*id), "b"),
+                            other => panic!("expected identifier condition, got {other:?}"),
+                        }
+                        *else_block
+                    }
+                    other => panic!("expected nested if, got {other:?}"),
+                }
+            }
+            other => panic!("expected if, got {other:?}"),
+        };
+        assert!(nested_else.is_none(), "no trailing else expected");
+    }
+
+    #[test]
+    fn lowers_multi_else_if_chain() {
+        // A three-condition chain nests three deep: `a` → `b` → `c` → bare else.
+        // Walk every level, asserting the condition identity at each.
+        let arena = lower(
+            "fn f() { if a { return 1; } else if b { return 2; } \
+             else if c { return 3; } else { return 4; } }",
+        );
+
+        // Level a.
+        let a_else = match single_stmt(&arena) {
+            Stmt::If {
+                condition,
+                else_block,
+                ..
+            } => {
+                assert_cond_ident(&arena, *condition, "a");
+                else_block.expect("else after arm a")
+            }
+            other => panic!("expected if, got {other:?}"),
+        };
+
+        // Level b.
+        let b_else = match nested_if(&arena, a_else) {
+            Stmt::If {
+                condition,
+                else_block,
+                ..
+            } => {
+                assert_cond_ident(&arena, *condition, "b");
+                else_block.expect("else after arm b")
+            }
+            other => panic!("expected nested if b, got {other:?}"),
+        };
+
+        // Level c, then the bare final else.
+        let c_else = match nested_if(&arena, b_else) {
+            Stmt::If {
+                condition,
+                else_block,
+                ..
+            } => {
+                assert_cond_ident(&arena, *condition, "c");
+                else_block.expect("bare else after arm c")
+            }
+            other => panic!("expected nested if c, got {other:?}"),
+        };
+        let final_stmts = &arena[c_else].stmts;
+        assert_eq!(final_stmts.len(), 1);
+        assert!(matches!(arena[final_stmts[0]].kind, Stmt::Return { .. }));
+    }
+
+    #[test]
+    fn lowers_plain_if_has_no_else() {
+        let arena = lower("fn f() { if c { x = 1; } }");
+        match single_stmt(&arena) {
+            Stmt::If { else_block, .. } => assert!(else_block.is_none()),
+            other => panic!("expected if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditionless_if_lowers_its_block_once() {
+        // Pins error-recovery for a conditionless `if`: the parser attaches a
+        // single block and no condition, so lowering must consume that block
+        // exactly once, as the synthetic arm's `then_block`. A seed that also
+        // lowered a trailing block into an `else_block` when there is no arm to
+        // pair it against would lower the same source block twice, giving it two
+        // `BlockId`s whose statements downstream per-statement passes would then
+        // visit twice. Uses `parse` directly since the input is malformed.
+        let result = parse("fn f() { if else { return 2; } }");
+        assert!(
+            !result.errors.is_empty(),
+            "a conditionless if must report a parse error"
+        );
+        match single_stmt(&result.arena) {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                let then_stmts = &result.arena[*then_block].stmts;
+                assert_eq!(then_stmts.len(), 1, "the single block is the then-arm");
+                assert!(matches!(
+                    result.arena[then_stmts[0]].kind,
+                    Stmt::Return { .. }
+                ));
+                assert!(
+                    else_block.is_none(),
+                    "the block must not be lowered a second time as an else"
+                );
             }
             other => panic!("expected if, got {other:?}"),
         }

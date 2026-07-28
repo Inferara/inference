@@ -40,8 +40,14 @@ mod gate {
     /// Corpus fixtures under `tests/test_data/inf/`, paired with the module name
     /// each is translated under. Together they exercise the proof-mode surface
     /// the issue calls out: inline and function-body-modifier `forall`/`exists`/
-    /// `assume`, `unique`, cross-function calls (`BI_call`), comparisons,
-    /// `assert`, and structured control flow (`if`/`loop`).
+    /// `assume`, cross-function calls (`BI_call`), comparisons, `assert`, and
+    /// structured control flow (`if`/`loop`). The `unique` block and the
+    /// `exists`-kind spec function are deliberately absent — neither has a
+    /// `hassert` encoding, so proof-mode codegen rejects them with fatal
+    /// `P002`/`P001` diagnostics (pinned by the unit tests in
+    /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
+    /// `build_v_rejects_unique_block_with_p002` in `apps/infs`) rather than by a
+    /// corpus entry that would compile against the stub.
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -52,6 +58,9 @@ mod gate {
         ("rocq_control_flow.inf", "rocq_control_flow"),
         ("rocq_spec_shapes.inf", "rocq_spec_shapes"),
         ("rocq_prime_example.inf", "rocq_prime_example"),
+        ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
+        ("spec_short_circuit.inf", "spec_short_circuit"),
+        ("spec_narrow_abi.inf", "spec_narrow_abi"),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -83,6 +92,7 @@ mod gate {
         "T_app ",
         "T_local ",
         "HA_ex",
+        "BT_valtype (Some",
     ];
 
     /// Proof-mode `.v` for one fixture, driven entirely in-process.
@@ -277,6 +287,28 @@ mod gate {
         }
 
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// `&&`/`||` lower to a valued `if (result i32)` block, which proof-mode
+    /// translation renders as a valued `BI_if`. This fixture is the first corpus
+    /// producer of `BT_valtype (Some ...)` — via its *executable* functions
+    /// `guard_div`/`either`, whose bodies survive in the module record; assert
+    /// the exact valued shape and that the fixture emits no term-level
+    /// `Binop_i BOI_and` — since `&&`/`||` no longer lower to `i32.and`/`i32.or`,
+    /// that shape would only reappear from bitwise `&`/`|` or narrowing masks
+    /// (which this fixture has none of), so a regression to strict `i32.and`
+    /// lowering surfaces here rather than silently.
+    #[test]
+    fn short_circuit_emits_valued_bi_if() {
+        let v = generate_v("spec_short_circuit.inf", "spec_short_circuit");
+        assert!(
+            v.contains("BI_if (BT_valtype (Some (T_num T_i32)))"),
+            "expected a valued `BI_if` from short-circuit `&&`/`||` lowering; got:\n{v}"
+        );
+        assert!(
+            !v.contains("Binop_i BOI_and"),
+            "short-circuit lowering must not emit a term-level `Binop_i BOI_and`; got:\n{v}"
+        );
     }
 
     /// Committed `.v` golden for the PrimeExample fixture — the repository's first

@@ -35,62 +35,174 @@
   (export "ne_bool" (func $ne_bool))
   (func $and3 (;0;) (type 0) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
+    if (result i32) ;; label = @1
+      local.get $c
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
   (func $or3 (;1;) (type 1) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $c
+    end
     return
     unreachable
   )
   (func $and_or (;2;) (type 2) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $c
+    end
     return
     unreachable
   )
   (func $or_and (;3;) (type 3) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.and
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+      if (result i32) ;; label = @2
+        local.get $c
+      else
+        i32.const 0
+      end
+    end
     return
     unreachable
   )
   (func $not_and_or (;4;) (type 4) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
     i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.or
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $c
+    local.get $a
+    i32.eqz
+    if (result i32) ;; label = @1
+      local.get $b
+      if (result i32) ;; label = @2
+        i32.const 1
+      else
+        local.get $c
+      end
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
   (func $de_morgan_and (;5;) (type 5) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
     i32.eqz
     return
     unreachable
   )
   (func $de_morgan_or (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
     i32.eqz
     return
     unreachable
@@ -99,10 +211,13 @@
     local.get $a
     local.get $b
     i32.lt_s
-    local.get $c
-    local.get $d
-    i32.lt_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $c
+      local.get $d
+      i32.lt_s
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
@@ -110,10 +225,13 @@
     local.get $a
     local.get $b
     i32.gt_s
-    local.get $c
-    local.get $d
-    i32.gt_s
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $c
+      local.get $d
+      i32.gt_s
+    end
     return
     unreachable
   )
@@ -121,10 +239,13 @@
     local.get $x
     local.get $lo
     i32.ge_s
-    local.get $x
-    local.get $hi
-    i32.le_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $x
+      local.get $hi
+      i32.le_s
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
@@ -132,10 +253,13 @@
     local.get $x
     local.get $lo
     i32.lt_s
-    local.get $x
-    local.get $hi
-    i32.gt_s
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $x
+      local.get $hi
+      i32.gt_s
+    end
     return
     unreachable
   )
@@ -152,40 +276,103 @@
   )
   (func $xor_bool (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
     local.get $a
-    local.get $b
-    i32.or
-    local.get $a
-    local.get $b
-    i32.and
     i32.eqz
-    i32.and
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
+    if (result i32) ;; label = @1
+      local.get $a
+      if (result i32) ;; label = @2
+        local.get $b
+      else
+        i32.const 0
+      end
+      i32.eqz
+    else
+      i32.const 0
+    end
     return
     unreachable
   )
   (func $implies (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
     local.get $a
     i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    i32.eqz
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
     return
     unreachable
   )
   (func $bool_majority3 (;14;) (type 14) (param $a i32) (param $b i32) (param $c i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.and
-    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $c
-    i32.and
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $c
     local.get $a
-    local.get $c
-    i32.and
-    i32.or
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+      if (result i32) ;; label = @2
+        local.get $c
+      else
+        i32.const 0
+      end
+    end
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $a
+      if (result i32) ;; label = @2
+        local.get $c
+      else
+        i32.const 0
+      end
+    end
     return
     unreachable
   )
   (func $eq_bool (;15;) (type 15) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.eq
@@ -193,6 +380,14 @@
     unreachable
   )
   (func $ne_bool (;16;) (type 16) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.ne

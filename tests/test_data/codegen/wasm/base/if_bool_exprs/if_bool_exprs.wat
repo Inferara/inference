@@ -33,6 +33,10 @@
   (export "if_else_complex" (func $if_else_complex))
   (func $if_bool_param (;0;) (type 0) (param $cond i32) (result i32)
     local.get $cond
+    i32.eqz
+    i32.eqz
+    local.set $cond
+    local.get $cond
     if ;; label = @1
       i32.const 1
       return
@@ -42,6 +46,10 @@
     unreachable
   )
   (func $if_not_param (;1;) (type 1) (param $cond i32) (result i32)
+    local.get $cond
+    i32.eqz
+    i32.eqz
+    local.set $cond
     local.get $cond
     i32.eqz
     if ;; label = @1
@@ -56,10 +64,13 @@
     local.get $x
     i32.const 0
     i32.gt_s
-    local.get $y
-    i32.const 0
-    i32.gt_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $y
+      i32.const 0
+      i32.gt_s
+    else
+      i32.const 0
+    end
     if ;; label = @1
       i32.const 1
       return
@@ -72,10 +83,13 @@
     local.get $x
     i32.const 0
     i32.gt_s
-    local.get $y
-    i32.const 0
-    i32.gt_s
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $y
+      i32.const 0
+      i32.gt_s
+    end
     if ;; label = @1
       i32.const 1
       return
@@ -101,14 +115,20 @@
     local.get $a
     i32.const 0
     i32.gt_s
-    local.get $b
-    i32.const 10
-    i32.lt_s
-    local.get $c
-    i32.const 0
-    i32.eq
-    i32.or
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $b
+      i32.const 10
+      i32.lt_s
+      if (result i32) ;; label = @2
+        i32.const 1
+      else
+        local.get $c
+        i32.const 0
+        i32.eq
+      end
+    else
+      i32.const 0
+    end
     if ;; label = @1
       i32.const 1
       return
@@ -121,14 +141,20 @@
     local.get $a
     i32.const 0
     i32.gt_s
-    local.get $b
-    i32.const 0
-    i32.gt_s
-    local.get $c
-    i32.const 0
-    i32.gt_s
-    i32.and
-    i32.or
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+      i32.const 0
+      i32.gt_s
+      if (result i32) ;; label = @2
+        local.get $c
+        i32.const 0
+        i32.gt_s
+      else
+        i32.const 0
+      end
+    end
     if ;; label = @1
       i32.const 1
       return
@@ -139,8 +165,19 @@
   )
   (func $if_demorgan_and (;7;) (type 7) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.and
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    if (result i32) ;; label = @1
+      local.get $b
+    else
+      i32.const 0
+    end
     i32.eqz
     if ;; label = @1
       i32.const 1
@@ -153,8 +190,19 @@
   )
   (func $if_demorgan_or (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
     local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
     local.get $b
-    i32.or
+    i32.eqz
+    i32.eqz
+    local.set $b
+    local.get $a
+    if (result i32) ;; label = @1
+      i32.const 1
+    else
+      local.get $b
+    end
     i32.eqz
     if ;; label = @1
       i32.const 1
@@ -169,10 +217,13 @@
     local.get $x
     local.get $lo
     i32.ge_s
-    local.get $x
-    local.get $hi
-    i32.le_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $x
+      local.get $hi
+      i32.le_s
+    else
+      i32.const 0
+    end
     if ;; label = @1
       i32.const 1
       return
@@ -201,10 +252,13 @@
     local.get $x
     i32.const 0
     i32.gt_s
-    local.get $y
-    i32.const 0
-    i32.gt_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $y
+      i32.const 0
+      i32.gt_s
+    else
+      i32.const 0
+    end
     local.set $b
     local.get $b
     if ;; label = @1
@@ -216,6 +270,14 @@
     unreachable
   )
   (func $if_bool_eq (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.eq
@@ -229,6 +291,14 @@
     unreachable
   )
   (func $if_bool_ne (;13;) (type 13) (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    i32.eqz
+    i32.eqz
+    local.set $a
+    local.get $b
+    i32.eqz
+    i32.eqz
+    local.set $b
     local.get $a
     local.get $b
     i32.ne
@@ -257,10 +327,13 @@
     local.get $a
     i32.const 0
     i32.gt_s
-    local.get $b
-    i32.const 0
-    i32.gt_s
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $b
+      i32.const 0
+      i32.gt_s
+    else
+      i32.const 0
+    end
     if ;; label = @1
       local.get $a
       return

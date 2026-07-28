@@ -1,0 +1,98 @@
+struct S { a: i64; b: i64; }
+
+pub fn arr(n: i32) -> i64 {
+    const ONE: i64 = 1;
+    let mut acc: i64 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        let mut a: [i64; 1] = [0];
+        a[0] = a[0] + ONE;
+        acc = acc + a[0];
+        k = k + 1;
+    }
+    return acc;
+}
+
+pub fn strct(n: i32) -> i64 {
+    const ONE: i64 = 1;
+    let mut acc: i64 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        let mut s: S = S { a: 0, b: 0 };
+        s.a = s.a + ONE;
+        acc = acc + s.a;
+        k = k + 1;
+    }
+    return acc;
+}
+
+pub fn boolarr(n: i32) -> i32 {
+    let mut count: i32 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        let mut b: [bool; 2] = [false, false];
+        if b[0] {
+            count = count + 1;
+        }
+        b[0] = true;
+        k = k + 1;
+    }
+    return count;
+}
+
+pub fn partial(n: i32) -> i32 {
+    let mut acc: i32 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        let mut a: [i32; 3] = [5, 0, 0];
+        a[1] = a[1] + 1;
+        acc = acc + a[0] + a[1];
+        k = k + 1;
+    }
+    return acc;
+}
+
+pub fn twod(n: i32) -> i32 {
+    let mut acc: i32 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        let mut g: [[i32; 2]; 2] = [[0, 0], [0, 0]];
+        g[0][0] = g[0][0] + 1;
+        g[1][1] = g[1][1] + 1;
+        acc = acc + g[0][0] + g[1][1];
+        k = k + 1;
+    }
+    return acc;
+}
+
+pub fn nested(n: i32) -> i64 {
+    const ONE: i64 = 1;
+    let mut acc: i64 = 0;
+    let mut i: i32 = 0;
+    loop i < n {
+        let mut j: i32 = 0;
+        loop j < 2 {
+            let mut a: [i64; 1] = [0];
+            a[0] = a[0] + ONE;
+            acc = acc + a[0];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn if_in_loop(n: i32) -> i64 {
+    const ONE: i64 = 1;
+    let mut acc: i64 = 0;
+    let mut k: i32 = 0;
+    loop k < n {
+        if k >= 0 {
+            let mut a: [i64; 1] = [0];
+            a[0] = a[0] + ONE;
+            acc = acc + a[0];
+        }
+        k = k + 1;
+    }
+    return acc;
+}

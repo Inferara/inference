@@ -1,0 +1,48 @@
+// Short-circuit evaluation of `&&` and `||`. Every function pairs a left
+// operand that can decide the result with a right operand that would trap or
+// misbehave if it ran unconditionally, so the wasmtime coverage separates the
+// lazy-skip paths from the still-evaluated paths by trap identity.
+
+pub fn guard_div(x: i32) -> bool {
+    return x != 0 && 100 / x > 1;
+}
+
+pub fn guard_div_or(x: i32) -> bool {
+    return x == 0 || 100 / x > 1;
+}
+
+pub fn and_rhs_runs(a: i32, b: i32) -> bool {
+    return a != 0 && 100 / b > 0;
+}
+
+pub fn or_rhs_runs(a: i32, b: i32) -> bool {
+    return a == 0 || 100 / b > 0;
+}
+
+pub fn chain3_div(a: i32, b: i32, c: i32) -> bool {
+    return 100 / a > 0 && 100 / b > 0 && 100 / c > 0;
+}
+
+pub fn trap_kind(a: i32, i: i32) -> bool {
+    let arr: [i32; 2] = [1, 2];
+    return 100 / a > 0 && arr[i] > 0;
+}
+
+pub fn mixed_not(a: bool, x: i32) -> bool {
+    return !a && 100 / x > 0;
+}
+
+pub fn prec_mix(a: bool, b: bool, c: bool) -> bool {
+    return a || b && c;
+}
+
+pub fn loop_guard() -> i32 {
+    let arr: [i32; 4] = [1, 2, 3, 4];
+    let mut sum: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 4 && arr[i] > 0 {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum;
+}

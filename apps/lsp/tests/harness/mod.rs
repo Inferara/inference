@@ -6,6 +6,15 @@
 //! are kept as raw [`serde_json::Value`]s and asserted with JSON pointer paths,
 //! so the tests exercise the real wire format, not a typed re-encoding of it.
 //!
+//! [`LspClient::wait_for_response`] and [`LspClient::wait_for_notification`] read
+//! past whatever arrives ahead of the message they want and retain it, in arrival
+//! order, for the waits that follow — a session is free to interleave
+//! notifications with the responses a test awaits. Each of those two bounds its
+//! whole wait by a single deadline. The helpers layered on top do not inherit that
+//! bound: [`LspClient::wait_for_publish`] loops until a publish matches its URI, so
+//! it starts a fresh deadline per non-matching publish and *discards* rather than
+//! retains them.
+//!
 //! A background reader thread parses the child's stdout into framed messages. If
 //! any byte of that stream is not valid framing, the reader reports it as a
 //! [`Incoming::Framing`] error instead of a message — which is what lets a test
@@ -47,9 +56,22 @@ pub struct LspClient {
     stdin: ChildStdin,
     incoming: Receiver<Incoming>,
     reader: Option<JoinHandle<()>>,
-    /// Messages received while waiting for a different, specific one.
+    /// Messages read off the wire but not yet claimed by a wait.
+    ///
+    /// Invariant: always a subsequence of the arrival sequence, in arrival order.
+    /// Every mutation preserves it — reads remove at an index, and appends only ever
+    /// come from a wire read, which is by construction later than anything already
+    /// here. Code that adds a buffer mutation must keep it.
+    ///
+    /// Only responses and notifications are ever claimed. A server-to-client
+    /// *request* (both `id` and `method`) matches neither [`response_id`] nor
+    /// [`notification_method`], so it would accumulate here unclaimed; the server
+    /// sends none today.
     pending: Vec<Value>,
     next_id: i64,
+    /// The budget each wait gets. Defaults to [`RECV_TIMEOUT`]; the harness's own
+    /// tests shorten it so a wait that must give up does so quickly.
+    recv_timeout: Duration,
     /// Set once a framing violation is observed; asserted absent at shutdown.
     framing_error: Option<String>,
 }
@@ -91,6 +113,7 @@ impl LspClient {
             reader: Some(reader),
             pending: Vec::new(),
             next_id: 0,
+            recv_timeout: RECV_TIMEOUT,
             framing_error: None,
         }
     }
@@ -120,59 +143,100 @@ impl LspClient {
     }
 
     /// Receives the next message in arrival order, failing on timeout or a
-    /// prematurely closed / corrupt stream.
+    /// prematurely closed / corrupt stream. Already-buffered messages come first.
     pub fn recv_message(&mut self) -> Value {
         if !self.pending.is_empty() {
             return self.pending.remove(0);
         }
-        match self.incoming.recv_timeout(RECV_TIMEOUT) {
+        let deadline = Instant::now() + self.recv_timeout;
+        self.recv_from_wire(deadline, "a message")
+    }
+
+    /// Reads the next message straight off the wire, ignoring [`Self::pending`] and
+    /// giving up at `deadline`.
+    ///
+    /// The one place a wait turns a reader-thread item into a test failure, so a
+    /// clean EOF mid-session, non-protocol bytes, a silent server and a dead reader
+    /// all fail the same loud way wherever a wait observes them. `awaited` names what
+    /// the caller wanted, so an expiry says which wait gave up. The two drains
+    /// ([`Self::drain_publishes`], [`Self::drain_until_eof`]) interpret the same items
+    /// separately and end quietly by design — they are collectors, not waits.
+    fn recv_from_wire(&mut self, deadline: Instant, awaited: &str) -> Value {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.incoming.recv_timeout(remaining) {
             Ok(Incoming::Message(value)) => value,
-            Ok(Incoming::Eof) => panic!("server closed its stdout while a message was expected"),
+            Ok(Incoming::Eof) => {
+                panic!("server closed its stdout while waiting for {awaited}")
+            }
             Ok(Incoming::Framing(error)) => {
                 self.framing_error = Some(error.clone());
                 panic!("server wrote non-protocol bytes to stdout: {error}");
             }
             Err(RecvTimeoutError::Timeout) => {
-                panic!("timed out waiting for a message from the server")
+                let budget = self.recv_timeout;
+                panic!("timed out after {budget:?} waiting for {awaited}")
             }
             Err(RecvTimeoutError::Disconnected) => panic!("the reader thread ended unexpectedly"),
         }
     }
 
-    /// Waits for the response to `id`, buffering any notifications that arrive
-    /// first so a later `wait_for_notification` can still find them.
+    /// Waits for the response to `id`, retaining every other message in
+    /// [`Self::pending`] — in arrival order — so a later `wait_for_notification`,
+    /// `wait_for_publish` or `drain_publishes` still finds it.
+    ///
+    /// The buffer is scanned once, up front; after that every read goes straight to
+    /// the wire. Reading through [`Self::recv_message`] instead would hand back the
+    /// very messages this loop just buffered and never reach the wire again. The
+    /// whole wait — not each read within it — is bounded by [`Self::recv_timeout`],
+    /// so a response that never comes fails the test loudly instead of stalling it.
     pub fn wait_for_response(&mut self, id: i64) -> Value {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|message| response_id(message) == Some(id))
+        {
+            return self.pending.remove(index);
+        }
+
+        let deadline = Instant::now() + self.recv_timeout;
+        let mut stepped_over = 0usize;
         loop {
-            if let Some(index) = self
-                .pending
-                .iter()
-                .position(|message| response_id(message) == Some(id))
-            {
-                return self.pending.remove(index);
-            }
-            let message = self.recv_message();
+            let message = self.recv_from_wire(
+                deadline,
+                &format!("the response to request {id} ({stepped_over} messages stepped over)"),
+            );
             if response_id(&message) == Some(id) {
                 return message;
             }
             self.pending.push(message);
+            stepped_over += 1;
         }
     }
 
-    /// Waits for the next notification with `method`, buffering everything else.
+    /// Waits for the next notification with `method`, retaining everything else in
+    /// arrival order. Buffer-then-wire and deadline behaviour mirror
+    /// [`Self::wait_for_response`].
     pub fn wait_for_notification(&mut self, method: &str) -> Value {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|message| notification_method(message) == Some(method))
+        {
+            return self.pending.remove(index);
+        }
+
+        let deadline = Instant::now() + self.recv_timeout;
+        let mut stepped_over = 0usize;
         loop {
-            if let Some(index) = self
-                .pending
-                .iter()
-                .position(|message| notification_method(message) == Some(method))
-            {
-                return self.pending.remove(index);
-            }
-            let message = self.recv_message();
+            let message = self.recv_from_wire(
+                deadline,
+                &format!("a {method} notification ({stepped_over} messages stepped over)"),
+            );
             if notification_method(&message) == Some(method) {
                 return message;
             }
             self.pending.push(message);
+            stepped_over += 1;
         }
     }
 
@@ -662,4 +726,365 @@ fn percent_encode(input: &str) -> String {
         }
     }
     out
+}
+
+/// Contract tests for the waiting primitives themselves.
+///
+/// A wait for one message must read past whatever stands ahead of it — already
+/// buffered or still on the wire — retain that traffic for the waits that follow,
+/// and give up at a deadline if its target never comes. A wait that re-took the
+/// messages it had itself buffered would instead spin in place: the shape that once
+/// made a busy test client look like a hung server.
+///
+/// Determinism comes from two sources, never from a sleep. Traffic the server would
+/// not send is seeded straight into the buffer. Traffic it does send is ordered by
+/// the server's own contract — the worker handles jobs in arrival order and publishes
+/// for a document write before it dequeues the next job, so a write queued ahead of a
+/// request is always published ahead of that request's response.
+///
+/// A spinning wait never reaches a deadline to expire, so it would *hang* most of
+/// these rather than fail them. [`tests::a_wait_makes_progress_instead_of_spinning`]
+/// is the one that stays red instead of hanging: it runs the wait on its own thread
+/// and bounds it from the test thread.
+#[cfg(test)]
+mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+
+    use super::*;
+
+    /// A short budget for the waits that are *meant* to expire, or that must finish
+    /// without reading the wire at all. Long enough not to fire spuriously on a loaded
+    /// machine, short enough that a regression fails in fractions of a second.
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(250);
+
+    /// How long the test thread lets an off-thread wait run before calling it a spin.
+    /// Only ever reached on failure — a healthy wait answers in milliseconds — but as
+    /// generous as [`RECV_TIMEOUT`], and for the same reason: a loaded machine must
+    /// make this slower, never red.
+    const SPIN_WATCHDOG: Duration = RECV_TIMEOUT;
+
+    /// The id of a seeded response. `next_id` starts at 0, so no real request is ever
+    /// assigned this and no wait can mistake a seeded message for its target.
+    const UNCLAIMED_ID: i64 = 9_999;
+
+    const SOURCE: &str = "fn main() -> i32 { return 0; }";
+    const SOURCE_V2: &str = "fn main() -> i32 { return 1; }";
+
+    /// A `publishDiagnostics` notification the server never sent.
+    fn seeded_publish(uri: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": { "uri": uri, "diagnostics": [] },
+        })
+    }
+
+    /// A response the server never sent, answering [`UNCLAIMED_ID`].
+    fn seeded_response() -> Value {
+        json!({ "jsonrpc": "2.0", "id": UNCLAIMED_ID, "result": Value::Null })
+    }
+
+    /// Handshake params for the tests that drive `initialize` by hand rather than
+    /// through [`LspClient::initialize_default`], because they assert on the wait
+    /// itself and so must send the request and await it in separate steps.
+    fn initialize_params() -> Value {
+        json!({
+            "processId": Value::Null,
+            "rootUri": Value::Null,
+            "capabilities": {},
+        })
+    }
+
+    /// Writes a valid single-file fixture and returns its directory and URI. The
+    /// directory must outlive the session — it removes itself on drop.
+    fn fixture(tag: &str) -> (TempDir, String) {
+        let dir = TempDir::new(tag);
+        let uri = path_to_uri(&dir.write("main.inf", SOURCE));
+        (dir, uri)
+    }
+
+    /// Opens a document without awaiting its publish, so the publish is still in
+    /// flight when the next message is sent.
+    fn open_without_waiting(client: &mut LspClient, uri: &str, version: i64) {
+        client.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "inference",
+                    "version": version,
+                    "text": SOURCE,
+                }
+            }),
+        );
+    }
+
+    /// Rewrites a document without awaiting its publish.
+    fn change_without_waiting(client: &mut LspClient, uri: &str, version: i64) {
+        client.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [ { "text": SOURCE_V2 } ],
+            }),
+        );
+    }
+
+    fn document_symbol(client: &mut LspClient, uri: &str) -> i64 {
+        client.send_request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": uri } }),
+        )
+    }
+
+    /// The `params.uri` of each buffered message, for order assertions.
+    fn buffered_uris(client: &LspClient) -> Vec<String> {
+        client
+            .pending
+            .iter()
+            .map(|message| {
+                message["params"]["uri"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The message a caught panic carried, whichever payload shape it used.
+    fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&'static str>().copied())
+            .unwrap_or("<panic payload was not a string>")
+    }
+
+    #[test]
+    fn a_response_wait_steps_over_buffered_traffic_and_keeps_its_order() {
+        let mut client = LspClient::spawn();
+        client.pending.push(seeded_publish("file:///first.inf"));
+        client.pending.push(seeded_publish("file:///second.inf"));
+
+        let id = client.send_request("initialize", initialize_params());
+        let response = client.wait_for_response(id);
+
+        assert_eq!(
+            response["id"],
+            json!(id),
+            "the awaited response arrives, got {response}"
+        );
+        assert!(
+            response.get("result").is_some(),
+            "initialize answers a result, got {response}"
+        );
+        assert_eq!(
+            buffered_uris(&client),
+            ["file:///first.inf", "file:///second.inf"],
+            "both non-targets are retained, in their original order, got {:?}",
+            client.pending
+        );
+
+        client.send_notification("initialized", json!({}));
+        client.shutdown_exit_ok();
+    }
+
+    #[test]
+    fn a_notification_wait_steps_over_a_buffered_response() {
+        let mut client = LspClient::spawn();
+        client.initialize_default(true);
+        // Seeded after the handshake to keep this test about the notification wait; the
+        // id could not collide with a real request's in any case.
+        client.pending.push(seeded_response());
+
+        let (_dir, uri) = fixture("harness-buffered-response");
+        open_without_waiting(&mut client, &uri, 1);
+
+        let published = client.wait_for_notification("textDocument/publishDiagnostics");
+
+        assert_eq!(
+            published["params"]["uri"],
+            json!(uri),
+            "the opened document's publish arrives, got {published}"
+        );
+        assert_eq!(
+            client.pending.len(),
+            1,
+            "the non-target is retained exactly once, got {:?}",
+            client.pending
+        );
+        assert_eq!(
+            client.pending[0]["id"],
+            json!(UNCLAIMED_ID),
+            "and it is the buffered response, got {:?}",
+            client.pending
+        );
+
+        client.shutdown_exit_ok();
+    }
+
+    #[test]
+    fn a_response_wait_retains_a_publish_behind_what_was_already_buffered() {
+        let mut client = LspClient::spawn();
+        client.initialize_default(true);
+        client.pending.push(seeded_publish("file:///buffered.inf"));
+
+        let (_dir, uri) = fixture("harness-retain-publish");
+        // A write queued ahead of the request, not awaited: the server publishes for it
+        // before it dequeues the request, so the wait meets the publish first and has
+        // to step over it to reach the response.
+        open_without_waiting(&mut client, &uri, 1);
+        let id = document_symbol(&mut client, &uri);
+
+        let response = client.wait_for_response(id);
+        assert!(
+            response.get("error").is_none(),
+            "documentSymbol is answered from behind the publish, got {response}"
+        );
+        assert_eq!(
+            buffered_uris(&client),
+            ["file:///buffered.inf", uri.as_str()],
+            "the publish is retained behind the message already buffered, got {:?}",
+            client.pending
+        );
+
+        // And a later wait still finds what this one retained.
+        let published = client.wait_for_publish(&uri);
+        assert!(
+            published.diagnostics.is_empty(),
+            "a valid document publishes no diagnostics, got {:?}",
+            published.diagnostics
+        );
+
+        client.shutdown_exit_ok();
+    }
+
+    #[test]
+    fn a_notification_wait_retains_the_response_that_precedes_it() {
+        let mut client = LspClient::spawn();
+        client.initialize_default(true);
+
+        let (_dir, uri) = fixture("harness-retain-response");
+        client.did_open(&uri, SOURCE, 1);
+
+        // The request is queued ahead of the write, so its response reaches the wire
+        // first and the publish wait has to step over it.
+        let id = document_symbol(&mut client, &uri);
+        change_without_waiting(&mut client, &uri, 2);
+
+        let published = client.wait_for_publish(&uri);
+        assert_eq!(
+            published.version,
+            json!(2),
+            "the write's publish arrives, got {:?}",
+            published.version
+        );
+        assert_eq!(
+            client.pending.len(),
+            1,
+            "the response it stepped over is retained, got {:?}",
+            client.pending
+        );
+        assert_eq!(
+            client.pending[0]["id"],
+            json!(id),
+            "and it is the documentSymbol response, got {:?}",
+            client.pending
+        );
+
+        client.shutdown_exit_ok();
+    }
+
+    #[test]
+    fn an_already_buffered_target_is_taken_without_reading_the_wire() {
+        // Nothing is ever sent to this server, so it answers nothing: any read that
+        // reached the wire would burn the whole budget and expire.
+        let mut client = LspClient::spawn();
+        client.recv_timeout = SHORT_TIMEOUT;
+        client.pending.push(seeded_publish("file:///buffered.inf"));
+        client.pending.push(seeded_response());
+
+        let first = client.recv_message();
+        assert_eq!(
+            notification_method(&first),
+            Some("textDocument/publishDiagnostics"),
+            "the oldest buffered message comes back first, got {first}"
+        );
+
+        let response = client.wait_for_response(UNCLAIMED_ID);
+        assert_eq!(
+            response["id"],
+            json!(UNCLAIMED_ID),
+            "the buffered response is claimed by the up-front scan, got {response}"
+        );
+        assert!(
+            client.pending.is_empty(),
+            "and the buffer is drained, got {:?}",
+            client.pending
+        );
+    }
+
+    #[test]
+    fn a_wait_makes_progress_instead_of_spinning() {
+        let mut client = LspClient::spawn();
+        client.pending.push(seeded_publish("file:///buffered.inf"));
+        let id = client.send_request("initialize", initialize_params());
+
+        // The wait runs off-thread so the test thread can outlive it. A wait that
+        // re-took its own buffered message would never return and never expire; here
+        // that shows up as a failed test rather than a suite that never finishes.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let response = client.wait_for_response(id);
+            let _ = tx.send((response, client));
+        });
+
+        match rx.recv_timeout(SPIN_WATCHDOG) {
+            Ok((response, mut client)) => {
+                assert_eq!(
+                    response["id"],
+                    json!(id),
+                    "the awaited response arrives, got {response}"
+                );
+                assert_eq!(
+                    buffered_uris(&client),
+                    ["file:///buffered.inf"],
+                    "and the non-target is retained, got {:?}",
+                    client.pending
+                );
+                client.send_notification("initialized", json!({}));
+                client.shutdown_exit_ok();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("the wait ended without answering")
+            }
+            Err(RecvTimeoutError::Timeout) => panic!(
+                "the wait neither answered nor gave up within {SPIN_WATCHDOG:?} — it spun on its own buffer"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_wait_that_never_gets_its_target_gives_up_loudly() {
+        // A buffered non-target is the essential ingredient: a silent server expires
+        // any implementation, but a wait that re-took its own buffer would never
+        // consult the deadline at all.
+        let mut client = LspClient::spawn();
+        client.recv_timeout = SHORT_TIMEOUT;
+        client.pending.push(seeded_publish("file:///buffered.inf"));
+
+        // No request was ever sent, so nothing can answer this id.
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| client.wait_for_response(7)));
+
+        let payload = outcome.expect_err("an unanswerable wait must give up");
+        let message = panic_text(&*payload);
+        assert!(
+            message.contains("timed out"),
+            "it gives up on the deadline, got {message:?}"
+        );
+        assert!(
+            message.contains("the response to request 7"),
+            "and names what it awaited, got {message:?}"
+        );
+    }
 }

@@ -104,6 +104,16 @@
 //!   independent of the compilation mode. Only the outermost non-det block on
 //!   each path is reported.
 //!
+//! ### Reserved Export Names (A043)
+//!
+//! - A043: An entry-file top-level `pub fn` may not be named `memory` or
+//!   `__stack_pointer`. Codegen exports such a function under its plain source
+//!   name and separately reserves those names for the module's synthetic linear
+//!   memory and stack-pointer exports; a user function with either name would
+//!   produce a duplicate export name (invalid wasm) or hijack the standard
+//!   `memory` export with a Function. The check is unconditional so the ABI
+//!   surface does not depend on whether the program happens to use memory.
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -219,6 +229,8 @@ mod tests {
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { ty: "Point".to_string(), location: dummy_location() },
             AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
             AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

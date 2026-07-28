@@ -69,6 +69,7 @@ use inference_ast::nodes::{
 };
 use inference_hassert::HSpecMap;
 use inference_type_checker::{
+    EnumInfo,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -398,6 +399,16 @@ pub(crate) struct Compiler {
     /// frameless functions. Reset per function alongside the rest of the
     /// per-function state.
     bounds_check_scratch_local: Option<u32>,
+    /// WASM local index of the scratch i32 used to single-evaluate the promoted
+    /// quotient of a narrow (i8/i16) signed division for the overflow guard.
+    /// Reserved per-function in [`Self::visit_function_definition`] only when the
+    /// body actually contains a narrow signed division (the only case that emits
+    /// the guard), so functions without one stay byte-identical; `None`
+    /// otherwise. A dedicated local — not shared with the bounds-check scratch —
+    /// preserves each guard's single-owner invariant. Unlike the bounds scratch
+    /// it is not mode-gated: the guard emits in both Compile and Proof modes.
+    /// Reset per function alongside the rest of the per-function state.
+    narrow_div_scratch_local: Option<u32>,
 }
 
 /// The nested blocks a statement introduces, classified by how a frame-layout
@@ -460,6 +471,7 @@ impl Compiler {
             frame_sizes: FxHashMap::default(),
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
+            narrow_div_scratch_local: None,
         }
     }
 
@@ -1208,7 +1220,52 @@ impl Compiler {
             self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
 
+        // Reserve an i32 scratch local for the narrow signed division overflow
+        // guard so the promoted quotient can be single-evaluated via `local.tee`
+        // before the width check. It is reserved iff the body contains a narrow
+        // signed division (the only case that emits the guard — see
+        // `body_has_narrow_signed_div`, which mirrors that emission condition),
+        // so functions without one stay byte-identical. A dedicated local, not
+        // shared with the bounds scratch, preserves each guard's single-owner
+        // invariant. The scratch sits at the next free local after the named
+        // locals, the optional frame-pointer temp, and the optional bounds
+        // scratch, so its index and its push order agree. Unlike the bounds
+        // scratch this is not gated on `emit_bounds_checks`: division overflow
+        // must trap in both Compile and Proof modes.
+        if Self::body_has_narrow_signed_div(arena, body_id, ctx) {
+            local_declarations.push((1, ValType::I32));
+            self.narrow_div_scratch_local = Some(
+                local_idx
+                    + u32::from(has_frame)
+                    + u32::from(self.bounds_check_scratch_local.is_some()),
+            );
+        }
+
         self.func = Some(Function::new(local_declarations));
+
+        // Exported functions are the module's WebAssembly ABI boundary; canonicalize
+        // every narrow scalar parameter before anything else executes so the body
+        // only ever sees in-domain values. See memory::emit_entry_param_normalization.
+        if is_exportable_position {
+            for arg in &args {
+                if let ArgKind::Named { name, ty, .. } = &arg.kind {
+                    let arg_name = &arena[*name].name;
+                    let param_local = self
+                        .locals_map
+                        .get(arg_name)
+                        .expect("named parameter was inserted into locals_map above")
+                        .0;
+                    let ti = TypeInfo::from_type_id(arena, *ty);
+                    if memory::emit_entry_param_normalization(self.func(), &ti.kind, param_local) {
+                        cov_mark::hit!(wasm_codegen_entry_param_normalization);
+                    } else if let Some(enum_info) =
+                        Self::resolve_param_enum(ctx, &ti.kind, module_path)
+                    {
+                        self.emit_entry_enum_tag_guard(param_local, enum_info.variants.len());
+                    }
+                }
+            }
+        }
 
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
@@ -1356,6 +1413,7 @@ impl Compiler {
         self.frame_layout = None;
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
+        self.narrow_div_scratch_local = None;
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -1570,6 +1628,109 @@ impl Compiler {
         }
     }
 
+    /// Returns `true` if the function body contains at least one narrow (i8/i16)
+    /// *signed* division — the only case [`Self::emit_narrow_div_overflow_guard`]
+    /// emits an overflow guard for, so the narrow-div scratch local is reserved
+    /// iff this returns `true`. Functions with no such division reserve no
+    /// scratch and stay byte-identical to an unguarded build.
+    ///
+    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
+    /// the same statements as local discovery and the bounds-index scan. Unlike
+    /// that scan this also descends into a `const` binding's initializer: a
+    /// function-scoped `const Q: i8 = a / b;` lowers through the same
+    /// `lower_named_binding_init` → `lower_expression` path as a `let`, so a
+    /// narrow signed division there emits the guard and must reserve the scratch;
+    /// missing it would panic the guard's `.expect` at emission.
+    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *e)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *left)
+                        || Self::expr_has_narrow_signed_div(arena, ctx, *right)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_has_narrow_signed_div(arena, ctx, v)),
+                Stmt::If { condition, .. } => {
+                    Self::expr_has_narrow_signed_div(arena, ctx, *condition)
+                }
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_has_narrow_signed_div(arena, ctx, c)),
+                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
+                    Def::Constant { value, .. } => {
+                        Self::expr_has_narrow_signed_div(arena, ctx, *value)
+                    }
+                    _ => false,
+                },
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+            };
+        });
+        found
+    }
+
+    /// Recursively reports whether `expr_id` (or any sub-expression) is a narrow
+    /// (i8/i16) signed division. Supporting helper for
+    /// [`Self::body_has_narrow_signed_div`]; mirrors the expression-variant
+    /// coverage of [`Self::expr_has_dynamic_array_index`] so the reservation and
+    /// emission conditions descend through the same nodes.
+    ///
+    /// A node is a narrow signed division when it is `Expr::Binary { op: Div, .. }`
+    /// whose left operand's type info is `Number(I8 | I16)` — the exact predicate
+    /// [`Self::emit_narrow_div_overflow_guard`] gates on (unsigned narrow and
+    /// full-width divisions no-op there). Missing type info yields `false`.
+    fn expr_has_narrow_signed_div(arena: &AstArena, ctx: &TypedContext, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Binary { op, left, right } => {
+                (matches!(op, OperatorKind::Div)
+                    && matches!(
+                        ctx.get_node_typeinfo(NodeId::Expr(*left))
+                            .as_ref()
+                            .map(|ti| &ti.kind),
+                        Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
+                    ))
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *left)
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *right)
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *array)
+                    || Self::expr_has_narrow_signed_div(arena, ctx, *index)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *expr)
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_has_narrow_signed_div(arena, ctx, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_has_narrow_signed_div(arena, ctx, *arg))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_has_narrow_signed_div(arena, ctx, *value)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&e| Self::expr_has_narrow_signed_div(arena, ctx, e)),
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
     /// Computes the stack frame layout for a function.
     ///
     /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
@@ -1696,6 +1857,34 @@ impl Compiler {
             module_path,
         )?;
 
+        // Reserve one shared staging region, appended after every named slot, for
+        // self-referential compound reassignments. Existing slot offsets are
+        // unchanged, so functions without such an assignment stay byte-identical:
+        // the region is present (and `total_size` grows) only when the scan finds
+        // one. Alignment is at most 8, keeping real padding within A036's per-slot
+        // model.
+        let mut scratch_size: u32 = 0;
+        let mut scratch_align: u32 = 1;
+        Self::scan_self_ref_scratch(
+            arena,
+            block_id,
+            ctx,
+            &struct_offsets,
+            &array_offsets,
+            module_path,
+            &mut scratch_size,
+            &mut scratch_align,
+        )?;
+        let scratch_offset = if scratch_size > 0 {
+            let aligned = align_to(current_offset, scratch_align);
+            current_offset = aligned.checked_add(scratch_size).expect(
+                "Frame offset overflow: scratch allocation exceeds u32::MAX",
+            );
+            Some(aligned)
+        } else {
+            None
+        };
+
         if current_offset == 0 {
             return Ok(None);
         }
@@ -1711,6 +1900,7 @@ impl Compiler {
             array_offsets,
             struct_offsets,
             frame_ptr_local: frame_ptr_local_idx,
+            scratch_offset,
         }))
     }
 
@@ -1913,6 +2103,118 @@ impl Compiler {
         Ok(())
     }
 
+    /// Scans `block_id` (and its nested blocks) for self-referential compound
+    /// reassignments — `dest = StructLiteral { .. }` / `dest = ArrayLiteral { .. }`
+    /// where a field value or element reads `dest` — accumulating the maximum size
+    /// and alignment of the scratch region needed to stage such a literal before
+    /// copying it into the destination slot.
+    ///
+    /// Descent mirrors [`Self::collect_compound_slots`] (including `if`/`loop`
+    /// bodies) so no reassignment is missed. A single shared region is sound: each
+    /// build-then-copy is sequential and the region is dead after each copy, so the
+    /// per-assignment max (not the sum) is charged.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_self_ref_scratch(
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+        struct_offsets: &FxHashMap<String, StructSlot>,
+        array_offsets: &FxHashMap<String, ArraySlot>,
+        module_path: &[String],
+        max_size: &mut u32,
+        max_align: &mut u32,
+    ) -> Result<(), CodegenError> {
+        for &stmt_id in &arena[block_id].stmts {
+            if let Stmt::Assign { left, right } = &arena[stmt_id].kind
+                && let Expr::Identifier(ident_id) = &arena[*left].kind
+            {
+                let dest = &arena[*ident_id].name;
+                match &arena[*right].kind {
+                    Expr::StructLiteral { fields, .. }
+                        if fields
+                            .iter()
+                            .any(|(_, fe)| Self::expr_reads_var(arena, *fe, dest)) =>
+                    {
+                        if let Some(slot) = struct_offsets.get(dest) {
+                            *max_size = (*max_size).max(slot.total_size);
+                            *max_align =
+                                (*max_align).max(memory::max_struct_alignment(&slot.fields));
+                        }
+                    }
+                    Expr::ArrayLiteral { elements }
+                        if elements
+                            .iter()
+                            .any(|e| Self::expr_reads_var(arena, *e, dest)) =>
+                    {
+                        if let Some(slot) = array_offsets.get(dest) {
+                            let size = slot.elem_size.checked_mul(slot.length).expect(
+                                "Array byte size overflow: elem_size * length exceeds u32::MAX",
+                            );
+                            // Element natural alignment (at most 8) drives the scratch
+                            // region's alignment. Derive it from the element type; the
+                            // 8-byte fallback is a sound over-alignment for the
+                            // unreachable case of missing type info.
+                            let elem_align = match ctx
+                                .get_node_typeinfo(NodeId::Expr(*right))
+                                .map(|info| info.kind)
+                            {
+                                Some(TypeInfoKind::Array(elem, _)) => {
+                                    natural_alignment_for_type(&elem.kind, ctx, module_path)?
+                                }
+                                _ => 8,
+                            };
+                            *max_size = (*max_size).max(size);
+                            *max_align = (*max_align).max(elem_align);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            match Self::nested_blocks(&arena[stmt_id].kind) {
+                NestedBlocks::None => {}
+                NestedBlocks::Sequential(block) => Self::scan_self_ref_scratch(
+                    arena,
+                    block,
+                    ctx,
+                    struct_offsets,
+                    array_offsets,
+                    module_path,
+                    max_size,
+                    max_align,
+                )?,
+                NestedBlocks::Alternatives {
+                    then_block,
+                    else_block,
+                } => {
+                    Self::scan_self_ref_scratch(
+                        arena,
+                        then_block,
+                        ctx,
+                        struct_offsets,
+                        array_offsets,
+                        module_path,
+                        max_size,
+                        max_align,
+                    )?;
+                    if let Some(else_block) = else_block {
+                        Self::scan_self_ref_scratch(
+                            arena,
+                            else_block,
+                            ctx,
+                            struct_offsets,
+                            array_offsets,
+                            module_path,
+                            max_size,
+                            max_align,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
     fn lower_statement(
@@ -2074,8 +2376,12 @@ impl Compiler {
             cov_mark::hit!(wasm_codegen_emit_struct_copy);
             self.lower_struct_copy_var_init(arena, value_expr_id, local_idx, name, ctx);
         } else {
-            // init_zero_elision must not leak past lower_expression; reset before LocalSet runs.
-            self.init_zero_elision = true;
+            // Elide syntactic-zero leaf stores only when this binding is not inside a loop.
+            // The prologue memory.fill zeroes the frame once per call, so a loop-scoped compound
+            // literal must emit explicit zero stores to re-initialize each iteration;
+            // loop_exit_depths is non-empty exactly while lowering inside a loop. Reset before
+            // LocalSet so the flag never leaks past lower_expression.
+            self.init_zero_elision = self.loop_ctx.loop_exit_depths.is_empty();
             self.lower_expression(arena, value_expr_id, ctx, Some(name));
             self.init_zero_elision = false;
             self.func().instruction(&Instruction::LocalSet(local_idx));
@@ -2490,6 +2796,7 @@ impl Compiler {
                     | TypeInfoKind::Enum(_, _) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                        self.emit_uzumaki_domain_constraint(&type_info.kind, ctx);
                     }
                     TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
@@ -2505,7 +2812,7 @@ impl Compiler {
                             )
                         });
                         if let Err(e) =
-                            self.lower_array_uzumaki(arena, &elem_type, length, var_name)
+                            self.lower_array_uzumaki(arena, &elem_type, length, var_name, ctx)
                         {
                             panic!("array uzumaki lowering failed: {e}");
                         }
@@ -3068,9 +3375,25 @@ impl Compiler {
                     .frame_layout
                     .as_ref()
                     .is_some_and(|layout| layout.array_offsets.contains_key(name));
-                if is_struct_literal {
+                // A literal RHS that reads the destination must be evaluated against
+                // the pre-assignment state: storing field-by-field into the
+                // destination's own slot would let a later initializer read data an
+                // earlier one already clobbered. Such literals are staged in the
+                // frame's scratch region and copied over instead.
+                let self_ref = match &arena[right].kind {
+                    Expr::StructLiteral { fields, .. } => fields
+                        .iter()
+                        .any(|(_, fe)| Self::expr_reads_var(arena, *fe, name)),
+                    Expr::ArrayLiteral { elements } => elements
+                        .iter()
+                        .any(|e| Self::expr_reads_var(arena, *e, name)),
+                    _ => false,
+                };
+                if is_struct_literal && !self_ref {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
+                } else if is_struct_literal {
+                    self.lower_self_ref_struct_reassign(arena, right, name, local_idx, ctx);
                 } else if is_struct_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.struct_offsets[name];
@@ -3080,9 +3403,11 @@ impl Compiler {
                     // src = RHS expression (struct pointer)
                     self.lower_expression(arena, right, ctx, None);
                     self.emit_memory_copy(byte_size);
-                } else if is_array_literal {
+                } else if is_array_literal && !self_ref {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
+                } else if is_array_literal {
+                    self.lower_self_ref_array_reassign(arena, right, name, local_idx, ctx);
                 } else if is_array_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.array_offsets[name];
@@ -3112,6 +3437,118 @@ impl Compiler {
             }
             _ => todo!("Assignment to non-identifier targets not yet supported"),
         }
+    }
+
+    /// Lowers a struct-literal reassignment whose fields read the destination
+    /// (`p = P { x: p.y, y: p.x }`).
+    ///
+    /// The literal is built into the frame's scratch region — reading the
+    /// still-pristine destination — then copied over it, so every field observes
+    /// the pre-assignment state (per statements.md 9.1.1). Storing field-by-field
+    /// into the destination's own slot would let a later field read data an
+    /// earlier one already clobbered.
+    fn lower_self_ref_struct_reassign(
+        &mut self,
+        arena: &AstArena,
+        right: ExprId,
+        name: &str,
+        local_idx: u32,
+        ctx: &TypedContext,
+    ) {
+        let layout = self.frame_layout.as_ref().unwrap();
+        let dest_slot = &layout.struct_offsets[name];
+        let field_slots = dest_slot.fields.clone();
+        let total_size = dest_slot.total_size;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let scratch_off = layout.scratch_offset.expect(
+            "self-referential struct reassignment requires a scratch region reserved \
+             in compute_frame_layout",
+        );
+        let rhs_fields: Vec<(IdentId, ExprId)> = match &arena[right].kind {
+            Expr::StructLiteral { fields, .. } => {
+                fields.iter().map(|(id, expr)| (*id, *expr)).collect()
+            }
+            _ => unreachable!("caller guarantees a StructLiteral RHS"),
+        };
+        self.lower_struct_literal_fields(
+            arena,
+            &rhs_fields,
+            &field_slots,
+            frame_ptr_local,
+            scratch_off,
+            ctx,
+            name,
+            0,
+            false,
+        );
+        self.func().instruction(&Instruction::LocalGet(local_idx));
+        emit_ptr_offset_addr(self.func(), frame_ptr_local, scratch_off);
+        self.emit_memory_copy(total_size);
+    }
+
+    /// Lowers an array-literal reassignment whose elements read the destination
+    /// (`a = [a[1], a[0]]`).
+    ///
+    /// Mirrors [`Self::lower_self_ref_struct_reassign`]: the literal is built into
+    /// the frame's scratch region against the pristine destination, then copied
+    /// over it. Struct-element and scalar/nested-element arrays reuse the same
+    /// element-store routines as the non-self-referential path, targeting scratch.
+    fn lower_self_ref_array_reassign(
+        &mut self,
+        arena: &AstArena,
+        right: ExprId,
+        name: &str,
+        local_idx: u32,
+        ctx: &TypedContext,
+    ) {
+        let layout = self.frame_layout.as_ref().unwrap();
+        let dest_slot = &layout.array_offsets[name];
+        let elem_size = dest_slot.elem_size;
+        let length = dest_slot.length;
+        let element_layout = dest_slot.element_layout.clone();
+        let frame_ptr_local = layout.frame_ptr_local;
+        let scratch_off = layout.scratch_offset.expect(
+            "self-referential array reassignment requires a scratch region reserved \
+             in compute_frame_layout",
+        );
+        let total_size = elem_size.checked_mul(length).expect(
+            "Array byte size overflow: elem_size * length exceeds u32::MAX",
+        );
+        let elements: Vec<ExprId> = match &arena[right].kind {
+            Expr::ArrayLiteral { elements } => elements.clone(),
+            _ => unreachable!("caller guarantees an ArrayLiteral RHS"),
+        };
+        if let Some(field_slots) = element_layout {
+            self.lower_array_literal_struct_elements(
+                arena,
+                &elements,
+                &field_slots,
+                frame_ptr_local,
+                scratch_off,
+                elem_size,
+                ctx,
+                false,
+            );
+        } else {
+            let elem_kind = match ctx.get_node_typeinfo(NodeId::Expr(right)).map(|info| info.kind) {
+                Some(TypeInfoKind::Array(elem, _)) => elem.kind,
+                other => panic!(
+                    "array literal reassignment '{name}' has non-array type info: {other:?}"
+                ),
+            };
+            self.store_array_literal_elements(
+                arena,
+                &elements,
+                &elem_kind,
+                scratch_off,
+                frame_ptr_local,
+                ctx,
+                false,
+            );
+        }
+        self.func().instruction(&Instruction::LocalGet(local_idx));
+        emit_ptr_offset_addr(self.func(), frame_ptr_local, scratch_off);
+        self.emit_memory_copy(total_size);
     }
 
     /// Lowers the return expression in an sret function (array or struct return).
@@ -3619,6 +4056,124 @@ impl Compiler {
         self.func().instruction(&Instruction::End);
     }
 
+    /// Emits the overflow guard for a narrow (i8/i16) signed division.
+    ///
+    /// Narrow division runs in the promoted i32 width, where the one overflowing
+    /// input pair (MIN, -1) yields +128 / +32768 — representable in i32, so wasm's
+    /// own `div_s` trap cannot fire, and the re-narrowing that follows would silently
+    /// sign-wrap it back to MIN: a wrong answer with no failure signal. Division
+    /// overflow must instead trap at every width, exactly as wasm itself traps
+    /// i32/i64 MIN / -1 (add/sub/mul wrap by policy; division overflow does not).
+    /// The guard tests the promoted quotient before narrowing:
+    ///
+    /// ```wat
+    /// local.tee $scratch    ;; [q]; $scratch = q
+    /// i32.const 128         ;; [q, 128]     (32768 for i16)
+    /// i32.eq                ;; [cond]
+    /// if (empty)            ;; []
+    ///   unreachable
+    /// end
+    /// local.get $scratch    ;; [q]
+    /// ```
+    ///
+    /// A single equality is exhaustive: operands are canonical sign-extended
+    /// values (ABI entry normalization, producing-instruction re-narrowing, and
+    /// sign-extending loads), so |q| <= |a| <= 2^(w-1), and q = +2^(w-1) is
+    /// reachable only from (MIN, -1). Running after `div_s` keeps the native
+    /// divide-by-zero trap; the guard itself traps as `unreachable`, while the
+    /// full widths report wasm's native integer-overflow trap — the trap-or-not
+    /// contract, not the trap code, is what is width-uniform.
+    fn emit_narrow_div_overflow_guard(&mut self, kind: &TypeInfoKind) {
+        let bound = match kind {
+            TypeInfoKind::Number(NumberType::I8) => 128,
+            TypeInfoKind::Number(NumberType::I16) => 32768,
+            _ => return,
+        };
+        cov_mark::hit!(wasm_codegen_narrow_div_overflow_guard);
+        let scratch = self.narrow_div_scratch_local.expect(
+            "narrow-div scratch local must be reserved: body_has_narrow_signed_div mirrors this \
+             guard's emission condition",
+        );
+        self.func().instruction(&Instruction::LocalTee(scratch));
+        self.func().instruction(&Instruction::I32Const(bound));
+        self.func().instruction(&Instruction::I32Eq);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+        self.func().instruction(&Instruction::LocalGet(scratch));
+    }
+
+    /// Resolves an exported parameter's type kind to its [`EnumInfo`], or `None`
+    /// when the parameter is not an enum.
+    ///
+    /// `from_type_id` yields pre-resolution carriers at the prologue — a bare
+    /// name (enum *or* struct) arrives as `Custom` and a `::`-qualified path as
+    /// `Qualified`, never `TypeInfoKind::Enum` — so this resolves the carrier.
+    /// A `Custom` name that resolves to a struct returns `None` and is correctly
+    /// skipped; `lookup_enum_in` is canonical-key-safe, resolving both
+    /// entry-file-local and item-imported enums. `TypeNode::QualifiedName` is the
+    /// dead parser variant, matched only to mirror the qualified-path idiom used
+    /// for qualified struct return types.
+    fn resolve_param_enum(
+        ctx: &TypedContext,
+        kind: &TypeInfoKind,
+        module_path: &[String],
+    ) -> Option<EnumInfo> {
+        match kind {
+            TypeInfoKind::Custom(name) => ctx.lookup_enum_in(name, module_path),
+            TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+                let segments: Vec<String> = path.split("::").map(ToString::to_string).collect();
+                ctx.lookup_enum_by_qualified_path(&segments, module_path)
+            }
+            _ => None,
+        }
+    }
+
+    /// Emits the exported-fn prologue guard for one enum-typed parameter:
+    ///
+    /// ```wat
+    /// local.get $p
+    /// i32.const N          ;; declared variant count
+    /// i32.ge_u             ;; unsigned: also traps negative tags, which arrive as huge u32
+    /// if (empty)
+    ///   unreachable
+    /// end
+    /// ```
+    ///
+    /// A host may pass any i32 for an enum parameter, but only tags 0..N-1 name a
+    /// variant; every other value names nothing under any convention, so unlike the
+    /// narrow-int (low bits, the C ABI) and bool (truthiness) parameters — which are
+    /// canonicalized because a host convention already gives every wire value a
+    /// meaning — an out-of-range tag is rejected. Any mapping onto the tag range
+    /// (e.g. the `rem_u N` used for uzumaki draws, which are provenance-free
+    /// non-deterministic draws needing only a surjection onto the domain) would
+    /// silently relabel a concrete host input as a variant the host never named.
+    /// A variantless enum is uninhabited, so `p >= 0` is uniformly true and every
+    /// host call traps — the correct degenerate with no special case. In-language
+    /// callers always pass declaration-derived tags, so the guard never fires for
+    /// them.
+    fn emit_entry_enum_tag_guard(&mut self, param_local: u32, variant_count: usize) {
+        if variant_count == 0 {
+            cov_mark::hit!(wasm_codegen_entry_enum_tag_guard_empty);
+        } else {
+            cov_mark::hit!(wasm_codegen_entry_enum_tag_guard);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let n = variant_count as i32;
+        self.func().instruction(&Instruction::LocalGet(param_local));
+        self.func().instruction(&Instruction::I32Const(n));
+        self.func().instruction(&Instruction::I32GeU);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+    }
+
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
     ///
     /// Handles scalar arrays of any dimensionality by recursing through nested
@@ -3631,6 +4186,7 @@ impl Compiler {
         elem_type: &TypeInfo,
         length: u32,
         enclosing_var_name: &str,
+        ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         let total = total_leaf_count(&elem_type.kind, length);
         if total > MAX_UZUMAKI_UNROLL_ELEMENTS {
@@ -3674,6 +4230,7 @@ impl Compiler {
             leaf_size,
             uzumaki_opcode,
             &store_instr,
+            ctx,
         );
 
         self.func()
@@ -3703,6 +4260,7 @@ impl Compiler {
         leaf_size: u32,
         uzumaki_opcode: u8,
         store_instr: &Instruction<'_>,
+        ctx: &TypedContext,
     ) {
         match kind {
             TypeInfoKind::Array(inner_elem, inner_len) => {
@@ -3726,6 +4284,7 @@ impl Compiler {
                         leaf_size,
                         uzumaki_opcode,
                         store_instr,
+                        ctx,
                     );
                 }
             }
@@ -3744,6 +4303,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
                     self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_compound_uzumaki_domain_constraint(kind, ctx);
                     self.func().instruction(store_instr);
                 }
             }
@@ -3787,12 +4347,12 @@ impl Compiler {
                 let (_, computed_fields) =
                     compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
                 for field in &computed_fields {
-                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
+                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
                 }
             }
         } else {
             for field in &field_slots {
-                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
             }
         }
 
@@ -3818,6 +4378,7 @@ impl Compiler {
         frame_ptr_local: u32,
         struct_base_offset: u32,
         field: &memory::StructFieldSlot,
+        ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         if let TypeInfoKind::Array(ref _elem, length) = field.type_kind
             && length > MAX_UZUMAKI_UNROLL_ELEMENTS
@@ -3848,6 +4409,7 @@ impl Compiler {
                 self.func().instruction(&Instruction::I32Const(byte_offset));
                 self.func().instruction(&Instruction::I32Add);
                 self.emit_uzumaki(uzumaki_opcode);
+                self.emit_compound_uzumaki_domain_constraint(&field.type_kind, ctx);
                 self.func().instruction(&store_instr);
             }
             CompoundFieldLayout::NestedArray {
@@ -3874,6 +4436,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
                     self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_compound_uzumaki_domain_constraint(elem_kind, ctx);
                     self.func().instruction(&store_instr);
                 }
             }
@@ -3886,6 +4449,82 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Constrains a raw 32-bit uzumaki draw on the stack to the declared
+    /// type's value set.
+    ///
+    /// The uzumaki opcode always draws a full-width i32. For types whose value
+    /// set is narrower — sub-i32 integers, `bool`, and enums — the raw draw must
+    /// be mapped onto the type's domain, otherwise the Rocq-side quantifiers
+    /// (`forall`/`exists`) range over all 2^32 bit patterns instead of the
+    /// declared type's values. Every mapping below is surjective onto the target
+    /// domain, so quantifying over the raw draw and then mapping is equivalent to
+    /// quantifying over the domain itself.
+    ///
+    /// - Sub-i32 integers reuse the same mask / `shl`+`shr_s` shapes as
+    ///   [`memory::emit_sub_i32_narrowing`], matching the convention that narrow
+    ///   values are normalized at the producing instruction.
+    /// - `bool` maps onto {0, 1} via `i32.and 1`.
+    /// - Enums map onto the tag range `0..N-1` via `i32.rem_u N`. Tags are
+    ///   assigned by declaration position and cannot be customized, so the range
+    ///   is always contiguous from zero.
+    /// - A variantless enum is uninhabited; `i32.rem_u 0` would trap, so the draw
+    ///   is deliberately left unconstrained for that degenerate case (the enum
+    ///   definition itself already carries a diagnostic).
+    /// - i32/u32/i64/u64 draws occupy every bit pattern; no-op.
+    fn emit_uzumaki_domain_constraint(&mut self, kind: &TypeInfoKind, ctx: &TypedContext) {
+        match kind {
+            TypeInfoKind::Number(
+                NumberType::I8 | NumberType::U8 | NumberType::I16 | NumberType::U16,
+            ) => {
+                cov_mark::hit!(wasm_codegen_uzumaki_domain_narrow_int);
+                memory::emit_sub_i32_narrowing(self.func(), kind);
+            }
+            TypeInfoKind::Bool => {
+                cov_mark::hit!(wasm_codegen_uzumaki_domain_bool);
+                self.func().instruction(&Instruction::I32Const(1));
+                self.func().instruction(&Instruction::I32And);
+            }
+            TypeInfoKind::Enum(name, key) => {
+                let enum_info = ctx
+                    .lookup_enum(key)
+                    .or_else(|| ctx.lookup_enum_in(name, &self.current_module_path))
+                    .unwrap_or_else(|| {
+                        panic!("Uzumaki over unknown enum type `{name}` (key `{key}`)")
+                    });
+                let variant_count = enum_info.variants.len();
+                if variant_count == 0 {
+                    cov_mark::hit!(wasm_codegen_uzumaki_domain_enum_empty);
+                } else {
+                    cov_mark::hit!(wasm_codegen_uzumaki_domain_enum);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let n = variant_count as i32;
+                    self.func().instruction(&Instruction::I32Const(n));
+                    self.func().instruction(&Instruction::I32RemU);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Domain constraint for a raw i32 uzumaki draw that is about to be stored
+    /// into a compound (array/struct) leaf slot.
+    ///
+    /// Only `bool` and enum leaves need an explicit constraint here: the narrow
+    /// integer widths are excluded because the following `store8`/`store16`
+    /// truncates the value and the typed load re-extends it, so the memory
+    /// round-trip already realizes those domains. Emitting the constraint before
+    /// the store also normalizes the stored bytes (a `bool` slot holds only 0 or
+    /// 1).
+    fn emit_compound_uzumaki_domain_constraint(
+        &mut self,
+        kind: &TypeInfoKind,
+        ctx: &TypedContext,
+    ) {
+        if matches!(kind, TypeInfoKind::Bool | TypeInfoKind::Enum(_, _)) {
+            self.emit_uzumaki_domain_constraint(kind, ctx);
+        }
     }
 
     /// Lowers a binary expression to WASM stack instructions.
@@ -3902,6 +4541,11 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
+        if matches!(op, OperatorKind::And | OperatorKind::Or) {
+            self.lower_short_circuit_binary(arena, left, right, op, ctx);
+            return;
+        }
+
         self.lower_expression(arena, left, ctx, None);
         self.lower_expression(arena, right, ctx, None);
 
@@ -3910,6 +4554,15 @@ impl Compiler {
             .expect("Binary expression left operand must have type info");
         let is_i64 = Self::is_i64_type(&left_type_info.kind);
         let is_unsigned = Self::is_unsigned_type(&left_type_info.kind);
+
+        // A shift count is taken modulo the operand type's bit width. Wasm's own
+        // shift already masks the count modulo 32/64, so only narrow types (which
+        // promote to i32) need an explicit mask to their declared width.
+        if matches!(op, OperatorKind::Shl | OperatorKind::Shr)
+            && memory::emit_shift_count_mask(self.func(), &left_type_info.kind)
+        {
+            cov_mark::hit!(wasm_codegen_shift_count_mask);
+        }
 
         let instruction = match op {
             OperatorKind::Add => {
@@ -3945,8 +4598,9 @@ impl Compiler {
                 (false, true) => Instruction::I32RemU,
                 (false, false) => Instruction::I32RemS,
             },
-            OperatorKind::And => Instruction::I32And,
-            OperatorKind::Or => Instruction::I32Or,
+            OperatorKind::And | OperatorKind::Or => {
+                unreachable!("`&&`/`||` lower via the short-circuit path above")
+            }
             OperatorKind::Eq => {
                 if is_i64 {
                     Instruction::I64Eq
@@ -4020,14 +4674,25 @@ impl Compiler {
                 (false, false) => Instruction::I32ShrS,
             },
             OperatorKind::Pow => {
-                todo!(
-                    "Power operator (`**`) deferred -- no native WASM instruction; \
-                     see .claude/plans/codegen/new-pow-operator/master_plan.md"
+                unreachable!(
+                    "`**` (power) has no lowering; the type checker rejects every use of \
+                     `**` (PowOperatorNotSupported), so codegen never sees this operator"
                 )
             }
         };
 
         self.func().instruction(&instruction);
+
+        // A narrow (i8/i16) signed division computes in the promoted i32 width,
+        // where the (MIN, -1) pair yields a quotient (+128 / +32768) that the
+        // following re-narrowing would silently sign-wrap back to MIN. Guard the
+        // promoted quotient here — after div_s, before narrowing — so division
+        // overflow traps at every width. Only `Div` is guarded: `Mod` never
+        // overflows (`MIN % -1 == 0` at every width) and unsigned narrow division
+        // cannot overflow (the guard method no-ops for those operand types).
+        if matches!(op, OperatorKind::Div) {
+            self.emit_narrow_div_overflow_guard(&left_type_info.kind);
+        }
 
         if !matches!(
             op,
@@ -4038,12 +4703,74 @@ impl Compiler {
                 | OperatorKind::Gt
                 | OperatorKind::Ge
                 | OperatorKind::Mod
-                | OperatorKind::And
-                | OperatorKind::Or
                 | OperatorKind::Shr
         ) {
             memory::emit_sub_i32_narrowing(self.func(), &left_type_info.kind);
         }
+    }
+
+    /// Lowers `&&`/`||` with short-circuit evaluation.
+    ///
+    /// The right operand is emitted inside a valued `if (result i32)` block, so
+    /// at runtime it executes only when the left operand does not already decide
+    /// the result:
+    ///
+    /// ```wat
+    /// ;; a && b                      ;; a || b
+    /// <a>                            <a>
+    /// if (result i32)                if (result i32)
+    ///   <b>                            i32.const 1
+    /// else                           else
+    ///   i32.const 0                    <b>
+    /// end                            end
+    /// ```
+    ///
+    /// Correctness leans on two invariants. The type checker admits only `bool`
+    /// operands here, and every bool producer emits a canonical 0/1 (comparisons,
+    /// `i32.eqz`, bool literals, uzumaki domain constraints), so the constant in
+    /// the decided branch is exact and the pass-through operand needs no
+    /// renormalization. That canonicity holds at the ABI boundary as well:
+    /// exported functions normalize narrow parameters (including `bool`, by
+    /// truthiness) in their entry prologue, so an out-of-domain host argument is
+    /// canonical `0`/`1` before it can reach a pass-through branch. Do not
+    /// replace this shape with `select` or bitwise
+    /// `i32.and`/`i32.or`: both evaluate the right operand unconditionally, which
+    /// re-introduces the traps the guard idiom exists to avoid
+    /// (`x != 0 && y / x > 0`, `i < len && arr[i] != 0`).
+    ///
+    /// Left-associative chains lower flat: `(a && b) && c` emits two sequential
+    /// valued ifs, the first block's 0/1 result serving as the second `if`'s
+    /// condition, so nesting depth does not grow with chain length.
+    #[allow(clippy::needless_pass_by_value)]
+    fn lower_short_circuit_binary(
+        &mut self,
+        arena: &AstArena,
+        left: ExprId,
+        right: ExprId,
+        op: OperatorKind,
+        ctx: &TypedContext,
+    ) {
+        self.lower_expression(arena, left, ctx, None);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Result(ValType::I32)));
+        self.loop_ctx.wasm_block_depth += 1;
+        match op {
+            OperatorKind::And => {
+                cov_mark::hit!(wasm_codegen_emit_short_circuit_and);
+                self.lower_expression(arena, right, ctx, None);
+                self.func().instruction(&Instruction::Else);
+                self.func().instruction(&Instruction::I32Const(0));
+            }
+            OperatorKind::Or => {
+                cov_mark::hit!(wasm_codegen_emit_short_circuit_or);
+                self.func().instruction(&Instruction::I32Const(1));
+                self.func().instruction(&Instruction::Else);
+                self.lower_expression(arena, right, ctx, None);
+            }
+            _ => unreachable!("only `&&`/`||` take the short-circuit lowering"),
+        }
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
     }
 
     /// Lowers a prefix unary expression to WASM stack instructions.
@@ -4175,6 +4902,59 @@ impl Compiler {
                 expr,
             } => Self::is_syntactic_zero(arena, *expr),
             _ => false,
+        }
+    }
+
+    /// Returns `true` if `expr_id` lexically reads the variable named `dest`.
+    ///
+    /// A struct/array literal whose field or element initializers read the
+    /// destination of the assignment they belong to (`p = P { x: p.y, y: p.x }`)
+    /// must be evaluated against the pre-assignment state, so codegen builds it in
+    /// a scratch region first rather than storing field-by-field into the
+    /// destination's own slot. This predicate detects that self-reference.
+    ///
+    /// It is the exhaustive expression walk mirrored from
+    /// `inference_analysis::rules::method_never_accesses_self`, specialized to a
+    /// leaf identifier equal to `dest`. Because member-access and array-index
+    /// bases are themselves `Identifier` nodes, the single leaf check catches a
+    /// bare read (`p`), a field read (`p.x`), and an element read (`p.arr[i]`).
+    /// Inference has no references, pointers, or globals, so a lexical name read
+    /// is the only way an expression can alias `dest`: a call cannot return `dest`
+    /// by reference, and a call argument that reads `dest` is caught by the
+    /// `FunctionCall` recursion.
+    fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
+            Expr::Binary { left, right, .. } => {
+                Self::expr_reads_var(arena, *left, dest)
+                    || Self::expr_reads_var(arena, *right, dest)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => Self::expr_reads_var(arena, *expr, dest),
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_reads_var(arena, *function, dest)
+                    || args
+                        .iter()
+                        .any(|(_, arg_expr)| Self::expr_reads_var(arena, *arg_expr, dest))
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_reads_var(arena, *array, dest)
+                    || Self::expr_reads_var(arena, *index, dest)
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, field_expr)| Self::expr_reads_var(arena, *field_expr, dest)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|elem| Self::expr_reads_var(arena, *elem, dest)),
+            Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
         }
     }
 

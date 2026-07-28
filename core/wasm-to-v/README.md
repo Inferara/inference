@@ -341,6 +341,21 @@ Instead, translation is a two-part split, both enforced fail-closed:
 
 [wasm-verifier]: https://github.com/Inferara/wasm-verifier
 
+### Narrow-Typed Domain Constraints
+
+A scalar uzumaki draw always produces a full-width `i32`/`i64` value. When the
+declared type is narrower — `i8`/`u8`/`i16`/`u16`/`bool`/an enum — codegen
+emits a short domain-mapping sequence between the draw and the `local.set` in
+the *WASM* instruction stream (mask for `u8`/`u16`, `shl`+`shr_s` for
+`i8`/`i16`, `and 1` for `bool`, `rem_u <variant count>` for a non-empty enum;
+see the `wasm-codegen` README). Because a draw can only occur inside a `spec`
+function, that sequence never reaches the emitted `.v` — the spec body is
+omitted from the module record. The corresponding `hassert` obligation
+currently binds the drawn variable as an unconstrained universal slot or
+existential binder; carrying the declared type's domain into the obligation
+(`HA_has_type`-style antecedents) is a tracked follow-up of the wasm-verifier
+contract work.
+
 ## Testing
 
 The crate includes comprehensive test coverage using WASM test modules in `test_data/`.

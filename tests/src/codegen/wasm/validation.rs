@@ -12,9 +12,10 @@ mod codegen_validation_tests {
     use crate::utils::{
         codegen_output, codegen_output_no_analysis, codegen_output_with_mode,
         codegen_output_with_mode_no_analysis, codegen_with_full_config,
-        codegen_with_target_mode, codegen_with_target_mode_no_analysis,
+        codegen_with_target_mode, codegen_with_target_mode_no_analysis, wasm_codegen,
         wasm_codegen_no_analysis,
     };
+    use inf_wasmparser::{Operator, Parser, Payload};
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
     // WASM content tests ---
@@ -118,6 +119,58 @@ mod codegen_validation_tests {
             wasm_contains_bytes(wasm, b"regular"),
             "WASM should export regular function"
         );
+    }
+
+    /// A spec-wrapped non-det program built in compile mode (analysis ON) must not
+    /// leak any verification operator into the executable module: the `spec` is
+    /// proof-only and stripped, so a well-formed compile-mode artifact carries none
+    /// of the custom `0xfc` opcodes that fail standard wasm validation. Walk every
+    /// function body's operators and assert none is one of the six verification
+    /// operators. The i32 + i64 uzumaki cover both uzumaki opcodes; `forall` and
+    /// `exists` cover the block operators.
+    #[test]
+    fn compile_mode_spec_nondet_emits_no_verification_operators() {
+        let source = r#"
+            spec S {
+                fn check() -> i32 {
+                    forall {
+                        let x: i32 = @;
+                    }
+                    exists {
+                        let y: i64 = @;
+                    }
+                    return 0;
+                }
+            }
+            pub fn main() -> i32 {
+                return 0;
+            }
+        "#;
+        let wasm = wasm_codegen(source);
+        for payload in Parser::new(0).parse_all(&wasm) {
+            let payload = payload.unwrap_or_else(|e| panic!("failed to parse emitted wasm: {e}"));
+            let Payload::CodeSectionEntry(body) = payload else {
+                continue;
+            };
+            let operators = body
+                .get_operators_reader()
+                .unwrap_or_else(|e| panic!("failed to read a function body: {e}"));
+            for op in operators {
+                let op = op.unwrap_or_else(|e| panic!("failed to decode an operator: {e}"));
+                assert!(
+                    !matches!(
+                        op,
+                        Operator::Forall { .. }
+                            | Operator::Exists { .. }
+                            | Operator::Assume { .. }
+                            | Operator::Unique { .. }
+                            | Operator::I32Uzumaki { .. }
+                            | Operator::I64Uzumaki { .. }
+                    ),
+                    "compile-mode module must contain no verification operators, found: {op:?}"
+                );
+            }
+        }
     }
 
     // Proof mode non-det tests ---

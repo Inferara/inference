@@ -252,6 +252,72 @@ mod analysis_rules_tests {
         );
     }
 
+    /// A non-det keyword written directly between an `if` condition and the brace
+    /// (`if c forall { … }`) annotates the *arm block itself* rather than nesting a
+    /// separate block inside it. That kind-annotated arm outside a spec fires
+    /// exactly one A042 naming the kind — for each of the four kinds.
+    #[test]
+    fn a042_kind_annotated_if_arm_fires_for_each_kind() {
+        for kind in KINDS {
+            let source = format!(
+                r#"
+                    pub fn main() -> i32 {{
+                        let c: bool = true;
+                        if c {kind} {{
+                            let x: i32 = 1;
+                        }}
+                        return 0;
+                    }}
+                "#
+            );
+            let diags = a042_diags(&source);
+            assert_eq!(
+                diags.len(),
+                1,
+                "a kind-annotated `if c {kind}` arm outside a spec must fire exactly one A042, got: {diags:?}"
+            );
+            assert!(
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                "A042 must name the `{kind}` if-arm kind, got: {:?}",
+                diags[0]
+            );
+        }
+    }
+
+    /// A non-det keyword written between a `loop` condition and the brace
+    /// (`loop i < 3 forall { … }`) annotates the *loop body block itself*. That
+    /// kind-annotated body outside a spec fires exactly one A042 naming the kind —
+    /// for each of the four kinds. The loop keeps a condition (an unconditional
+    /// `loop forall {}` would trip the infinite-loop rule instead) and its body
+    /// neither breaks nor uses `@`, so no unrelated rule perturbs the count.
+    #[test]
+    fn a042_kind_annotated_loop_body_fires_for_each_kind() {
+        for kind in KINDS {
+            let source = format!(
+                r#"
+                    pub fn main() -> i32 {{
+                        let mut i: i32 = 0;
+                        loop i < 3 {kind} {{
+                            i = i + 1;
+                        }}
+                        return 0;
+                    }}
+                "#
+            );
+            let diags = a042_diags(&source);
+            assert_eq!(
+                diags.len(),
+                1,
+                "a kind-annotated `loop i < 3 {kind}` body outside a spec must fire exactly one A042, got: {diags:?}"
+            );
+            assert!(
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                "A042 must name the `{kind}` loop-body kind, got: {:?}",
+                diags[0]
+            );
+        }
+    }
+
     // =====================================================================
     // Nested non-det: outermost-only, no cascade
     // =====================================================================

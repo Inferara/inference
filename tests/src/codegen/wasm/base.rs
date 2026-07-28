@@ -2981,9 +2981,20 @@ mod base_codegen_tests {
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "div_i8_overflow")
             .expect("get func");
-        // i8: -128 / -1 = 128, which overflows to -128 (signed wrap)
-        let result = func.call(&mut store, (-128, -1)).expect("call");
-        assert_eq!(result, -128, "i8(-128) / i8(-1) should wrap to -128");
+        // i8: -128 / -1 overflows the type; division overflow traps at every
+        // width, so the narrow guard raises `unreachable` instead of wrapping.
+        let err = func
+            .call(&mut store, (-128, -1))
+            .expect_err("i8(-128) / i8(-1) must trap, not wrap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>()
+                .expect("trap, not a host error"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "narrow division overflow must trap via the overflow guard"
+        );
+        // The non-overflowing edge stays exact.
+        let ok = func.call(&mut store, (-128, 1)).expect("call");
+        assert_eq!(ok, -128, "i8(-128) / i8(1) is representable and exact");
     }
 
     // -- C2: Array-to-array copy (value semantics) --
@@ -3641,6 +3652,144 @@ mod base_codegen_tests {
         let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct second field assign WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_self_ref_reassign_test() {
+        let test_name = "struct_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_self_ref_reassign_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // Each destination is reassigned from a literal that reads its own
+        // pre-assignment fields; the whole RHS must be evaluated against that
+        // pristine state. Before the fix these returned the clobbered values
+        // (swap_y=222, expr_y=100, rotate_b=?, nested_swap=3).
+        let cases: &[(&str, i64)] = &[
+            ("swap_y", 111),
+            ("expr_x", 107),
+            ("expr_y", 93),
+            ("rotate_a", 3),
+            ("rotate_b", 1),
+            ("rotate_c", 2),
+            ("nested_swap", 1),
+        ];
+        for &(name, expected) in cases {
+            let f: TypedFunc<(), i64> = instance
+                .get_typed_func(&mut store, name)
+                .unwrap_or_else(|_| panic!("Failed to get '{name}'"));
+            let result = f
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("{name} failed: {e}"));
+            assert_eq!(result, expected, "{name} should return {expected}");
+        }
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        assert_eq!(
+            stack_pointer.get(&mut store).i32().unwrap(),
+            65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn array_self_ref_reassign_test() {
+        let test_name = "array_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_self_ref_reassign_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "array_self_ref_reassign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // `a = [a[1], a[0]]` swaps against the pristine array. Before the fix the
+        // first store clobbered a[0], so swap01 returned 909 and rotate3 332.
+        let swap01: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "swap01")
+            .expect("Failed to get 'swap01'");
+        assert_eq!(
+            swap01.call(&mut store, ()).expect("swap01 failed"),
+            905,
+            "swap01 should return 905 (a=[9,5])"
+        );
+
+        let rotate3: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "rotate3")
+            .expect("Failed to get 'rotate3'");
+        assert_eq!(
+            rotate3.call(&mut store, ()).expect("rotate3 failed"),
+            312,
+            "rotate3 should return 312 (b=[3,1,2])"
+        );
+
+        let swap01_i64: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "swap01_i64")
+            .expect("Failed to get 'swap01_i64'");
+        assert_eq!(
+            swap01_i64.call(&mut store, ()).expect("swap01_i64 failed"),
+            905,
+            "swap01_i64 should return 905 (c=[9,5])"
+        );
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        assert_eq!(
+            stack_pointer.get(&mut store).i32().unwrap(),
+            65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
     }
 
     #[test]
@@ -6840,6 +6989,9 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_params_golden_test() {
+        // Dir has 4 variants; is_up, dir_to_int, and pass_through each take one
+        // Dir parameter, so the exported prologue emits three tag guards.
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 3);
         let test_name = "enum_params";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -6854,6 +7006,10 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_compare_golden_test() {
+        // Status has 2 variants; are_equal and are_not_equal each take two Status
+        // parameters and is_active takes one, so the prologue emits five tag
+        // guards (2 + 2 + 1).
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 5);
         let test_name = "enum_compare";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -6868,6 +7024,9 @@ mod base_codegen_tests {
 
     #[test]
     fn enum_assign_golden_test() {
+        // Only assign_from_param takes a Color parameter (reassign takes none),
+        // so the prologue emits a single tag guard.
+        cov_mark::check_count!(wasm_codegen_entry_enum_tag_guard, 1);
         let test_name = "enum_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -6946,6 +7105,22 @@ mod base_codegen_tests {
             .expect("Failed to get 'pass_through'");
         assert_eq!(pass_through.call(&mut store, 0).unwrap(), 0, "pass_through should return same tag");
         assert_eq!(pass_through.call(&mut store, 2).unwrap(), 2, "pass_through should return same tag");
+        // Boundary tag N-1 (Right = 3) is a valid variant and passes through.
+        assert_eq!(pass_through.call(&mut store, 3).unwrap(), 3, "pass_through(Right) should return 3");
+
+        // Out-of-range enum tags trap at the exported prologue: N (4) is the
+        // first invalid tag, and a negative tag arrives as a huge u32 caught by
+        // the same unsigned compare. Dir has 4 variants.
+        for bad in [4_i32, 99_i32, -1_i32] {
+            let err = dir_to_int
+                .call(&mut store, bad)
+                .expect_err("out-of-range Dir tag must trap");
+            assert_eq!(
+                *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+                wasmtime::Trap::UnreachableCodeReached,
+                "dir_to_int({bad}) should trap as unreachable",
+            );
+        }
     }
 
     #[test]
@@ -6984,6 +7159,34 @@ mod base_codegen_tests {
             .expect("Failed to get 'is_active'");
         assert_eq!(is_active.call(&mut store, 0).unwrap(), 1, "Active should return true");
         assert_eq!(is_active.call(&mut store, 1).unwrap(), 0, "Inactive should return false");
+
+        // Status has 2 variants, so tag 2 is out of range. The guard is emitted
+        // per enum parameter, so it fires whether the bad tag is the first or the
+        // second argument.
+        let err = are_equal
+            .call(&mut store, (0, 2))
+            .expect_err("second-arg out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "are_equal((0, 2)) should trap on the second parameter",
+        );
+        let err = are_equal
+            .call(&mut store, (2, 0))
+            .expect_err("first-arg out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "are_equal((2, 0)) should trap on the first parameter",
+        );
+        let err = is_active
+            .call(&mut store, 2)
+            .expect_err("out-of-range tag must trap");
+        assert_eq!(
+            *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+            wasmtime::Trap::UnreachableCodeReached,
+            "is_active(2) should trap",
+        );
     }
 
     #[test]
@@ -7012,8 +7215,22 @@ mod base_codegen_tests {
         let assign_from_param: wasmtime::TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "assign_from_param")
             .expect("Failed to get 'assign_from_param'");
+        assert_eq!(assign_from_param.call(&mut store, 0).unwrap(), 0, "assign_from_param(Red) should return 0");
         assert_eq!(assign_from_param.call(&mut store, 1).unwrap(), 1, "assign_from_param(Green) should return 1");
         assert_eq!(assign_from_param.call(&mut store, 2).unwrap(), 2, "assign_from_param(Blue) should return 2");
+
+        // Color has 3 variants, so tags 3 and 99 are out of range and trap at
+        // the exported prologue.
+        for bad in [3_i32, 99_i32] {
+            let err = assign_from_param
+                .call(&mut store, bad)
+                .expect_err("out-of-range Color tag must trap");
+            assert_eq!(
+                *err.downcast_ref::<wasmtime::Trap>().expect("wasmtime Trap"),
+                wasmtime::Trap::UnreachableCodeReached,
+                "assign_from_param({bad}) should trap as unreachable",
+            );
+        }
     }
 
     #[test]
@@ -7286,6 +7503,104 @@ mod base_codegen_tests {
         let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+    }
+
+    #[test]
+    fn narrow_uzumaki_test() {
+        // Scalars (u8/i8/u16/i16/bool) each draw through the i32 uzumaki arm; the
+        // two arrays draw through the array-uzumaki path instead.
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 5);
+        // u8/i8/u16/i16 scalars mask/sign-extend; the `[u8; 2]` leaves must NOT
+        // (store8 already realizes the 0..255 domain).
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_narrow_int, 4);
+        // One scalar `bool` plus the two `[bool; 2]` leaves.
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_bool, 3);
+        let test_name = "narrow_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // A `[u8; 2]` uzumaki leaf is a bare draw (`FC 31`) immediately followed
+        // by `i32.store8` (`3A`) — no `41 FF 01 71` mask is inserted, because the
+        // store truncates to the byte domain. Pins the compound narrow-int
+        // exclusion at the byte level.
+        assert!(
+            actual.windows(3).any(|w| w == [0xFC, 0x31, 0x3A]),
+            "u8 array uzumaki leaf must be a bare draw immediately followed by store8"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn enum_uzumaki_domain_test() {
+        // Color scalar + One scalar + two Color array leaves + one Color struct
+        // field (Item.status) = five enum-domain constraints.
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_enum, 5);
+        let test_name = "enum_uzumaki_domain";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // Color has 3 variants → `i32.const 3; i32.rem_u`; One has 1 variant →
+        // `i32.const 1; i32.rem_u`. `41 01 70` (rem_u) is distinct from the bool
+        // shape `41 01 71` (and).
+        assert!(
+            actual.windows(5).any(|w| w == [0xFC, 0x31, 0x41, 0x03, 0x70]),
+            "Color uzumaki must draw then `i32.const 3; i32.rem_u`"
+        );
+        assert!(
+            actual.windows(5).any(|w| w == [0xFC, 0x31, 0x41, 0x01, 0x70]),
+            "One uzumaki must draw then `i32.const 1; i32.rem_u`"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn u32_uzumaki_test() {
+        let test_name = "u32_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        // u32 occupies every bit pattern: the draw stays mask-free. No `i32.const`
+        // (`41`) may trail the `FC 31` draw.
+        assert!(
+            !actual.windows(3).any(|w| w == [0xFC, 0x31, 0x41]),
+            "u32 uzumaki must be a bare draw with no domain constraint"
+        );
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn enum_uzumaki_empty_enum_unconstrained_test() {
+        cov_mark::check_count!(wasm_codegen_uzumaki_domain_enum_empty, 1);
+        let source = r#"
+            enum Empty {}
+            pub fn nondet_empty() {
+                forall {
+                    let e: Empty = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes).unwrap();
+        // No rem_u may follow the draw: rem_u 0 would trap.
+        assert!(!wasm_bytes.windows(3).any(|w| w == [0x41, 0x00, 0x70]));
     }
 }
 
@@ -7999,6 +8314,46 @@ mod regenerate {
 
     #[test]
     #[ignore]
+    fn regenerate_struct_self_ref_reassign_wasm() {
+        let dir = base_test_dir().join("struct_self_ref_reassign");
+        let source_code = std::fs::read_to_string(dir.join("struct_self_ref_reassign.inf"))
+            .expect("Failed to read struct_self_ref_reassign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_self_ref_reassign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_self_ref_reassign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_self_ref_reassign_wasm() {
+        let dir = base_test_dir().join("array_self_ref_reassign");
+        let source_code = std::fs::read_to_string(dir.join("array_self_ref_reassign.inf"))
+            .expect("Failed to read array_self_ref_reassign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_self_ref_reassign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_self_ref_reassign");
+    }
+
+    #[test]
+    #[ignore]
     fn regenerate_struct_params_wasm() {
         let dir = base_test_dir().join("struct_params");
         let source_code = std::fs::read_to_string(dir.join("struct_params.inf"))
@@ -8240,10 +8595,12 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_struct_nondet_wasm() {
+        // Uses wasm_codegen_no_analysis: the fixture drives struct uzumaki from a
+        // top-level `forall`, which analysis rejects (non-det outside a spec).
         let dir = base_test_dir().join("struct_nondet");
         let source_code = std::fs::read_to_string(dir.join("struct_nondet.inf"))
             .expect("Failed to read struct_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("struct_nondet.wasm");
@@ -8255,6 +8612,72 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_narrow_uzumaki_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("narrow_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("narrow_uzumaki.inf"))
+            .expect("Failed to read narrow_uzumaki.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("narrow_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "narrow_uzumaki");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_uzumaki_domain_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("enum_uzumaki_domain");
+        let source_code = std::fs::read_to_string(dir.join("enum_uzumaki_domain.inf"))
+            .expect("Failed to read enum_uzumaki_domain.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_uzumaki_domain.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_uzumaki_domain");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_u32_uzumaki_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
+        let dir = base_test_dir().join("u32_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("u32_uzumaki.inf"))
+            .expect("Failed to read u32_uzumaki.inf");
+        let actual = wasm_codegen_no_analysis(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("u32_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "u32_uzumaki");
     }
 
     #[test]

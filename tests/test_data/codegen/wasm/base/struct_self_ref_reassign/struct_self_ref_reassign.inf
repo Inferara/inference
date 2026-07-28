@@ -1,0 +1,48 @@
+struct P { x: i64; y: i64; }
+
+pub fn swap_y() -> i64 {
+    let mut p: P = P { x: 111, y: 222 };
+    p = P { x: p.y, y: p.x };
+    return p.y;
+}
+
+pub fn expr_x() -> i64 {
+    let mut p: P = P { x: 100, y: 7 };
+    p = P { x: p.x + p.y, y: p.x - p.y };
+    return p.x;
+}
+
+pub fn expr_y() -> i64 {
+    let mut p: P = P { x: 100, y: 7 };
+    p = P { x: p.x + p.y, y: p.x - p.y };
+    return p.y;
+}
+
+struct Q { a: i64; b: i64; c: i64; }
+
+pub fn rotate_a() -> i64 {
+    let mut q: Q = Q { a: 1, b: 2, c: 3 };
+    q = Q { a: q.c, b: q.a, c: q.b };
+    return q.a;
+}
+
+pub fn rotate_b() -> i64 {
+    let mut q: Q = Q { a: 1, b: 2, c: 3 };
+    q = Q { a: q.c, b: q.a, c: q.b };
+    return q.b;
+}
+
+pub fn rotate_c() -> i64 {
+    let mut q: Q = Q { a: 1, b: 2, c: 3 };
+    q = Q { a: q.c, b: q.a, c: q.b };
+    return q.c;
+}
+
+struct Inner { a: i64; b: i64; }
+struct Outer { p: Inner; q: Inner; }
+
+pub fn nested_swap() -> i64 {
+    let mut o: Outer = Outer { p: Inner { a: 1, b: 2 }, q: Inner { a: 3, b: 4 } };
+    o = Outer { p: o.q, q: o.p };
+    return o.q.a;
+}

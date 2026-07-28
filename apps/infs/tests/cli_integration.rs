@@ -2739,10 +2739,10 @@ fn build_compiles_translatable_nondet_features() {
 /// `unique` block is rejected. `unique` has no `hassert` encoding, so codegen
 /// aborts with a fatal `P002` diagnostic. Pins that `infs` propagates a fatal
 /// hassert diagnostic from `infc` to stderr with a non-zero exit, and that no
-/// partial `.v` artifact is left behind.
+/// partial `.v` or `.wasm` artifact is left behind.
 ///
 /// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
-/// rejection, and no `.v` is written.
+/// rejection, and neither a `.v` nor a `.wasm` is written.
 #[test]
 fn build_v_rejects_unique_block_with_p002() {
     let Some(infc_path) = require_infc() else {
@@ -2765,12 +2765,53 @@ fn build_v_rejects_unique_block_with_p002() {
         .failure()
         .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
 
-    // A fatal codegen error must leave no partial proof artifact behind.
+    // A fatal codegen error must leave no partial artifact behind.
     let v_output = temp.child("out").child("nondet_unique.v");
+    let wasm_output = temp.child("out").child("nondet_unique.wasm");
     assert!(
         !v_output.path().exists(),
-        "no .v must be written when proof-mode codegen fails: {:?}",
+        "a rejected proof-mode build must write no V file, found: {:?}",
         v_output.path()
+    );
+    assert!(
+        !wasm_output.path().exists(),
+        "a rejected proof-mode build must write no WASM file, found: {:?}",
+        wasm_output.path()
+    );
+}
+
+/// QA: TC-13.8 - Verify the same `unique`-only fixture compiles in compile mode
+/// (no `-v`): the proof-only spec is stripped and the executable `main` is
+/// compiled, so the mode boundary — rejected under `-v`, accepted without it —
+/// is pinned.
+///
+/// **Expected behavior**: Exit code 0, WASM binary generated.
+#[test]
+fn build_compiles_unique_block_without_v() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique.inf");
+    let dest = temp.child("nondet_unique.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let wasm_output = temp.child("out").child("nondet_unique.wasm");
+    assert!(
+        wasm_output.path().exists(),
+        "Expected WASM file at: {:?}",
+        wasm_output.path()
     );
 }
 
@@ -3305,7 +3346,7 @@ fn wasm_opt_rejects_leaked_verification_construct() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("forall").and(predicate::str::contains("spec")));
+        .stderr(predicate::str::contains("'forall' block").and(predicate::str::contains("spec")));
 
     assert!(
         optimizer_invocations(log.path()).is_empty(),
@@ -3314,6 +3355,49 @@ fn wasm_opt_rejects_leaked_verification_construct() {
     assert!(
         !temp.child("out").child("main.wasm").path().exists(),
         "no artifact is written when analysis rejects the program before codegen"
+    );
+}
+
+/// A non-deterministic block in an *imported* module file (not just the entry
+/// file) is rejected end-to-end through project-mode `infs build`: analysis rule
+/// A042 fires on the `forall` in `src/lib.inf`, the rendered diagnostic names the
+/// offending module by its file label (`lib`), and no artifact is written. This
+/// pins that the whole import closure — not only `src/main.inf` — is held to the
+/// rule.
+#[test]
+fn build_rejects_nondet_in_imported_module_file() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "use lib;\n\npub fn main() -> i32 {\n    return lib::helper();\n}\n",
+        "",
+    );
+    temp.child("src")
+        .child("lib.inf")
+        .write_str(
+            "pub fn helper() -> i32 {\n    forall {\n        let x: i32 = 1;\n    }\n    return 7;\n}\n",
+        )
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("A042")
+            .and(predicate::str::contains("'forall' block"))
+            .and(predicate::str::contains("lib")),
+    );
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "no artifact must be written when analysis rejects the build"
     );
 }
 

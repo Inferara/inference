@@ -405,6 +405,14 @@
   )
   (func $gcd_u8 (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
     (local $zero i32) (local $x i32) (local $y i32) (local $t i32)
+    local.get $a
+    i32.const 255
+    i32.and
+    local.set $a
+    local.get $b
+    i32.const 255
+    i32.and
+    local.set $b
     i32.const 0
     local.set $zero
     local.get $a
@@ -435,6 +443,12 @@
   )
   (func $fibonacci_i16 (;9;) (type 9) (param $n i32) (result i32)
     (local $zero i32) (local $one i32) (local $a i32) (local $b i32) (local $i i32) (local $next i32)
+    local.get $n
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
+    local.set $n
     i32.const 0
     local.set $zero
     i32.const 1
@@ -495,6 +509,14 @@
   )
   (func $pow_u16 (;10;) (type 10) (param $base i32) (param $exp i32) (result i32)
     (local $zero i32) (local $one i32) (local $result i32) (local $b i32) (local $e i32)
+    local.get $base
+    i32.const 65535
+    i32.and
+    local.set $base
+    local.get $exp
+    i32.const 65535
+    i32.and
+    local.set $exp
     i32.const 0
     local.set $zero
     i32.const 1
@@ -535,6 +557,8 @@
         local.set $b
         local.get $e
         local.get $one
+        i32.const 15
+        i32.and
         i32.shr_u
         local.set $e
         br 0 (;@2;)

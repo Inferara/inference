@@ -22,8 +22,10 @@ pub mod missing_return;
 pub mod nested_compound_depth;
 pub mod nondet_outside_spec;
 pub mod recursion;
+pub mod reserved_export_name;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
+pub mod shift_count_out_of_range;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
 pub mod struct_uzumaki_as_argument;
@@ -62,8 +64,10 @@ use missing_return::MissingReturn;
 use nested_compound_depth::NestedCompoundDepth;
 use nondet_outside_spec::NonDetOutsideSpec;
 use recursion::RecursionDetected;
+use reserved_export_name::ReservedExportName;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
+use shift_count_out_of_range::ShiftCountOutOfRange;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
 use struct_uzumaki_as_argument::StructUzumakiAsArgument;
@@ -126,5 +130,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnCompoundArrayElement,
         &DuplicateLocalName,
         &NonDetOutsideSpec,
+        &ReservedExportName,
+        &ShiftCountOutOfRange,
     ]
 }

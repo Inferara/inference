@@ -1,0 +1,38 @@
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+enum One {
+    Only,
+}
+
+struct Item {
+    status: Color;
+    value: i32;
+}
+
+pub fn uzumaki_enum_scalar() {
+    forall {
+        let c: Color = @;
+    }
+}
+
+pub fn uzumaki_enum_one() {
+    forall {
+        let o: One = @;
+    }
+}
+
+pub fn uzumaki_enum_array() {
+    forall {
+        let a: [Color; 2] = @;
+    }
+}
+
+pub fn uzumaki_enum_struct_field() {
+    forall {
+        let it: Item = @;
+    }
+}

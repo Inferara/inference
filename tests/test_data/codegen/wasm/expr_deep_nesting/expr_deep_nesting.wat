@@ -54,14 +54,20 @@
     local.get $a
     local.get $b
     i32.gt_s
-    local.get $c
-    local.get $d
-    i32.lt_s
-    local.get $a
-    local.get $c
-    i32.eq
-    i32.or
-    i32.and
+    if (result i32) ;; label = @1
+      local.get $c
+      local.get $d
+      i32.lt_s
+      if (result i32) ;; label = @2
+        i32.const 1
+      else
+        local.get $a
+        local.get $c
+        i32.eq
+      end
+    else
+      i32.const 0
+    end
     return
     unreachable
   )

@@ -114,6 +114,26 @@ Typed AST (TypedContext)
    mandatory because imported functions occupy the lowest indices and the section ordering
    is enforced by the binary format.
 
+### Entry Parameter Normalization
+
+An exported function is the module's WebAssembly ABI boundary, where a host may pass any
+i32 bit pattern for a narrow scalar parameter. Each exported function (an entry-file
+top-level `pub fn`, including `main`) canonicalizes its narrow parameters in the entry
+prologue before the body runs: `u8`/`u16` take the argument's low bits (zero-extend),
+`i8`/`i16` sign-extend from the low bits, and `bool` normalizes by truthiness (`p != 0`, so
+any nonzero host value is `true`). In-language callers always pass canonical values and each
+normalization is a fixed point on them, so in-domain behavior is unchanged and non-exported
+functions are byte-identical. Enum-typed and compound parameters are not normalized.
+
+### Shift Counts
+
+A shift count is taken modulo the operand type's bit width. WebAssembly's `ishl`/`ishr`
+already mask the count modulo 32/64, which is exactly the type width for `i32`/`u32`/`i64`/
+`u64`, so those types emit nothing extra. Narrow types (`i8`/`u8`/`i16`/`u16`) promote to
+i32, where wasm's mod-32 mask would produce a non-monotonic cliff, so a narrow-typed shift
+masks the count (`& 7` / `& 15`) before the wasm shift, extending wasm's own mod-width
+semantics to the declared type. The mask applies to both `<<` and `>>`.
+
 ## Non-Deterministic Extensions
 
 Inference supports non-deterministic constructs for formal verification through custom WebAssembly instructions in the `0xfc` prefix space, emitted via `wasm_encoder::Function::raw()`:
@@ -131,6 +151,29 @@ pub fn example() -> i32 {
 **Custom opcodes:**
 - `i32.uzumaki` → `0xfc 0x31`
 - `i64.uzumaki` → `0xfc 0x32`
+
+The draw always produces a full-width value, so a declared type narrower than
+`i32`/`i64` gets a domain-constraint sequence emitted immediately after the
+draw, mapping the raw draw onto the type's value set:
+
+| Declared type | Emitted after the draw | Resulting domain |
+|---|---|---|
+| `i8`, `i16` | `shl <32-width>`, `shr_s <32-width>` (sign-narrow) | full signed sub-range |
+| `u8`, `u16` | `and <width bitmask>` | full unsigned sub-range |
+| `bool` | `and 1` | `{0, 1}` |
+| enum, N ≥ 1 variants | `rem_u N` | tags `0..N-1` |
+| enum, 0 variants | none (uninhabited; `rem_u 0` would trap) | — |
+| `i32`, `u32`, `i64`, `u64` | none | full 32/64-bit width |
+
+This reuses the same mask / `shl`+`shr_s` shapes used to normalize sub-i32
+arithmetic results at their producing instruction (binops, unary negation,
+unary bitwise-not), rather than `i32.extend8_s`/`extend16_s`, which the
+`wasm-to-v` translator does not implement. A compound (array/struct) uzumaki
+leaf gets the same `bool`/enum constraint before its store; narrow-int
+compound leaves need no constraint, since the element's `store8`/`store16`
+truncation plus its sign/zero-extending typed load already realize the
+domain. See [docs/local-variables-lowering.md](docs/local-variables-lowering.md)
+and [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
 
 ### Forall Block
 
