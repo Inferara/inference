@@ -23,7 +23,19 @@
 use std::fmt::{self, Display, Formatter};
 
 use inference_ast::nodes::Location;
+use inference_type_checker::errors::TypeMismatchContext;
 use thiserror::Error;
+
+/// The note line appended to a range error, explaining where the literal's type
+/// came from, or nothing when the literal kept the `i32` default.
+fn literal_type_source_note(type_name: &str, source: Option<&TypeMismatchContext>) -> String {
+    source.map_or_else(String::new, |source| {
+        format!(
+            "\nnote: the literal is typed `{type_name}` {}",
+            source.literal_typing_reason()
+        )
+    })
+}
 
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,12 +139,19 @@ pub enum AnalysisDiagnostic {
     #[error("array index must be a 32-bit integer type, found `{found}`")]
     ArrayIndex64Bit { found: String, location: Location },
 
-    #[error("literal `{value}` is out of range for type `{type_name}` (valid range: {min}..={max})")]
+    /// The literal's type is usually written somewhere the literal is not — the
+    /// annotation, parameter or return type of the position it appears in — so
+    /// the note names that position.
+    #[error(
+        "literal `{value}` is out of range for type `{type_name}` (valid range: {min}..={max}){}",
+        literal_type_source_note(type_name, type_source.as_ref())
+    )]
     LiteralOutOfRange {
         value: String,
         type_name: String,
         min: i128,
         max: i128,
+        type_source: Option<TypeMismatchContext>,
         location: Location,
     },
 
@@ -620,6 +639,44 @@ mod tests {
             end_line: 1,
             end_column: 10,
         }
+    }
+
+    /// A literal's type is written where the literal is not, so the range
+    /// error carries the position that supplied it.
+    #[test]
+    fn display_literal_out_of_range_note() {
+        let with_source = AnalysisDiagnostic::LiteralOutOfRange {
+            value: "300".to_string(),
+            type_name: "u8".to_string(),
+            min: 0,
+            max: 255,
+            type_source: Some(TypeMismatchContext::Return),
+            location: test_location(),
+        };
+        assert_eq!(
+            with_source.to_string(),
+            "literal `300` is out of range for type `u8` (valid range: 0..=255)\n\
+             note: the literal is typed `u8` by the type expected in return statement"
+        );
+    }
+
+    /// A literal nothing typed has no position to name, and the message is the
+    /// one it has always been.
+    #[test]
+    fn display_literal_out_of_range_without_a_source() {
+        let without_source = AnalysisDiagnostic::LiteralOutOfRange {
+            value: "300".to_string(),
+            type_name: "u8".to_string(),
+            min: 0,
+            max: 255,
+            type_source: None,
+            location: test_location(),
+        };
+        assert_eq!(
+            without_source.to_string(),
+            "literal `300` is out of range for type `u8` (valid range: 0..=255)"
+        );
+        assert!(!without_source.to_string().contains("note:"));
     }
 
     #[test]

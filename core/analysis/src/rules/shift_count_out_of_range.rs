@@ -12,12 +12,15 @@
 //! as opaque identifiers and are not detected. A count wrapped in parentheses or
 //! written as a negated literal (`x << (33)`, `x >> -1`) is still resolved.
 //!
-//! Reachability: a literal count currently type-checks only for `i32`-typed
-//! shifts — bare literals are `i32` and binary operands do not coerce — but the
-//! check reads the operand width from the type, so it extends automatically if a
-//! narrow-typed literal count ever becomes expressible. Unparseable or
-//! out-of-`i128`-range literals are left to A022, which owns that diagnostic;
-//! this rule skips them to avoid double-reporting.
+//! Reachability: every width is covered in practice, not only in principle. A
+//! literal shift count takes the type of the operand being shifted, so
+//! `x << 64` on an `i64` and `x << 8` on a `u8` reach this rule the same way
+//! `x << 32` on an `i32` does; where both operands are literals, the type
+//! expected of the whole shift is what fixes the width (`let x: i64 = 1 << 64;`
+//! is out of range, `1 << 40` is not). Reading the width from the recorded
+//! operand type — rather than assuming 32 — is what makes that automatic.
+//! Unparseable or out-of-`i128`-range literals are left to A022, which owns that
+//! diagnostic; this rule skips them to avoid double-reporting.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{ExprId, NodeId};

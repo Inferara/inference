@@ -1,0 +1,66 @@
+// Every position the issue reported a bare literal failing in, plus the
+// transparent forms an expected type descends through. None of these
+// functions declares a helper binding for its constants.
+
+fn scale(v: i64, factor: i64) -> i64 { return v * factor; }
+
+fn take_u64(v: u64) -> u64 { return v; }
+
+pub fn shift_by_literal(a: i64) -> i64 { return a << 16; }
+
+pub fn add_literal(a: i64) -> i64 { return a + 65536; }
+
+pub fn compare_with_literal(a: i64) -> i64 {
+    if a < 65536 {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn call_with_literal(a: i64) -> i64 { return scale(a, 65536); }
+
+pub fn return_literal() -> i64 { return 65536; }
+
+pub fn return_glued_negative() -> i64 { return -42; }
+
+pub fn return_spaced_negation() -> i64 { return - 42; }
+
+pub fn parenthesized_literal() -> i64 { return (65536); }
+
+pub fn complement_literal() -> i64 { return ~0; }
+
+pub fn shift_of_two_literals() -> i64 { return 1 << 40; }
+
+pub fn nested_literal_expression() -> i64 { return -(65536 + (1 << 40)); }
+
+pub fn max_u64_argument() -> u64 { return take_u64(18446744073709551615); }
+
+pub fn narrow_peer(x: u8) -> u8 { return x + 1; }
+
+// A Q16.16 fixed-point kernel over i64: the scale, the rounding term and
+// every shift count are bare literals.
+
+pub fn fixed_one() -> i64 { return 1 << 16; }
+
+pub fn fixed_from_int(n: i64) -> i64 { return n << 16; }
+
+pub fn fixed_mul(a: i64, b: i64) -> i64 { return (a * b) >> 16; }
+
+pub fn fixed_div(a: i64, b: i64) -> i64 { return (a << 16) / b; }
+
+pub fn fixed_round_to_int(x: i64) -> i64 { return (x + 32768) >> 16; }
+
+// Unsigned and narrow operations, where the literal's width decides which
+// opcode is selected: a signed reading of these would compute differently.
+
+pub fn udiv_right(a: u64) -> u64 { return a / 3; }
+
+pub fn udiv_left(a: u64) -> u64 { return 1000 / a; }
+
+pub fn ucmp_left(a: u64) -> bool { return 1000 > a; }
+
+pub fn ushr_max(a: u64) -> u64 { return 18446744073709551615 >> a; }
+
+pub fn narrow_div_left(x: u8) -> u8 { return 200 / x; }
+
+pub fn narrow_wrap_const() -> u8 { let x: u8 = 200 + 100; return x; }

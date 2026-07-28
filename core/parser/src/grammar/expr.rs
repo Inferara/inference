@@ -14,6 +14,7 @@
 //! `_literal`, `_name` arms only dispatch.
 
 use crate::grammar::types;
+use crate::lexer::is_ident_start;
 use crate::parser::{CompletedMarker, Parser};
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
@@ -243,12 +244,88 @@ fn atom(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
     Some(cm)
 }
 
+/// The diagnostic for a type suffix glued to an integer literal (`16i64`).
+///
+/// Inference has no literal suffixes: an integer literal takes its type from the
+/// context it appears in, so a suffix is never the fix. The message names the
+/// offending spelling and points at the one place a type can be pinned when no
+/// typed value is nearby — the binding — with a worked example in a real type,
+/// which stays correct whether or not the suffix names one.
+fn suffix_message(suffix: &str) -> String {
+    format!(
+        "integer literals do not take a type suffix — remove `{suffix}`; an integer literal \
+         takes its type from where it is used. If there is no value of that type nearby, name \
+         the type at the binding: `let n: i64 = 16;`"
+    )
+}
+
+/// The diagnostic for any other tail glued to an integer literal: a digit
+/// separator (`1_000`), a radix prefix (`0x1F`, `0b01`, `0o17`), an exponent
+/// (`1e10`), or plain adjacent garbage (`16true`).
+///
+/// These lex as a `Number` plus an identifier, so without this they would parse
+/// as a *different, valid-looking* number — `1_000` as `1` — which is the trap
+/// worth a dedicated message. The tail is named first so the message stays true
+/// for the spellings the trailing enumeration does not describe.
+fn non_decimal_message(tail: &str) -> String {
+    format!(
+        "`{tail}` cannot follow the digits of a number literal; Inference numbers are decimal \
+         digits only — no `_` separators and no `0x`/`0b`/`0o` prefixes"
+    )
+}
+
+/// Whether `text` starts an identifier run — that is, whether the lexer's
+/// identifier scanner produced it.
+///
+/// The number scanner stops at the first non-digit and the identifier scanner
+/// takes over, so a literal written as one word (`16i64`, `1_000`, `0x1F`)
+/// arrives as a `Number` glued to exactly such a token. Only the first byte is
+/// examined because [`is_ident_start`] is what decided the split; the rest of the
+/// token is word characters by construction.
+fn is_identifier_run(text: &str) -> bool {
+    text.as_bytes().first().is_some_and(|&b| is_ident_start(b))
+}
+
+/// Whether `text` is shaped like an integer type suffix: an optional `_`, then
+/// `i` or `u`, then anything.
+///
+/// Deliberately wider than the eight integer type names, so `5i128`, `5usize`
+/// and `5u` all get the same message as `5i64`. Narrowing this to the real names
+/// would route `i128` to [`non_decimal_message`], implying `i64` is a recognized
+/// suffix while `i128` is garbage; narrowing it to `_?[iu][0-9]+` would do the
+/// same to `usize`, the likeliest spelling for someone arriving from Rust — and
+/// would tell that author about separators and radix prefixes they did not
+/// write. Every spelling here is rejected identically, so one message serves
+/// them all. The remaining tails start with neither `i` nor `u` (`_000`, `x1F`,
+/// `b01`, `o17`, `e10`), so nothing is misrouted the other way.
+fn is_integer_suffix(text: &str) -> bool {
+    let text = text.strip_prefix('_').unwrap_or(text);
+    text.starts_with(['i', 'u'])
+}
+
 /// Wraps a `Number` token in a `number_literal` node
 /// (`number_literal`). A leading `-` glued to the digits is part of the token, so
 /// `-42` is a single literal while `- 42` is a prefix-unary expression.
+///
+/// A `Number` glued to an identifier run is one malformed literal the lexer split
+/// in two (`16i64`, `1_000`, `0x1F`). The tail is consumed into the literal node
+/// with a single teaching diagnostic: consuming it is what keeps a stray token
+/// out of expression position, where it would cascade into "expected Semi" plus
+/// "expected an expression". The `Number` token still carries the digits alone,
+/// which is what lowering stores as the literal's value.
 pub(crate) fn number_literal(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(SyntaxKind::Number);
+    let tail = p.current_text();
+    if p.prev_joint() && is_identifier_run(tail) {
+        let message = if is_integer_suffix(tail) {
+            suffix_message(tail)
+        } else {
+            non_decimal_message(tail)
+        };
+        p.error(message);
+        p.bump_any();
+    }
     m.complete(p, SyntaxKind::NumberLiteral)
 }
 

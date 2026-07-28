@@ -23,8 +23,12 @@ use crate::syntax_kind::SyntaxKind;
 ///
 /// Stores the indices of the meaningful (non-trivia) tokens in the original
 /// stream, so the parser can look ahead by meaningful position while the tree
-/// builder still has the original positions for trivia re-attachment.
+/// builder still has the original positions for trivia re-attachment. The source
+/// travels with the tokens so a rule can also look ahead by *spelling*, which the
+/// diagnostics that quote what the author wrote need.
 pub struct Input<'t> {
+    /// The source the tokens were lexed from, for [`Input::text`].
+    src: &'t str,
     /// The full, lossless token stream (trivia included).
     tokens: &'t [Token],
     /// Original-stream indices of the non-trivia tokens, in order.
@@ -35,13 +39,22 @@ pub struct Input<'t> {
 }
 
 impl<'t> Input<'t> {
-    /// Builds a trivia-free view over `tokens`.
+    /// Builds a trivia-free view over `tokens`, which were lexed from `src`.
     ///
     /// `tokens` is expected to be a full lexer stream terminated by an
     /// [`SyntaxKind::Eof`] sentinel; the `Eof` is meaningful and acts as the
     /// end-of-stream marker for lookahead.
     #[must_use]
-    pub fn new(tokens: &'t [Token]) -> Input<'t> {
+    pub fn new(src: &'t str, tokens: &'t [Token]) -> Input<'t> {
+        // The two arguments must describe the same source, or every span and
+        // spelling read through this view is wrong. `Lexer::run` places the
+        // zero-width `Eof` sentinel at `src.len()`, which pins the pairing.
+        debug_assert_eq!(
+            tokens.last().map(|t| t.loc.offset_start),
+            Some(src.len() as u32),
+            "tokens must be the output of tokenize(src)"
+        );
+
         let mut meaningful = Vec::new();
         for (i, token) in tokens.iter().enumerate() {
             if !token.kind.is_trivia() {
@@ -66,6 +79,7 @@ impl<'t> Input<'t> {
         }
 
         Input {
+            src,
             tokens,
             meaningful,
             joint,
@@ -117,6 +131,16 @@ impl<'t> Input<'t> {
     pub fn token(&self, pos: usize) -> Option<&Token> {
         self.meaningful.get(pos).map(|&orig| &self.tokens[orig])
     }
+
+    /// The source spelling of the meaningful token at `pos`, or `""` past the end
+    /// of the stream (where the zero-width `Eof` sentinel also spells `""`).
+    #[must_use]
+    pub fn text(&self, pos: usize) -> &'t str {
+        match self.token(pos) {
+            Some(token) => token.text(self.src),
+            None => "",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -127,7 +151,7 @@ mod tests {
     #[test]
     fn skips_trivia_in_lookahead() {
         let toks = tokenize("a  +\t b");
-        let input = Input::new(&toks);
+        let input = Input::new("a  +\t b", &toks);
         assert_eq!(input.kind(0), SyntaxKind::Ident);
         assert_eq!(input.kind(1), SyntaxKind::Plus);
         assert_eq!(input.kind(2), SyntaxKind::Ident);
@@ -139,7 +163,7 @@ mod tests {
     #[test]
     fn nth_offsets_meaningful_positions() {
         let toks = tokenize("a + b");
-        let input = Input::new(&toks);
+        let input = Input::new("a + b", &toks);
         assert_eq!(input.nth(0, 0), SyntaxKind::Ident);
         assert_eq!(input.nth(0, 1), SyntaxKind::Plus);
         assert_eq!(input.nth(0, 2), SyntaxKind::Ident);
@@ -149,7 +173,7 @@ mod tests {
     #[test]
     fn colon_colon_glued_is_joint() {
         let toks = tokenize("a::b");
-        let input = Input::new(&toks);
+        let input = Input::new("a::b", &toks);
         // Tokens: Ident(0) ColonColon(1) Ident(2) Eof(3).
         assert_eq!(input.kind(1), SyntaxKind::ColonColon);
         assert!(input.is_joint(0), "a abuts ::");
@@ -159,7 +183,7 @@ mod tests {
     #[test]
     fn spaced_colon_colon_is_not_joint() {
         let toks = tokenize("a :: b");
-        let input = Input::new(&toks);
+        let input = Input::new("a :: b", &toks);
         assert_eq!(input.kind(1), SyntaxKind::ColonColon);
         assert!(!input.is_joint(0), "a does not abut :: across a space");
         assert!(!input.is_joint(1), ":: does not abut b across a space");
@@ -168,7 +192,7 @@ mod tests {
     #[test]
     fn type_argument_tick_is_joint() {
         let toks = tokenize("Vec i32'");
-        let input = Input::new(&toks);
+        let input = Input::new("Vec i32'", &toks);
         // Meaningful: Ident(Vec) I32Kw Tick Eof.
         assert_eq!(input.kind(0), SyntaxKind::Ident);
         assert_eq!(input.kind(1), SyntaxKind::I32Kw);
@@ -180,7 +204,7 @@ mod tests {
     #[test]
     fn comment_between_tokens_breaks_join() {
         let toks = tokenize("a// c\nb");
-        let input = Input::new(&toks);
+        let input = Input::new("a// c\nb", &toks);
         assert_eq!(input.kind(0), SyntaxKind::Ident);
         assert_eq!(input.kind(1), SyntaxKind::Ident);
         assert!(
@@ -192,7 +216,7 @@ mod tests {
     #[test]
     fn empty_source_is_just_eof() {
         let toks = tokenize("");
-        let input = Input::new(&toks);
+        let input = Input::new("", &toks);
         assert_eq!(input.len(), 1);
         assert_eq!(input.kind(0), SyntaxKind::Eof);
         assert!(!input.is_joint(0));

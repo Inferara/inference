@@ -1192,7 +1192,19 @@ impl<'s> Lowering<'s> {
                 })
             }
             SyntaxKind::NumberLiteral => {
-                let value = node.text(self.src).to_string();
+                // Read the `Number` token, not the node span: a malformed literal
+                // (`16i64`, `1_000`) also holds the glued tail the grammar
+                // consumed with its diagnostic, and the value must stay the
+                // digits alone so the range check and codegen can parse it.
+                let value = match node.child_token(SyntaxKind::Number) {
+                    Some(token) => token.text(self.src).to_string(),
+                    // `number_literal` always bumps a `Number` first, so this
+                    // arm is unreachable; lowering stays total regardless. The
+                    // placeholder is `"0"` rather than `""` because every
+                    // consumer parses this string, and an unparseable one is
+                    // reported as "out of range" or trips a codegen invariant.
+                    None => "0".to_string(),
+                };
                 self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::NumberLiteral { value },
@@ -2886,6 +2898,82 @@ mod tests {
             Expr::NumberLiteral { value } => assert_eq!(value, "-42"),
             other => panic!("expected number literal, got {other:?}"),
         }
+    }
+
+    /// A malformed literal's node spans the tail the grammar consumed alongside
+    /// the digits (`16i64`), so the value must come from the `Number` token, not
+    /// the node. A poisoned `"16i64"` fails every downstream `parse` of it: the
+    /// range check reports a spurious "out of range", and codegen and the spec
+    /// translator hit their unparseable-literal invariants on any path that runs
+    /// past a recovered parse.
+    #[test]
+    fn lowers_malformed_number_literals_to_digits_only() {
+        for (src, expected) in [
+            ("fn f() { 16i64; }", "16"),
+            ("fn f() { 16_i64; }", "16"),
+            ("fn f() { 5i128; }", "5"),
+            ("fn f() { 1_000; }", "1"),
+            ("fn f() { 0x1F; }", "0"),
+            ("fn f() { 0b01; }", "0"),
+            ("fn f() { 5usize; }", "5"),
+            (
+                "fn f() { -9223372036854775808i64; }",
+                "-9223372036854775808",
+            ),
+        ] {
+            let arena = parse(src).arena;
+            match single_expr(&arena) {
+                Expr::NumberLiteral { value } => assert_eq!(value, expected, "for {src:?}"),
+                other => panic!("expected number literal for {src:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Spec bodies lower through the same expression path, and are where a
+    /// poisoned value would do the most damage: the spec translator turns
+    /// literals into constants inside proof obligations, so a wrong constant
+    /// makes the proof about a different program than the one that runs. The
+    /// `forall`/`assume` shape is where such a literal actually appears.
+    #[test]
+    fn lowers_malformed_literals_in_a_spec_body_to_digits_only() {
+        for (src, expected) in [
+            (
+                "spec S { fn p(a: i64) -> bool { return a > 1_000; } }",
+                vec!["1"],
+            ),
+            (
+                "spec S { fn p() forall { let n: i64 = @; \
+                 assume { assert(n > 16i64); } assert(n > 0); } }",
+                vec!["16", "0"],
+            ),
+        ] {
+            let arena = parse(src).arena;
+            let literals: Vec<&str> = arena
+                .exprs
+                .iter()
+                .filter_map(|(_, expr)| match &expr.kind {
+                    Expr::NumberLiteral { value } => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(literals, expected, "for {src:?}");
+        }
+    }
+
+    /// An array *size* is a `number_literal` too, so the same truncation applies
+    /// — here it silently shortens a type rather than a value.
+    #[test]
+    fn lowers_malformed_array_size_to_digits_only() {
+        let arena = parse("fn f() { let x: [i32; 1_0] = a; }").arena;
+        let literals: Vec<&str> = arena
+            .exprs
+            .iter()
+            .filter_map(|(_, expr)| match &expr.kind {
+                Expr::NumberLiteral { value } => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(literals, vec!["1"]);
     }
 
     #[test]

@@ -3,9 +3,16 @@
 //! For example, `let x: u8 = 256` or `let y: i8 = 200`.
 //! Uses type information from the typed context to determine the target type
 //! and validate the literal value fits within its range.
+//!
+//! A literal takes its type from the position it appears in, which is usually
+//! not where the literal is written — a `u8` parameter three lines up is enough
+//! to put a literal out of range. The diagnostic therefore also carries the
+//! position that supplied the type, so the report says why this literal is being
+//! measured against this type.
 
 use inference_ast::ids::{ExprId, NodeId};
 use inference_ast::nodes::Expr;
+use inference_type_checker::errors::TypeMismatchContext;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 
@@ -45,7 +52,14 @@ fn check_number_literal(
     if let Expr::NumberLiteral { value } = &arena[expr_id].kind
         && let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id))
     {
-        validate_literal_range(value, module_path, &ti.kind, arena[expr_id].location, errors);
+        validate_literal_range(
+            value,
+            module_path,
+            &ti.kind,
+            ctx.literal_type_source(expr_id),
+            arena[expr_id].location,
+            errors,
+        );
     }
 }
 
@@ -53,6 +67,7 @@ fn validate_literal_range(
     value: &str,
     module_path: &[String],
     target_kind: &TypeInfoKind,
+    type_source: Option<&TypeMismatchContext>,
     location: inference_ast::nodes::Location,
     errors: &mut Vec<LabeledDiagnostic>,
 ) {
@@ -81,6 +96,7 @@ fn validate_literal_range(
                 type_name: type_name.to_string(),
                 min,
                 max,
+                type_source: type_source.cloned(),
                 location,
             },
         ));

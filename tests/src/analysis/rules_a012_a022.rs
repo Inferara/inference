@@ -709,6 +709,22 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a022_struct_field_literal_out_of_range() {
+        // A struct-literal field is a position where a literal takes the
+        // declared field type, so the range check must follow it there too.
+        let source =
+            r#"struct P { x: u8; } fn test() -> i32 { let p: P = P { x: 300 }; return 0; }"#;
+        let errors = expect_errors(source);
+        let has_a022 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+        assert!(
+            has_a022,
+            "expected LiteralOutOfRange for struct-literal field, got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a022_assign_literal_out_of_range() {
         let source = r#"fn test() -> i32 { let mut x: u8 = 0; x = 256; return 0; }"#;
         let errors = expect_errors(source);
@@ -719,6 +735,127 @@ mod analysis_rules_tests {
             has_a022,
             "expected LiteralOutOfRange for assignment, got: {errors:?}"
         );
+    }
+
+    /// The declared return type is what a bare literal operand denotes, so the
+    /// range check follows it into the `return` position.
+    #[test]
+    fn a022_return_literal_out_of_range() {
+        let source = r#"fn test() -> u8 { return 300; }"#;
+        let errors = expect_errors(source);
+        let has_a022 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+        assert!(
+            has_a022,
+            "expected LiteralOutOfRange for return operand, got: {errors:?}"
+        );
+    }
+
+    /// A literal operand takes its type from its peer, so a value that does not
+    /// fit the peer's width is out of range even though nothing declared the
+    /// literal's type.
+    #[test]
+    fn a022_peer_typed_operand_out_of_range() {
+        let source = r#"fn test(x: u8) -> u8 { return x + 300; }"#;
+        let errors = expect_errors(source);
+        let has_a022 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+        assert!(
+            has_a022,
+            "expected LiteralOutOfRange for peer-typed operand, got: {errors:?}"
+        );
+    }
+
+    /// A call argument takes the parameter's declared type, so the range check
+    /// follows it there as well.
+    #[test]
+    fn a022_call_argument_out_of_range() {
+        let source = r#"fn take(v: u8) -> u8 { return v; } fn test() -> u8 { return take(300); }"#;
+        let errors = expect_errors(source);
+        let has_a022 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+        assert!(
+            has_a022,
+            "expected LiteralOutOfRange for call argument, got: {errors:?}"
+        );
+    }
+
+    /// The widened type is equally load-bearing in the accepting direction: a
+    /// value that overflows `i32` is in range once the position types it `i64`.
+    #[test]
+    fn a022_accepts_a_wide_literal_the_position_types_i64() {
+        let source = r#"fn test() -> i64 { return 4294967296; }"#;
+        let has_a022 = match analyze(source) {
+            Ok(_) => false,
+            Err(errors) => errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. })),
+        };
+        assert!(
+            !has_a022,
+            "a literal typed `i64` by its position is in range"
+        );
+    }
+
+    /// Every position that fixes a literal's type also decides whether its
+    /// value fits, so the range check must reach all of them. One row per
+    /// position, each carrying a value that is out of range for `u8`.
+    #[test]
+    fn a022_fires_in_every_contextual_position() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "member assignment",
+                "struct P { x: u8; } fn test() -> i32 { let mut p: P = P { x: 0 }; p.x = 300; return 0; }",
+            ),
+            (
+                "index assignment",
+                "fn test() -> i32 { let mut a: [u8; 2] = [0, 0]; a[0] = 300; return 0; }",
+            ),
+            (
+                "nested array element",
+                "fn test() -> i32 { let g: [[u8; 2]; 2] = [[300, 0], [0, 0]]; return 0; }",
+            ),
+            (
+                "parenthesized",
+                "fn test() -> i32 { let x: u8 = (300); return 0; }",
+            ),
+            (
+                "bitwise complement",
+                "fn test() -> i32 { let x: u8 = ~300; return 0; }",
+            ),
+            (
+                "both operands literal",
+                "fn test() -> i32 { let x: u8 = 300 + 1; return 0; }",
+            ),
+            (
+                "peer on the left",
+                "fn test(v: u8) -> i32 { let x: u8 = 300 + v; return 0; }",
+            ),
+            (
+                "method argument",
+                "struct P { x: u8; fn keep(self, v: u8) -> u8 { return v; } } \
+                 fn test() -> i32 { let p: P = P { x: 0 }; let y: u8 = p.keep(300); return 0; }",
+            ),
+            (
+                "associated function argument",
+                "struct P { x: u8; fn make(v: u8) -> P { return P { x: v }; } } \
+                 fn test() -> i32 { let p: P = P::make(300); return 0; }",
+            ),
+        ];
+        for (position, source) in cases {
+            let errors = expect_errors(source);
+            let has_a022 = errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+            assert!(
+                has_a022,
+                "expected LiteralOutOfRange in {position} position, got: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -814,6 +951,274 @@ mod analysis_rules_tests {
         assert!(
             has_a022,
             "expected LiteralOutOfRange for assignment i128 overflow, got: {errors:?}"
+        );
+    }
+
+    // A022 provenance notes ---
+    //
+    // A literal takes its type from the position it appears in, and that
+    // position is usually not where the literal is written — without a note
+    // saying so, the range error names a type the reader cannot find on the
+    // line. One case per position that can supply a type, plus the literals
+    // that were never given one.
+
+    /// The rendered text of the one A022 diagnostic `source` produces.
+    fn a022_message(source: &str) -> String {
+        let errors = expect_errors(source);
+        let messages: Vec<String> = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }))
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected exactly one A022 diagnostic for `{source}`, got: {errors:?}"
+        );
+        messages.into_iter().next().expect("one A022 diagnostic")
+    }
+
+    /// Asserts the A022 diagnostic for `source` ends with exactly `note`, so a
+    /// note that gained trailing text fails rather than passing on a prefix.
+    fn assert_a022_note(source: &str, note: &str) {
+        let message = a022_message(source);
+        assert!(
+            message.ends_with(&format!("\nnote: {note}")),
+            "unexpected A022 note for `{source}`: {message}"
+        );
+    }
+
+    /// Asserts the A022 diagnostic for `source` carries no note at all —
+    /// nothing typed the literal, so there is nothing true to say about why.
+    fn assert_a022_has_no_note(source: &str) {
+        let message = a022_message(source);
+        assert!(
+            !message.contains("note:"),
+            "expected no provenance note for `{source}`: {message}"
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_annotated_binding() {
+        assert_a022_note(
+            "fn test() -> i32 { let x: u8 = 300; return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_assignment() {
+        assert_a022_note(
+            "fn test() -> i32 { let mut x: u8 = 0; x = 300; return 0; }",
+            "the literal is typed `u8` by the type expected in assignment",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_return_position() {
+        assert_a022_note(
+            "fn test() -> u8 { return 300; }",
+            "the literal is typed `u8` by the type expected in return statement",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_struct_field() {
+        assert_a022_note(
+            "struct P { x: u8; } fn test() -> i32 { let p: P = P { x: 300 }; return 0; }",
+            "the literal is typed `u8` by the type expected in field `x` of struct `P`",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_array_element() {
+        assert_a022_note(
+            "fn test() -> i32 { let a: [u8; 2] = [300, 0]; return 0; }",
+            "the literal is typed `u8` by the type expected in array element",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_free_function_parameter() {
+        assert_a022_note(
+            "fn take(v: u8) -> u8 { return v; } fn test() -> u8 { return take(300); }",
+            "the literal is typed `u8` by the type expected in argument 0 of function `take`",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_the_method_parameter() {
+        assert_a022_note(
+            "struct P { x: u8; fn keep(self, v: u8) -> u8 { return self.x + v; } } \
+             fn test() -> u8 { let p: P = P { x: 0 }; return p.keep(300); }",
+            "the literal is typed `u8` by the type expected in argument 0 of method `P::keep`",
+        );
+    }
+
+    /// FIXME: `make` takes no `self`, so calling it a method is imprecise —
+    /// the vocabulary has one argument position for both, and the mismatch
+    /// message has always said "method" here. Splitting the two belongs with
+    /// the deferred parameter-name work on the same enum, not here.
+    #[test]
+    fn a022_note_names_the_associated_function_parameter() {
+        assert_a022_note(
+            "struct P { x: u8; fn make(v: u8) -> P { return P { x: v }; } } \
+             fn test() -> i32 { let p: P = P::make(300); return 0; }",
+            "the literal is typed `u8` by the type expected in argument 0 of method `P::make`",
+        );
+    }
+
+    /// A peer-typed operand was not required to be anything by its
+    /// surroundings — it copied the type its neighbour already had, and the
+    /// note has to say that instead of naming a position.
+    #[test]
+    fn a022_note_names_the_peer_operand() {
+        assert_a022_note(
+            "fn test(x: u8) -> u8 { return x + 300; }",
+            "the literal is typed `u8` to match the other operand of `Add`",
+        );
+    }
+
+    /// Both sides of a shift are peer-typed, so the count position is
+    /// explained the same way the base position is.
+    #[test]
+    fn a022_note_names_the_peer_operand_of_a_shift() {
+        assert_a022_note(
+            "fn test(x: u8) -> u8 { return 300 << x; }",
+            "the literal is typed `u8` to match the other operand of `Shl`",
+        );
+        assert_a022_note(
+            "fn test(x: u8) -> u8 { return x << 300; }",
+            "the literal is typed `u8` to match the other operand of `Shl`",
+        );
+    }
+
+    /// Peer typing reaches comparison operands too, even though the
+    /// comparison's own result is never an integer.
+    #[test]
+    fn a022_note_names_the_peer_operand_of_a_comparison() {
+        assert_a022_note(
+            "fn test(x: u8) -> bool { return x < 300; }",
+            "the literal is typed `u8` to match the other operand of `Lt`",
+        );
+    }
+
+    /// Where both operands are literal-built, the type came from outside the
+    /// operation, so the note names that outer position rather than the
+    /// operator.
+    #[test]
+    fn a022_note_reuses_the_outer_position_for_a_literal_only_operation() {
+        assert_a022_note(
+            "fn test() -> i32 { let x: u8 = 300 + 1; return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+    }
+
+    /// The transparent forms pass the position along with the type, so the
+    /// note still names the binding rather than the operator in between.
+    #[test]
+    fn a022_note_survives_descent_through_parentheses() {
+        assert_a022_note(
+            "fn test() -> i32 { let x: u8 = (300); return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+    }
+
+    #[test]
+    fn a022_note_survives_descent_through_a_complement() {
+        assert_a022_note(
+            "fn test() -> i32 { let x: u8 = ~300; return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+    }
+
+    #[test]
+    fn a022_note_names_a_local_const() {
+        assert_a022_note(
+            "fn test() -> i32 { const C: u8 = 300; return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+    }
+
+    /// The innermost position wins: the element position typed the literal, so
+    /// that is what the note names — the enclosing field is not mentioned, and
+    /// a reader chasing an array-typed field has to find it themselves. Naming
+    /// both would need the table to hold a chain rather than a position.
+    #[test]
+    fn a022_note_names_the_element_not_the_enclosing_field() {
+        assert_a022_note(
+            "struct P { a: [u8; 2]; } \
+             fn test() -> i32 { let p: P = P { a: [300, 0] }; return 0; }",
+            "the literal is typed `u8` by the type expected in array element",
+        );
+    }
+
+    /// A spec body is type-checked by the same pass as any other body, so a
+    /// literal in a proof obligation is typed — and explained — the same way,
+    /// in every position.
+    #[test]
+    fn a022_note_reaches_a_spec_body() {
+        assert_a022_note(
+            "spec S { fn obligation() -> u8 { return 300; } } fn test() -> i32 { return 0; }",
+            "the literal is typed `u8` by the type expected in return statement",
+        );
+        assert_a022_note(
+            "spec S { fn obligation() -> i32 { let x: u8 = 300; return 0; } } \
+             fn test() -> i32 { return 0; }",
+            "the literal is typed `u8` by the type expected in variable definition",
+        );
+        assert_a022_note(
+            "spec S { fn take(v: u8) -> u8 { return v; } \
+                      fn obligation() -> u8 { return take(300); } } \
+             fn test() -> i32 { return 0; }",
+            "the literal is typed `u8` by the type expected in argument 0 of function `take`",
+        );
+    }
+
+    /// Nothing typed this literal, so there is no position to name and the
+    /// message stays as it was. A confidently wrong "why" would be worse than
+    /// none, which is what these controls exist to prevent.
+    #[test]
+    fn a022_has_no_note_for_a_literal_left_at_the_default() {
+        let message = a022_message("fn test() -> i32 { 3000000000; return 0; }");
+        assert!(
+            message.contains("literal `3000000000` is out of range for type `i32`"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("note:"),
+            "a literal nothing typed has no note: {message}"
+        );
+    }
+
+    /// A comparison's operands are peer-typed, but a non-numeric peer refuses
+    /// to type its neighbour and nothing else reaches into a condition — so
+    /// this literal is left at the default and stays unexplained.
+    #[test]
+    fn a022_has_no_note_for_a_comparison_operand_with_a_non_numeric_peer() {
+        assert_a022_has_no_note("fn test() -> i32 { let b: bool = 3000000000 == 1; return 0; }");
+    }
+
+    /// The parameter here is generic; the type came from the literal's own
+    /// default via the type-parameter pre-pass, not from the parameter. Naming
+    /// the parameter would assert a cause that is not there.
+    #[test]
+    fn a022_has_no_note_for_a_literal_at_an_inferred_parameter() {
+        assert_a022_has_no_note(
+            "fn id T'(x: T) -> T { return x; } fn test() -> i32 { return id(3000000000); }",
+        );
+    }
+
+    /// An array index is on the stop list, so an out-of-range index literal is
+    /// reported without a note as well.
+    #[test]
+    fn a022_has_no_note_for_an_array_index() {
+        let source =
+            "fn test() -> i32 { let a: [i32; 2] = [0, 0]; let v: i32 = a[3000000000]; return v; }";
+        let message = a022_message(source);
+        assert!(
+            !message.contains("note:"),
+            "an index literal has no typing position: {message}"
         );
     }
 

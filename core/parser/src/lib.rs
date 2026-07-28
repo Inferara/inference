@@ -103,7 +103,7 @@ pub fn parse_into(arena: AstArena, src: &str, module_path: Vec<String>) -> Parse
 #[must_use]
 pub fn parse_to_cst(src: &str) -> (SyntaxNode, Vec<ParseError>) {
     let tokens = tokenize(src);
-    let input = Input::new(&tokens);
+    let input = Input::new(src, &tokens);
     let mut parser = Parser::new(&input);
     grammar::source_file(&mut parser);
     let steps = process(parser.finish());
@@ -208,6 +208,14 @@ mod tests {
             "fn f() { a.",
             "fn f() { a::",
             "fn f() { let x: [",
+            // Malformed literals truncated at EOF: `number_literal` consumes the
+            // glued tail, so the token a recovery set was counting on may be
+            // gone by the time the enclosing rule looks for it.
+            "fn f() { 16i64",
+            "fn f() { 0x",
+            "fn f() { let x: [i32; 1_",
+            "fn f() { a[1_",
+            "16i64",
         ];
         let partial_constructs = [
             "fn f() { let x: ; }",

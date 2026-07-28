@@ -433,29 +433,20 @@ mod codegen_validation_tests {
 
     // i64 literal tests (Bug #4: lower_literal dispatches I64Const for i64/u64) ---
 
+    /// The declared return type is what the bare literal denotes, so `return
+    /// 100` in an `-> i64` function emits `i64.const 100` (`0x42`) rather than
+    /// the `i32.const` the literal's old default forced.
     #[test]
-    fn i64_literal_in_return_rejected_by_type_checker() {
-        //FIXME: The type checker infers bare number literals as i32, so `return 100`
-        // in an i64 function is rejected. Once the type checker supports i64 literal
-        // inference (e.g., via bidirectional type checking that propagates the expected
-        // return type into the literal), this test should be updated to verify that the
-        // WASM output contains i64.const (opcode 0x42) instead of i32.const (opcode 0x41).
-        // The lower_literal fix in compiler.rs correctly dispatches I64Const for i64-typed
-        // literals, but the type checker prevents this code path from being reached today.
+    fn i64_literal_in_return_emits_i64_const() {
         let source = "pub fn get_i64_value() -> i64 { return 100; }";
-        let arena = crate::utils::build_ast(source.to_string());
-        let type_check_result =
-            inference_type_checker::TypeCheckerBuilder::build_typed_context(arena);
-        match type_check_result {
-            Ok(_) => panic!("Type checker should reject i32 literal in i64 return position"),
-            Err(err) => {
-                let err_msg = err.to_string();
-                assert!(
-                    err_msg.contains("type mismatch"),
-                    "Error should be a type mismatch. Got: {err_msg}"
-                );
-            }
-        }
+        let output = codegen_output_no_analysis(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("i64 literal return WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x42, 0xE4, 0x00]),
+            "WASM should contain i64.const 100 (0x42 0xE4 0x00)"
+        );
     }
 
     #[test]

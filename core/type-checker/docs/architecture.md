@@ -279,59 +279,47 @@ TypedContext {
 }
 ```
 
-#### Contextual Type Propagation for Number Literals
+#### Check Mode: The Expected Type
 
-Number literals present a special challenge for sub-i32 numeric types (`i8`, `i16`, `u8`, `u16`). WebAssembly has no native types narrower than 32 bits, so all of them are represented in WASM as `i32`. The syntax `42` carries no inherent width — without additional context, the type checker defaults number literals to `i32`.
+Every expression is inferred by `infer_expression_expecting(expr_id, expected, ctx)`, where `expected: Option<Expected>` is what the surrounding position requires of the expression. `infer_expression` is the shim that passes `None`, and it is what the positions with nothing to require — an expression statement, a condition, an array index — still call.
 
-When the code generator later lowers a literal to a WASM instruction, it calls `ctx.get_node_typeinfo(number_literal.id)` to decide how to interpret the bits. If the literal's node held `i32`, the generator would produce a plain `i32.const` and lose the declared sub-i32 width information.
-
-To solve this, the `VariableDefinition` handler propagates the declared type onto the number literal's node **before** calling `infer_expression`. The literal inference code checks whether type info already exists for the node and, if so, returns it unchanged rather than falling back to the `i32` default:
-
-```
-VariableDefinition handler
-  │
-  ├─ 1. Compute target_type from the declared type annotation
-  │      e.g. `let a: i8 = 42;`  →  target_type = TypeInfo { kind: Number(I8) }
-  │
-  ├─ 2. If initializer is a number literal:
-  │      ctx.set_node_typeinfo(num_lit.id, target_type.clone())
-  │      (The literal node now carries the declared type)
-  │
-  ├─ 3. infer_expression() is called on the initializer
-  │      └─ Literal::Number branch: type info already present → returns it as-is
-  │         (No i32 fallback applied)
-  │
-  └─ 4. Codegen lower_literal() reads ctx.get_node_typeinfo(number_literal.id)
-         and emits the correct instruction width
-         e.g. Number(I8) → parse as i32, emit i32.const (WASM sub-i32 convention)
-              Number(I64) → parse as i64, emit i64.const
-```
-
-This is a form of **bidirectional type checking**: information flows from the declaration site (the annotation) down into the initializer expression, rather than bottom-up synthesis from the literal value alone.
-
-**Range validation**: The type checker emits `LiteralOutOfRange` when a literal's value exceeds the declared type's range (for example, `let a: i8 = 200;` produces an error). This check runs after contextual type propagation so the declared type is known. Negative numeric literals expressed as a `Neg` unary expression wrapping a positive literal are not yet range-checked at this stage.
-
-#### Array Element Type Propagation
-
-Arrays extend this pattern. When an array literal initializes a variable with an explicit array type annotation, the type checker propagates the element type onto all numeric literals in the array:
+`Expected` pairs the required type with the position requiring it:
 
 ```rust
-// Source:  let arr: [i8; 3] = [10, 20, 30];
-
-// Array type: TypeInfo { kind: Array(Box::new(Number(I8)), 3) }
-
-// After propagation (before inference):
-//   ctx.set_node_typeinfo(literal_10.id, Number(I8))
-//   ctx.set_node_typeinfo(literal_20.id, Number(I8))
-//   ctx.set_node_typeinfo(literal_30.id, Number(I8))
-
-// After codegen, each element is emitted with the correct width:
-//   10 → i32.const 10 (sub-i32 convention for i8)
-//   20 → i32.const 20
-//   30 → i32.const 30
+struct Expected<'a> {
+    ty: &'a TypeInfo,
+    source: &'a TypeMismatchContext,
+}
 ```
 
-This ensures that array elements with sub-i32 types are correctly represented in WASM output.
+The two travel together deliberately. The type is what an integer literal denotes when the expectation reaches a leaf; the `source` is what a diagnostic needs in order to say *why* the literal has that type, because the type is written somewhere the literal is not. Splitting them would let a descent forward one without the other and leave a literal typed with no explanation. `Expected` is `Copy` and borrowed, so the transparent forms forward it unchanged and a literal under `-( 1 + 2 )` still reports the position that typed the whole expression.
+
+The positions that construct an `Expected` are the ones that know a declared type: an annotated `let`/`const` initializer, the right-hand side of an assignment, a struct-literal field value, an element of an array literal, a call argument (free, associated, and method calls alike), and the operand of `return`. Each then runs its ordinary post-inference mismatch check, which reports the single diagnostic when the value cannot denote the required type.
+
+The number-literal arm is where an expectation *terminates* — the one place an expected type becomes a recorded type. It takes an expected *integer* type in preference to any type already recorded for the node, because the recorded one may be its own `i32` fallback from an earlier visit — the generic-argument pre-pass reaches argument literals before any expected type exists — and the position is the authority on which type the literal denotes. Every other arm either forwards an expectation or decides what to forward:
+
+- **Literal-closed predicate** — `is_literal_closed(arena, expr_id)` decides, from syntax alone, whether an expression is built entirely out of integer literals: a literal is closed, and `( e )`, `-e`, `~e` and the arithmetic/bitwise/shift operators preserve closure. `!` and the comparison, equality and logical operators do not, because their operands' types are unconstrained by the type of the whole.
+- **Transparent descent** — `Parenthesized`, `PrefixUnary(Neg)` and `PrefixUnary(BitNot)` forward `expected` unchanged to their operand; each still runs its own signedness or numeric check on the type that comes back, so `-e` under an unsigned expected type is still rejected. `ArrayLiteral` consumes an expected `[T; N]` by expecting `T` of every element, recursively, so a nested initializer types all the way down.
+- **Peer-first binary typing** — `infer_binary_operands` inspects both operands' closure. With exactly one closed, the *other* operand is inferred first and, when its type is an integer type, is expected of the closed one. With both closed, the type expected of the whole expression descends into both, but only for an operator that yields its operands' type. With neither closed, both operands already carry their own types and nothing is expected of either. Peer typing runs for every operator, including comparisons and the shift count — code generation picks the shift opcode from the left operand alone and requires both stack operands to match.
+
+Peer-first is what keeps the diagnostic for the ordinary mistake at the binding: `let a: i32 = 3; let x: i64 = a + 1;` reports a variable-definition mismatch pointing at `x`, rather than an operand mismatch pointing at `+`. Its one visible consequence is ordering — when the left operand is literal-closed and both operands independently produce diagnostics, the right operand's are reported first.
+
+The `Binary` and `ArrayLiteral` arms keep their memo early-return **unconditionally**: a recorded type is returned without re-deriving it, even under an expected type. Re-deriving would re-run every check in the subtree and report its diagnostics a second time, and it could not change an outcome — the only visit that records an interior type before any expected type exists is the generic-argument pre-pass, and wherever what it recorded disagrees with what is later expected it has already pushed `ConflictingTypeInference`.
+
+**Provenance side table**: when the literal arm consumes an expected type it also records the position in `TypedContext::literal_type_sources`, keyed by the literal's `ExprId`. Analysis rule A022 reads it to append a note naming that position to an out-of-range diagnostic:
+
+```
+literal `300` is out of range for type `u8` (valid range: 0..=255)
+note: the literal is typed `u8` by the type expected in return statement
+```
+
+Without it, a range error against a type written elsewhere reads as action at a distance. The table is **diagnostics-only**: `node_types` remains the single source of truth for what a literal denotes, and no backend (`wasm-codegen`, `hassert`, `wasm-to-v`) may consult it, because nothing about how a program compiles depends on which position supplied the type.
+
+**Range validation** is not the type checker's: it records the literal's type but never parses its value. Analysis rule A022 (`LiteralOutOfRange`) reads the recorded type and validates the value against it, so it follows contextual typing automatically.
+
+#### Array Element and Uzumaki Propagation
+
+An expected `[T; N]` reaching an array literal is `T` expected of every element, so `let arr: [i8; 3] = [10, 20, 30];` types all three literals `i8` and code generation emits each at the right width. Because the expectation is consumed in the `ArrayLiteral` arm rather than at one statement handler, it applies wherever an array type is expected — a `let`, a `const`, an assignment, and each level of a nested initializer such as `[[i64; 2]; 2]`.
 
 The same propagation applies to uzumaki (`@`) leaves inside array literals. When the declared array element type is known, a `@` element receives that declared type, allowing constructs such as `let a: [i32; 2] = [0, @];` to type-check and reach codegen. Propagation recurses through nested array literals so that every `@` leaf in a multi-dimensional array literal is typed. A struct- or array-typed `@` element is typed by the same mechanism but is subsequently rejected by analysis rule A040 (`UzumakiOnCompoundArrayElement`), which enforces the codegen restriction that only scalar and enum elements may use uzumaki.
 
@@ -557,33 +545,25 @@ let return_type = function_return_type.substitute(&substitutions);
 
 ### Bidirectional Type Checking
 
-The type checker uses bidirectional inference:
+Both directions run in a single traversal of one function. An expected type descends into the expression; a synthesized type ascends out of it.
 
-**Synthesis (infer)**: Infer type from expression structure
 ```rust
-infer_expression(expr: &Expression) -> TypeInfo {
-    match expr {
-        Expression::Literal(lit) => infer_literal_type(lit),
-        Expression::Binary(bin) => {
-            let left_type = infer_expression(bin.left);
-            let right_type = infer_expression(bin.right);
-            check_operator_types(bin.operator, left_type, right_type)
-        }
-        // ...
-    }
+fn infer_expression_expecting(
+    &mut self,
+    expr_id: ExprId,
+    expected: Option<Expected<'_>>,
+    ctx: &mut TypedContext,
+) -> Option<TypeInfo>;
+
+// The synthesis-only form: nothing is required of the expression.
+fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
+    self.infer_expression_expecting(expr_id, None, ctx)
 }
 ```
 
-**Checking (check)**: Validate expression against expected type
-```rust
-check_expression(expr: &Expression, expected: TypeInfo) -> Result<()> {
-    let actual = infer_expression(expr);
-    if actual != expected {
-        return Err(TypeMismatch { expected, actual });
-    }
-    Ok(())
-}
-```
+**Synthesis** is what every arm does with its subexpressions: a binary expression infers both operands and derives its own type from them, an identifier looks its type up, a call takes its function's return type.
+
+**Checking** is not a separate traversal. A position that knows the type it requires passes it as `expected` and compares the synthesized type against it afterwards, reporting one `TypeMismatch` with that position's `TypeMismatchContext`. Between those two steps, `expected` is what lets an integer literal in the subexpression denote the required type in the first place — see [Check Mode: The Expected Type](#check-mode-the-expected-type).
 
 ### Operator Type Rules
 
@@ -1059,7 +1039,8 @@ fn test_feature() {
 - No compile-time computation of array bounds
 
 **Numeric Literal Range Validation**:
-- Out-of-range literals are rejected. For example, `let a: i8 = 200;` produces a `LiteralOutOfRange` error. The contextual type propagation mechanism (see the Phase 5 section above) provides the declared type to the range checker. Negative literals parsed with a leading `-` unary operator are not yet range-checked (the type checker sees a `Neg` expression wrapping a positive literal, not a negative literal directly).
+- Out-of-range literals are rejected. For example, `let a: i8 = 200;` produces a `LiteralOutOfRange` error. The expected type (see [Check Mode: The Expected Type](#check-mode-the-expected-type)) is what gives the range checker a type to validate against.
+- A minus sign written *against* the digits is part of the literal token, so `-200` is one literal and is checked as `-200`. A minus sign separated by whitespace is a `Neg` expression instead; the expected type now descends into its operand, so `let a: i8 = - 100;` type-checks where it used to be an `i8`/`i32` mismatch. The range check still runs on the *un-negated* literal, which makes each signed type's minimum unreachable in that spelling: `- 128` for `i8` is reported as `128` being out of range even though `-128` is a valid `i8`. Write it glued (`-128`), the ordinary spelling, which is checked correctly.
 
 **Pattern Matching**:
 - No destructuring of structs or arrays

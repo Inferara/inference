@@ -138,7 +138,7 @@ enum NumberType {
 
 **WebAssembly representation**: WebAssembly provides only `i32` and `i64` as integer types. All numeric types narrower than 64 bits (`i8`, `i16`, `i32`, `u8`, `u16`, `u32`) are lowered to WASM `i32`. `i64` and `u64` are lowered to WASM `i64`. The type checker preserves the Inference-level type so that the code generator can use the correct parse width when emitting literal values.
 
-**Known limitation — range validation not yet implemented**: The type checker does not currently verify that a literal value fits within the declared type's range. For example, `let a: i8 = 200;` compiles without an error even though 200 exceeds the i8 maximum of 127. The value is silently truncated when the WASM instruction is emitted. Proper range checking will be added in a future pass.
+**Range validation**: The type checker records the type of each literal but never parses its value; whether the value fits is analysis rule A022 (`LiteralOutOfRange`), which reads the recorded type. `let a: i8 = 200;` is rejected — 200 exceeds the `i8` maximum of 127 — rather than silently truncated.
 
 **Examples**:
 
@@ -154,8 +154,8 @@ fn test_numbers() {
     let g: u32 = 4294967295;
     let h: u64 = 18446744073709551615;
 
-    // No compile error today, but value is truncated in WASM output:
-    let bad: i8 = 200;      // 200 > 127; silently becomes -56 in WASM
+    // Rejected by A022, not truncated:
+    let bad: i8 = 200;      // error: literal `200` is out of range for type `i8`
 }
 ```
 
@@ -391,37 +391,37 @@ fn sum_array<T>(arr: [T; 3]) -> T {
 
 The type checker uses bidirectional inference:
 
-**1. Literals**: Type inferred from syntax, with contextual propagation for sub-i32 types
-
-Number literals have no inherent bit-width in the syntax. When a number literal appears as the sole initializer in a variable definition that carries an explicit type annotation, the declared type is propagated onto the literal node before inference runs. This allows sub-i32 types (`i8`, `i16`, `u8`, `u16`) to reach the code generator with the correct type, because WebAssembly provides no native types narrower than 32 bits.
+**1. Literals**: A boolean or string literal has one type; an integer literal takes the type its position requires
 
 ```rust
-42          → i32 (default when no context is available)
+42          → i32 (the default, applied when nothing is required of the literal)
 true        → bool
 "hello"     → string
 
-// With a type annotation, the literal adopts the declared type:
+// A position that knows the type it requires supplies it to the literal:
 let a: i8  = 42;   // literal node type: i8  (not i32)
 let b: i16 = 42;   // literal node type: i16 (not i32)
 let c: i64 = 42;   // literal node type: i64 (not i32)
-let d: i32 = 42;   // literal node type: i32 (same as default)
+let d: i32 = 42;   // literal node type: i32 (same as the default)
 ```
 
-Note: Range validation is not yet implemented. A literal that is out of range for its declared type (for example `let a: i8 = 200;`) compiles without error. The out-of-range value is silently truncated at the WASM instruction emission stage. This is a known limitation tracked separately.
+Which positions supply a type, how far it descends into an expression, and what happens where a literal meets an operand that already has a type are all set out in [Integer Literal Typing](#integer-literal-typing) below.
 
-**2. Variables**: Type from declaration or initializer
+A literal whose value does not fit the type it receives is rejected by analysis rule A022 (`LiteralOutOfRange`). That rule reads the type recorded for the literal, so it follows whatever position supplied it: `let a: i8 = 200;` is an error, not a silent truncation.
+
+**2. Variables**: Type from the declaration, which is always written — a `let` without an annotation is a parse error
 ```rust
-let x: i32 = 42;      // x: i32 (explicit)
-let y = 42;           // y: i32 (inferred from literal)
-let z = x + y;        // z: i32 (inferred from operation)
+let x: i32 = 42;      // x: i32
+let y: i64 = 42;      // y: i64; the annotation is what types the literal
+let z: i32 = x + x;   // initializer checked against the annotation
 ```
 
 **3. Binary Operations**: Type from operands
 ```rust
 let a: i32 = 10;
 let b: i32 = 20;
-let sum = a + b;      // sum: i32
-let equal = a == b;   // equal: bool (comparison result)
+let sum: i32 = a + b;      // operands agree, so the result is i32
+let equal: bool = a == b;  // a comparison is bool whatever its operands are
 ```
 
 **4. Function Calls**: Type from return type
@@ -430,13 +430,13 @@ fn get_value() -> i32 {
     return 42;
 }
 
-let x = get_value();  // x: i32
+let x: i32 = get_value();  // the call's return type is checked against the annotation
 ```
 
 **5. Array Indexing**: Type from array element type
 ```rust
 let arr: [i32; 5] = [1, 2, 3, 4, 5];
-let elem = arr[0];    // elem: i32
+let elem: i32 = arr[0];    // the element type is i32
 ```
 
 **6. Field Access**: Type from field definition
@@ -446,10 +446,55 @@ struct Point {
     y: i64,
 }
 
-let p = Point { x: 10, y: 20 };
-let x = p.x;          // x: i32
-let y = p.y;          // y: i64
+let p: Point = Point { x: 10, y: 20 };  // `10` is i32, `20` is i64 — each field's type
+let x: i32 = p.x;
+let y: i64 = p.y;
 ```
+
+### Integer Literal Typing
+
+An integer literal has no intrinsic type. Its type is determined by the typing context in which it appears.
+
+**Where an expected type comes from.** A position supplies an expected type only when it already knows one from a declaration:
+
+- the initializer of an annotated `let` or `const` (the annotation);
+- the right-hand side of an assignment (the target's declared type — for `p.x = 5` and `a[i] = 5` this is the field's or element's type, not the struct's or array's);
+- a struct-literal field value (the field's declared type);
+- an element of an array literal whose expected type is `[T; N]` (which is `T`);
+- a call argument (the parameter's declared type), for free functions, associated functions and methods alike;
+- the operand of `return` (the enclosing function's declared return type).
+
+**Literal-closed expressions.** An expression is *literal-closed* if it is an integer literal, or `( e )`, `-e` or `~e` with `e` literal-closed, or `a ⊕ b` for `⊕` one of `+ - * / % & | ^ << >>` with both operands literal-closed. Closure is syntactic: it is decided from the shape of the expression alone, before any type is known.
+
+**Descent.** An expected type `T` propagates unchanged into subexpressions through the *type-transparent* forms `( e )`, `-e` and `~e`, and — only when both operands are literal-closed — into both operands of `a ⊕ b` for the operators listed above. A type reaches a literal only when it is an integer type. Nothing else propagates an expected type: the index of an array access, the operands of a comparison, equality or logical operator, the receiver of a field or method access, and the result of a call all keep the types they already have.
+
+**Peer typing.** Where a binary operator's operands are not both literal-closed, peer typing applies: if exactly one operand is literal-closed and the other has an integer type `T`, the literal-closed operand is checked against `T`, with `T` descending into it by the rules above. Peer typing applies to every binary operator — including comparison, equality, and the shift count, which must match the shifted operand's width.
+
+```rust
+fn dbl(n: i64) -> i64 {
+    return n * 2;
+}
+
+fn examples(a: i64) -> i64 {
+    let m: i64 = 65536;         // annotation
+    let shifted: i64 = a << 16; // peer: `16` is i64, matching `a`
+    let sum: i64 = a + 65536;   // peer
+    let scaled: i64 = -(1 + 2); // descent through `-` and `+`, both closed
+    let doubled: i64 = dbl(65536);  // argument position
+    if a > 4294967296 {         // peer, at a comparison
+        return 65536;           // return position
+    }
+    return m + shifted + sum + scaled + doubled;
+}
+```
+
+**Default.** An integer literal that receives no type by any rule above has type `i32`. The positions where that happens are exactly the ones above that supply nothing — an array index, a bare expression statement, an operand whose peer is not an integer type — so a value too wide for `i32` written in one of them is rejected by A022 against `i32`. Every position that *can* name a wider type does: a `let` always carries an annotation, and arguments, returns, fields and elements take theirs from a declaration.
+
+**This is not coercion.** Contextual typing selects the type a literal denotes; it converts nothing. No expression that already has a type ever changes it, and no widening or narrowing instruction is emitted. Two typed operands of different widths still never combine — `let a: i32 = 3; let b: i64 = 4; a + b` is `BinaryOperandTypeMismatch`, unchanged. A literal whose value does not fit the type it receives is rejected by A022, never truncated or wrapped.
+
+**Determinism.** The type of every expression is a function of its syntax and the declared types in scope. Typing is a single traversal, with an expected type descending and a synthesized type ascending; there are no type variables, no constraints, and no whole-program inference, so nothing depends on declaration or checking order.
+
+Unlike Go and Zig there is no arbitrary-precision untyped-constant arithmetic. Every node of a literal-closed expression is stamped with the target type and evaluated at that width, so `let x: u8 = 200 + 100;` types both operands `u8` and wraps at run time exactly as any other `u8` addition does. This keeps WebAssembly and Rocq semantics identical, with no separate constant-evaluation path.
 
 ### Statement Type Checking
 
@@ -909,9 +954,9 @@ fn add<T>(a: T, b: T) -> T {
 ### Under Consideration
 
 **Implicit Type Conversions**:
-- Numeric type widening (i32 → i64) for ergonomics
 - Subtyping relationships for function types
-- Coercion sites (function arguments, return values)
+
+Widening between typed values (`i32` → `i64`) is not under consideration: all type conversions are explicit, and there is no cast operator. What function arguments and return values *do* supply is an expected type for an integer literal, which is not a conversion — see [Integer Literal Typing](#integer-literal-typing).
 
 **Advanced Type Features**:
 - Type aliases with generics: `type List<T> = [T; 10]`

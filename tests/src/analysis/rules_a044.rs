@@ -9,9 +9,10 @@
 ///
 /// These tests exercise the rule through a real parse -> type-check -> analyze
 /// pipeline, complementing the in-crate message/`rule_id` unit test in
-/// `core/analysis`. Literal counts currently type-check only for `i32`-typed
-/// shifts (binary operands do not coerce), so the sources are `i32`; the width
-/// is read from the operand type, so the rule extends to other widths for free.
+/// `core/analysis`. The width is read from the operand type, and a literal
+/// count now takes the type of the operand it shifts, so the rule covers every
+/// width — the `i64` and `u8` cases at the end of this module are only
+/// reachable because of that.
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::build_ast;
@@ -200,6 +201,102 @@ mod analysis_rules_tests {
             count_a044(source),
             2,
             "two out-of-range shifts must yield exactly two A044 diagnostics"
+        );
+    }
+
+    /// A shift count is peer-typed against the value being shifted, so an
+    /// `i64` shift is checked against a 64-bit width rather than `i32`'s 32.
+    #[test]
+    fn a044_i64_shift_count_out_of_range() {
+        let source = r#"
+            fn test(x: i64) -> i64 {
+                return x << 64;
+            }
+        "#;
+        assert!(
+            has_a044(source),
+            "a count of 64 is out of range for a 64-bit operand"
+        );
+    }
+
+    #[test]
+    fn a044_i64_shift_count_at_the_width_boundary_accepted() {
+        let source = r#"
+            fn test(x: i64) -> i64 {
+                return x << 63;
+            }
+        "#;
+        assert!(
+            !has_a044(source),
+            "a count of 63 is the largest valid count for a 64-bit operand"
+        );
+    }
+
+    /// When both operands are literals neither can type the other, and the
+    /// width comes from what the position expects of the whole shift — a
+    /// different path to the operand type than the peer cases above.
+    #[test]
+    fn a044_both_operands_literal_takes_the_width_from_the_expected_type() {
+        let source = r#"
+            fn test() -> i64 {
+                let x: i64 = 1 << 64;
+                return x;
+            }
+        "#;
+        assert!(
+            has_a044(source),
+            "a count of 64 is out of range once the annotation types the shift `i64`"
+        );
+    }
+
+    #[test]
+    fn a044_both_operands_literal_within_the_expected_width_accepted() {
+        let source = r#"
+            fn test() -> i64 {
+                let x: i64 = 1 << 40;
+                return x;
+            }
+        "#;
+        assert!(
+            !has_a044(source),
+            "a count of 40 is valid for a 64-bit operand"
+        );
+    }
+
+    /// A count that `i32` would have accepted is out of range for a narrow
+    /// operand, which is equally unreachable while every literal is `i32`.
+    #[test]
+    fn a044_narrow_shift_count_out_of_range() {
+        let source = r#"
+            fn test(x: u8) -> u8 {
+                return x << 8;
+            }
+        "#;
+        assert!(
+            has_a044(source),
+            "a count of 8 is out of range for an 8-bit operand"
+        );
+    }
+
+    #[test]
+    fn a044_i64_diagnostic_names_the_wider_range() {
+        let source = r#"
+            fn test(x: i64) -> i64 {
+                return x >> 100;
+            }
+        "#;
+        let diag = a044_diag(source);
+        assert!(
+            matches!(
+                &diag,
+                AnalysisDiagnostic::ShiftCountOutOfRange { value, type_name, max, .. }
+                    if value == "100" && type_name == "i64" && *max == 63
+            ),
+            "expected A044 with value 100, type i64, max 63, got: {diag}"
+        );
+        assert!(
+            diag.to_string().contains("0..=63"),
+            "the i64 message must state the 64-bit count range, got: {diag}"
         );
     }
 

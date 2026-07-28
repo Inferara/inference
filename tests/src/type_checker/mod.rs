@@ -6,6 +6,7 @@ mod associated_functions;
 mod coverage;
 mod error_recovery;
 mod features;
+mod literal_typing;
 mod multi_file;
 mod multi_file_matrix;
 mod pow_rejection;

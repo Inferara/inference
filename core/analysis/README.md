@@ -87,7 +87,7 @@ These rules cover constructs that are valid in the type system but cannot yet be
 | A017 | `CompoundReturnCallAssignment` | error | compound-returning function call on the RHS of an assignment statement |
 | A018 | `MethodCallChainCompound` | error | method call chained on the result of a compound-returning function |
 | A019 | `ArrayIndex64Bit` | error | 64-bit integer used as an array index |
-| A022 | `LiteralOutOfRange` | error | numeric literal is outside the valid range for its declared type |
+| A022 | `LiteralOutOfRange` | error | numeric literal is outside the valid range for the type its position gave it |
 | A023 | `UzumakiInReassignment` | error | uzumaki (`@`) used in a variable reassignment (only `let` initializers are supported) |
 | A024 | `ExternFunctionCall` | error | call to an external (`extern`) function (not yet implemented in codegen) |
 | A026 | `NestedCompoundDepth` | error | struct field is itself a nested compound type beyond one level of nesting |
@@ -96,6 +96,15 @@ These rules cover constructs that are valid in the type system but cannot yet be
 | A029 | `CompoundLiteralMemberAssign` | error | compound literal (struct or array) used directly as the RHS of a member-access or array-index assignment |
 | A030 | *(removed)* | — | *(uzumaki on scalar arrays now supported at any depth)* |
 | A031 | `UnsupportedCompoundReturnExpr` | error | return expression in a compound-returning function is not a supported form (identifier, literal, call, or field/element access) |
+
+A022 validates a literal against the type the *type checker recorded* for it, and an integer literal takes that type from the position it appears in — an annotation, a call argument, a `return`, a struct field, an array element, or the operand it is compared or combined with. The type is therefore often written somewhere the literal is not, so the diagnostic names the position that supplied it:
+
+```
+literal `300` is out of range for type `u8` (valid range: 0..=255)
+note: the literal is typed `u8` by the type expected in return statement
+```
+
+The note is present only when a position gave the literal its type; a literal left at the `i32` default has nothing to name and the message is the bare range line. The provenance comes from `TypedContext::literal_type_source`, a diagnostics-only side table — the recorded node type stays the single source of truth for what a literal denotes.
 
 ### Recursion (errors)
 
@@ -153,7 +162,7 @@ A042 enforces that the non-deterministic block forms — inline `forall`/`exists
 |----|--------|----------|----------------|
 | A044 | `ShiftCountOutOfRange` | error | a shift (`<<`/`>>`) whose count is a literal that is negative or `>=` the operand type's bit width |
 
-A044 rejects a shift whose count operand is a statically-known literal outside `0..width` for the operand type — `x << 32` or `x >> -1` on an `i32`. It complements the runtime rule that a shift count is taken modulo the operand type's bit width: a literal that lands outside the valid range is a program error, not a value to fold silently. Parenthesized and negated literals are resolved (`x << (33)`, `x >> -1`); dynamic counts and const-declared counts (`const K: i32 = 33; x << K`) are not detected, the same statically-known-literal scope as A022 and the division-by-zero check. Because the width is read from the operand type, the rule covers every integer width automatically, even though a literal count currently type-checks only for `i32`-typed shifts (binary operands do not coerce). Unparseable or out-of-`i128`-range literals are left to A022 to avoid double-reporting.
+A044 rejects a shift whose count operand is a statically-known literal outside `0..width` for the operand type — `x << 32` or `x >> -1` on an `i32`. It complements the runtime rule that a shift count is taken modulo the operand type's bit width: a literal that lands outside the valid range is a program error, not a value to fold silently. Parenthesized and negated literals are resolved (`x << (33)`, `x >> -1`); dynamic counts and const-declared counts (`const K: i32 = 33; x << K`) are not detected, the same statically-known-literal scope as A022 and the division-by-zero check. The width is read from the operand type, so every integer width is covered in practice as well as in principle: a literal count takes the type of the operand being shifted, which makes `x << 64` on an `i64` and `x << 8` on a `u8` reachable, and where both operands are literals the type expected of the whole shift fixes the width (`let x: i64 = 1 << 64;` is rejected, `1 << 40` is not). Unparseable or out-of-`i128`-range literals are left to A022 to avoid double-reporting.
 
 ## Diagnostic Output Format
 

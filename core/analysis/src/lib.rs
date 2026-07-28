@@ -146,6 +146,11 @@ use errors::{AnalysisErrors, AnalysisResult, Severity};
 
 pub use rules::stack_depth::estimate_frame_sizes;
 
+/// Re-exported because [`errors::AnalysisDiagnostic::LiteralOutOfRange`] carries
+/// one: a consumer that destructures that diagnostic would otherwise need a
+/// direct dependency on the type checker to name the field's type.
+pub use inference_type_checker::errors::TypeMismatchContext;
+
 /// Performs static analysis on the typed AST.
 ///
 /// Runs all registered analysis rules and collects findings. Rules cover
@@ -209,7 +214,7 @@ mod tests {
             AnalysisDiagnostic::MethodCallChainOnCompoundReturn { location: dummy_location() },
             AnalysisDiagnostic::ArrayIndex64Bit { found: "i64".to_string(), location: dummy_location() },
             AnalysisDiagnostic::DeadCode { terminator: "return", location: dummy_location() },
-            AnalysisDiagnostic::LiteralOutOfRange { value: "256".to_string(), type_name: "u8".to_string(), min: 0, max: 255, location: dummy_location() },
+            AnalysisDiagnostic::LiteralOutOfRange { value: "256".to_string(), type_name: "u8".to_string(), min: 0, max: 255, type_source: None, location: dummy_location() },
             AnalysisDiagnostic::UzumakiInReassignment { location: dummy_location() },
             AnalysisDiagnostic::ExternFunctionCall { name: "print".to_string(), location: dummy_location() },
             AnalysisDiagnostic::UninitializedVariable { name: "x".to_string(), location: dummy_location() },

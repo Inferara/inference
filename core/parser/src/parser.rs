@@ -123,6 +123,17 @@ impl<'i> Parser<'i> {
         self.at(SyntaxKind::Eof)
     }
 
+    /// The source spelling of the current token.
+    ///
+    /// Grammar decisions are made on [`SyntaxKind`]; this is for the rules that
+    /// must also see *what the author wrote* — a diagnostic quoting the
+    /// offending text, or a lexical malformation the token kinds alone do not
+    /// distinguish. At end of input it is `""`.
+    #[must_use]
+    pub fn current_text(&self) -> &'i str {
+        self.input.text(self.pos)
+    }
+
     /// The current meaningful-token position.
     ///
     /// Used by item loops to assert forward progress: a handler that completes
@@ -357,7 +368,7 @@ mod tests {
     #[test]
     fn throwaway_rule_emits_nested_events() {
         let toks = tokenize("42");
-        let input = Input::new(&toks);
+        let input = Input::new("42", &toks);
         let mut p = Parser::new(&input);
         parse_number(&mut p);
         let steps = process(p.finish());
@@ -378,7 +389,7 @@ mod tests {
     #[test]
     fn eat_consumes_only_matching_kind() {
         let toks = tokenize("42");
-        let input = Input::new(&toks);
+        let input = Input::new("42", &toks);
         let mut p = Parser::new(&input);
         assert!(!p.eat(SyntaxKind::Plus));
         assert!(p.eat(SyntaxKind::Number));
@@ -388,7 +399,7 @@ mod tests {
     #[test]
     fn at_ts_uses_token_set() {
         let toks = tokenize("+ a");
-        let input = Input::new(&toks);
+        let input = Input::new("+ a", &toks);
         let p = Parser::new(&input);
         let ops = TokenSet::new(&[SyntaxKind::Plus, SyntaxKind::Minus]);
         assert!(p.at_ts(ops));
@@ -398,7 +409,7 @@ mod tests {
     #[test]
     fn expect_reports_error_on_mismatch() {
         let toks = tokenize("42");
-        let input = Input::new(&toks);
+        let input = Input::new("42", &toks);
         let mut p = Parser::new(&input);
         assert!(!p.expect(SyntaxKind::Semi));
         let events = p.finish();
@@ -409,7 +420,7 @@ mod tests {
     fn precede_wraps_completed_node() {
         // Build `Identifier`, then precede into `BinaryExpression`.
         let toks = tokenize("a");
-        let input = Input::new(&toks);
+        let input = Input::new("a", &toks);
         let mut p = Parser::new(&input);
         let inner = p.start();
         p.bump(SyntaxKind::Ident);
@@ -432,7 +443,7 @@ mod tests {
     #[test]
     fn err_recover_bumps_unexpected_token_into_error_node() {
         let toks = tokenize("#");
-        let input = Input::new(&toks);
+        let input = Input::new("#", &toks);
         let mut p = Parser::new(&input);
         p.err_recover("unexpected", TokenSet::EMPTY);
         assert!(p.at_eof(), "the offending token must be consumed");
@@ -451,7 +462,7 @@ mod tests {
     #[test]
     fn err_recover_leaves_token_in_recovery_set() {
         let toks = tokenize(";");
-        let input = Input::new(&toks);
+        let input = Input::new(";", &toks);
         let mut p = Parser::new(&input);
         let recovery = TokenSet::new(&[SyntaxKind::Semi]);
         p.err_recover("unexpected", recovery);
@@ -463,7 +474,7 @@ mod tests {
     #[test]
     fn abandon_drops_the_node() {
         let toks = tokenize("a");
-        let input = Input::new(&toks);
+        let input = Input::new("a", &toks);
         let mut p = Parser::new(&input);
         let outer = p.start();
         let inner = p.start();
@@ -490,7 +501,7 @@ mod tests {
         // input — it is purely a development backstop.
         let result = std::panic::catch_unwind(|| {
             let toks = tokenize("a");
-            let input = Input::new(&toks);
+            let input = Input::new("a", &toks);
             let p = Parser::new(&input);
             for _ in 0..(FUEL + 1) {
                 let _ = p.current();
