@@ -7,9 +7,11 @@ that consumes the generated `.v` files.
 
 ## Consumer
 
-The consumer is [wasm-verifier](https://github.com/Inferara/wasm-verifier)
-(local checkout `~/GitHub/wasm-verifier`, verified against commit
-`0c5d525e`), built on **vanilla WasmCert-Coq v2.2.0** — not the
+The consumer is wasm-verifier (a private Inferara repository; this
+document and the vendored signature stub in `rocq-stub/` are the
+authoritative, in-repo statement of the contract — verified against
+wasm-verifier commit `0c5d525e`), built on **vanilla WasmCert-Coq
+v2.2.0** — not the
 `WasmCert-Coq-Essence` fork this crate previously targeted. The fork's
 non-deterministic constructors (`BI_forall`, `BI_exists`, `BI_assume`,
 `BI_unique`, `BI_uzumaki_num`) do not exist in vanilla WasmCert, so a
@@ -78,7 +80,7 @@ Within that context, the translator depends on:
   the per-spec obligation, now **hassert-valued** rather than an index
   list.
 
-wasm-verifier's own naming note (`theories/Verifier.v:8-21`) is worth
+wasm-verifier's own naming note (in its `theories/Verifier.v`) is worth
 carrying forward: the *old* external-contract name (indexed by a WASM
 function list) now lives in that library as `ValidSpecFI`; emitting
 `ValidSpec` with that old payload would silently change what the name
@@ -532,8 +534,8 @@ encoding the printer has to pattern-match — because wasm-verifier's
 can name directly. No implicit `HA_has_type` guard is emitted for a
 `T_local` slot, matching the canonical worked example below.
 
-The worked derivation to compare against is wasm-verifier's own
-`theories/examples/PrimeExample.v:147-164` (`prime_hspec1`); the smart
+The worked derivation to compare against is `prime_hspec1` from
+wasm-verifier's own `theories/examples/PrimeExample.v`; the smart
 constructors in `core/hassert/src/ir.rs` reproduce that tree node-for-node
 in `canonical_prime_hspec1_structure`, the semantic anchor test for the
 whole translation.

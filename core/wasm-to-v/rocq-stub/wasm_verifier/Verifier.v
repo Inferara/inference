@@ -2,7 +2,7 @@
    proof-mode Rocq output contract.
 
    The two downstream proof obligations the emitter references, with the arities
-   the real wasm-verifier library declares (theories/Verifier.v:38, :376):
+   the real wasm-verifier library declares in its `theories/Verifier.v`:
 
      - `ValidModule : module -> Prop` -- structural well-formedness, 1-ary.
        In the real library its body uses no `Section Host` variable, so post-

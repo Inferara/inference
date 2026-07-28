@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-link CLI path); pass a populated map to override or supplement it,
   mirroring the existing `spec_funcs_by_spec` explicit-vs-embedded precedence.
   `CodegenOutput` gains a matching `hspecs()` accessor (empty in compile mode)
-- Rocq output targets [wasm-verifier](https://github.com/Inferara/wasm-verifier)
+- Rocq output targets wasm-verifier (a private Inferara repository; the
+  vendored stub in `core/wasm-to-v/rocq-stub/` and
+  `core/wasm-to-v/ROCQ_CONTRACT.md` are the in-repo statement of its interface)
   on vanilla WasmCert-Coq v2.2.0, replacing the WasmCert-Coq-Essence fork.
   `ValidModule : module -> Prop` is now truly 1-ary and always emitted (even
   for a module with zero specs); the new `ValidSpec : module -> list hassert

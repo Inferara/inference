@@ -1,11 +1,11 @@
 (* WasmVerifier.Assertions -- vendored signature stub for the Inference
    proof-mode Rocq output contract.
 
-   The `term`/`hassert` assertion language and its derived sugar, mirrored
-   verbatim from the wasm-verifier library (theories/Assertions.v:21-88) so the
-   emitted per-spec obligations type-check against the same constructors the
-   real prover uses. Signatures only; no denotation, no proofs. See README.md
-   for scope, drift risk, and the swap-to-real-library follow-up. *)
+   The `term`/`hassert` assertion language and its derived sugar, mirroring
+   the wasm-verifier library's `Assertions.v` so the emitted per-spec
+   obligations type-check against the same constructors the real prover
+   uses. Signatures only; no denotation, no proofs. See README.md for
+   scope, drift risk, and the swap-to-real-library follow-up. *)
 
 Require Import BinNat.
 Require Import List.

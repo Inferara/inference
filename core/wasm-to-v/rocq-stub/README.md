@@ -41,7 +41,7 @@ Two logical namespaces, mapped by `_CoqProject`:
 | Directory | Namespace | Mirrors |
 | --- | --- | --- |
 | `wasm/` | `Wasm.*` | Vanilla **WasmCert-Coq v2.2.0** — the WASM datatypes, no fork extensions |
-| `wasm_verifier/` | `WasmVerifier.*` | [wasm-verifier](https://github.com/Inferara/wasm-verifier) — the `hassert` assertion language and the two proof-obligation predicates |
+| `wasm_verifier/` | `WasmVerifier.*` | wasm-verifier (a private Inferara repository; this stub is the in-repo mirror of its interface) — the `hassert` assertion language and the two proof-obligation predicates |
 
 | File | Provides | Mirrors |
 | --- | --- | --- |
@@ -49,8 +49,8 @@ Two logical namespaces, mapped by `_CoqProject`:
 | `wasm/numerics.v` | `i32`/`i64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) | Vanilla WasmCert |
 | `wasm/datatypes.v` | Value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive, and the module/section records | Vanilla WasmCert |
 | `wasm/host.v` | The `host` typeclass every emitted theorem is stated under (`Class host := {}`) | Vanilla WasmCert |
-| `wasm_verifier/Assertions.v` | The `term`/`hassert` inductives, `term_eq`/`Himpl`/`Hor`/`Hall` sugar, verbatim from wasm-verifier `theories/Assertions.v:21-88` | wasm-verifier, `Assertions.v` |
-| `wasm_verifier/Verifier.v` | `Parameter ValidModule : module -> Prop` and `Parameter ValidSpec : forall `{ho:host}, module -> list hassert -> Prop`, the two predicates emitted theorems reference | wasm-verifier, `Verifier.v:38,376` |
+| `wasm_verifier/Assertions.v` | The `term`/`hassert` inductives, `term_eq`/`Himpl`/`Hor`/`Hall` sugar, mirroring wasm-verifier's `Assertions.v` | wasm-verifier, `Assertions.v` |
+| `wasm_verifier/Verifier.v` | `Parameter ValidModule : module -> Prop` and `Parameter ValidSpec : forall `{ho:host}, module -> list hassert -> Prop`, the two predicates emitted theorems reference | wasm-verifier, `Verifier.v` |
 | `_CoqProject` | Maps both physical directories to their logical library names | — |
 
 Compile manually, `Wasm` first (`WasmVerifier` imports it):
@@ -186,6 +186,6 @@ The authoritative targets are the real `WasmCert-Coq` (v2.2.0) and
 available at build time (a checkout + `.vo` build, or a prebuilt image)
 and is intentionally left as a follow-up. When it lands, point the gate's
 `-Q` flags at the real libraries' `theories` directories instead of this
-one, pin the same commit `~/GitHub/wasm-verifier` was verified against
+one, pin the same wasm-verifier commit this stub was verified against
 (`0c5d525e`) so codegen and the proof target cannot drift, and delete
 this stub. The corpus and the test harness carry over unchanged.

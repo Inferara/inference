@@ -1,7 +1,7 @@
 // The canonical wasm-verifier PrimeExample, expressed in Inference: a faithful
 // executable `is_prime` (the `T_app` target of the spec obligation) paired with
 // the `forall` spec whose obligation reproduces `prime_hspec1`
-// (wasm-verifier theories/examples/PrimeExample.v:147-164) node-for-node.
+// (from wasm-verifier's `theories/examples/PrimeExample.v`) node-for-node.
 //
 // `is_prime` is written without a return inside the loop (analysis rule A003):
 // it seeds a `result` flag, then clears it on finding any divisor. The loop's

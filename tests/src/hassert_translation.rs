@@ -85,7 +85,7 @@ fn nz(t: HTerm) -> HAssert {
 
 /// Building the PrimeExample source through the whole front end must yield an
 /// obligation structurally equal to wasm-verifier's `prime_hspec1`
-/// (theories/examples/PrimeExample.v:147-164).
+/// (its `theories/examples/PrimeExample.v`).
 #[test]
 fn prime_example_end_to_end_matches_prime_hspec1() {
     // The else-arm existential binder is named `k` rather than `m`: two `let m`

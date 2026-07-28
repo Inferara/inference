@@ -192,7 +192,7 @@ fn rems(l: HTerm, r: HTerm) -> HTerm {
 // ----- 1. the canonical prime obligation --------------------------------
 
 /// The single most important test: the `PrimeExample` source spec must produce
-/// `prime_hspec1` (`theories/examples/PrimeExample.v:147-164`) node-for-node.
+/// `prime_hspec1` (wasm-verifier's `theories/examples/PrimeExample.v`) node-for-node.
 #[test]
 fn canonical_prime_spec_matches_prime_hspec1() {
     let source = "\

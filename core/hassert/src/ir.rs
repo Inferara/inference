@@ -1,7 +1,7 @@
 //! The `hassert` obligation IR: terms, assertions, and the per-program map.
 //!
-//! Every type here mirrors a wasm-verifier inductive from `theories/`
-//! (`Assertions.v:21-88`), restricted to what an Inference specification can
+//! Every type here mirrors a wasm-verifier inductive from its
+//! `theories/Assertions.v`, restricted to what an Inference specification can
 //! express. The variant doc comments name each Coq counterpart.
 
 use rustc_hash::FxHashMap;
@@ -77,7 +77,7 @@ pub enum HConst {
 pub struct HFnRef(pub String);
 
 /// A term of the assertion language, mirroring the `term` inductive
-/// (`Assertions.v:21-33`).
+/// (`Assertions.v`).
 ///
 /// There is deliberately no `T_global` variant: an Inference specification
 /// cannot reference a global.
@@ -99,7 +99,7 @@ pub enum HTerm {
 }
 
 /// An assertion, mirroring the `hassert` inductive plus its two transparent
-/// sugars `Himpl`/`Hor` (`Assertions.v:37-88`).
+/// sugars `Himpl`/`Hor` (`Assertions.v`).
 ///
 /// The heap fragment (`HA_emp`/`HA_star`/`HA_iter`/`HA_pto`/`HA_size`) and the
 /// general `HA_pred` are omitted: memory constructs are never produced, and
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// Transcription of wasm-verifier's `prime_hspec1`
-    /// (`theories/examples/PrimeExample.v:147-164`): the single most important
+    /// (its `theories/examples/PrimeExample.v`): the single most important
     /// expressiveness anchor. Building it through the smart constructors must
     /// reproduce the hand-spelled explicit tree node-for-node — pinning slot
     /// numbering, the `assume`→`Himpl` / exists-arm→`HA_and` polarity split,
@@ -294,7 +294,7 @@ mod tests {
     /// placement, and the `T_lvar 0` / `SX_S` choices.
     #[test]
     fn canonical_prime_hspec1_structure() {
-        // Shared sub-terms (PrimeExample.v:117-123).
+        // Shared sub-terms (PrimeExample.v).
         let n = || HTerm::Local(0); // n_term = T_local 0
         let m_then = || HTerm::Local(1); // m_then = T_local 1
         let m_ex = || HTerm::LVar(0); // exists-arm m = T_lvar 0
