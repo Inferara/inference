@@ -67,6 +67,7 @@ use inference_ast::nodes::{
     UnaryOperatorKind,
     Visibility,
 };
+use inference_hassert::HSpecMap;
 use inference_type_checker::{
     EnumInfo,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
@@ -5726,10 +5727,14 @@ impl Compiler {
     /// Consumes `self` so the recorded maps are moved out exactly once; there is
     /// no separate drain step and no flag to track. The custom
     /// `inference.spec_funcs` section is emitted from `self.spec_func_indices_by_spec`
-    /// before the move. The `frame_sizes` map (canonical [`FnKey`] →
-    /// real shadow-stack frame bytes) is surfaced for the cross-crate A036
-    /// frame-size soundness check.
-    pub(crate) fn finish_and_take(self) -> FinishedModule {
+    /// before the move, and — in proof mode — the `inference.hspecs` section is
+    /// emitted from `hspecs` immediately after it (borrowed, since the caller
+    /// retains the map to attach to its output). Both are additive custom
+    /// sections: proof-mode function bodies stay byte-identical. `hspecs` must
+    /// have cleared the depth guard before this call. The `frame_sizes` map
+    /// (canonical [`FnKey`] → real shadow-stack frame bytes) is surfaced for the
+    /// cross-crate A036 frame-size soundness check.
+    pub(crate) fn finish_and_take(self, hspecs: &HSpecMap) -> FinishedModule {
         let mut module = Module::new();
 
         let mut type_section = TypeSection::new();
@@ -5838,6 +5843,15 @@ impl Compiler {
             module.section(&spec_section);
         }
 
+        // The `inference.hspecs` obligation section is a sibling of
+        // `inference.spec_funcs`, emitted right after it so the two verification
+        // deliverables sit adjacently. It is populated only in proof mode; the
+        // map is empty otherwise, so the section is absent from compile-mode
+        // output.
+        if !hspecs.is_empty() {
+            module.section(&crate::hspecs_section::HspecsSection::new(hspecs));
+        }
+
         (
             module.finish(),
             self.spec_func_indices_by_spec,
@@ -5901,7 +5915,7 @@ mod tests {
     #[test]
     fn finish_without_memory_omits_memory_section() {
         let compiler = Compiler::new("test");
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         assert!(!wasm.is_empty());
         assert!(!has_memory_section(&wasm));
     }
@@ -5911,7 +5925,7 @@ mod tests {
         cov_mark::check!(wasm_codegen_emit_memory_section);
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         assert!(has_memory_section(&wasm));
     }
 
@@ -5919,7 +5933,7 @@ mod tests {
     fn finish_with_memory_validates_via_wasmparser() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("Generated WASM with memory is invalid: {e}"));
     }
@@ -5928,7 +5942,7 @@ mod tests {
     fn finish_with_memory_exports_memory_and_stack_pointer() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -5945,7 +5959,7 @@ mod tests {
     fn finish_with_memory_has_correct_stack_pointer_init() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -5958,7 +5972,7 @@ mod tests {
     fn finish_with_memory_has_mutable_global() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(

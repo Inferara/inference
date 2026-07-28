@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 inf-wasmparser.workspace = true
+inference-hassert.workspace = true
 inference-wasm-codegen.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true

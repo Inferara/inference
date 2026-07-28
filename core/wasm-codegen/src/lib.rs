@@ -57,6 +57,8 @@ use crate::errors::CodegenError;
 
 mod compiler;
 mod errors;
+mod hassert;
+mod hspecs_section;
 mod memory;
 pub mod output;
 mod spec_section;
@@ -64,6 +66,13 @@ pub mod target;
 
 pub use output::CodegenOutput;
 pub use target::{CompilationMode, OptLevel, Target};
+
+/// Re-exports of the `hassert` obligation IR, so a consumer of
+/// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
+/// separate dependency on `inference-hassert`.
+pub use inference_hassert::{
+    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm,
+};
 
 /// Single source of truth for the custom WASM section name that carries
 /// per-spec function indices. Consumed by both `core/wasm-codegen` (encoder)
@@ -136,9 +145,11 @@ pub fn codegen(
     // traps; the `emit_index_offset` choke point is the seam where it hooks in.
     compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
 
-    if typed_context.source_files().next().is_some() {
-        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
-    }
+    let hspecs = if typed_context.source_files().next().is_some() {
+        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?
+    } else {
+        HSpecMap::default()
+    };
 
     // Reject any spec name that would overflow the byte cap both
     // `inference.spec_funcs` decoders enforce, before the section is emitted.
@@ -154,14 +165,25 @@ pub fn codegen(
         .into());
     }
 
+    // Refuse to write an `inference.hspecs` section the codec's own decoder
+    // would reject: `inference_hassert::encode` is infallible, but its hardened
+    // decoder enforces an input contract (bounded tree depth, non-empty names
+    // within a byte cap), so an unchecked obligation would serialize into a
+    // corrupt-at-decode artifact. Gating on the shared validator here names the
+    // offending spec and identifier instead of leaving a `.wasm` that fails its
+    // own downstream link/translate step.
+    hspecs_section::check_payload(&hspecs)?;
+
     // Snapshot `has_main` before `finish_and_take` consumes the compiler:
     // the section is emitted in a single pass that moves out the recorded
-    // spec map alongside the WASM bytes.
+    // spec map alongside the WASM bytes. The obligation map is borrowed for the
+    // `inference.hspecs` section and retained here to attach to the output.
     let has_main = compiler.has_main();
-    let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take();
+    let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take(&hspecs);
     debug_assert!(
-        mode != CompilationMode::Compile || spec_func_indices_by_spec.is_empty(),
-        "compile mode must not record any spec function indices"
+        mode != CompilationMode::Compile
+            || (spec_func_indices_by_spec.is_empty() && hspecs.is_empty()),
+        "compile mode must not record any spec function indices or hspec obligations"
     );
 
     Ok(CodegenOutput::new(
@@ -173,7 +195,8 @@ pub fn codegen(
         has_main,
         spec_func_indices_by_spec,
     )
-    .with_frame_sizes(frame_sizes))
+    .with_frame_sizes(frame_sizes)
+    .with_hspecs(hspecs))
 }
 
 /// Traverses every source file's typed AST and compiles all function and
@@ -198,7 +221,7 @@ fn traverse_t_ast_with_compiler(
     typed_context: &TypedContext,
     compiler: &mut Compiler,
     mode: CompilationMode,
-) -> Result<(), CodegenError> {
+) -> Result<HSpecMap, CodegenError> {
     let arena = typed_context.arena();
 
     // Collect emittable items from every source file into one set of buckets,
@@ -285,7 +308,32 @@ fn traverse_t_ast_with_compiler(
             &FunctionOrigin::SpecInner(entry.spec_name.clone()),
         )?;
     }
-    Ok(())
+
+    // Proof-mode only: derive each spec function's `hassert` obligation. This
+    // runs after every body is compiled so the WASM bytes are already settled;
+    // the pass reads the AST, type information, and the buckets, never the
+    // compiler's output, so proof-mode bytes are unchanged. In compile mode the
+    // spec buckets are empty, so the obligation map is empty.
+    //
+    // The obligation is a required proof-mode deliverable: a spec function that
+    // cannot be translated (a `P0xx` diagnostic) fails code generation rather
+    // than silently emitting a module whose specifications are unverifiable.
+    // Every diagnostic is collected first, so a spec with several mistakes
+    // surfaces them all at once.
+    if mode == CompilationMode::Proof {
+        let (hspecs, diagnostics) = hassert::translate_spec_fns(typed_context, &buckets);
+        if !diagnostics.is_empty() {
+            let rendered = diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(CodegenError::UntranslatableSpec(rendered));
+        }
+        Ok(hspecs)
+    } else {
+        Ok(HSpecMap::default())
+    }
 }
 
 /// File-qualifies a spec name by prefixing its defining file's module-path

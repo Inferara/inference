@@ -42,22 +42,23 @@
 //! reaches the translator, since an external body must additionally survive tier
 //! classification (a memory access through a non-parameter address is rejected as
 //! Tier C). Direct `call` is inherent in every fixture (the main module calls the
-//! satisfied import, whose body is merged in). The translatable proof-path
-//! opcodes — the `forall`/`exists`/`assume` blocks and both uzumaki rvalues —
-//! are legal only in the main module, which carries them as Rocq proof
-//! scaffolding the merge preserves verbatim.
+//! satisfied import, whose body is merged in).
 //!
-//! ## `unique` is linkable but rejected at translation
+//! ## Non-deterministic instructions are translatable only by omission
 //!
-//! The `unique` block (`0xfc 0x3d`) is the one deliberate exception: the
-//! wasm-verifier library defines no `BI_unique` constructor, so `wasm-to-v`
-//! rejects it with a recoverable `UnsupportedFeature` error instead of
-//! lowering it to a constructor the real library cannot type-check. The
-//! linker is unchanged — a main module carrying `unique` as proof scaffolding
-//! still links (externals carrying it are rejected by the allow-list as
-//! before) — so the phase agreement for `unique` is a clean rejection, never
-//! a panic and never a silently un-verifiable `.v`.
-//! [`proof_path_unique_is_rejected_at_translation`] pins that.
+//! The verification-only opcodes (`forall`/`exists`/`assume`/`unique` and
+//! `i32`/`i64.uzumaki`) have no counterpart in the vanilla WasmCert proof model
+//! `wasm-to-v` targets. They reach the `.v` path only inside a `spec` function's
+//! body, which the translator OMITS from the module record entirely — so they are
+//! "translatable" purely by not being emitted. A non-det instruction in a
+//! surviving (executable, non-spec) body has no lowering and is a fail-closed
+//! `wasm-to-v` rejection. The linker still admits these opcodes (its allow-list is
+//! unchanged, so a main module carrying them still links); the phase agreement
+//! they must uphold is therefore that such an output *is rejected*, not that it
+//! translates — [`proof_path_nondet_and_uzumaki_is_rejected`] pins that, and
+//! [`proof_path_unique_is_rejected_at_translation`] pins the `unique` arm in
+//! isolation (the combined fixture rejects on its first opcode, so `unique`
+//! would otherwise ride along untested).
 
 use inference_wasm_linker::link as raw_link;
 use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
@@ -111,7 +112,8 @@ fn assert_output_translates(label: &str, main: &[u8]) {
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        translate_bytes("Prog", &linked, &empty)
+        let empty_hspecs = inference_hassert::HSpecMap::default();
+        translate_bytes("Prog", &linked, &empty, &empty_hspecs)
     }));
 
     match result {
@@ -131,38 +133,43 @@ fn assert_output_translates(label: &str, main: &[u8]) {
     }
 }
 
-/// The dual of [`assert_output_translates`] for `unique`: the linker accepts
-/// `main`, but wasm-to-v must reject the linked output with a recoverable
-/// `WasmToVError::UnsupportedFeature` — never a panic, never a silent success.
+/// The dual of [`assert_output_translates`] for the non-deterministic families:
+/// the linker accepts `main`, but because the opcodes sit in a surviving
+/// (non-spec) body, `wasm-to-v` must reject the linked output with a recoverable
+/// [`inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature`]
+/// naming the vanilla-WasmCert limitation — never a panic, never a silent
+/// success.
 fn assert_output_rejected_as_nondet(label: &str, main: &[u8]) {
     let linked = link_against_mathlib(main);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        translate_bytes("Prog", &linked, &empty)
+        let empty_hspecs = inference_hassert::HSpecMap::default();
+        translate_bytes("Prog", &linked, &empty, &empty_hspecs)
     }));
+
     match result {
         Ok(Err(e)) => {
-            let downcast =
-                e.downcast_ref::<inference_wasm_to_v_translator::errors::WasmToVError>();
+            let downcast = e.downcast_ref::<inference_wasm_to_v_translator::errors::WasmToVError>();
             assert!(
                 matches!(
                     downcast,
-                    Some(inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature { .. })
+                    Some(
+                        inference_wasm_to_v_translator::errors::WasmToVError::UnsupportedFeature { .. }
+                    )
                 ),
-                "{label}: expected a recoverable UnsupportedFeature rejection; got {e:?}"
-            );
-            assert!(
-                e.to_string().contains("`unique`"),
-                "{label}: the rejection must name the `unique` block; got {e:?}"
+                "{label}: a non-deterministic instruction in a surviving body must be a \
+                 recoverable UnsupportedFeature rejection; got {e:?}"
             );
         }
         Ok(Ok(_)) => panic!(
-            "{label}: wasm-to-v must reject a linked output carrying `unique` (the \
-             wasm-verifier library has no `BI_unique` constructor), but translation succeeded"
+            "{label}: a non-deterministic instruction in a surviving (non-spec) body must be \
+             rejected by wasm-to-v (the vanilla WasmCert proof model has no such construct), \
+             but translation succeeded"
         ),
         Err(_) => panic!(
-            "{label}: wasm-to-v PANICKED instead of returning a recoverable \
-             UnsupportedFeature error"
+            "{label}: wasm-to-v PANICKED on a non-deterministic instruction instead of \
+             returning a recoverable UnsupportedFeature error"
         ),
     }
 }
@@ -539,26 +546,30 @@ fn ref_func_translates() {
 // preservation, add a `call_indirect` entry here.
 
 #[test]
-fn proof_path_nondet_and_uzumaki_translate() {
-    // The translatable proof-path opcodes (forall/exists/assume and
-    // i32.uzumaki/i64.uzumaki) are legal only in the main module, which carries
-    // them as Rocq proof scaffolding the merge preserves verbatim. `wat` cannot
-    // assemble these custom `0xfc`-prefixed opcodes, so the body is hand-encoded.
-    // `unique` (`0xfc 0x3d`) has no honest lowering and is exercised separately
-    // by its own rejection fixture, [`proof_path_unique_is_rejected_at_translation`].
+fn proof_path_nondet_and_uzumaki_is_rejected() {
+    // The verification-only proof-path opcodes (forall/exists/assume and
+    // i32.uzumaki/i64.uzumaki) have no counterpart in the vanilla WasmCert proof
+    // model. Here they sit in the main module's *surviving* (non-spec) body — the
+    // module carries no `inference.spec_funcs` section, so nothing is omitted —
+    // and `wasm-to-v` must reject the linked output rather than translate it. The
+    // linker still admits the opcodes (its allow-list is unchanged), so the phase
+    // agreement is a clean rejection, not a lowering. Rejection fires on the
+    // first opcode reached, so `unique` (`0xfc 0x3d`) is exercised in isolation
+    // by [`proof_path_unique_is_rejected_at_translation`]. `wat` cannot assemble
+    // these custom `0xfc`-prefixed opcodes, so the body is hand-encoded.
     let main = proof_mode_main_with_nondet_and_uzumaki();
-    assert_output_translates("non-det blocks + uzumaki (proof path)", &main);
+    assert_output_rejected_as_nondet("non-det blocks + uzumaki (proof path)", &main);
 }
 
 /// Builds a proof-mode MAIN module that imports `mathlib::sum` and whose own
 /// exported body carries the translatable verification-only opcodes the proof
 /// path uses — the three non-det blocks (`forall`/`exists`/`assume`) and both
 /// uzumaki rvalues (`i32.uzumaki`/`i64.uzumaki`) — alongside an executable `call`
-/// to the import. `unique` (`0xfc 0x3d`) is deliberately excluded: it has no
-/// honest Rocq lowering, so it is exercised by its own rejection fixture
-/// ([`main_with_unique_block`]) rather than here. `wat` cannot assemble the
-/// custom opcodes, so the module is hand-encoded byte-by-byte, mirroring the
-/// encoding in `link.rs`.
+/// to the import. `unique` (`0xfc 0x3d`) is deliberately excluded: rejection
+/// fires on the first opcode reached, so it is exercised in isolation by its
+/// own fixture ([`main_with_unique_block`]) rather than riding along untested
+/// here. `wat` cannot assemble the custom opcodes, so the module is
+/// hand-encoded byte-by-byte, mirroring the encoding in `link.rs`.
 fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
@@ -626,9 +637,9 @@ fn proof_path_unique_is_rejected_at_translation() {
 /// exported body carries a single `unique` block (`0xfc 0x3d 0x40`) closed by
 /// `End`, alongside an executable `call` to the import. The linker admits this
 /// (a main module's proof scaffolding is re-encoded verbatim), but wasm-to-v
-/// must reject it — there is no `BI_unique` constructor to lower it to. `wat`
-/// cannot assemble the custom opcode, so the module is hand-encoded, mirroring
-/// [`proof_mode_main_with_nondet_and_uzumaki`].
+/// must reject it — the vanilla WasmCert proof model has no constructor to
+/// lower it to. `wat` cannot assemble the custom opcode, so the module is
+/// hand-encoded, mirroring [`proof_mode_main_with_nondet_and_uzumaki`].
 fn main_with_unique_block() -> Vec<u8> {
     use wasm_encoder::{
         CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,

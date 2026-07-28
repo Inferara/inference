@@ -166,15 +166,89 @@ use inf_wasmparser::{
     FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
     RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
+use inference_hassert::HSpecMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errors::WasmToVError;
+use crate::hassert_print;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
 
 const LIST_EXT: &str = " ::\n";
 const LIST_SEAL: &str = "nil";
+
+/// The function-index renumbering the spec-function omission forces on the
+/// emitted module.
+///
+/// A `spec` function is a downstream contract obligation, not part of the
+/// executable module, so it is dropped from the `.v` module record. Dropping a
+/// function at absolute index `s` shifts every later function down by one, so
+/// every surviving reference — `BI_call` operands, export/element/start
+/// descriptors, and `T_app` targets — must be renumbered. Imports are never
+/// spec functions (codegen records only local functions), so imported indices
+/// are stable.
+struct FuncRemap {
+    /// Absolute WASM indices of the omitted spec functions, sorted ascending
+    /// and de-duplicated.
+    spec_abs: Vec<u32>,
+    /// Number of imported functions, occupying the lowest function indices.
+    func_import_count: u32,
+}
+
+impl FuncRemap {
+    /// Builds the remap from the spec-index map and the function-import count.
+    fn new(spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>, func_import_count: u32) -> Self {
+        let mut spec_abs: Vec<u32> = spec_funcs_by_spec.values().flatten().copied().collect();
+        spec_abs.sort_unstable();
+        spec_abs.dedup();
+        Self {
+            spec_abs,
+            func_import_count,
+        }
+    }
+
+    /// Whether the function at absolute index `abs` is an omitted spec function.
+    fn is_omitted(&self, abs: u32) -> bool {
+        self.spec_abs.binary_search(&abs).is_ok()
+    }
+
+    /// The number of omitted spec functions strictly below `abs`.
+    fn below(&self, abs: u32) -> u32 {
+        // `partition_point` returns the count of elements for which the
+        // predicate holds; on the sorted `spec_abs` that is exactly the number
+        // of omitted indices strictly below `abs`.
+        u32::try_from(self.spec_abs.partition_point(|&s| s < abs)).unwrap_or(u32::MAX)
+    }
+
+    /// Renumbers a function index into the emitted module's instantiated
+    /// function space (imports first, then surviving defined functions). This
+    /// is the operand form for `BI_call`, exports, elements, and `mod_start`.
+    /// Fail-closed: a reference to an omitted spec function is an error.
+    fn instantiated(&self, abs: u32) -> anyhow::Result<u32> {
+        if self.is_omitted(abs) {
+            return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                "a surviving construct references function {abs}, which is an omitted \
+                 spec function"
+            ))));
+        }
+        Ok(abs - self.below(abs))
+    }
+
+    /// The index of a defined function into `mod_funcs` (imports excluded), the
+    /// form `T_app` uses. Fail-closed on an omitted or imported function.
+    fn mod_funcs_index(&self, abs: u32) -> anyhow::Result<u32> {
+        let instantiated = self.instantiated(abs)?;
+        instantiated
+            .checked_sub(self.func_import_count)
+            .ok_or_else(|| {
+                anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                    "a `T_app` obligation references imported function {abs}, but only \
+                     module-defined functions can be applied"
+                )))
+            })
+    }
+}
 
 /// Structured representation of a parsed WASM module.
 ///
@@ -214,6 +288,12 @@ const LIST_SEAL: &str = "nil";
 pub(crate) struct WasmParseData<'a> {
     pub(crate) mod_name: String,
     pub(crate) func_names_map: Option<HashMap<u32, String>>,
+    /// The RAW, unsanitized name-section function names keyed by absolute WASM
+    /// function index. Whereas `func_names_map` holds Rocq-sanitized names for
+    /// `Definition` emission, `inference.hspecs` obligations reference callees
+    /// by their exact `FnKey::Display` symbol, so `T_app` resolution keys on
+    /// these untouched strings.
+    pub(crate) raw_func_names_map: Option<HashMap<u32, String>>,
     pub(crate) func_locals_name_map: Option<HashMap<u32, HashMap<u32, String>>>,
 
     pub(crate) start_function: Option<u32>,
@@ -228,10 +308,19 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_types: Vec<RecGroup>,
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
-    /// WASM function indices that originated from `spec` blocks, keyed by
-    /// spec name. Each entry materializes as a `<mod>__<SpecName>_specs : list N`
-    /// Rocq definition consumed by the corresponding `ValidModule` theorem.
+    /// WASM function indices that originated from `spec` blocks, keyed by spec
+    /// name. These functions are OMITTED from the emitted module record (they
+    /// are downstream contract obligations, not part of the executable module),
+    /// and their union drives the [`FuncRemap`] that renumbers every surviving
+    /// function reference. Each spec also materializes a
+    /// `<mod>__<SpecName>_specs : list hassert` definition and a
+    /// `ValidSpec` theorem.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
+    /// Per-spec `hassert` verification obligations decoded from the
+    /// `inference.hspecs` custom section (or supplied explicitly). A subset of
+    /// `spec_funcs_by_spec` by spec name: a spec with only methods contributes
+    /// indices but no obligations.
+    pub(crate) hspecs_by_spec: HSpecMap,
 
     translated_function_names: Vec<String>,
     translated_functions_string: String,
@@ -250,10 +339,12 @@ impl WasmParseData<'_> {
     pub(crate) fn new<'a>(
         mod_name: String,
         spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
+        hspecs_by_spec: HSpecMap,
     ) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
             func_names_map: None,
+            raw_func_names_map: None,
             func_locals_name_map: None,
             start_function: None,
             imports: Vec::new(),
@@ -267,6 +358,7 @@ impl WasmParseData<'_> {
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
             spec_funcs_by_spec,
+            hspecs_by_spec,
 
             translated_function_names: Vec::new(),
             translated_functions_string: String::new(),
@@ -331,14 +423,22 @@ impl WasmParseData<'_> {
         for spec_name in self.spec_funcs_by_spec.keys() {
             crate::rocq_names::validate_spec_join_boundary(&self.mod_name, spec_name)?;
         }
+
+        // The renumbering forced by omitting spec functions from the module
+        // record. Built once here and threaded through every function-index
+        // site (function bodies, exports, elements, `mod_start`, and `T_app`
+        // resolution).
+        let func_import_count =
+            u32::try_from(self.func_import_count()).expect("import count exceeds u32");
+        let remap = FuncRemap::new(&self.spec_funcs_by_spec, func_import_count);
+
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");
         res.push_str("Require Import BinNat.\n");
         res.push_str("Require Import ZArith.\n");
-        res.push_str("From Wasm Require Import bytes.\n");
-        res.push_str("From Wasm Require Import numerics.\n");
-        res.push_str("From Wasm Require Import datatypes verifier.\n");
+        res.push_str("From Wasm Require Import bytes numerics datatypes host.\n");
+        res.push_str("From WasmVerifier Require Import Assertions Verifier.\n");
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
@@ -382,7 +482,7 @@ impl WasmParseData<'_> {
 
         let mut created_exports = String::new();
         for export in &self.exports {
-            match translate_export_module(export) {
+            match translate_export_module(export, &remap) {
                 Ok(translated_export) => {
                     created_exports.push_str("    ");
                     created_exports.push_str(translated_export.as_str());
@@ -430,7 +530,7 @@ impl WasmParseData<'_> {
 
         let mut created_globals = String::new();
         for global in &self.globals {
-            match translate_global(global) {
+            match translate_global(global, &remap) {
                 Ok(translated_global) => {
                     created_globals.push_str("    ");
                     created_globals.push_str(translated_global.as_str());
@@ -446,7 +546,7 @@ impl WasmParseData<'_> {
 
         let mut created_data_segments = String::new();
         for data in &self.data {
-            match translate_data(data) {
+            match translate_data(data, &remap) {
                 Ok(translated_data) => {
                     created_data_segments.push_str("    ");
                     created_data_segments.push_str(translated_data.as_str());
@@ -460,7 +560,7 @@ impl WasmParseData<'_> {
 
         let mut created_elements = String::new();
         for element in &self.elements {
-            match translate_element(element) {
+            match translate_element(element, &remap) {
                 Ok(translated_element) => {
                     created_elements.push_str("    ");
                     created_elements.push_str(translated_element.as_str());
@@ -492,7 +592,7 @@ impl WasmParseData<'_> {
         created_function_types.push_str(LIST_SEAL);
 
         let mut created_functions = String::new();
-        match self.translate_functions() {
+        match self.translate_functions(&remap) {
             Ok(_) => {
                 res.push_str(self.translated_functions_string.as_str());
                 for function_name in &self.translated_function_names {
@@ -520,9 +620,9 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_elems :=\n{created_elements};\n").as_str());
         res.push_str(format!("  mod_datas :=\n{created_data_segments};\n").as_str());
         if let Some(start_function) = self.start_function {
+            let start = remap.instantiated(start_function)?;
             res.push_str(
-                format!("  mod_start := Some {{|modstart_func := {start_function}%N|}};\n")
-                    .as_str(),
+                format!("  mod_start := Some {{|modstart_func := {start}%N|}};\n").as_str(),
             );
         } else {
             res.push_str("  mod_start := None;\n");
@@ -531,69 +631,160 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
-        // Emit per-spec lists of WASM function indices, sorted by spec name
-        // for deterministic output. Spec names were validated against the
-        // Rocq identifier rules at the top of `translate()` so that
-        // `<mod>__<SpecName>_specs` is always a syntactically legal Rocq
-        // identifier.
-        let mut spec_entries: Vec<(&String, &Vec<u32>)> =
-            self.spec_funcs_by_spec.iter().collect();
-        spec_entries.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (spec_name, indices) in &spec_entries {
-            res.push('\n');
-            if indices.is_empty() {
-                // (@nil N): no literals to disambiguate, and works regardless
-                // of scope state at the Require site.
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := (@nil N).\n"
-                    )
-                    .as_str(),
-                );
-            } else {
-                let indices_str = indices
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" :: ");
-                res.push_str(
-                    format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := ({indices_str} :: nil)%N.\n"
-                    )
-                    .as_str(),
-                );
-            }
-        }
-
-        // Generate Theorems
-        res.push('\n');
-        res.push_str("Section Host.\n");
-        res.push_str("Context `{ho: host}.\n");
-        res.push('\n');
-        for (spec_name, _) in &spec_entries {
-            res.push('\n');
-            res.push_str(
-                format!(
-                    "Theorem valid_{module_name}__{spec_name} : ValidModule {module_name} {module_name}__{spec_name}_specs.\n"
-                )
-                .as_str(),
-            );
-            res.push_str("Proof.\n");
-            res.push_str("  (* TODO: fill the proof *)\n");
-            res.push_str("Qed.\n");
-        }
-        res.push('\n');
-        res.push_str("End Host.\n");
-
         // Fail-closed: any section error means the assembled module is
         // incomplete (e.g. a function body that hit an unsupported operator).
-        // Returning it as success would emit a corrupt proof artifact, so
-        // surface the first collected error instead.
+        // Surface it before emitting the obligation definitions, which resolve
+        // symbols against the (now-known) function layout.
         if let Some(first) = errors.into_iter().next() {
             return Err(first);
         }
+
+        self.emit_spec_definitions(&mut res, &remap)?;
+        self.emit_theorems(&mut res);
+
         Ok(res)
+    }
+
+    /// Spec names, sorted, so the `list hassert` definitions and the theorems
+    /// iterate in the same deterministic order. The authoritative spec set is
+    /// `inference.spec_funcs`; `inference.hspecs` is a subset (a method-only
+    /// spec has indices but no obligations), so a spec present here with no
+    /// obligation entry emits an empty `list hassert`.
+    fn sorted_spec_names(&self) -> Vec<&String> {
+        let mut names: Vec<&String> = self.spec_funcs_by_spec.keys().collect();
+        names.sort();
+        names
+    }
+
+    /// Resolves every function symbol any obligation applies to its `mod_funcs`
+    /// index, up front, so a missing / ambiguous / imported / omitted target
+    /// fails before a line of output is built.
+    fn resolve_app_symbols(&self, remap: &FuncRemap) -> anyhow::Result<FxHashMap<String, u32>> {
+        let mut symbols: Vec<&str> = Vec::new();
+        for entries in self.hspecs_by_spec.values() {
+            for entry in entries {
+                hassert_print::collect_symbols(&entry.hassert, &mut symbols);
+            }
+        }
+        symbols.sort_unstable();
+        symbols.dedup();
+        if symbols.is_empty() {
+            return Ok(FxHashMap::default());
+        }
+
+        // Invert the RAW name-section map: a symbol resolves to the absolute
+        // index of the defined function carrying it. A `T_app` names exactly
+        // one defined function, so zero or several matches is a hard error.
+        let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
+        if let Some(raw) = &self.raw_func_names_map {
+            for (idx, name) in raw {
+                by_name.entry(name.as_str()).or_default().push(*idx);
+            }
+        }
+
+        let mut resolved = FxHashMap::default();
+        for sym in symbols {
+            let abs = match by_name.get(sym).map(Vec::as_slice) {
+                Some([one]) => *one,
+                Some(many) if many.len() > 1 => {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "obligation applies function symbol `{sym}`, which {} defined \
+                         functions share; the target is ambiguous",
+                        many.len()
+                    ))));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "obligation applies function symbol `{sym}`, which no defined function \
+                         in the module carries"
+                    ))));
+                }
+            };
+            // Rejects an imported or omitted (spec) target: a `T_app` may only
+            // name a module-defined, non-spec function.
+            let idx = remap.mod_funcs_index(abs)?;
+            resolved.insert(sym.to_string(), idx);
+        }
+        Ok(resolved)
+    }
+
+    /// Appends the per-spec `hassert` obligation definitions to `out`: one
+    /// `<mod>__<Spec>_hspec{k} : hassert` per obligation (source order,
+    /// 1-based), then a `<mod>__<Spec>_specs : list hassert` gathering them.
+    ///
+    /// Spec names were validated against the Rocq identifier rules at the top
+    /// of `translate()` so that `<mod>__<Spec>_specs` is always a syntactically
+    /// legal Rocq identifier.
+    fn emit_spec_definitions(&self, out: &mut String, remap: &FuncRemap) -> anyhow::Result<()> {
+        let resolved = self.resolve_app_symbols(remap)?;
+        let module_name = &self.mod_name;
+        for spec_name in self.sorted_spec_names() {
+            out.push('\n');
+            match self.hspecs_by_spec.get(spec_name) {
+                Some(entries) if !entries.is_empty() => {
+                    let mut hspec_names = Vec::with_capacity(entries.len());
+                    for (k, entry) in entries.iter().enumerate() {
+                        let def_name = format!("{module_name}__{spec_name}_hspec{}", k + 1);
+                        let body = hassert_print::print_assert(&entry.hassert, &resolved);
+                        out.push_str(
+                            format!("Definition {def_name} : hassert :=\n  {body}.\n").as_str(),
+                        );
+                        hspec_names.push(def_name);
+                    }
+                    let joined = hspec_names.join(" :: ");
+                    out.push_str(
+                        format!(
+                            "Definition {module_name}__{spec_name}_specs : list hassert := ({joined} :: nil).\n"
+                        )
+                        .as_str(),
+                    );
+                }
+                // A spec with no free-function obligations (only methods, or an
+                // empty `spec { }`): an explicitly-typed empty list, scope- and
+                // Require-order-independent.
+                _ => {
+                    out.push_str(
+                        format!(
+                            "Definition {module_name}__{spec_name}_specs : list hassert := (@nil hassert).\n"
+                        )
+                        .as_str(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends the `Section Host` block: the always-emitted 1-ary
+    /// `ValidModule` theorem, then one `ValidSpec` theorem per spec, consuming
+    /// the `<mod>__<Spec>_specs` definitions emitted by
+    /// [`Self::emit_spec_definitions`].
+    fn emit_theorems(&self, out: &mut String) {
+        let module_name = &self.mod_name;
+        out.push('\n');
+        out.push_str("Section Host.\n");
+        out.push_str("Context `{ho: host}.\n");
+        out.push('\n');
+        out.push_str(
+            format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str(),
+        );
+        out.push_str("Proof.\n");
+        out.push_str("  (* TODO: fill the proof *)\n");
+        out.push_str("Qed.\n");
+        for spec_name in self.sorted_spec_names() {
+            out.push('\n');
+            out.push_str(
+                format!(
+                    "Theorem valid_{module_name}__{spec_name} : ValidSpec {module_name} {module_name}__{spec_name}_specs.\n"
+                )
+                .as_str(),
+            );
+            out.push_str("Proof.\n");
+            out.push_str("  (* TODO: fill the proof *)\n");
+            out.push_str("Qed.\n");
+        }
+        out.push('\n');
+        out.push_str("End Host.\n");
     }
 
     /// Number of imported functions, which occupy the lowest function indices
@@ -612,7 +803,7 @@ impl WasmParseData<'_> {
     }
 
     //Record module_func
-    fn translate_functions(&mut self) -> anyhow::Result<()> {
+    fn translate_functions(&mut self, remap: &FuncRemap) -> anyhow::Result<()> {
         // Rocq `Definition`s are not overloadable, so every emitted function
         // name must be globally unique. A static merge can fold an external
         // library's private function (carrying its own debug name) next to a
@@ -633,6 +824,14 @@ impl WasmParseData<'_> {
         for (index, function_body) in self.function_bodies.iter().enumerate() {
             let modfunc_type = *self.function_type_indexes.get(index).unwrap_or(&0);
             let abs_index = (func_import_base + index) as u32;
+            // A spec function is a downstream contract obligation, not part of
+            // the executable module: omit its body and its `mod_funcs` entry.
+            // `mod_types` stays complete (its now-unused type is still legal),
+            // so `modfunc_type` above needs no adjustment; the `remap` renumbers
+            // every surviving reference to the functions that remain.
+            if remap.is_omitted(abs_index) {
+                continue;
+            }
             // A function with no name-section entry is named deterministically
             // from its absolute index (`func_<abs_index>`) rather than a
             // per-process random UUID, so the `.v` is byte-identical across runs
@@ -662,13 +861,13 @@ impl WasmParseData<'_> {
             }
             modfunc_locals.push_str("nil");
 
-            let modfunc_body = match &self.func_locals_name_map {
-                Some(func_locals_name_map) => translate_expr(
-                    &mut function_body.get_operators_reader()?,
-                    func_locals_name_map.get(&modfunc_type).cloned(),
-                )?,
-                None => translate_expr(&mut function_body.get_operators_reader()?, None)?,
-            };
+            let local_name_map = self
+                .func_locals_name_map
+                .as_ref()
+                .and_then(|func_locals_name_map| func_locals_name_map.get(&modfunc_type).cloned());
+            let ctx = OperatorContext { local_name_map };
+            let modfunc_body =
+                translate_expr(&mut function_body.get_operators_reader()?, ctx, remap)?;
 
             self.translated_functions_string
                 .push_str(format!("Definition {func_name} : module_func := ").as_str());
@@ -802,16 +1001,22 @@ fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<Stri
 }
 
 //Inductive translate_export_module
-fn translate_export_module(export: &Export) -> anyhow::Result<String> {
+fn translate_export_module(export: &Export, remap: &FuncRemap) -> anyhow::Result<String> {
     let modexp_name = export.name;
-    let modexp_desc = translate_module_export_desc(export)?;
+    let modexp_desc = translate_module_export_desc(export, remap)?;
     Ok(format!("Me \"{modexp_name}\" ({modexp_desc})"))
 }
 
 //Inductive module_export_desc
-fn translate_module_export_desc(export: &Export) -> anyhow::Result<String> {
+fn translate_module_export_desc(export: &Export, remap: &FuncRemap) -> anyhow::Result<String> {
     let res = match export.kind {
-        inf_wasmparser::ExternalKind::Func => format!("MED_func {}%N", export.index),
+        // A function export's index shifts down past every omitted spec
+        // function; no export is ever dropped (spec functions are not
+        // exportable). Table/memory/global indices are not function indices, so
+        // they pass through unchanged.
+        inf_wasmparser::ExternalKind::Func => {
+            format!("MED_func {}%N", remap.instantiated(export.index)?)
+        }
         inf_wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
         inf_wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
         inf_wasmparser::ExternalKind::Global => format!("MED_global {}%N", export.index),
@@ -838,21 +1043,29 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
 }
 
 //Record global_type
-fn translate_global(global: &Global) -> anyhow::Result<String> {
+fn translate_global(global: &Global, remap: &FuncRemap) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
-    let mg_init = translate_expr(&mut global.init_expr.get_operators_reader(), None)?;
+    let mg_init = translate_expr(
+        &mut global.init_expr.get_operators_reader(),
+        OperatorContext::default(),
+        remap,
+    )?;
     Ok(format!("Mg {tg_mut} ({tg_t}) ({mg_init})"))
 }
 
 //Inductive module_datamode
-fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
+fn translate_module_datamode(data: &Data, remap: &FuncRemap) -> anyhow::Result<String> {
     let res = match &data.kind {
         DataKind::Active {
             memory_index,
             offset_expr,
         } => {
-            let expression = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
+            let expression = translate_expr(
+                &mut offset_expr.get_operators_reader(),
+                OperatorContext::default(),
+                remap,
+            )?;
             format!("MD_active {memory_index}%N ({expression})")
         }
         DataKind::Passive => "MD_passive".to_string(),
@@ -877,10 +1090,21 @@ struct ConditionExpr<'a> {
     else_arm: Expression<'a>,
 }
 
+/// Per-function data the operator translators consult while rendering a
+/// function body. Bundling it in one struct keeps the operator-translation
+/// signatures stable as body-level state accrues, instead of widening each
+/// signature independently.
+#[derive(Default)]
+struct OperatorContext {
+    /// Local index → source name, used to annotate `BI_local_*` with the
+    /// original variable name as a Rocq comment.
+    local_name_map: Option<HashMap<u32, String>>,
+}
+
 #[derive(Default)]
 struct Expression<'a> {
     parts: Vec<ExpressionPart<'a>>,
-    local_name_map: Option<HashMap<u32, String>>,
+    ctx: OperatorContext,
 }
 
 impl Expression<'_> {
@@ -897,7 +1121,12 @@ impl Expression<'_> {
     /// stack exhaustion (an unrecoverable `abort()`). The bound mirrors the one
     /// in `translate_expression`, so a body that built its tree without
     /// overflowing also renders without overflowing.
-    fn print_with_offset(&self, tabs_count: usize, depth: usize) -> anyhow::Result<String> {
+    fn print_with_offset(
+        &self,
+        tabs_count: usize,
+        depth: usize,
+        remap: &FuncRemap,
+    ) -> anyhow::Result<String> {
         if depth >= MAX_EXPRESSION_DEPTH {
             return Err(too_deeply_nested_err());
         }
@@ -909,29 +1138,40 @@ impl Expression<'_> {
                     Operator::Else | Operator::End => {}
                     _ => {
                         res.push_str(offset.as_str());
-                        res.push_str(translate_basic_operator(op, &self.local_name_map)?.as_str());
+                        res.push_str(translate_basic_operator(op, &self.ctx, remap)?.as_str());
                         res.push_str(LIST_EXT);
                     }
                 },
                 ExpressionPart::Block(block) => {
                     res.push_str(offset.as_str());
                     res.push_str(
-                        translate_basic_operator(&block.label, &self.local_name_map)?.as_str(),
+                        translate_basic_operator(&block.label, &self.ctx, remap)?.as_str(),
                     );
                     res.push_str(" (\n");
-                    res.push_str(block.parts.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
+                    res.push_str(
+                        block
+                            .parts
+                            .print_with_offset(tabs_count + 1, depth + 1, remap)?
+                            .as_str(),
+                    );
                     res.push_str(") ");
                     res.push_str("::\n");
                 }
                 ExpressionPart::Condition(cond) => {
                     res.push_str(offset.as_str());
-                    res.push_str(
-                        translate_basic_operator(&cond.label, &self.local_name_map)?.as_str(),
-                    );
+                    res.push_str(translate_basic_operator(&cond.label, &self.ctx, remap)?.as_str());
                     res.push_str(" (\n");
-                    res.push_str(cond.then_arm.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
+                    res.push_str(
+                        cond.then_arm
+                            .print_with_offset(tabs_count + 1, depth + 1, remap)?
+                            .as_str(),
+                    );
                     res.push_str(") (\n");
-                    res.push_str(cond.else_arm.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
+                    res.push_str(
+                        cond.else_arm
+                            .print_with_offset(tabs_count + 1, depth + 1, remap)?
+                            .as_str(),
+                    );
                     res.push_str(") ");
                     res.push_str("::\n");
                 }
@@ -1022,15 +1262,16 @@ fn translate_expression<'a>(
 
 fn translate_expr(
     operators_reader: &mut OperatorsReader,
-    local_name_map: Option<HashMap<u32, String>>,
+    ctx: OperatorContext,
+    remap: &FuncRemap,
 ) -> anyhow::Result<String> {
     let mut peekable_operators_reader = operators_reader.clone().into_iter();
     let mut expression = translate_expression(&mut peekable_operators_reader, 0)?;
-    expression.local_name_map = local_name_map;
+    expression.ctx = ctx;
     // Render through the fallible `print_with_offset` directly rather than the
     // `Display` impl, so that an unsupported operator surfaces as a returned
     // `WasmToVError` instead of being swallowed into placeholder text.
-    expression.print_with_offset(2, 0)
+    expression.print_with_offset(2, 0, remap)
 }
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
@@ -1053,7 +1294,7 @@ fn translate_memarg(memarg: &inf_wasmparser::MemArg) -> anyhow::Result<String> {
 }
 
 //Record module_element
-fn translate_element(element: &Element) -> anyhow::Result<String> {
+fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<String> {
     let mut res = String::new();
     // let id = get_id();
     let modelem_mode = match &element.kind {
@@ -1061,8 +1302,14 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             table_index,
             offset_expr,
         } => {
+            // The active-element table index is a table index, not a function
+            // index, so it is not renumbered.
             let tableidx = table_index.unwrap_or_default();
-            let expr = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
+            let expr = translate_expr(
+                &mut offset_expr.get_operators_reader(),
+                OperatorContext::default(),
+                remap,
+            )?;
             format!("ME_active {tableidx}%N ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
@@ -1075,18 +1322,24 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, expr_reader) = result?;
-                let expr = translate_expr(&mut expr_reader.get_operators_reader(), None)?;
+                let expr = translate_expr(
+                    &mut expr_reader.get_operators_reader(),
+                    OperatorContext::default(),
+                    remap,
+                )?;
                 expr_list.push_str(format!("({expr})").as_str());
                 expr_list.push_str(" ::\n");
             }
             format!("{expr_list}nil")
         }
         ElementItems::Functions(elements) => {
+            // Each element is a function index into the instantiated space;
+            // renumber it past every omitted spec function.
             modelem_type = "T_funcref".to_string();
             let mut indexes = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, index) = result?;
-                indexes.push_str(format!("{index}").as_str());
+                indexes.push_str(format!("{}", remap.instantiated(index)?).as_str());
                 indexes.push_str("::");
             }
             indexes.push_str("nil");
@@ -1164,21 +1417,11 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     Ok(res)
 }
 
-/// Diagnostic emitted when a `unique` block is reached during proof-mode
-/// translation: the wasm-verifier library defines no `BI_unique` constructor,
-/// so there is no honest Rocq lowering. Hoisted to a `const` so the rejection
-/// arm stays compact.
-const UNIQUE_REJECTION_DESCRIPTION: &str = "the `unique` non-deterministic block (the wasm-verifier proof \
-     library defines no `BI_unique` constructor, so a uniqueness \
-     obligation cannot be expressed in the emitted `.v`; \
-     `forall`/`exists`/`assume` blocks still translate — restate the \
-     property without `unique`, or build without `-v`, which strips \
-     spec functions)";
-
 //Inductive basic_instruction
 fn translate_basic_operator(
     operator: &Operator,
-    local_name_map: &Option<HashMap<u32, String>>,
+    ctx: &OperatorContext,
+    remap: &FuncRemap,
 ) -> anyhow::Result<String> {
     let operator = match operator {
         inf_wasmparser::Operator::Nop => "BI_nop".to_string(),
@@ -1195,44 +1438,25 @@ fn translate_basic_operator(
             let blockty = translate_block_type(blockty)?;
             format!("BI_if ({blockty})")
         }
-        // `forall`/`exists` lower to the verifier library's quantifier
-        // constructors, which take ONLY the body block — `BI_forall,
-        // BI_exists : list basic_instruction -> basic_instruction` (see
-        // WasmCert-Coq-Essence `theories/datatypes.v`). Unlike `BI_block`/
-        // `BI_loop`/`BI_if`/`BI_assume`, they carry no `block_type`: a
-        // quantifier block produces no value, so there is no result type to
-        // model. `print_with_offset` appends the body as the sole `( … )`
-        // argument, so we must emit the bare constructor here; emitting a
-        // `block_type` argument would make the generated `.v` apply the
-        // 1-ary constructor to two arguments and fail to type-check. The
-        // WASM encoding always carries an empty (`0x40`) blocktype for these
-        // (see `inference-wasm-codegen`), so dropping it loses nothing.
-        Operator::Forall { .. } => String::from("BI_forall"),
-        Operator::Exists { .. } => String::from("BI_exists"),
-        Operator::Assume { blockty } => {
-            // `BI_assume : block_type -> list basic_instruction -> _` does
-            // take a leading block_type, so this one keeps it (matching the
-            // 2-ary `BI_block` shape).
-            let blockty = translate_block_type(blockty)?;
-            format!("BI_assume ({blockty})")
-        }
-        // The wasm-verifier library defines no `BI_unique` constructor (it is
-        // commented out in its `theories/datatypes.v`), so there is no honest
-        // Rocq lowering for a `unique` block: emitting `BI_unique` would
-        // produce a `.v` that can never type-check against the real library.
-        // Reject with a recoverable error instead. The linker deliberately
-        // still admits the opcode in a main module's proof scaffolding (the
-        // merge allow-list never applied to the main re-encode path), so the
-        // linker<->translator agreement pinned by
-        // `core/wasm-linker/tests/v_alignment.rs` is that a linked output
-        // carrying `unique` is rejected here — never lowered, never a panic.
-        Operator::Unique { .. } => {
+        // Non-deterministic instructions have no counterpart in the vanilla
+        // WasmCert proof model the wasm-verifier library targets. With spec
+        // functions omitted from the module record, these lowerings are
+        // reachable only from a *surviving* (executable, non-spec) body. The
+        // language rule (analysis A042) already bars non-det outside a spec, so
+        // this path is unreachable from Inference-compiled code; the rejection
+        // is defense-in-depth for foreign or hand-crafted `.wasm`.
+        Operator::Forall { .. }
+        | Operator::Exists { .. }
+        | Operator::Assume { .. }
+        | Operator::Unique { .. }
+        | Operator::I32Uzumaki { .. }
+        | Operator::I64Uzumaki { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-                description: UNIQUE_REJECTION_DESCRIPTION.to_string(),
+                description: "non-deterministic instruction outside a spec function cannot be \
+                             represented in the vanilla WasmCert proof model"
+                    .into(),
             }));
         }
-        Operator::I32Uzumaki { .. } => String::from("BI_uzumaki_num T_i32"),
-        Operator::I64Uzumaki { .. } => String::from("BI_uzumaki_num T_i64"),
         Operator::Else => String::new(),
         Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
@@ -1252,7 +1476,14 @@ fn translate_basic_operator(
             }
         }
         Operator::Return => "BI_return".to_string(),
-        Operator::Call { function_index } => format!("BI_call {function_index}%N"),
+        Operator::Call { function_index } => {
+            // A `BI_call` operand indexes the emitted module's instantiated
+            // function space; renumber it past every omitted spec function. A
+            // surviving body never calls a spec function (they are not
+            // executable), so an omitted target here is a fail-closed error.
+            let target = remap.instantiated(*function_index)?;
+            format!("BI_call {target}%N")
+        }
         Operator::CallIndirect {
             type_index,
             table_index,
@@ -1260,7 +1491,7 @@ fn translate_basic_operator(
         Operator::Drop => "BI_drop".to_string(),
         Operator::Select => "BI_select None".to_string(),
         Operator::LocalGet { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_get {local_index}%N (*{}*)",
@@ -1274,7 +1505,7 @@ fn translate_basic_operator(
             }
         }
         Operator::LocalSet { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_set {local_index}%N (*{}*)",
@@ -1288,7 +1519,7 @@ fn translate_basic_operator(
             }
         }
         Operator::LocalTee { local_index } => {
-            if let Some(local_name_map) = local_name_map {
+            if let Some(local_name_map) = &ctx.local_name_map {
                 if local_name_map.contains_key(local_index) {
                     format!(
                         "BI_local_tee {local_index}%N (*{}*)",
@@ -2245,9 +2476,9 @@ fn translate_basic_operator(
 }
 
 //Record module_data
-fn translate_data(data: &Data) -> anyhow::Result<String> {
+fn translate_data(data: &Data, remap: &FuncRemap) -> anyhow::Result<String> {
     let mut res = String::new();
-    let moddata_mode = translate_module_datamode(data)?;
+    let moddata_mode = translate_module_datamode(data, remap)?;
     let mut moddata_init = String::new();
     for byte in data.data {
         moddata_init.push_str(format!("#{byte:02X}").as_str());
@@ -2327,49 +2558,6 @@ mod tests {
         assert_unsupported(
             translate_memory_type_limits(&mem(false, false, Some(0))),
             "custom page size",
-        );
-    }
-
-    #[test]
-    fn unique_operator_is_rejected_as_unsupported() {
-        // A `unique` block has no honest Rocq lowering — the verifier library
-        // defines no `BI_unique` constructor — so the arm rejects it with a
-        // recoverable error naming both the construct and the missing
-        // constructor, never lowering it and never panicking.
-        let err = translate_basic_operator(&Operator::Unique { blockty: BlockType::Empty }, &None)
-            .expect_err("a `unique` block must be rejected, not lowered");
-        assert!(
-            matches!(
-                err.downcast_ref::<WasmToVError>(),
-                Some(WasmToVError::UnsupportedFeature { .. })
-            ),
-            "expected UnsupportedFeature, got {err:?}"
-        );
-        let text = err.to_string();
-        assert!(text.contains("`unique`"), "names the construct: {text}");
-        assert!(text.contains("BI_unique"), "names the missing constructor: {text}");
-        assert!(text.contains("still translate"), "offers a recovery hint: {text}");
-    }
-
-    #[test]
-    fn forall_exists_assume_still_translate() {
-        // Only `unique` is rejected: the sibling proof-path blocks keep their
-        // honest lowerings, so each must still produce its exact constructor —
-        // a regression that broadened the rejection would fail here.
-        assert_eq!(
-            translate_basic_operator(&Operator::Forall { blockty: BlockType::Empty }, &None)
-                .expect("forall still translates"),
-            "BI_forall"
-        );
-        assert_eq!(
-            translate_basic_operator(&Operator::Exists { blockty: BlockType::Empty }, &None)
-                .expect("exists still translates"),
-            "BI_exists"
-        );
-        assert_eq!(
-            translate_basic_operator(&Operator::Assume { blockty: BlockType::Empty }, &None)
-                .expect("assume still translates"),
-            "BI_assume (BT_valtype None)"
         );
     }
 }

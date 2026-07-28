@@ -1,12 +1,12 @@
 // Negative proof-mode fixture: the `unique` non-deterministic block has no
-// honest Rocq lowering — the wasm-verifier library defines no `BI_unique`
-// constructor — so proof mode (`-v`) rejects it with a recoverable
-// `UnsupportedFeature` error instead of emitting a `.v` that could never
-// type-check against the real library. Compile mode is unaffected (specs are
-// stripped from codegen). The `unique` block lives inside a `spec` because
+// `hassert` encoding, so proof-mode codegen rejects the spec with a fatal
+// `P002` diagnostic before any artifact is written — the construct never
+// reaches `wasm-to-v` or the emitted `.v`. Compile mode is unaffected (specs
+// are stripped from codegen). The `unique` block lives inside a `spec` because
 // non-deterministic constructs are valid only there (analysis rule A042).
-// Pinned by `unique_block_is_rejected_in_proof_mode` in
-// tests/src/rocq_typecheck.rs.
+// Pinned by `p002_rejects_constructs_without_an_encoding` in
+// core/wasm-codegen/src/hassert/tests.rs and end-to-end by
+// `build_v_rejects_unique_block_with_p002` in apps/infs.
 spec UniqueSpec {
     fn unique_fn() {
         unique {

@@ -2691,11 +2691,15 @@ fn build_compiles_uzumaki_operator() {
     );
 }
 
-/// QA: TC-13.6 - Verify compilation of file with all non-det features.
+/// QA: TC-13.6 - Verify a `-v` build of the TRANSLATABLE non-deterministic
+/// feature set (a `forall` spec function with the uzumaki `@`, an `assume`
+/// filter, and a nested `exists` block).
 ///
-/// **Expected behavior**: Exit code 0, both WASM and Rocq outputs generated.
+/// **Expected behavior**: Exit code 0, both WASM and Rocq outputs generated —
+/// the spec lowers to the custom WASM opcodes and its `hassert` obligation is
+/// emitted into the `.v` (the spec function is omitted from the module record).
 #[test]
-fn build_compiles_all_nondet_features() {
+fn build_compiles_translatable_nondet_features() {
     let Some(infc_path) = require_infc() else {
         return;
     };
@@ -2731,15 +2735,16 @@ fn build_compiles_all_nondet_features() {
     );
 }
 
-/// QA: TC-13.7 - Verify a proof-mode build (`-v`) of a spec whose only
-/// non-deterministic construct is a `unique` block is rejected: the `unique`
-/// block has no honest Rocq lowering, so translation fails with a recoverable
-/// diagnostic naming the construct, and — because translation runs before any
-/// artifact write — no `.v` or `.wasm` is left behind.
+/// QA: TC-13.7 - Verify a `-v` (proof-mode) build of a spec containing a
+/// `unique` block is rejected. `unique` has no `hassert` encoding, so codegen
+/// aborts with a fatal `P002` diagnostic. Pins that `infs` propagates a fatal
+/// hassert diagnostic from `infc` to stderr with a non-zero exit, and that no
+/// partial `.v` or `.wasm` artifact is left behind.
 ///
-/// **Expected behavior**: Exit code non-zero, stderr names `unique`, no output.
+/// **Expected behavior**: Non-zero exit, stderr names the `P002` `unique`
+/// rejection, and neither a `.v` nor a `.wasm` is written.
 #[test]
-fn build_v_rejects_unique_block() {
+fn build_v_rejects_unique_block_with_p002() {
     let Some(infc_path) = require_infc() else {
         return;
     };
@@ -2758,8 +2763,9 @@ fn build_v_rejects_unique_block() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("unique"));
+        .stderr(predicate::str::contains("P002").and(predicate::str::contains("unique")));
 
+    // A fatal codegen error must leave no partial artifact behind.
     let v_output = temp.child("out").child("nondet_unique.v");
     let wasm_output = temp.child("out").child("nondet_unique.wasm");
     assert!(

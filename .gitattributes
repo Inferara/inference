@@ -1,0 +1,8 @@
+# Committed Rocq goldens are byte-compared against generated output in tests
+# (tests/src/rocq_typecheck.rs), so their checkout must be LF on every
+# platform — autocrlf would break the comparison on Windows.
+/tests/test_data/rocq/*.v text eol=lf
+
+# The vendored Rocq stub is compiled by coqc in the rocq gate; keep it LF for
+# byte-stable behavior across platforms.
+/core/wasm-to-v/rocq-stub/**/*.v text eol=lf

@@ -14,6 +14,7 @@ use std::io;
 use std::path::Path;
 
 use inference_fn_key::FnKey;
+use inference_hassert::HSpecMap;
 use rustc_hash::FxHashMap;
 
 use crate::target::{CompilationMode, OptLevel, Target};
@@ -97,6 +98,14 @@ pub struct CodegenOutput {
     /// Exposed for testing and diagnostics; empty unless populated by the
     /// codegen entry point.
     frame_sizes: FxHashMap<FnKey, u32>,
+
+    /// Per-spec `hassert` verification obligations, keyed by folded spec name.
+    ///
+    /// Empty in `compile` mode (specs are stripped). In `proof` mode, each
+    /// `forall`-quantified (or plain) spec *free* function contributes one
+    /// obligation, in source order. A later phase serializes these into the
+    /// `inference.hspecs` custom section for the Rocq translator.
+    hspecs: HSpecMap,
 }
 
 impl CodegenOutput {
@@ -120,6 +129,7 @@ impl CodegenOutput {
             has_main,
             spec_func_indices_by_spec,
             frame_sizes: FxHashMap::default(),
+            hspecs: HSpecMap::default(),
         }
     }
 
@@ -142,6 +152,27 @@ impl CodegenOutput {
     #[must_use]
     pub fn frame_sizes(&self) -> &FxHashMap<FnKey, u32> {
         &self.frame_sizes
+    }
+
+    /// Attaches the per-spec `hassert` verification obligations to this output.
+    ///
+    /// Builder-style setter so the public [`Self::new`] signature stays
+    /// non-breaking, mirroring [`Self::with_frame_sizes`]. The map is empty in
+    /// compile mode and populated in proof mode.
+    #[must_use]
+    pub fn with_hspecs(mut self, hspecs: HSpecMap) -> Self {
+        self.hspecs = hspecs;
+        self
+    }
+
+    /// Returns the per-spec `hassert` verification obligations, keyed by folded
+    /// spec name.
+    ///
+    /// Empty in compile mode; populated in proof mode with one obligation per
+    /// spec free function, in source order.
+    #[must_use]
+    pub fn hspecs(&self) -> &HSpecMap {
+        &self.hspecs
     }
 
     /// Returns the WASM function indices for functions originating in `spec`

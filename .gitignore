@@ -16,6 +16,12 @@ Cargo.lock
 *_output/
 
 *.v
+# Committed Rocq `.v` goldens live here; `*.v` above still ignores compiler output.
+!/tests/test_data/rocq/*.v
+# The vendored Rocq stub sources are code, not compiler output. Without this
+# negation a new stub file is silently skipped by `git add` (the pre-existing
+# stub files were only ever tracked via a historical force-add).
+!/core/wasm-to-v/rocq-stub/**/*.v
 out
 test_data/**/*.json
 

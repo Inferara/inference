@@ -24,7 +24,12 @@
 //! use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
 //!
 //! let wasm_bytes = std::fs::read("output.wasm")?;
-//! let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+//! let rocq_code = translate_bytes(
+//!     "my_module",
+//!     &wasm_bytes,
+//!     &rustc_hash::FxHashMap::default(),
+//!     &inference_hassert::HSpecMap::default(),
+//! )?;
 //! std::fs::write("output.v", rocq_code)?;
 //! ```
 //!
@@ -118,13 +123,16 @@
 //! | `forall` | `0xfc 0x3a` | Begin universal quantification block |
 //! | `exists` | `0xfc 0x3b` | Begin existential quantification block |
 //! | `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
-//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists — rejected in proof mode (no `BI_unique` constructor in the verifier library) |
+//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists — rejected in proof mode (no `hassert` encoding; fatal `P002` at codegen) |
 //! | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
 //! | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 //!
-//! These instructions are parsed by the forked [`inf-wasmparser`] dependency and
-//! translated to corresponding Rocq constructs that enable formal reasoning about
-//! non-deterministic programs.
+//! These instructions are parsed by the forked [`inf-wasmparser`] dependency, but
+//! they never appear in the emitted Rocq: spec-function bodies are omitted from the
+//! module record entirely (their logical content arrives separately as `hassert`
+//! obligations via the `inference.hspecs` custom section), and a non-deterministic
+//! instruction in any surviving (non-spec) body is a translation error — the
+//! vanilla WasmCert proof model has no constructors for them.
 //!
 //! See the [WASM codegen documentation](../wasm-codegen/README.md) for details on
 //! how these instructions are generated from Inference source code.
@@ -161,6 +169,7 @@
 //! - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard
 
 pub mod errors;
+mod hassert_print;
 pub mod rocq_names;
 pub mod translator;
 pub mod wasm_parser;
@@ -238,7 +247,12 @@ mod tests {
             // Catch panics from unimplemented features
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                 let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-                translate_bytes(module_name, &bytes, &empty)
+                translate_bytes(
+                    module_name,
+                    &bytes,
+                    &empty,
+                    &inference_hassert::HSpecMap::default(),
+                )
             }));
 
             match result {
@@ -283,19 +297,26 @@ mod tests {
         let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
 
         let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        // Spec name `Spec1` avoids shadowing the Peano successor `S` (newly
-        // added to the prelude rejection list) while still exercising the
-        // per-spec emission path.
-        map.insert("Spec1".to_string(), vec![3, 4, 7]);
-        let output = translate_bytes("Fac", &bytes, &map).expect("translate succeeds");
+        // A spec with no function indices exercises the per-spec emission path
+        // without omitting any of `fac`'s real functions (arbitrary indices
+        // would drop functions and shift every call). Its obligation list is
+        // therefore the explicitly-typed empty list. Spec name `Spec1` avoids
+        // shadowing the Peano successor `S`.
+        map.insert("Spec1".to_string(), vec![]);
+        let output = translate_bytes("Fac", &bytes, &map, &inference_hassert::HSpecMap::default())
+            .expect("translate succeeds");
 
         assert!(
-            output.contains("Definition Fac__Spec1_specs : list N := (3 :: 4 :: 7 :: nil)%N."),
-            "output should contain Fac__Spec1_specs definition; got:\n{output}",
+            output.contains("Definition Fac__Spec1_specs : list hassert := (@nil hassert)."),
+            "output should contain the Fac__Spec1_specs obligation list; got:\n{output}",
         );
         assert!(
-            output.contains("Theorem valid_Fac__Spec1 : ValidModule Fac Fac__Spec1_specs."),
-            "output should contain per-spec ValidModule theorem; got:\n{output}",
+            output.contains("Theorem valid_Fac__Spec1 : ValidSpec Fac Fac__Spec1_specs."),
+            "output should contain the per-spec ValidSpec theorem; got:\n{output}",
+        );
+        assert!(
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should always contain the 1-ary ValidModule theorem; got:\n{output}",
         );
     }
 
@@ -306,15 +327,77 @@ mod tests {
         let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let output = translate_bytes("Fac", &bytes, &empty).expect("translate succeeds");
+        let output = translate_bytes(
+            "Fac",
+            &bytes,
+            &empty,
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translate succeeds");
 
         assert!(
-            !output.contains("_specs : list N"),
+            !output.contains("_specs : list hassert"),
             "output should contain no per-spec definitions when the map is empty; got:\n{output}",
         );
         assert!(
-            !output.contains("Theorem valid_"),
-            "output should contain no theorems when the spec map is empty; got:\n{output}",
+            !output.contains("ValidSpec "),
+            "output should contain no per-spec theorem when the spec map is empty; got:\n{output}",
+        );
+        // The 1-ary module theorem is emitted for every module, spec-bearing or
+        // not.
+        assert!(
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should always contain the module theorem; got:\n{output}",
+        );
+    }
+
+    /// The flip's own remap guard: a spec function sitting BETWEEN two executable
+    /// functions is omitted from the module record, and a surviving cross-call to
+    /// a function ABOVE it must be renumbered down. Here `func 0` calls `func 2`
+    /// while `func 1` is the omitted spec function, so the emitted body must read
+    /// `BI_call 1%N` (not `2`), the omitted function contributes no `Definition`,
+    /// and the two survivors remain. The `coqc` gate catches shape errors but not
+    /// a wrong index, so this operand assertion carries that load.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn omitting_a_spec_function_renumbers_a_surviving_cross_call() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (func (;0;) (result i32) call 2)
+              (func (;1;) (result i32) i32.const 0)
+              (func (;2;) (result i32) i32.const 7))
+            "#,
+        )
+        .expect("remap fixture assembles");
+
+        // Mark `func 1` as the spec function (omitted). No obligations.
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("Between".to_string(), vec![1]);
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &map,
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translate succeeds");
+
+        assert!(
+            output.contains("BI_call 1%N"),
+            "the cross-call to func 2 must be renumbered to 1 past the omitted spec \
+             function at index 1; got:\n{output}",
+        );
+        assert!(
+            !output.contains("BI_call 2%N"),
+            "the original (unremapped) `BI_call 2` must not survive; got:\n{output}",
+        );
+        assert!(
+            !output.contains("Definition func_1 :"),
+            "the omitted spec function must contribute no `Definition`; got:\n{output}",
+        );
+        assert!(
+            output.contains("Definition func_0 :") && output.contains("Definition func_2 :"),
+            "both surviving executable functions must be emitted; got:\n{output}",
         );
     }
 }
@@ -336,7 +419,12 @@ mod link_robustness {
 
     fn translate(wat: &str) -> anyhow::Result<String> {
         let bytes = wat::parse_str(wat).expect("fixture WAT assembles");
-        translate_bytes("Prog", &bytes, &FxHashMap::default())
+        translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
     }
 
     /// H20: a merged module whose external inner function shares a name with a
@@ -349,8 +437,13 @@ mod link_robustness {
         // identical string `add_three`, modelling a main-module `add_three`
         // (index 0) next to a merged external `add_three` (index 1).
         let bytes = duplicate_named_module();
-        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("translation succeeds");
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translation succeeds");
 
         let definitions = output.matches("Definition add_three :").count();
         assert_eq!(
@@ -486,8 +579,13 @@ mod link_robustness {
     #[cfg_attr(miri, ignore)]
     fn deeply_nested_body_is_unsupported_feature_not_stack_overflow() {
         let bytes = nested_blocks_module(5_000);
-        let err = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect_err("a deeply-nested body must be rejected, not abort");
+        let err = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect_err("a deeply-nested body must be rejected, not abort");
 
         let downcast = err.downcast_ref::<WasmToVError>();
         assert!(
@@ -503,8 +601,13 @@ mod link_robustness {
     #[cfg_attr(miri, ignore)]
     fn body_nested_within_the_cap_translates() {
         let bytes = nested_blocks_module(16);
-        translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("a modestly-nested body translates");
+        translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("a modestly-nested body translates");
     }
 
     /// Assembles a 2-function module with *no* name section: an exported `sum`
@@ -532,10 +635,20 @@ mod link_robustness {
     fn nameless_functions_get_deterministic_names_and_reproducible_v() {
         let bytes = nameless_two_function_module();
 
-        let first = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("first translation succeeds");
-        let second = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("second translation succeeds");
+        let first = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("first translation succeeds");
+        let second = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("second translation succeeds");
 
         assert_eq!(
             first, second,
@@ -596,10 +709,20 @@ mod link_robustness {
     fn nameless_inner_callee_with_named_root_is_deterministic() {
         let bytes = root_named_inner_nameless_module();
 
-        let first = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("first translation succeeds");
-        let second = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("second translation succeeds");
+        let first = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("first translation succeeds");
+        let second = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("second translation succeeds");
 
         assert_eq!(
             first, second,
@@ -641,8 +764,13 @@ mod link_robustness {
         )
         .expect("import fixture WAT assembles");
 
-        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("an import-bearing module translates");
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("an import-bearing module translates");
 
         assert!(
             output.contains("Definition local :"),
@@ -673,8 +801,13 @@ mod link_robustness {
         )
         .expect("import fixture WAT assembles");
 
-        let output = translate_bytes("Prog", &with_names, &FxHashMap::default())
-            .expect("an import-bearing nameless module translates");
+        let output = translate_bytes(
+            "Prog",
+            &with_names,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("an import-bearing nameless module translates");
 
         assert!(
             output.contains("Definition func_1 :"),
@@ -703,8 +836,13 @@ mod link_robustness {
         )
         .expect("memory-import fixture WAT assembles");
 
-        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
-            .expect("a module whose only import is a memory translates");
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("a module whose only import is a memory translates");
 
         // The defined function sits at absolute index 0 (no function imports),
         // so it keeps its source name with no index perturbation.

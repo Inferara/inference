@@ -133,6 +133,55 @@ pub(crate) enum CodegenError {
         fix_hint = .0.fix_hint,
     )]
     SpecNameReservesSeparator(Box<SpecNameSeparatorDetails>),
+
+    /// A spec function's translated `hassert` obligation nests deeper than the
+    /// `inference.hspecs` codec's decode-time depth cap. The encoder is
+    /// infallible, so an over-deep tree would serialize into a section that the
+    /// codec's own hardened decoder — in the linker and the Rocq translator —
+    /// rejects as corrupt. Codegen refuses to write such an artifact, naming the
+    /// offending spec and function. Realistic specifications never approach the
+    /// cap; only a pathologically long statement chain can reach it.
+    #[error(
+        "the verification obligation for function '{function}' in spec '{spec}' nests deeper \
+         than the maximum of {max} the inference.hspecs section supports; \
+         simplify the specification"
+    )]
+    HspecTreeTooDeep {
+        spec: String,
+        function: String,
+        max: usize,
+    },
+
+    /// A spec name or a spec-function symbol carried in a `hassert` obligation
+    /// falls outside the `inference.hspecs` codec's name-length contract (at
+    /// most `max` bytes; a non-empty minimum that source identifiers always
+    /// meet). The encoder is infallible, so an out-of-range name would serialize
+    /// into a section the codec's own decoder — in the linker and the Rocq
+    /// translator — rejects. Codegen refuses to write such an artifact, naming
+    /// the offending identifier and its spec. Only a pathologically long
+    /// identifier reaches this; realistic names are far shorter.
+    #[error(
+        "the inference.hspecs name '{name}' in spec '{spec}' is {len} bytes, outside the \
+         1..={max} bytes the section permits; shorten the identifier"
+    )]
+    HspecNameTooLong {
+        spec: String,
+        name: String,
+        len: usize,
+        max: usize,
+    },
+
+    /// One or more specification functions could not be translated into a
+    /// `hassert` verification obligation: a construct with no assertion
+    /// encoding (`loop`, `break`, a `unique` block, `**`, memory access), an
+    /// `exists`/`unique`/`assume`-quantified body, a reassignment, a non-scalar
+    /// term or `@`, an untranslatable call, or a quantified spec method. In
+    /// proof mode the obligation is a required deliverable, so codegen refuses
+    /// to emit a module whose specifications are silently unverifiable. The
+    /// message is the newline-joined `P0xx` diagnostics, each in the same
+    /// `[file:]line:col: error[P00x]: message` shape analysis diagnostics use.
+    #[error("{0}")]
+    UntranslatableSpec(String),
 }
 
 /// The boxed payload of [`CodegenError::SpecNameReservesSeparator`]. Boxed so the

@@ -672,7 +672,24 @@ fn main() {
             } else {
                 &empty_spec_funcs
             };
-            match wasm_to_v(source_fname, wasm_bytes, explicit_spec_funcs) {
+            // Same policy for the `inference.hspecs` obligations as for
+            // `inference.spec_funcs`: with externals the pre-link map is stale
+            // (the linker rewrote the embedded section), so pass an empty map
+            // and defer to the embedded post-link section; without externals
+            // the merge is a byte-identical pass-through and the explicit map
+            // still cross-checks against the embedded one.
+            let empty_hspecs = inference::HSpecMap::default();
+            let explicit_hspecs = if external_modules.is_empty() {
+                codegen_output.hspecs()
+            } else {
+                &empty_hspecs
+            };
+            match wasm_to_v(
+                source_fname,
+                wasm_bytes,
+                explicit_spec_funcs,
+                explicit_hspecs,
+            ) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     eprint_translation_error(&e);

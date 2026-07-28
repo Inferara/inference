@@ -1,8 +1,8 @@
 // A spec whose only non-deterministic construct is a `unique` block. `unique`
-// has no honest Rocq lowering (the wasm-verifier library defines no
-// `BI_unique` constructor), so a proof-mode build (`-v`) fails with a
-// recoverable diagnostic on stderr and writes no artifacts. A compile-mode
-// build strips the proof-only spec and succeeds.
+// has no `hassert` encoding in the vanilla WasmCert proof model, so a
+// proof-mode build (`-v`) fails with a fatal `P002` diagnostic surfaced on
+// stderr. (A compile-mode build strips the proof-only spec and succeeds; proof
+// mode is the only mode that translates spec obligations.)
 pub fn main() -> i32 {
     return 0;
 }
