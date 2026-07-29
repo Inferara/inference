@@ -47,6 +47,39 @@ pub use token_set::TokenSet;
 
 use inference_ast::arena::AstArena;
 
+/// The minimum stack a thread must have before it runs the compiler's recursive
+/// phases — parse, lowering, type check, analysis and code generation all descend
+/// once per level of the input's syntactic nesting.
+///
+/// Whether a program is accepted must be a property of its source, decided by an
+/// explicit limit, and never by the incidental point at which the host stack runs
+/// out. That point moves with the build profile, the platform and the thread: a
+/// debug frame is an order of magnitude larger than the same frame in release, so
+/// without a fixed floor the same file compiles from one binary and aborts from
+/// another. Fixing acceptance with an explicit limit only works if the process
+/// survives long enough to *reach and report* that limit, which means sizing the
+/// stack for the worst profile — debug — with substantial headroom, not for the
+/// one that happens to be shipped.
+///
+/// Headroom is the only available mitigation. A stack overflow aborts the process
+/// rather than unwinding, so no thread can catch it and turn it into a
+/// diagnostic; the stack has to be large enough that the explicit check is what
+/// the input meets first.
+///
+/// The requirement lives beside the grammar because the explicit bound on
+/// syntactic depth belongs here too, and the two are halves of one invariant: the
+/// depth a program is allowed to reach, multiplied by the worst-case frame any
+/// phase spends per level, must fit within this stack. Moving either half without
+/// the other reopens the abort. Only this half exists so far — no depth bound is
+/// enforced yet, so headroom currently decides where deep input stops, which is
+/// exactly the profile-dependence the other half has to remove.
+///
+/// This is a host-thread stack, unrelated to the linear-memory stack laid out for
+/// the generated WebAssembly. The cost is reserved address space, lazily committed
+/// on every 64-bit target the compiler builds for, so resident memory tracks the
+/// depth actually reached rather than the reservation.
+pub const MIN_COMPILE_STACK: usize = 128 * 1024 * 1024;
+
 /// The result of parsing a source string.
 ///
 /// Holds the produced AST arena together with any structured syntax errors

@@ -183,6 +183,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compiler
 
+- Every embedder now runs the compiler's recursive phases on an explicitly sized stack, so
+  deep input no longer aborts the process where it previously did. Parsing, lowering, type
+  checking, analysis and codegen each descend once per level of the input's syntactic
+  nesting, and a stack overflow aborts rather than unwinding — no thread can catch one and
+  turn it into a diagnostic — so the only mitigation is headroom that does not depend on
+  which thread happens to be running. `inference_parser::MIN_COMPILE_STACK` (128 MiB) states
+  the requirement, the new `inference::with_compiler_stack` runs a closure on a thread that
+  meets it, and `infc`'s driver now runs inside that helper. Exit codes are unchanged —
+  `process::exit` terminates the process identically from the scoped worker thread, and a
+  panic is re-raised on the calling thread with its original payload, printed exactly once —
+  and the only stderr difference is that a panic header now names the compile thread
+  (`thread 'inference-compile' panicked at …`) rather than `main`, which also makes an
+  overflow report which thread overflowed.
+  Measured on macOS aarch64 in debug, the reported repro is fixed — an operator chain that
+  aborted at 350 operands (300 was the last that compiled) now compiles at 5,262, and an
+  `else if` chain that aborted at 900 arms now compiles past 2,000. Input deeper than the new
+  ceilings still aborts; making rejection *deterministic* needs an explicit depth limit with
+  a proper diagnostic, which is separate and still pending. This change is what makes such a
+  limit reachable in every embedder rather than shadowed by whichever host stack runs out
+  first ([#322])
+- parser: `SyntaxNode`'s drop is now iterative. The derived drop glue descended once per tree
+  level, so merely *discarding* a deeply nested CST overflowed the stack — the path any
+  rejected over-deep input has to take. Detaching the children into a worklist and draining
+  it holds the depth at one: a 500,000-level tree, constructed directly, is now discarded on
+  a bare 2 MiB thread, where the recursive glue capped at roughly 8,200 levels. This makes a
+  tree safe to *discard*, not safe to *build*: CST construction still recurses with tree
+  height — through the grammar's own recursive descent, and through `Builder::leave`'s span
+  resolution for shapes whose extremal children are nodes rather than tokens — and that side
+  binds first for a parsed tree (measured on 8 MiB: construction caps at 14,994 levels, the
+  old drop glue at 32,804). Bounding the
+  construction side is separate, still-pending work; removing the drop-side consumer is what
+  lets a rejected tree be freed at all, and what makes limit-depth trees testable on small
+  stacks. The derived `Clone`, `PartialEq` and `Debug` on `SyntaxNode` and `SyntaxElement`
+  remain recursive and must not be applied to a tree of unbounded height ([#322])
 - wasm-linker: New `core/wasm-linker` crate (`inference-wasm-linker`) implementing the
   static-merge link pass. `link(main_wasm, &[external_wasm])` folds satisfied imports'
   transitive closures into the main module, rewrites all index-bearing operators into a
@@ -636,6 +670,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Testing
 
 - Fix three golden-regeneration helpers that were stale against A042: `regenerate_const_in_forall_wasm`, `regenerate_struct_array_field_nondet_wasm`, and `regenerate_multidim_array_uzumaki_wasm` ran the analysis pass (`wasm_codegen`) while the golden tests they serve compile with `wasm_codegen_no_analysis`, so once A042 started rejecting non-det constructs outside `spec` the helpers crashed and those goldens could not be regenerated. Each helper now mirrors its test's pipeline. Eight sibling helpers with the same staleness (`if_nondet`, five `binops_*`, two `loops` non-det fixtures) are untouched — their goldens did not change here — and remain follow-up debt
+- Add `tests/src/robustness/deep_syntax.rs`, a generated-source module covering deep and
+  deeply chained input across seven shapes — flat operator chain, right-nested parentheses,
+  prefix-unary nest, `else if` chain, block nest, nested array type, and a deep spec-function
+  body. Its pipeline helpers all route through `inference::with_compiler_stack`, because
+  cargo's test harness gives each test thread roughly 2 MiB and every one of these tests would
+  otherwise overflow long before reaching the code under test. The two regressions pinned at
+  issue scale are a 350-operand chain (the reported repro, asserted through analysis rather
+  than merely parsing, since the type checker is the phase that aborted) and a 900-arm
+  `else if` chain (the lowest known abort threshold), driven through code generation.
+  Alongside them: `core/inference/tests/compiler_stack.rs` covers the helper's contract —
+  return value, a closure borrowing its environment (the scoped-thread requirement the CLI
+  call site depends on), a stack far larger than the caller's, and panic propagation with the
+  original payload; `core/cli/tests/cli_integration.rs` proves both shapes exit 0 through the
+  real binary, which distinguishes the fix from both the old abort and any diagnostic, since a
+  stack-overflow abort is a signal kill rather than exit 1; and a parser unit test discards a
+  500,000-level tree on a bare 2 MiB thread, deliberately not routed through the helper because
+  the claim is that it needs no headroom ([#322])
 - Fix a hot-spin in the LSP e2e test client's message waits ([#296])
   - `wait_for_response`/`wait_for_notification` looped over `recv_message`, which returns buffered messages before reading the wire. Once any non-matching message existed — most often a `publishDiagnostics` landing ahead of the awaited response — each iteration popped it from the buffer and pushed it straight back, so the loop never reached the wire again. The client burned 100% of a core indefinitely with no timeout, because `recv_timeout` was never called. This was misdiagnosed once as a server-side hang and forced a wire-direct `collect_responses` workaround in the cancellation tests
   - Both waits now scan the buffer once up front and then read straight off the wire, appending each non-matching message to the back of the buffer so arrival order survives for later waits. Each wait is bounded by a single deadline covering the whole wait rather than per read, and expiry panics naming what was awaited and how many messages it stepped over. A new `recv_from_wire` is the one place a wait turns a reader-thread item into a failure; the two drains keep interpreting the same items quietly, as collectors rather than waits. `recv_message`'s own semantics (buffer first, then the wire, one timeout per call) are unchanged — the `#294` shutdown-silence test depends on them
@@ -1007,6 +1058,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### IDE / LSP
 
+- The language server's `SERVER_STACK_SIZE` is now the larger of its historical 64 MiB
+  (the rust-analyzer main-loop figure it mirrored) and `inference_parser::MIN_COMPILE_STACK`,
+  with a compile-time assertion pinning the two together. All three spawn sites — router,
+  read pool and analysis worker — reserve the larger amount. The deviation from the
+  rust-analyzer number is deliberate: the server runs the same recursive phases the compiler
+  does and owes them the same stack, and the reservation is address space with lazy commit,
+  so the editor's resident memory still tracks the depth actually reached. Taking the larger
+  of the two is what keeps them in step: were the server's figure allowed to sit below the
+  front end's, a file at that limit would compile under the CLI while killing the editor
+  process — a worse failure than the one the requirement exists to prevent. The compile-time
+  assertion is a machine-checked restatement of that invariant rather than a gate; the `max`
+  already makes it unfalsifiable ([#322])
 - Add `inference-lsp`, a Language Server Protocol server for Inference (`apps/lsp`) ([#33])
   - A synchronous, single-threaded `lsp-server` 0.8 stdio binary; single-threaded by design because `TypedContext` is `!Send`
   - Diagnostics: merged syntax, import, type-check, and analysis-rule findings (rule codes `A001`–`A041`), published on `didOpen`/`didChange`/`didClose`
@@ -1188,3 +1251,4 @@ Initial tagged release.
 [#219]: https://github.com/Inferara/inference/issues/219
 [#220]: https://github.com/Inferara/inference/issues/220
 [#315]: https://github.com/Inferara/inference/issues/315
+[#322]: https://github.com/Inferara/inference/issues/322

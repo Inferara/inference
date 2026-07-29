@@ -21,3 +21,8 @@ serde_json.workspace = true
 anyhow.workspace = true
 rustc-hash.workspace = true
 inference-ide.workspace = true
+# Named directly for the front end's stack requirement only: the assertion beside
+# SERVER_STACK_SIZE has to read as "the editor satisfies the *front end's* demand",
+# which laundering the constant through `inference-ide` would obscure. Everything
+# else this server needs still comes through `inference-ide` alone.
+inference-parser.workspace = true

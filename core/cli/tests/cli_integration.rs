@@ -1879,3 +1879,129 @@ fn dash_v_success_still_writes_both_artifacts() {
     assert!(temp.child("out").child("main.wasm").path().exists());
     assert!(temp.child("out").child("main.v").path().exists());
 }
+
+// Deeply nested and deeply chained input (issue #322).
+//
+// The compiler's phases recurse once per level of the input's syntactic nesting,
+// and the platform's default main-thread stack is smaller than they need, so
+// these programs used to end the process with `fatal runtime error: stack
+// overflow`. That is a signal kill, not an exit status, so the assertion that
+// separates the fixed behaviour from both the old abort and any diagnostic is
+// `.success()` — a mere "not exit 1" would pass on an abort.
+//
+// The binary is the level that matters here: `fn main` is what reserves the
+// stack, so only a real process proves the reservation is in place for a user's
+// build rather than only for a test that opts into it.
+
+/// `pub fn f(a: i64) -> i64 { return a + a + … + a; }` with `n` operands.
+fn operand_chain_source(n: usize) -> String {
+    let chain = std::iter::repeat_n("a", n).collect::<Vec<_>>().join(" + ");
+    format!("pub fn f(a: i64) -> i64 {{ return {chain}; }}")
+}
+
+/// An `if` / `else if` chain of `k` arms closed by a final `else`.
+fn else_if_chain_source(k: usize) -> String {
+    let arms: String = (0..k)
+        .map(|i| format!("if a == {i} {{ return {i}; }} else "))
+        .collect();
+    format!("pub fn f(a: i64) -> i64 {{ {arms}{{ return 0; }} }}")
+}
+
+/// The input reported in issue #322 — a 350-operand operator chain — compiles
+/// through the binary. On the platform default stack the type checker aborted
+/// here, while 300 operands survived.
+#[test]
+fn deep_operand_chain_compiles_through_the_binary() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "chain.inf", &operand_chain_source(350));
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("chain.wasm").path().exists());
+}
+
+/// A 900-arm `else if` chain compiles through the binary. This was the lowest
+/// known abort threshold: 800 arms survived, 900 did not.
+#[test]
+fn deep_else_if_chain_compiles_through_the_binary() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "arms.inf", &else_if_chain_source(900));
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("arms.wasm").path().exists());
+}
+
+/// The acceptance bar for this work, driven end to end through the binary rather
+/// than stopping at the type checker: 2,000 operands and 2,000 `else if` arms
+/// compile. Both are an order of magnitude past the depths that used to abort, and
+/// running them here is what makes the claim hold on every CI platform rather than
+/// only on the machine the numbers were measured on.
+#[test]
+fn deep_input_at_the_acceptance_bar_compiles_through_the_binary() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let chain = write_source(temp.path(), "chain2k.inf", &operand_chain_source(2_000));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&chain);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(temp.child("out").child("chain2k.wasm").path().exists());
+
+    let arms = write_source(temp.path(), "arms2k.inf", &else_if_chain_source(2_000));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&arms);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(temp.child("out").child("arms2k.wasm").path().exists());
+}
+
+// Exit statuses on the argument-handling paths.
+//
+// These are the paths most perturbed by running the driver on a worker thread:
+// argument parsing now happens off the main thread, so clap's own `process::exit`
+// and the missing-argument path both terminate the process from a thread that is
+// not `main`. They are pinned by exact code rather than by `.failure()`, because
+// `.failure()` cannot tell 1 from 2 — nor either of them from the signal kill a
+// stack overflow produces.
+
+/// No arguments: the driver reports the missing source file and exits 1.
+#[test]
+fn no_arguments_exits_one() {
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("source file argument required"));
+}
+
+/// An unknown flag is rejected by clap, which exits 2 — a distinct status from the
+/// driver's own exit 1, and one that survives the move onto the worker thread.
+#[test]
+fn unknown_flag_exits_two() {
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .arg("--no-such-flag")
+        .assert()
+        .code(2);
+}
+
+/// A path that does not exist: exit 1, before any phase runs.
+#[test]
+fn missing_source_file_exits_one() {
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .arg("definitely-not-here.inf")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("path not found"));
+}

@@ -426,7 +426,20 @@ fn clear_stale_outputs(output_dir: &std::path::Path, source_fname: &str) {
     let _ = fs::remove_file(output_dir.join(format!("{source_fname}.v")));
 }
 
-/// Entry point for the Inference compiler CLI.
+/// Runs the compiler driver on an explicitly sized stack.
+///
+/// The compiler's phases recurse with the input's syntactic nesting depth, and the
+/// platform's default main-thread stack is too small to survive input the front end
+/// is expected to accept. Exit codes are what they were: `process::exit` terminates
+/// the process identically from the scoped worker thread, and a panic inside the
+/// driver is re-raised on the main thread with its original payload, printed once.
+/// The only stderr difference is that a panic header now names the compile thread
+/// rather than `main`.
+fn main() {
+    inference::with_compiler_stack(run);
+}
+
+/// The Inference compiler CLI driver, run by [`main`] on a compiler-sized stack.
 ///
 /// ## Execution Flow
 ///
@@ -477,7 +490,7 @@ fn clear_stale_outputs(output_dir: &std::path::Path, source_fname: &str) {
 /// - Reads entire source file into memory (limitation: no streaming)
 /// - Phase execution is sequential (no parallelization)
 #[allow(clippy::too_many_lines)]
-fn main() {
+fn run() {
     let mut args = Cli::parse();
 
     if args.commit_hash {
