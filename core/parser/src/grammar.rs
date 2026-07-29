@@ -119,6 +119,26 @@ mod tests {
         "glob imports are not supported; import the file (use a::b;) or list items \
          explicitly (use a::b::{x, y};)";
 
+    /// The verbatim non-decimal-tail diagnostic for `tail`, kept in sync with
+    /// `expr::non_decimal_message`. Duplicated for the same reason as
+    /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
+    fn non_decimal_message(tail: &str) -> String {
+        format!(
+            "`{tail}` cannot follow the digits of a number literal; Inference numbers are decimal \
+             digits only — no `_` separators and no `0x`/`0b`/`0o` prefixes"
+        )
+    }
+
+    /// The verbatim type-suffix diagnostic for `suffix`, kept in sync with
+    /// `expr::suffix_message`.
+    fn suffix_message(suffix: &str) -> String {
+        format!(
+            "integer literals do not take a type suffix — remove `{suffix}`; an integer literal \
+             takes its type from where it is used. If there is no value of that type nearby, name \
+             the type at the binding: `let n: i64 = 16;`"
+        )
+    }
+
     /// The indented S-expression of `src`'s CST, for shape assertions.
     fn tree(src: &str) -> String {
         let (node, _) = parse_to_cst(src);
@@ -968,6 +988,238 @@ mod tests {
         let src = "fn f() { x = 42; }";
         assert_clean(src);
         assert!(find(&parse_to_cst(src).0, SyntaxKind::NumberLiteral).is_some());
+    }
+
+    // -- malformed numeric literals: one teaching diagnostic, no cascade --
+    //
+    // The lexer's number scanner stops at the first non-digit, so `16i64`,
+    // `1_000` and `0x1F` each arrive as a `Number` glued to an identifier run.
+    // Every case below must produce EXACTLY one diagnostic: the pre-#219
+    // behavior was "expected Semi" + "expected an expression" plus a stray
+    // `Error` node, and `1_000` silently parsed as the literal `1`.
+
+    #[test]
+    fn number_type_suffix_reports_one_teaching_error() {
+        let (root, msgs) = parse_messages("fn f() { let x: i64 = 16i64; }");
+        assert_eq!(msgs, vec![suffix_message("i64")]);
+        assert!(
+            !has_error_node(&root),
+            "the suffix is consumed into the literal, not left as an Error node:\n{}",
+            tree("fn f() { let x: i64 = 16i64; }")
+        );
+    }
+
+    #[test]
+    fn number_underscore_type_suffix_reports_one_teaching_error() {
+        // `16_i64` splits as Number(16) + Ident(_i64); removing `_i64` is what
+        // leaves a well-formed literal, so the message names the whole tail.
+        let (_root, msgs) = parse_messages("fn f() { let x: i64 = 16_i64; }");
+        assert_eq!(msgs, vec![suffix_message("_i64")]);
+    }
+
+    #[test]
+    fn every_suffix_shaped_tail_gets_the_same_message() {
+        // None of these name an Inference type, but all are suffix-shaped: each
+        // must get the suffix message, never the decimal-digits one, so the
+        // diagnostic never implies `i64` is recognized while `i128` is garbage —
+        // and so `16usize`, the likeliest habit from Rust, is not told about
+        // separators and radix prefixes it does not contain.
+        for (src, tail) in [
+            ("fn f() { let x: i64 = 5i128; }", "i128"),
+            ("fn f() { let x: i64 = 5usize; }", "usize"),
+            ("fn f() { let x: i64 = 5isize; }", "isize"),
+            ("fn f() { let x: i64 = 5u; }", "u"),
+            ("fn f() { let x: i64 = 5i; }", "i"),
+            ("fn f() { let x: i64 = 5_u32; }", "_u32"),
+            ("fn f() { let x: i64 = 16i64i64; }", "i64i64"),
+        ] {
+            let (_root, msgs) = parse_messages(src);
+            assert_eq!(msgs, vec![suffix_message(tail)], "for {src:?}");
+        }
+    }
+
+    #[test]
+    fn suffix_diagnostic_points_at_the_suffix() {
+        // The span must cover exactly the text the message says to remove.
+        let src = "fn f() { let x: i64 = 16i64; }";
+        let (_root, errors) = parse_to_cst(src);
+        assert_eq!(errors.len(), 1, "expected one error, got {errors:?}");
+        let span = errors[0].span;
+        assert_eq!(
+            &src[span.offset_start as usize..span.offset_end as usize],
+            "i64"
+        );
+    }
+
+    #[test]
+    fn non_decimal_diagnostic_points_at_the_tail() {
+        let src = "fn f() { let x: i32 = 1_000; }";
+        let (_root, errors) = parse_to_cst(src);
+        assert_eq!(errors.len(), 1, "expected one error, got {errors:?}");
+        let span = errors[0].span;
+        assert_eq!(
+            &src[span.offset_start as usize..span.offset_end as usize],
+            "_000"
+        );
+    }
+
+    #[test]
+    fn digit_separator_reports_one_decimal_digits_error() {
+        // The silent-token-split trap: without a diagnostic this parses as `1`.
+        let (_root, msgs) = parse_messages("fn f() { let x: i32 = 1_000; }");
+        assert_eq!(msgs, vec![non_decimal_message("_000")]);
+    }
+
+    #[test]
+    fn non_suffix_tails_report_one_decimal_digits_error() {
+        // Everything whose tail starts with neither `i` nor `u`: radix prefixes,
+        // an exponent, a lone trailing `_` (which lexes as `Underscore`, not
+        // `Ident`), and plain adjacent garbage.
+        for (src, tail) in [
+            ("fn f() { let x: i32 = 0x1F; }", "x1F"),
+            ("fn f() { let x: i32 = 0b01; }", "b01"),
+            ("fn f() { let x: i32 = 0o17; }", "o17"),
+            ("fn f() { let x: i32 = 1e10; }", "e10"),
+            ("fn f() { let x: i32 = 16f32; }", "f32"),
+            ("fn f() { let x: i32 = 1_; }", "_"),
+            ("fn f() { let x: i32 = 16true; }", "true"),
+        ] {
+            let (_root, msgs) = parse_messages(src);
+            assert_eq!(msgs, vec![non_decimal_message(tail)], "for {src:?}");
+        }
+    }
+
+    #[test]
+    fn glued_negative_literal_with_suffix_reports_one_error() {
+        // `-9223372036854775808` lexes as a single Number (the `-` is glued), so
+        // the suffix detection must still see the tail after it.
+        let src = "fn f() { let x: i64 = -9223372036854775808i64; }";
+        let (_root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![suffix_message("i64")]);
+    }
+
+    #[test]
+    fn malformed_literal_still_yields_a_number_literal_node() {
+        // The resilient path: IDE consumers must still find a usable literal.
+        let src = "fn f() { let x: i64 = 16i64; }";
+        let (root, _msgs) = parse_messages(src);
+        let lit = find(&root, SyntaxKind::NumberLiteral).expect("literal node survives");
+        assert_eq!(
+            lit.text(src),
+            "16i64",
+            "the node spans what the author wrote, tail included"
+        );
+        let digits = lit
+            .child_token(SyntaxKind::Number)
+            .expect("the digits stay a `Number` token inside the node");
+        assert_eq!(
+            digits.text(src),
+            "16",
+            "lowering reads this token, so it must hold the digits alone"
+        );
+    }
+
+    #[test]
+    fn statements_after_a_malformed_literal_stay_siblings() {
+        // The anti-cascade claim stated structurally rather than by error count:
+        // the following statements must still parse as siblings of the broken
+        // one, not get swallowed into its recovery.
+        let src = "fn f() { let x: i64 = 16i64; let y: i64 = 7; let z: i64 = 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![suffix_message("i64")]);
+        assert_eq!(
+            count_kind(&root, SyntaxKind::VariableDefinitionStatement),
+            3,
+            "all three lets survive:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn malformed_literal_is_rejected_in_every_expression_position() {
+        // `number_literal` is the atom rule, so one repair covers every position
+        // a literal can appear in. Pin the matrix so a future rewrite that moves
+        // the check to a caller cannot quietly lose most of them.
+        for src in [
+            "fn f() { let x: i64 = 16i64; }",
+            "const C: i64 = 16i64;",
+            "fn f() { x = 16i64; }",
+            "fn f() { return 16i64; }",
+            "fn f() { g(16i64); }",
+            "fn f() { let s: S = S { a: 16i64 }; }",
+            "fn f() { let a: [i64; 1] = [16i64]; }",
+            "fn f() { x = a + 16i64; }",
+            "fn f() { x = (16i64); }",
+            "fn f() { x = a[16i64]; }",
+            // `-16` is a single Number token, so the tail follows the digits of
+            // a negative literal just as it does a positive one.
+            "fn f() { x = -16i64; }",
+        ] {
+            let (_root, msgs) = parse_messages(src);
+            assert_eq!(msgs, vec![suffix_message("i64")], "for {src:?}");
+        }
+    }
+
+    #[test]
+    fn several_malformed_literals_report_one_error_each() {
+        // Recovery quality: one diagnostic per literal across a spec body, a
+        // `let` initializer and a binary operand — no cascade, no
+        // cross-contamination, and the clean function after them still parses.
+        let src = "spec S { fn p(a: i64) -> bool { return a > 1_000; } } \
+                   pub fn f(a: i64) -> i64 { let b: i64 = 5i128; return a + 0x1F; } \
+                   pub fn g() -> i32 { return 7; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(
+            msgs,
+            vec![
+                non_decimal_message("_000"),
+                suffix_message("i128"),
+                non_decimal_message("x1F"),
+            ]
+        );
+        assert_eq!(
+            count_kind(&root, SyntaxKind::FunctionDefinition),
+            3,
+            "every function survives:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn malformed_literal_in_array_size_reports_one_error() {
+        // Array sizes reuse `number_literal`, so the repair covers them too.
+        let (_root, msgs) = parse_messages("fn f() { let x: [i32; 1_0] = a; }");
+        assert_eq!(msgs, vec![non_decimal_message("_0")]);
+    }
+
+    #[test]
+    fn spaced_identifier_after_number_is_not_a_malformed_literal() {
+        // Not joint: `16 i64` is two tokens the author separated. Detection is
+        // adjacency-based, so this keeps its pre-existing parse — and the two
+        // messages it produces are exactly the cascade the glued case above
+        // replaces with one teaching diagnostic.
+        let (_root, msgs) = parse_messages("fn f() { let x: i64 = 16 i64; }");
+        assert_eq!(
+            msgs,
+            vec![
+                "expected Semi".to_string(),
+                "expected an expression".to_string(),
+            ],
+            "spaced tokens keep today's behavior"
+        );
+    }
+
+    #[test]
+    fn well_formed_number_literals_stay_clean() {
+        // Negative control: adjacency to a non-word token is untouched. The
+        // glued-operator cases are what `is_identifier_run` alone rules out.
+        assert_clean("fn f() { let x: i32 = 16; }");
+        assert_clean("fn f() { let x: [i32; 4] = a; }");
+        assert_clean("fn f() { g(16); }");
+        assert_clean("fn f() { let x: i32 = 16+1; }");
+        assert_clean("fn f() { let x: i32 = 16*2; }");
+        assert_clean("fn f() { let x: i32 = 16<<2; }");
+        assert_clean("fn f() { let x: i32 = a[0]; }");
     }
 
     #[test]

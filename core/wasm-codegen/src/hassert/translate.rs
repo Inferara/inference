@@ -626,27 +626,25 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// A number literal, parsed and widened exactly as code generation lowers it.
+    ///
+    /// The recorded type is an invariant of the phases that ran before this one,
+    /// not something to fall back from: a literal that arrives untyped means an
+    /// earlier phase failed to type it, and denoting it `i32` anyway would put a
+    /// constant into a proof obligation that the compiled program never computes
+    /// — the obligation would then be about a different program than the one that
+    /// runs.
     fn number_literal(&mut self, expr: ExprId, value: &str) -> HTerm {
-        let kind = self.ctx.get_node_typeinfo(node_expr(expr)).map(|t| t.kind);
+        let kind = self
+            .ctx
+            .get_node_typeinfo(node_expr(expr))
+            .map(|t| t.kind)
+            .expect(
+                "literal reached hassert translation without a recorded type — the type checker \
+                 records a type for every literal",
+            );
         match kind {
-            Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16 | NumberType::I32))
-            | None => HTerm::Const(HConst::I32(value.parse::<i32>().unwrap_or(0))),
-            Some(TypeInfoKind::Number(NumberType::U8)) => {
-                HTerm::Const(HConst::I32(i32::from(value.parse::<u8>().unwrap_or(0))))
-            }
-            Some(TypeInfoKind::Number(NumberType::U16)) => {
-                HTerm::Const(HConst::I32(i32::from(value.parse::<u16>().unwrap_or(0))))
-            }
-            Some(TypeInfoKind::Number(NumberType::U32)) => {
-                HTerm::Const(HConst::I32(value.parse::<u32>().unwrap_or(0).cast_signed()))
-            }
-            Some(TypeInfoKind::Number(NumberType::I64)) => {
-                HTerm::Const(HConst::I64(value.parse::<i64>().unwrap_or(0)))
-            }
-            Some(TypeInfoKind::Number(NumberType::U64)) => {
-                HTerm::Const(HConst::I64(value.parse::<u64>().unwrap_or(0).cast_signed()))
-            }
-            Some(other) => {
+            TypeInfoKind::Number(width) => HTerm::Const(number_const(width, value)),
+            other => {
                 self.error(
                     PCode::P004,
                     self.arena[expr].location,
@@ -1235,6 +1233,37 @@ fn zero_sentinel() -> HTerm {
     HTerm::Const(HConst::I32(0))
 }
 
+/// The constant a number literal denotes at the width recorded for it, chosen
+/// exactly as code generation lowers the same literal: every width below 64 bits
+/// rides in an `i32` constant, and an unsigned value is reinterpreted as the
+/// signed constant with the same bit pattern.
+fn number_const(width: NumberType, value: &str) -> HConst {
+    match width {
+        // `i8` and `i16` are read at `i32` width, the same latitude code
+        // generation takes: whether the value fits the narrower type is the
+        // literal-range analysis rule's call, and it has already made it.
+        NumberType::I8 | NumberType::I16 | NumberType::I32 => HConst::I32(parse_at(value, width)),
+        NumberType::U8 => HConst::I32(i32::from(parse_at::<u8>(value, width))),
+        NumberType::U16 => HConst::I32(i32::from(parse_at::<u16>(value, width))),
+        NumberType::U32 => HConst::I32(parse_at::<u32>(value, width).cast_signed()),
+        NumberType::I64 => HConst::I64(parse_at(value, width)),
+        NumberType::U64 => HConst::I64(parse_at::<u64>(value, width).cast_signed()),
+    }
+}
+
+/// A literal's text read at the width recorded for it. A value that does not fit
+/// that width has already been rejected by the literal-range analysis rule, so a
+/// parse failure here is a compiler bug — silently reading `0` instead would make
+/// the obligation constrain a constant the program never produces.
+fn parse_at<T: std::str::FromStr>(value: &str, width: NumberType) -> T {
+    value.parse().unwrap_or_else(|_| {
+        panic!(
+            "literal `{value}` does not parse at `{}`, the type recorded for it",
+            width.as_str()
+        )
+    })
+}
+
 /// The `emit_sub_i32_narrowing` mirror: truncates an i32 result to a sub-word
 /// width. Signed widths sign-extend by `shl`/`shr_s`; unsigned widths mask.
 fn narrow(term: HTerm, kind: Option<&TypeInfoKind>) -> HTerm {
@@ -1366,5 +1395,155 @@ fn lower_term(term: &HTerm, depth: u32) -> HTerm {
         ),
         HTerm::Binop(ty, op, l, r) => binop(*ty, *op, lower_term(l, depth), lower_term(r, depth)),
         HTerm::Relop(ty, op, l, r) => relop(*ty, *op, lower_term(l, depth), lower_term(r, depth)),
+    }
+}
+
+/// The literal contract at its edges, none of which a translated program can
+/// reach: a well-typed program has no untyped literal, no literal whose value
+/// overflows its own type, and no literal at a non-numeric type. Each state is
+/// provoked directly here. The two that are compiler-bug invariants are caught
+/// with `catch_unwind` rather than declared with `#[should_panic]`, and the panic
+/// hook is left alone so no process-global state is touched.
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use inference_ast::nodes::ExprData;
+    use inference_type_checker::TypeCheckerBuilder;
+
+    use super::*;
+    use crate::EmittableFunctions;
+
+    /// The text of a caught panic. Both `expect` and a formatted `panic!` deliver
+    /// a `String`; the other arms keep an unexpected payload from reading as an
+    /// empty message and failing an assertion for the wrong reason.
+    fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(text) = payload.downcast_ref::<String>() {
+            return text.clone();
+        }
+        if let Some(text) = payload.downcast_ref::<&str>() {
+            return (*text).to_string();
+        }
+        "<non-string panic payload>".to_string()
+    }
+
+    /// A one-spec program plus a number-literal expression belonging to no
+    /// definition. The type checker walks definitions, never the arena, so the
+    /// orphan is a literal the surrounding context has no type for — the state a
+    /// type-checked program cannot produce.
+    fn context_with_orphan_literal() -> (TypedContext, ExprId) {
+        let parsed = inference_parser::parse("spec S { fn f() forall { assert(1 > 0); } }");
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let mut arena = parsed.arena;
+        let orphan = arena.exprs.alloc(ExprData {
+            location: Location::default(),
+            kind: Expr::NumberLiteral {
+                value: "7".to_string(),
+            },
+        });
+        let ctx = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type checking should succeed")
+            .typed_context();
+        (ctx, orphan)
+    }
+
+    /// A literal with no recorded type is a typing gap in an earlier phase, not a
+    /// program error: denoting it `i32` would bake a constant into a proof
+    /// obligation that the compiled program never computes.
+    #[test]
+    fn literal_without_a_recorded_type_aborts_translation() {
+        let (ctx, orphan) = context_with_orphan_literal();
+        assert!(
+            ctx.get_node_typeinfo(node_expr(orphan)).is_none(),
+            "an expression reachable from no definition must stay untyped, or this test \
+             exercises nothing"
+        );
+
+        let buckets = EmittableFunctions::default();
+        let callee = CalleeIndex::build(ctx.arena(), &buckets);
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee);
+        let unwound = catch_unwind(AssertUnwindSafe(|| translator.number_literal(orphan, "7")));
+        let payload = unwound.expect_err("an untyped literal must abort translation");
+        let text = panic_text(payload.as_ref());
+        assert!(
+            text.contains("without a recorded type"),
+            "the abort must name the missing type, got: {text}"
+        );
+    }
+
+    /// The other side of that contract: a literal whose recorded type is not a
+    /// number is a *program* error, so it keeps its `P004` diagnostic and a zero
+    /// sentinel instead of aborting. The type checker rejects such a program long
+    /// before translation, so the type is stamped onto the orphan directly.
+    #[test]
+    fn literal_at_a_non_numeric_type_stays_a_diagnostic() {
+        let (mut ctx, orphan) = context_with_orphan_literal();
+        ctx.register_test_node_type(node_expr(orphan), TypeInfo::boolean());
+
+        let buckets = EmittableFunctions::default();
+        let callee = CalleeIndex::build(ctx.arena(), &buckets);
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee);
+        assert_eq!(
+            translator.number_literal(orphan, "7"),
+            zero_sentinel(),
+            "a non-numeric literal contributes the zero sentinel, not a constant"
+        );
+        let diagnostics = translator.take_diagnostics();
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "exactly one diagnostic, got: {diagnostics:?}"
+        );
+        let rendered = diagnostics[0].to_string();
+        assert!(
+            rendered.contains("error[P004]")
+                && rendered.contains("cannot appear in a specification term"),
+            "the non-numeric literal must keep its P004 diagnostic, got: {rendered}"
+        );
+    }
+
+    /// `i8` and `i16` are read at `i32` width, so a value that overflows the
+    /// narrower type yields its constant here rather than aborting — rejecting it
+    /// is the literal-range rule's job, and code generation's own literal table
+    /// takes the same latitude. Pinned so the two tables cannot drift apart
+    /// unnoticed.
+    #[test]
+    fn sub_word_signed_widths_are_read_at_i32_width() {
+        assert_eq!(number_const(NumberType::I8, "200"), HConst::I32(200));
+        assert_eq!(number_const(NumberType::I16, "40000"), HConst::I32(40000));
+    }
+
+    /// Each width's parse is an invariant too: the literal-range rule accepted
+    /// the value at this width, so a failure to parse it is a compiler bug and
+    /// must not silently denote zero. One case per distinct arm of the table.
+    #[test]
+    fn value_that_overflows_its_recorded_width_aborts_translation() {
+        for (width, value) in [
+            (NumberType::I32, "2147483648"),
+            (NumberType::U8, "300"),
+            (NumberType::U16, "70000"),
+            (NumberType::U32, "5000000000"),
+            (NumberType::I64, "9223372036854775808"),
+            (NumberType::U64, "-1"),
+        ] {
+            match catch_unwind(|| number_const(width, value)) {
+                Err(payload) => {
+                    let text = panic_text(payload.as_ref());
+                    assert!(
+                        text.contains(value) && text.contains(width.as_str()),
+                        "the abort must name the literal and the width recorded for it, got: \
+                         {text}"
+                    );
+                }
+                Ok(constant) => panic!(
+                    "`{value}` at `{}` must abort, got {constant:?}",
+                    width.as_str()
+                ),
+            }
+        }
     }
 }

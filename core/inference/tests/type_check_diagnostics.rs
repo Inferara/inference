@@ -482,19 +482,18 @@ fn ambiguous_extern_import_in_imported_file_is_labeled_with_module_path() {
     );
 }
 
-// --- Annotated-let number-literal mismatch: source-level double emission -----
+// --- Annotated-let number-literal mismatch: one diagnostic per mismatch -----
 
 #[test]
-fn annotated_let_number_literal_mismatch_double_emits_and_renders_in_legacy_twice() {
-    // A `let p: Point = 3;` reports the same variable-definition mismatch twice:
-    // once from the number-literal-vs-non-numeric-target check and once from the
-    // general initializer comparison it falls through to. This is deliberately
-    // left as-is at the type-checker source, because the legacy aggregated string
-    // renders the duplicate too (they share one error list), so deduping at the
-    // source would silently change pinned compiler-output. The user-visible
-    // squiggle duplication is instead collapsed downstream in the IDE/LSP
-    // diagnostics layer. This test pins the current source-level contract so any
-    // future change to emission is a conscious, coordinated one.
+fn annotated_let_number_literal_mismatch_emits_once() {
+    // `let p: Point = 3;` used to report the same variable-definition mismatch
+    // twice: once from a check that fired before the initializer was inferred,
+    // and once from the general initializer comparison it then fell through to.
+    // The literal now takes the annotated type through inference, so the single
+    // post-inference comparison is the only reporter, and the legacy aggregated
+    // string — which shares this error list — renders it once as well. The
+    // downstream IDE/LSP dedup that used to collapse the pair is now a no-op for
+    // this shape rather than the thing that made it presentable.
     let source = r#"struct Point { x: i32; } fn main() -> i32 { let p: Point = 3; return 0; }"#;
     let outcome = type_check_with_diagnostics(parse_arena(source));
 
@@ -508,14 +507,9 @@ fn annotated_let_number_literal_mismatch_double_emits_and_renders_in_legacy_twic
         .collect();
     assert_eq!(
         mismatches.len(),
-        2,
-        "the number-literal path emits the variable-definition mismatch twice, got {:?}",
+        1,
+        "the variable-definition mismatch is reported once, got {:?}",
         outcome.errors
-    );
-    assert_eq!(
-        mismatches[0].error.location(),
-        mismatches[1].error.location(),
-        "both mismatches anchor at the same location"
     );
 
     let legacy = type_check(parse_arena(source))
@@ -526,8 +520,7 @@ fn annotated_let_number_literal_mismatch_double_emits_and_renders_in_legacy_twic
         legacy
             .matches("type mismatch in variable definition")
             .count(),
-        2,
-        "the legacy aggregated string renders the duplicate too, so source-level \
-         emission must not be deduped without coordinating the pinned output: {legacy}"
+        1,
+        "the legacy aggregated string renders the same single mismatch: {legacy}"
     );
 }

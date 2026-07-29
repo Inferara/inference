@@ -8,7 +8,7 @@ The `inference-type-checker` crate implements a multi-phase type checker that va
 
 ## Key Features
 
-- **Bidirectional Type Checking**: Combines type synthesis (inferring types from expressions) and type checking (validating expressions against expected types)
+- **Bidirectional Type Checking**: One traversal carries a type in both directions — an expected type descends from a position that knows what it requires (`infer_expression_expecting`), and a synthesized type ascends from the expression. The expected type is what lets an integer literal denote the type its position calls for; it is not a coercion, and no expression that already has a type ever changes it
 - **Multi-Phase Analysis**: Processes code in distinct phases to handle forward references and circular dependencies
 - **Per-File Scope Model**: Each source file gets its own named child scope under the program root; qualified-name resolution (`a::b::fn()`) walks the scope tree from the calling file's scope
 - **File-Based Import Resolution**: `use a::b;` binds a namespace reference; `use a::b::{x, y};` binds individual items; `pub use …` re-exports bindings for transitive access; glob imports are rejected at the parser and removed from the resolver
@@ -519,7 +519,9 @@ Bidirectional type checking combines the best of both worlds:
 - **Synthesis** (bottom-up): Infers types from expressions without context
 - **Checking** (top-down): Validates expressions against expected types
 
-This approach provides better error messages and handles polymorphic types more naturally.
+Concretely, `infer_expression_expecting(expr_id, expected, ctx)` is the single entry point and `infer_expression` is the shim that passes `None`. A position that knows the type it requires — an annotated `let`/`const` initializer, an assignment target, a struct-literal field, an array element, a call argument, the operand of `return` — passes it down and compares what comes back. That is what gives an integer literal its type, and what makes the resulting mismatch name the position rather than the operator.
+
+What the checker deliberately does not have is a solver. There are no type variables, no constraint set, and no whole-program inference: every expression's type is a function of its syntax and the declared types in scope, computed in one traversal. Less inference power than Hindley-Milner, in exchange for messages that can point at a declaration and results that do not depend on checking order.
 
 ### Why Multi-Phase?
 

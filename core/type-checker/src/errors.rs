@@ -112,7 +112,9 @@ impl Display for RegistrationKind {
     }
 }
 
-/// Context for type mismatch errors to provide better messages.
+/// Where a type was required of an expression — the position a mismatch is
+/// reported against, and the position that gives an integer literal the type it
+/// denotes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeMismatchContext {
     Assignment,
@@ -133,6 +135,17 @@ pub enum TypeMismatchContext {
         arg_index: usize,
     },
     ArrayElement,
+    StructField {
+        struct_name: String,
+        field_name: String,
+    },
+    /// An operand that took the type its peer already had, rather than a type
+    /// its surroundings required. Provenance only: nothing constructs a
+    /// [`TypeCheckError::TypeMismatch`] with it, and
+    /// [`TypeMismatchContext::literal_typing_reason`] intercepts it. The
+    /// `Display` arm exists so the enum stays renderable in the mismatch frame
+    /// if a future position ever does report against an operand.
+    BinaryPeerOperand(OperatorKind),
 }
 
 impl Display for TypeMismatchContext {
@@ -162,6 +175,57 @@ impl Display for TypeMismatchContext {
                 "in argument {arg_index} `{arg_name}` of method `{type_name}::{method_name}`"
             ),
             TypeMismatchContext::ArrayElement => write!(f, "in array element"),
+            TypeMismatchContext::StructField {
+                struct_name,
+                field_name,
+            } => write!(f, "in field `{field_name}` of struct `{struct_name}`"),
+            TypeMismatchContext::BinaryPeerOperand(op) => {
+                write!(f, "in an operand of `{op:?}`")
+            }
+        }
+    }
+}
+
+impl TypeMismatchContext {
+    /// Why an integer literal has the type this position gave it, phrased as
+    /// the tail of "the literal is typed `T` …".
+    ///
+    /// Most positions render through [`Display`], so a position added later
+    /// reads correctly here without being listed. Three do not:
+    ///
+    /// - A peer-typed operand was required to be nothing by its surroundings;
+    ///   it took the type its neighbour already had, which is a different
+    ///   sentence, not a different position.
+    /// - The two argument positions drop the `arg_name`, which is the
+    ///   synthesized `arg{i}` placeholder rather than a name from the source —
+    ///   function signatures do not record parameter names. A mismatch message
+    ///   has carried that placeholder for a long time; a note explaining where
+    ///   a type came from must not introduce an identifier the reader cannot
+    ///   find in their own program.
+    #[must_use = "this renders a diagnostic note and has no side effects"]
+    pub fn literal_typing_reason(&self) -> String {
+        match self {
+            TypeMismatchContext::BinaryPeerOperand(op) => {
+                format!("to match the other operand of `{op:?}`")
+            }
+            TypeMismatchContext::FunctionArgument {
+                function_name,
+                arg_index,
+                ..
+            } => {
+                format!(
+                    "by the type expected in argument {arg_index} of function `{function_name}`"
+                )
+            }
+            TypeMismatchContext::MethodArgument {
+                type_name,
+                method_name,
+                arg_index,
+                ..
+            } => format!(
+                "by the type expected in argument {arg_index} of method `{type_name}::{method_name}`"
+            ),
+            position => format!("by the type expected {position}"),
         }
     }
 }
@@ -332,8 +396,12 @@ pub enum TypeCheckError {
         location: Location,
     },
 
+    /// Both operands already have types of their own, so neither can take the
+    /// other's — an integer literal in either position would have done so. The
+    /// note says why there is no third option, since a reader coming from C or
+    /// Rust expects either a promotion or a cast to be available.
     #[error(
-        "{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`"
+        "{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`\nnote: Inference has no implicit widening and no cast operator, so `{left}` and `{right}` never combine; change one of the two declarations so both operands have the same type"
     )]
     BinaryOperandTypeMismatch {
         operator: OperatorKind,
@@ -993,6 +1061,100 @@ mod tests {
             .to_string(),
             "in argument 0 `dx` of method `Point::move_by`"
         );
+        assert_eq!(
+            TypeMismatchContext::ArrayElement.to_string(),
+            "in array element"
+        );
+        assert_eq!(
+            TypeMismatchContext::VariableDefinition.to_string(),
+            "in variable definition"
+        );
+        assert_eq!(
+            TypeMismatchContext::BinaryOperation(OperatorKind::Add).to_string(),
+            "in binary operation `Add`"
+        );
+        assert_eq!(
+            TypeMismatchContext::StructField {
+                struct_name: "Point".to_string(),
+                field_name: "x".to_string(),
+            }
+            .to_string(),
+            "in field `x` of struct `Point`"
+        );
+        assert_eq!(
+            TypeMismatchContext::BinaryPeerOperand(OperatorKind::Add).to_string(),
+            "in an operand of `Add`"
+        );
+    }
+
+    /// Every position renders through `Display` unless naming it that way
+    /// would say something untrue about where a literal's type came from.
+    #[test]
+    fn literal_typing_reason_delegates_to_display_by_default() {
+        assert_eq!(
+            TypeMismatchContext::Return.literal_typing_reason(),
+            "by the type expected in return statement"
+        );
+        assert_eq!(
+            TypeMismatchContext::VariableDefinition.literal_typing_reason(),
+            "by the type expected in variable definition"
+        );
+        assert_eq!(
+            TypeMismatchContext::ArrayElement.literal_typing_reason(),
+            "by the type expected in array element"
+        );
+        assert_eq!(
+            TypeMismatchContext::StructField {
+                struct_name: "Point".to_string(),
+                field_name: "x".to_string(),
+            }
+            .literal_typing_reason(),
+            "by the type expected in field `x` of struct `Point`"
+        );
+        // No position ever records a literal here, but the wildcard is what
+        // keeps a later one readable without an edit.
+        assert_eq!(
+            TypeMismatchContext::Condition.literal_typing_reason(),
+            "by the type expected in condition"
+        );
+    }
+
+    /// A peer-typed operand copied its neighbour's type; no position asked
+    /// anything of it, so the sentence is a different one.
+    #[test]
+    fn literal_typing_reason_names_the_operator_for_a_peer_operand() {
+        assert_eq!(
+            TypeMismatchContext::BinaryPeerOperand(OperatorKind::Shl).literal_typing_reason(),
+            "to match the other operand of `Shl`"
+        );
+    }
+
+    /// `arg_name` is the synthesized `arg{i}`, not an identifier from the
+    /// program, so the note names the position by index only.
+    #[test]
+    fn literal_typing_reason_omits_the_synthesized_argument_name() {
+        let function = TypeMismatchContext::FunctionArgument {
+            function_name: "take".to_string(),
+            arg_name: "arg0".to_string(),
+            arg_index: 0,
+        };
+        assert_eq!(
+            function.literal_typing_reason(),
+            "by the type expected in argument 0 of function `take`"
+        );
+        assert!(!function.literal_typing_reason().contains("arg0"));
+
+        let method = TypeMismatchContext::MethodArgument {
+            type_name: "Point".to_string(),
+            method_name: "move_by".to_string(),
+            arg_name: "arg1".to_string(),
+            arg_index: 1,
+        };
+        assert_eq!(
+            method.literal_typing_reason(),
+            "by the type expected in argument 1 of method `Point::move_by`"
+        );
+        assert!(!method.literal_typing_reason().contains("arg1"));
     }
 
     #[test]
@@ -1155,7 +1317,9 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot apply operator `Add` to operands of different types: `i32` and `i64`"
+            "1:5: cannot apply operator `Add` to operands of different types: `i32` and `i64`\n\
+             note: Inference has no implicit widening and no cast operator, so `i32` and `i64` \
+             never combine; change one of the two declarations so both operands have the same type"
         );
     }
 

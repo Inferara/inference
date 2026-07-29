@@ -6,6 +6,13 @@
 //! translation pass with the guarantees only the full pipeline can make: that
 //! the obligation survives real code generation, that compile mode carries none,
 //! and that the corpus of existing spec fixtures still translates cleanly.
+//!
+//! They also pin that a specification body types its integer literals from the
+//! positions they appear in, exactly as executable code does. The two run in one
+//! traversal over one type table, so this is a property of the design rather than
+//! of a shared code path — but it is the property the whole obligation rests on:
+//! an obligation whose constants are not the program's constants is about a
+//! different program than the one that runs.
 
 #![cfg(test)]
 
@@ -49,6 +56,9 @@ fn sole_obligation(map: &HSpecMap, spec: &str) -> HAssert {
 fn i32c(v: i32) -> HTerm {
     HTerm::Const(HConst::I32(v))
 }
+fn i64c(v: i64) -> HTerm {
+    HTerm::Const(HConst::I64(v))
+}
 fn local(n: u32) -> HTerm {
     HTerm::Local(n)
 }
@@ -60,6 +70,12 @@ fn app(name: &str, args: Vec<HTerm>) -> HTerm {
 }
 fn rel(op: HRelop, l: HTerm, r: HTerm) -> HTerm {
     HTerm::Relop(HNumType::I32, op, Box::new(l), Box::new(r))
+}
+fn rel64(op: HRelop, l: HTerm, r: HTerm) -> HTerm {
+    HTerm::Relop(HNumType::I64, op, Box::new(l), Box::new(r))
+}
+fn add64(l: HTerm, r: HTerm) -> HTerm {
+    HTerm::Binop(HNumType::I64, HBinop::Add, Box::new(l), Box::new(r))
 }
 fn rems(l: HTerm, r: HTerm) -> HTerm {
     HTerm::Binop(HNumType::I32, HBinop::RemS, Box::new(l), Box::new(r))
@@ -193,6 +209,109 @@ fn spec_method_fixture_translates_without_obligations() {
         map.is_empty(),
         "spec methods are helpers, not obligations: {map:?}"
     );
+}
+
+/// A specification body types its integer literals from the positions they
+/// appear in, exactly as executable code does — the same traversal types both.
+///
+/// Every literal here is wider than `i32`, so an obligation carrying `Vi32`
+/// constants would be about a different program than the one that runs: the
+/// peer operand of a comparison and the operand of `i64` arithmetic must both
+/// come out as `HConst::I64`.
+#[test]
+fn spec_literals_take_the_peer_and_operand_types_at_i64() {
+    let source = "\
+fn scaled(n: i64) -> i64 {
+  return n * 2;
+}
+
+spec Widths {
+  fn widths() forall {
+    let n: i64 = @;
+    assume { assert(n > 4294967296); }
+    assert(scaled(n) > n + 1);
+  }
+}
+";
+    let n = || local(0);
+    let expected = imp(
+        not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        not(teq(
+            rel64(HRelop::GtS, app("scaled", vec![n()]), add64(n(), i64c(1))),
+            i32c(0),
+        )),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Widths"), expected);
+}
+
+/// A literal at a `u64` parameter is typed by that parameter, which is the only
+/// way `u64::MAX` is expressible at all — it fits no other integer type. The
+/// obligation carries it as the `i64` bit pattern `-1`, the same reinterpretation
+/// code generation performs, and the surrounding comparison is unsigned.
+#[test]
+fn spec_argument_literal_takes_a_u64_parameter_type() {
+    let source = "\
+fn is_max(n: u64) -> bool {
+  return n == 18446744073709551615;
+}
+
+spec MaxArg {
+  fn max_arg() forall {
+    let n: u64 = @;
+    assume { assert(n > 0); }
+    assert(is_max(18446744073709551615));
+  }
+}
+";
+    let expected = imp(
+        not(teq(rel64(HRelop::GtU, local(0), i64c(0)), i32c(0))),
+        not(teq(app("is_max", vec![i64c(-1)]), i32c(0))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "MaxArg"), expected);
+}
+
+/// The `spec_literal_ctx.inf` fixture places `i64`/`u64` literals in the return,
+/// argument and operand positions of one specification. Proof-mode code
+/// generation succeeding at all is half the assertion: `threshold`'s
+/// `return 4294967296;` is a spec-inner body that code generation lowers, and
+/// that value has no `i32` reading — left at the default it would abort the
+/// lowering before any obligation existed. The rest is the obligation itself.
+#[test]
+fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
+    let map = proof_hspecs(&read_inf("spec_literal_ctx.inf"));
+    let entries = map
+        .get("LiteralPositions")
+        .expect("spec LiteralPositions should carry obligations");
+    let by_symbol = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.fn_symbol == HFnRef(name.to_string()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no obligation for `{name}`; have {:?}",
+                    entries.iter().map(|e| &e.fn_symbol).collect::<Vec<_>>()
+                )
+            })
+            .hassert
+            .clone()
+    };
+
+    // The `i64`-returning helper is a plain spec-inner function: it contributes
+    // no term, so its obligation is trivially true.
+    assert_eq!(by_symbol("LiteralPositions.threshold"), HAssert::True);
+
+    let n = || local(0);
+    let expected = imp(
+        not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        and(
+            not(teq(
+                rel64(HRelop::GtS, app("scaled", vec![n()]), add64(n(), i64c(1))),
+                i32c(0),
+            )),
+            not(teq(app("nonzero", vec![i64c(-1)]), i32c(0))),
+        ),
+    );
+    assert_eq!(by_symbol("LiteralPositions.scaled_grows"), expected);
 }
 
 /// Compile mode strips specs, so no obligation is ever attached.

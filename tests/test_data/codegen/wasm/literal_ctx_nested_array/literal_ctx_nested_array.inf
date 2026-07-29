@@ -1,0 +1,32 @@
+// A nested array annotation carries its element type down one level at a
+// time, so the literals in `[[..], [..]]` are typed by the inner array type.
+
+pub fn grid_first() -> i64 {
+    let g: [[i64; 2]; 2] = [[1099511627776, 2199023255552], [3298534883328, 4398046511104]];
+    return g[0][0];
+}
+
+pub fn grid_last() -> i64 {
+    let g: [[i64; 2]; 2] = [[1099511627776, 2199023255552], [3298534883328, 4398046511104]];
+    return g[1][1];
+}
+
+pub fn grid_sum() -> i64 {
+    let g: [[i64; 2]; 2] = [[1, 2], [3, 4]];
+    return g[0][0] + g[0][1] + g[1][0] + g[1][1];
+}
+
+pub fn grid_of_expressions() -> i64 {
+    let g: [[i64; 2]; 2] = [[1 << 40, 1 << 41], [(1 << 40) + 1, ~0]];
+    return g[1][0];
+}
+
+pub fn grid_complement_element() -> i64 {
+    let g: [[i64; 2]; 2] = [[1 << 40, 1 << 41], [(1 << 40) + 1, ~0]];
+    return g[1][1];
+}
+
+pub fn grid_unsigned_max() -> u64 {
+    let g: [[u64; 2]; 2] = [[0, 1], [2, 18446744073709551615]];
+    return g[1][1];
+}

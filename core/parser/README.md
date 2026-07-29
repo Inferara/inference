@@ -20,7 +20,7 @@ lexer.rs        tokenize(&str) -> Vec<Token>
                 joint bits track immediate adjacency for `::` and `'`
     │
     ▼
-input.rs        Input: trivia-free view of the token stream for the parser
+input.rs        Input: trivia-free view of the token stream, plus its source
     │
     ▼
 grammar/        recursive-descent grammar rules (items, types, stmts, exprs)
@@ -47,7 +47,7 @@ AstArena        inference_ast::arena::AstArena (unchanged public type)
 | `syntax_kind.rs` | Single `SyntaxKind` enum: token kinds first, then node kinds from the computed `FIRST_NODE` boundary; keyword table; `is_trivia`, `from_keyword`, `is_token`. Contextual keywords (`self`/`type`/`from`/`spec`) are handled in `grammar/types.rs` via the `IDENT_LIKE` token set, not here |
 | `lexer.rs` | `tokenize(&str) -> Vec<Token>`; handles trivia, joint bits, greedy `-N`, unterminated strings |
 | `token_set.rs` | `TokenSet(u128)` bitset over `SyntaxKind` discriminants for O(1) recovery sets |
-| `input.rs` | Trivia-free token view the parser cursor operates on |
+| `input.rs` | Trivia-free token view the parser cursor operates on; carries the source so a rule can read a token's spelling |
 | `event.rs` | `Event` enum + `process` producing `Vec<Step>` consumed by `build_tree` |
 | `parser.rs` | `Parser` cursor; `Marker` / `CompletedMarker`; fuel counter; advance guard |
 | `syntax_tree.rs` | Owned immutable CST (`SyntaxNode`, `SyntaxElement`); `build_tree`; navigation helpers |
@@ -101,7 +101,7 @@ in the `vis` field of `UseDirective`. This required a fix in the top-level `item
 dispatch (`grammar.rs`): the parser now peeks past a leading `pub` token to detect
 `use` and routes it to `use_directive` rather than the general `definition` path.
 
-Three forms are rejected at the parser with educational messages and clean recovery:
+Four forms are rejected at the parser with educational messages and clean recovery:
 
 - `use a::b::*;` — glob imports are not supported; the error names the two supported
   forms (`use a::b;` and `use a::b::{x, y};`).
@@ -109,6 +109,15 @@ Three forms are rejected at the parser with educational messages and clean recov
   before codegen regardless of which file contains them.
 - `pub` on a struct field — fields inherit visibility from their struct; the error
   directs the user to the struct's own visibility modifier.
+- A number literal glued to an identifier run — a type suffix (`16i64`, `5usize`), a
+  digit separator (`1_000`), or a radix prefix (`0x1F`). The number scanner stops at
+  the first non-digit, so these lex as a `Number` plus an identifier and used to parse
+  as a *different, valid-looking* number followed by a stray token — `1_000` as `1`,
+  with an "expected Semi" cascade behind it. `number_literal` now consumes the tail
+  into the literal node with one message: suffixes are told that an integer literal
+  takes its type from where it is used, everything else that Inference numbers are
+  decimal digits only. The `Number` token still carries the digits alone, which is
+  what lowering stores as the literal's value.
 
 The `from`-form external WASM import (`use {x} from M;`) is unchanged and
 disambiguated from source imports by the presence of the `from` keyword.

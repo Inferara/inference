@@ -49,11 +49,28 @@ pub enum TypeMismatchContext {
     VariableDefinition,
     BinaryOperation(OperatorKind),
     Condition,
+    Assert,
     FunctionArgument { function_name, arg_name, arg_index },
     MethodArgument { type_name, method_name, arg_name, arg_index },
     ArrayElement,
+    StructField { struct_name, field_name },
+    BinaryPeerOperand(OperatorKind),
 }
 ```
+
+The enum has a second job beyond naming the site of a mismatch: it is also what records *why* an integer literal has the type it has, since a literal takes its type from the position it appears in (see [Integer Literal Typing](./type-system.md#integer-literal-typing)). `TypeMismatchContext::literal_typing_reason` renders that half, and analysis rule A022 appends it to an out-of-range diagnostic:
+
+```
+literal `300` is out of range for type `u8` (valid range: 0..=255)
+note: the literal is typed `u8` by the type expected in return statement
+```
+
+The two argument variants drop their `arg_name` in that note — it is a synthesized `arg{i}` placeholder, since a function signature records parameter types but not their names, and a note explaining where a type came from must not introduce an identifier the reader cannot find in their own program.
+
+Two variants deserve a note:
+
+- `StructField` reports a struct-literal field value against the field's declared type, naming both. Before it existed these mismatches reported `VariableDefinition`, which pointed at nothing the reader could act on.
+- `BinaryPeerOperand` is **provenance only**. Nothing constructs a `TypeMismatch` with it — it records that an operand took the type its peer already had, which is a source of a type rather than a site of an error. Its `Display` arm exists so the enum stays renderable if a position ever does report against an operand.
 
 **Examples**:
 
@@ -73,6 +90,13 @@ fn greet(name: string) -> string { return name; }
 
 fn test() {
     greet(42);  // Error: type mismatch in argument 0 `name` of function `greet`: expected `string`, found `i32`
+}
+
+// Struct field mismatch
+struct P { x: i32; }
+
+fn test() {
+    let p: P = P { x: true };  // Error: type mismatch in field `x` of struct `P`: expected `i32`, found `Bool`
 }
 ```
 
@@ -462,12 +486,19 @@ A binary operator is applied to two operands of different types.
 fn test() {
     let x: i32 = 10;
     let y: i64 = 20;
-    let z = x + y;
+    let z: i32 = x + y;
     // Error: cannot apply operator `Add` to operands of different types: `i32` and `i64`
+    // note: Inference has no implicit widening and no cast operator, so `i32` and `i64`
+    //       never combine; change one of the two declarations so both operands have the
+    //       same type
 }
 ```
 
-**Solution**: Ensure both operands have the same type. Inference does not perform implicit widening.
+**Solution**: Change one of the two declarations so both operands have the same type.
+
+**This is not the same as an integer literal in an operand position.** Two *typed* values of different widths never combine, and that has not changed: Inference has no implicit widening and no cast operator, so the only fix is at a declaration. An integer *literal* is a different thing — it has no type of its own until a position gives it one, so `let x: i64 = 10; let z: i64 = x + 20;` is fine: the literal `20` takes `x`'s type rather than being widened from `i32`. See [Integer Literal Typing](./type-system.md#integer-literal-typing) for which positions supply a type and how far it descends.
+
+The note names the two declarations rather than suggesting an annotation on an operand, because in the usual case both operands are typed variables and there is nothing to annotate. One shape still slips past that wording: a literal beside a non-numeric peer (`b == 1` with `b: bool`) keeps its `i32` default — peer typing only offers integer types — and reports `Bool` against `i32`, where "change one of the two declarations" names a declaration the literal does not have.
 
 ---
 

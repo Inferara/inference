@@ -31,6 +31,21 @@ pub struct Token {
     pub joint: bool,
 }
 
+impl Token {
+    /// The source text this token spans, sliced from `src` by its byte offsets.
+    ///
+    /// The token counterpart of [`crate::SyntaxNode::text`], for the places that
+    /// hold a token rather than a node: the grammar quoting an offending
+    /// spelling in a diagnostic, and lowering reading one token out of a node
+    /// that spans several.
+    #[must_use]
+    pub fn text<'s>(&self, src: &'s str) -> &'s str {
+        let start = self.loc.offset_start as usize;
+        let end = self.loc.offset_end as usize;
+        src.get(start..end).unwrap_or("")
+    }
+}
+
 /// Lexes `src` into a lossless token stream terminated by an [`SyntaxKind::Eof`].
 ///
 /// Every input byte is covered by exactly one token (trivia included), so the
@@ -272,7 +287,11 @@ struct Mark {
 }
 
 /// Whether `byte` can start an identifier.
-fn is_ident_start(byte: u8) -> bool {
+///
+/// The expression grammar reads this too: a `Number` glued to a byte that starts
+/// an identifier is one malformed literal the scanners split in two, and sharing
+/// the predicate keeps that check tied to the definition rather than a copy.
+pub(crate) fn is_ident_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
 }
 

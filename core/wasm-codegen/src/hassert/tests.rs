@@ -405,26 +405,50 @@ fn unary_operators_mirror_codegen() {
     );
 }
 
+/// The constant a literal of type `decl_ty` denotes. A typed `let` fixes the
+/// literal's width and the pure-let inlines its constant, so the right-hand side
+/// of the comparison is the parsed constant itself.
+fn literal_const_of(decl_ty: &str, literal: &str) -> HTerm {
+    let body =
+        format!("forall {{ let m: {decl_ty} = {literal}; let a: {decl_ty} = @; assert(a == m); }}");
+    match obligation_of("", &body) {
+        HAssert::Not(inner) => match *inner {
+            HAssert::TermEq(HTerm::Relop(_, HRelop::Eq, _, rhs), _) => *rhs,
+            other => panic!("expected nz(relop Eq ..), got {other:?}"),
+        },
+        other => panic!("expected nz(..), got {other:?}"),
+    }
+}
+
 #[test]
 fn literals_parse_per_width_including_cast_signed() {
-    // A typed `let` fixes the literal's width; the pure-let inlines its constant,
-    // so the comparison term is the parsed constant. u32 max casts to signed -1.
-    let body = "forall { let m: u32 = 4294967295; let a: u32 = @; assert(a == m); }";
+    // Every width below 64 bits rides in an i32 constant: signed widths at their
+    // most negative value, unsigned widths at their maximum.
+    assert_eq!(literal_const_of("i8", "-128"), i32c(-128));
+    assert_eq!(literal_const_of("i16", "-32768"), i32c(-32768));
+    assert_eq!(literal_const_of("i32", "-2147483648"), i32c(i32::MIN));
+    assert_eq!(literal_const_of("u8", "255"), i32c(255));
+    assert_eq!(literal_const_of("u16", "65535"), i32c(65535));
+    // 64-bit widths take an i64 constant.
+    assert_eq!(literal_const_of("i64", "5"), i64c(5));
     assert_eq!(
-        obligation_of("", body),
-        nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(-1)))
+        literal_const_of("i64", "9223372036854775807"),
+        i64c(i64::MAX)
     );
-    // i64 literal.
-    let body = "forall { let m: i64 = 5; let a: i64 = @; assert(a == m); }";
     assert_eq!(
-        obligation_of("", body),
-        nz(rel(HNumType::I64, HRelop::Eq, local(0), i64c(5)))
+        literal_const_of("i64", "-9223372036854775808"),
+        i64c(i64::MIN)
     );
-    // u64 max casts to signed -1.
-    let body = "forall { let m: u64 = 18446744073709551615; let a: u64 = @; assert(a == m); }";
+    // An unsigned value is the signed constant with the same bit pattern. The
+    // maxima alone would not discriminate — every all-ones pattern is -1 at any
+    // width — so each also takes the value one past its signed maximum, which is
+    // where a wrong-width reinterpretation would show.
+    assert_eq!(literal_const_of("u32", "4294967295"), i32c(-1));
+    assert_eq!(literal_const_of("u32", "2147483648"), i32c(i32::MIN));
+    assert_eq!(literal_const_of("u64", "18446744073709551615"), i64c(-1));
     assert_eq!(
-        obligation_of("", body),
-        nz(rel(HNumType::I64, HRelop::Eq, local(0), i64c(-1)))
+        literal_const_of("u64", "9223372036854775808"),
+        i64c(i64::MIN)
     );
     // bool literal.
     let body = "forall { let m: bool = true; let a: bool = @; assert(a == m); }";

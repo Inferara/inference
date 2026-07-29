@@ -1,0 +1,42 @@
+// Array-element typing in the positions that previously had none: the
+// right-hand side of an assignment, a `const` initializer, and a
+// struct-literal field.
+
+struct Holder { values: [i64; 2]; }
+
+pub fn assigned_elements() -> i64 {
+    let mut a: [i64; 2] = [0, 0];
+    a = [1099511627776, 2199023255552];
+    return a[0] + a[1];
+}
+
+pub fn reassigned_first_element() -> i64 {
+    let mut a: [i64; 2] = [1, 2];
+    a = [4398046511104, 3];
+    return a[0];
+}
+
+pub fn const_array_element() -> i64 {
+    const WIDE: [i64; 3] = [1099511627776, 2199023255552, 4398046511104];
+    return WIDE[2];
+}
+
+pub fn const_array_unsigned_max() -> u64 {
+    const MAXES: [u64; 2] = [0, 18446744073709551615];
+    return MAXES[1];
+}
+
+pub fn struct_field_array_element() -> i64 {
+    let h: Holder = Holder { values: [1099511627776, 2199023255552] };
+    return h.values[1];
+}
+
+pub fn element_expressions() -> i64 {
+    let a: [i64; 2] = [1 << 40, (1 << 20) * (1 << 20)];
+    return a[0] + a[1];
+}
+
+pub fn peer_typed_element(v: i64) -> i64 {
+    let a: [i64; 2] = [v + 1, 2];
+    return a[0] + a[1];
+}

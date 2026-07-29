@@ -4,6 +4,7 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
+    errors::TypeMismatchContext,
     symbol_table::{EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
@@ -103,6 +104,27 @@ pub struct TypedContext {
     /// indirection; calls absent from the map (e.g. higher-order, or to an
     /// `external fn` import) fall back to the existing bare-name resolution.
     resolved_call_targets: FxHashMap<ExprId, CallTarget>,
+    /// The position that gave each integer literal its type, keyed by the
+    /// literal's expression id. An entry describes one write: the literal arm
+    /// of inference recording an expected type it consumed. A literal left at
+    /// the `i32` default is absent.
+    ///
+    /// **Contract.** The entry explains the type in [`Self::node_types`] for
+    /// the same id, so a later `set_node_typeinfo` on that id must either
+    /// preserve the recorded type or clear the entry — otherwise the note
+    /// explains a type the literal no longer has. Nothing violates this today:
+    /// the only later writer for a literal id is `check_const_initializer`,
+    /// which re-stamps the *same* `TypeInfo` to normalize an unresolved
+    /// `Custom`. That is a coincidence of the current code, not a property of
+    /// it, which is why the rule is written down.
+    ///
+    /// Diagnostics only. A literal's type is rarely written where the literal
+    /// is, so a range error against it reads as action at a distance without
+    /// the position to point at — this table is what lets A022 name it. No
+    /// later phase may consult it: [`Self::node_types`] is the single source of
+    /// truth for what a literal denotes, and nothing about how a program
+    /// compiles depends on which position supplied that type.
+    literal_type_sources: FxHashMap<ExprId, TypeMismatchContext>,
 }
 
 // Compile-time assertion: TypedContext is Send + Sync. Its symbol table is an
@@ -126,7 +148,26 @@ impl TypedContext {
             enums_by_key: FxHashMap::default(),
             definition_order: Vec::new(),
             resolved_call_targets: FxHashMap::default(),
+            literal_type_sources: FxHashMap::default(),
         }
+    }
+
+    /// Records the position that gave the integer literal at `expr_id` its
+    /// type. Called from the literal arm of inference, on the same line as the
+    /// type it explains — see the contract on [`Self::literal_type_sources`].
+    pub(crate) fn set_literal_type_source(&mut self, expr_id: ExprId, source: TypeMismatchContext) {
+        self.literal_type_sources.insert(expr_id, source);
+    }
+
+    /// The position that gave the integer literal at `expr_id` its type, or
+    /// `None` for a literal that kept the `i32` default.
+    ///
+    /// For diagnostics only: the recorded node type is what a literal denotes,
+    /// and no compilation outcome depends on which position supplied it. A
+    /// range error uses this to name a type the reader cannot otherwise find.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn literal_type_source(&self, expr_id: ExprId) -> Option<&TypeMismatchContext> {
+        self.literal_type_sources.get(&expr_id)
     }
 
     /// Records the defining-file identity of a resolved call, keyed by its
@@ -521,6 +562,17 @@ impl TypedContext {
         )?;
         self.build_type_indexes();
         Ok(())
+    }
+
+    /// Records a node's type in the type context for testing.
+    ///
+    /// Intended for unit tests in downstream crates (e.g. `wasm-codegen`) that
+    /// need a node typed in a way the type-checker itself never produces, so a
+    /// defensive branch keyed on that type can be exercised.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    pub fn register_test_node_type(&mut self, node_id: NodeId, type_info: TypeInfo) {
+        self.set_node_typeinfo(node_id, type_info);
     }
 
     /// Looks up a method on the given type by name and returns its metadata.

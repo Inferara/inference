@@ -384,7 +384,7 @@ mod tests {
 
     fn build(src: &str) -> (Vec<Token>, SyntaxNode) {
         let toks = tokenize(src);
-        let input = Input::new(&toks);
+        let input = Input::new(src, &toks);
         let mut p = Parser::new(&input);
         parse_number(&mut p);
         let steps = process(p.finish());

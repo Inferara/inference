@@ -80,6 +80,55 @@ enum ImportTargetIdentity {
     },
 }
 
+/// What a position requires of the expression in it: the type, and the position
+/// itself.
+///
+/// The two always travel together. The type is what an integer literal denotes
+/// when it reaches a leaf; the position is what a diagnostic needs in order to
+/// say *why* the literal has that type, since the type is written somewhere the
+/// literal is not. Carrying them separately would let a descent forward one
+/// without the other and leave a literal typed with no explanation.
+///
+/// Borrowed and [`Copy`], so the transparent forms forward it unchanged and a
+/// literal under `-( 1 + 2 )` reports the position that typed the whole thing.
+#[derive(Clone, Copy, Debug)]
+struct Expected<'a> {
+    ty: &'a TypeInfo,
+    source: &'a TypeMismatchContext,
+}
+
+impl<'a> Expected<'a> {
+    /// Pairs the type a position requires with the position requiring it.
+    fn new(ty: &'a TypeInfo, source: &'a TypeMismatchContext) -> Self {
+        Self { ty, source }
+    }
+}
+
+/// The position of argument `arg_index` in a call to `function_name`.
+///
+/// The argument name is synthesized: a function signature records parameter
+/// types but not their names. The mismatch message has rendered that
+/// placeholder for a long time; [`TypeMismatchContext::literal_typing_reason`]
+/// drops it rather than repeat it in a new message class.
+fn function_arg_context(function_name: &str, arg_index: usize) -> TypeMismatchContext {
+    TypeMismatchContext::FunctionArgument {
+        function_name: function_name.to_string(),
+        arg_name: format!("arg{arg_index}"),
+        arg_index,
+    }
+}
+
+/// The position of argument `arg_index` in a call to `type_name::method_name`.
+/// The argument name is synthesized — see [`function_arg_context`].
+fn method_arg_context(type_name: &str, method_name: &str, arg_index: usize) -> TypeMismatchContext {
+    TypeMismatchContext::MethodArgument {
+        type_name: type_name.to_string(),
+        method_name: method_name.to_string(),
+        arg_name: format!("arg{arg_index}"),
+        arg_index,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
@@ -1225,10 +1274,10 @@ impl TypeChecker {
 
     /// Type-checks a constant initializer expression against the declared type.
     ///
-    /// If the initializer is a number literal matching a numeric target type,
-    /// sets the expression's type info directly. Otherwise, infers the expression
-    /// type and reports a mismatch if it doesn't match. Only sets node type info
-    /// when types are compatible.
+    /// The declared type is what a bare integer literal initializer denotes;
+    /// anything that cannot denote it is reported as a mismatch. A matching
+    /// initializer is re-stamped with the *resolved* constant type, which
+    /// normalizes an unresolved `Custom` to its canonical-keyed form.
     fn check_const_initializer(
         &mut self,
         value_id: ExprId,
@@ -1236,54 +1285,36 @@ impl TypeChecker {
         location: Location,
         ctx: &mut TypedContext,
     ) {
-        let value_kind = ctx.arena()[value_id].kind.clone();
-        let mut type_ok = false;
-        if let Expr::NumberLiteral { .. } = value_kind {
-            if const_type.kind.is_number() {
-                type_ok = true;
-            } else {
+        // A `const` array initializer may carry a `@` element (`const A:
+        // [i32; 2] = [0, @]`), which inherits the constant's element type.
+        // Thread it before inference (a no-op for non-array/non-uzumaki
+        // values) so the `@` is typed; this initializer is otherwise lowered
+        // element-by-element with no enclosing variable, so a `@` element
+        // panics codegen. A compound element is rejected by analysis (A040).
+        if matches!(ctx.arena()[value_id].kind, Expr::ArrayLiteral { .. })
+            && matches!(const_type.kind, TypeInfoKind::Array(_, _))
+        {
+            self.thread_array_uzumaki_types(ctx, value_id, const_type);
+        }
+        let source = TypeMismatchContext::VariableDefinition;
+        let init_type = self.infer_expression_expecting(
+            value_id,
+            Some(Expected::new(const_type, &source)),
+            ctx,
+        );
+        match init_type {
+            Some(init) if self.symbol_table.resolve_custom_type(init.clone()) != *const_type => {
                 self.push_error(TypeCheckError::TypeMismatch {
                     expected: const_type.clone(),
-                    found: TypeInfo {
-                        kind: TypeInfoKind::Number(NumberType::I32),
-                        type_params: vec![],
-                    },
-                    context: TypeMismatchContext::VariableDefinition,
+                    found: init,
+                    context: source,
                     location,
                 });
             }
-        } else {
-            // A `const` array initializer may carry a `@` element (`const A:
-            // [i32; 2] = [0, @]`), which inherits the constant's element type.
-            // Thread it before inference (a no-op for non-array/non-uzumaki
-            // values) so the `@` is typed; this initializer is otherwise lowered
-            // element-by-element with no enclosing variable, so a `@` element
-            // panics codegen. A compound element is rejected by analysis (A040).
-            if matches!(ctx.arena()[value_id].kind, Expr::ArrayLiteral { .. })
-                && matches!(const_type.kind, TypeInfoKind::Array(_, _))
-            {
-                self.thread_array_uzumaki_types(ctx, value_id, const_type);
+            Some(_) => {
+                ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type.clone());
             }
-            let init_type = self.infer_expression(value_id, ctx);
-            match init_type {
-                Some(init)
-                    if self.symbol_table.resolve_custom_type(init.clone()) != *const_type =>
-                {
-                    self.push_error(TypeCheckError::TypeMismatch {
-                        expected: const_type.clone(),
-                        found: init,
-                        context: TypeMismatchContext::VariableDefinition,
-                        location,
-                    });
-                }
-                Some(_) => {
-                    type_ok = true;
-                }
-                None => {}
-            }
-        }
-        if type_ok {
-            ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type.clone());
+            None => {}
         }
     }
 
@@ -1650,27 +1681,6 @@ impl TypeChecker {
                     self.push_error(TypeCheckError::InvalidAssignmentTarget { location });
                 }
                 let target_type = self.infer_expression(left, ctx);
-                {
-                    let right_kind = ctx.arena()[right].kind.clone();
-                    if let Some(target) = &target_type
-                        && let Expr::NumberLiteral { .. } = &right_kind
-                    {
-                        if target.kind.is_number() {
-                            ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
-
-                        } else {
-                            self.push_error(TypeCheckError::TypeMismatch {
-                                expected: target.clone(),
-                                found: TypeInfo {
-                                    kind: TypeInfoKind::Number(NumberType::I32),
-                                    type_params: vec![],
-                                },
-                                context: TypeMismatchContext::Assignment,
-                                location,
-                            });
-                        }
-                    }
-                }
                 let arena = ctx.arena();
                 if let Expr::Uzumaki = &arena[right].kind {
                     if let Some(target) = &target_type {
@@ -1693,7 +1703,15 @@ impl TypeChecker {
                     {
                         self.thread_array_uzumaki_types(ctx, right, target);
                     }
-                    let value_type = self.infer_expression(right, ctx);
+                    // The target's type is what a bare integer literal on the
+                    // right denotes; a value that cannot denote it is reported
+                    // once, by the mismatch check below.
+                    let source = TypeMismatchContext::Assignment;
+                    let value_type = self.infer_expression_expecting(
+                        right,
+                        target_type.as_ref().map(|ty| Expected::new(ty, &source)),
+                        ctx,
+                    );
                     // Compound-return-in-assignment check moved to analysis rule A017.
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
@@ -1701,7 +1719,7 @@ impl TypeChecker {
                         self.push_error(TypeCheckError::TypeMismatch {
                             expected: target,
                             found: val,
-                            context: TypeMismatchContext::Assignment,
+                            context: source,
                             location,
                         });
                     }
@@ -1723,7 +1741,15 @@ impl TypeChecker {
                 if let Expr::Uzumaki = &ctx.arena()[expr].kind {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
-                    let value_type = self.infer_expression(expr, ctx);
+                    // The declared return type is what a bare integer literal
+                    // operand denotes; a value that cannot denote it is reported
+                    // once, by the mismatch check below.
+                    let source = TypeMismatchContext::Return;
+                    let value_type = self.infer_expression_expecting(
+                        expr,
+                        Some(Expected::new(return_type, &source)),
+                        ctx,
+                    );
                     // Comparing a real return value against a declared return array
                     // whose size was already rejected would only add a confusing
                     // second error, so the mismatch is skipped for it.
@@ -1732,7 +1758,7 @@ impl TypeChecker {
                         self.push_error(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
                             found: value_type.unwrap_or_default(),
-                            context: TypeMismatchContext::Return,
+                            context: source,
                             location,
                         });
                     }
@@ -1795,40 +1821,16 @@ impl TypeChecker {
                 let size_rejected = target_type.has_rejected_array_size();
                 if let Some(expr_id) = value {
                     let expr_kind = ctx.arena()[expr_id].kind.clone();
-                    if let Expr::NumberLiteral { .. } = expr_kind
-                    {
-                        if target_type.kind.is_number() {
-                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-
-                        } else {
-                            self.push_error(TypeCheckError::TypeMismatch {
-                                expected: target_type.clone(),
-                                found: TypeInfo {
-                                    kind: TypeInfoKind::Number(NumberType::I32),
-                                    type_params: vec![],
-                                },
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    }
                     if let Expr::ArrayLiteral { elements } = &expr_kind
-                        && let TypeInfoKind::Array(ref elem_type, expected_size) = target_type.kind
+                        && let TypeInfoKind::Array(_, expected_size) = target_type.kind
+                        && !size_rejected
+                        && elements.len() != expected_size as usize
                     {
-                        if !size_rejected && elements.len() != expected_size as usize {
-                            self.push_error(TypeCheckError::ArrayLiteralSizeMismatch {
-                                expected: expected_size,
-                                actual: elements.len(),
-                                location,
-                            });
-                        }
-                        let elems: Vec<ExprId> = elements.clone();
-                        for elem_id in elems {
-                            let el_kind = ctx.arena()[elem_id].kind.clone();
-                            if let Expr::NumberLiteral { .. } = el_kind {
-                                ctx.set_node_typeinfo(NodeId::Expr(elem_id), (**elem_type).clone());
-                            }
-                        }
+                        self.push_error(TypeCheckError::ArrayLiteralSizeMismatch {
+                            expected: expected_size,
+                            actual: elements.len(),
+                            location,
+                        });
                     }
                     // An array-literal initializer may carry a `@` element (`let a:
                     // [i32; 2] = [0, @]`), which inherits the variable's element
@@ -1841,18 +1843,21 @@ impl TypeChecker {
                     {
                         self.thread_array_uzumaki_types(ctx, expr_id, &target_type);
                     }
+                    let source = TypeMismatchContext::VariableDefinition;
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
-                        && !size_rejected
-                        && self.symbol_table.resolve_custom_type(init_type.clone())
-                            != target_type
+                    } else if let Some(init_type) = self.infer_expression_expecting(
+                        expr_id,
+                        Some(Expected::new(&target_type, &source)),
+                        ctx,
+                    ) && !size_rejected
+                        && self.symbol_table.resolve_custom_type(init_type.clone()) != target_type
                     {
                         self.push_error(TypeCheckError::TypeMismatch {
                             expected: target_type.clone(),
                             found: init_type,
-                            context: TypeMismatchContext::VariableDefinition,
+                            context: source,
                             location,
                         });
                     }
@@ -1961,8 +1966,151 @@ impl TypeChecker {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Infers the type of `expr_id` with nothing expected of it by its
+    /// surroundings — the form used by every position that has no type to
+    /// require, such as an expression statement or a condition.
     fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
+        self.infer_expression_expecting(expr_id, None, ctx)
+    }
+
+    /// Whether `expr_id` is built entirely out of integer literals, so that a
+    /// type expected of it can reach every one of its leaves.
+    ///
+    /// Closure is syntactic and needs no types: an integer literal is closed,
+    /// and parentheses, `-`, `~` and the arithmetic, bitwise and shift
+    /// operators preserve closure. Nothing else does — `!` takes a boolean
+    /// operand, and comparison, equality and logical operators produce `bool`
+    /// whatever their operands are, so a type expected of them says nothing
+    /// about the operands.
+    fn is_literal_closed(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::NumberLiteral { .. } => true,
+            Expr::Parenthesized { expr } => Self::is_literal_closed(arena, *expr),
+            Expr::PrefixUnary { expr, op } => {
+                matches!(op, UnaryOperatorKind::Neg | UnaryOperatorKind::BitNot)
+                    && Self::is_literal_closed(arena, *expr)
+            }
+            Expr::Binary { left, right, op } => {
+                Self::operator_preserves_operand_type(op)
+                    && Self::is_literal_closed(arena, *left)
+                    && Self::is_literal_closed(arena, *right)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `op` yields a value of its operands' own type, which is what
+    /// makes a type expected of the whole expression also expected of both
+    /// operands. The comparison, equality and logical operators do not.
+    fn operator_preserves_operand_type(op: &OperatorKind) -> bool {
+        matches!(
+            op,
+            OperatorKind::Add
+                | OperatorKind::Sub
+                | OperatorKind::Mul
+                | OperatorKind::Div
+                | OperatorKind::Mod
+                | OperatorKind::BitAnd
+                | OperatorKind::BitOr
+                | OperatorKind::BitXor
+                | OperatorKind::Shl
+                | OperatorKind::Shr
+        )
+    }
+
+    /// Infers both operands of a binary expression, peer-typing a
+    /// literal-closed operand against the other one.
+    ///
+    /// A literal-closed operand has no type of its own to contribute, so it
+    /// takes the type of its peer — `a << 16` shifts an `i64` by an `i64` when
+    /// `a` is `i64`. The peer is inferred first for that reason, and because it
+    /// keeps the diagnostic for the ordinary mistake at the binding rather than
+    /// at the operator: `let a: i32 = 3; let x: i64 = a + 1;` still reports the
+    /// variable definition, not a mismatch between operand types.
+    ///
+    /// When both operands are literal-closed neither can inform the other, and
+    /// the type expected of the whole expression is what fixes them — but only
+    /// for an operator that yields its operands' type. When neither is
+    /// literal-closed both operands already carry their own types.
+    ///
+    /// A peer-typed operand is attributed to the operator rather than to
+    /// whatever the surroundings expected, because the operator is what put its
+    /// neighbour's type on it; an operand typed by descent keeps the outer
+    /// attribution, which is where its type really came from.
+    fn infer_binary_operands(
+        &mut self,
+        left: ExprId,
+        right: ExprId,
+        op: &OperatorKind,
+        expected: Option<Expected<'_>>,
+        ctx: &mut TypedContext,
+    ) -> (Option<TypeInfo>, Option<TypeInfo>) {
+        let arena = ctx.arena();
+        let left_closed = Self::is_literal_closed(arena, left);
+        let right_closed = Self::is_literal_closed(arena, right);
+        match (left_closed, right_closed) {
+            (true, true) => {
+                let descended = expected
+                    .filter(|e| e.ty.kind.is_number() && Self::operator_preserves_operand_type(op));
+                (
+                    self.infer_expression_expecting(left, descended, ctx),
+                    self.infer_expression_expecting(right, descended, ctx),
+                )
+            }
+            (true, false) => {
+                let right_type = self.infer_expression(right, ctx);
+                let peer_source = TypeMismatchContext::BinaryPeerOperand(op.clone());
+                let peer = right_type
+                    .as_ref()
+                    .filter(|t| t.kind.is_number())
+                    .map(|ty| Expected::new(ty, &peer_source));
+                let left_type = self.infer_expression_expecting(left, peer, ctx);
+                (left_type, right_type)
+            }
+            (false, true) => {
+                let left_type = self.infer_expression(left, ctx);
+                let peer_source = TypeMismatchContext::BinaryPeerOperand(op.clone());
+                let peer = left_type
+                    .as_ref()
+                    .filter(|t| t.kind.is_number())
+                    .map(|ty| Expected::new(ty, &peer_source));
+                let right_type = self.infer_expression_expecting(right, peer, ctx);
+                (left_type, right_type)
+            }
+            (false, false) => (
+                self.infer_expression(left, ctx),
+                self.infer_expression(right, ctx),
+            ),
+        }
+    }
+
+    /// Infers the type of `expr_id` under the type its position requires.
+    ///
+    /// An integer literal has no intrinsic type; it denotes whatever integer
+    /// type the surrounding position asks for, and only falls back to `i32` when
+    /// nothing is asked of it. Positions that know the type they require — the
+    /// initializer of an annotated `let`/`const`, the right-hand side of an
+    /// assignment, a struct-literal field value, an element of an array
+    /// literal, a call argument and the operand of `return` — pass it as
+    /// `expected` and then run their ordinary post-inference mismatch check,
+    /// which reports the one diagnostic when the value cannot denote that type.
+    ///
+    /// An expected type descends unchanged through the forms that yield their
+    /// operand's own type — `( e )`, `-e`, `~e`, and both operands of an
+    /// arithmetic, bitwise or shift operator when neither operand has a type of
+    /// its own. Nothing else carries it: an array index, the operands of a
+    /// comparison, equality or logical operator, a receiver and a call result
+    /// all keep the types they already have.
+    ///
+    /// This is not a coercion: nothing is converted and no expression that
+    /// already has a type ever changes it.
+    #[allow(clippy::too_many_lines)]
+    fn infer_expression_expecting(
+        &mut self,
+        expr_id: ExprId,
+        expected: Option<Expected<'_>>,
+        ctx: &mut TypedContext,
+    ) -> Option<TypeInfo> {
         let arena = ctx.arena();
         let expr_data = &arena[expr_id];
         let location = expr_data.location;
@@ -2249,25 +2397,7 @@ impl TypeChecker {
                                         arena[*field_value_expr].location,
                                     )
                                 };
-                                if let Expr::NumberLiteral { .. } = field_expr_kind
-                                {
-                                    if field_type.kind.is_number() {
-                                        ctx.set_node_typeinfo(
-                                            NodeId::Expr(*field_value_expr),
-                                            field_type.clone(),
-                                        );
-                                    } else {
-                                        self.push_error(TypeCheckError::TypeMismatch {
-                                            expected: field_type.clone(),
-                                            found: TypeInfo {
-                                                kind: TypeInfoKind::Number(NumberType::I32),
-                                                type_params: vec![],
-                                            },
-                                            context: TypeMismatchContext::VariableDefinition,
-                                            location: field_expr_loc,
-                                        });
-                                    }
-                                } else if let Expr::Uzumaki = field_expr_kind {
+                                if let Expr::Uzumaki = field_expr_kind {
                                     // A field-position uzumaki (`Point { x: @ }`)
                                     // carries no type of its own; it takes the
                                     // field's declared type. Threading it here is
@@ -2292,15 +2422,22 @@ impl TypeChecker {
                                         *field_value_expr,
                                         &field_type,
                                     );
-                                    let init_type =
-                                        self.infer_expression(*field_value_expr, ctx);
+                                    let source = TypeMismatchContext::StructField {
+                                        struct_name: struct_name.clone(),
+                                        field_name: field_name.clone(),
+                                    };
+                                    let init_type = self.infer_expression_expecting(
+                                        *field_value_expr,
+                                        Some(Expected::new(&field_type, &source)),
+                                        ctx,
+                                    );
                                     if let Some(init) = init_type
                                         && init != field_type
                                     {
                                         self.push_error(TypeCheckError::TypeMismatch {
                                             expected: field_type.clone(),
                                             found: init,
-                                            context: TypeMismatchContext::VariableDefinition,
+                                            context: source,
                                             location: field_expr_loc,
                                         });
                                     }
@@ -2368,7 +2505,11 @@ impl TypeChecker {
                     None
                 }
                 UnaryOperatorKind::Neg => {
-                    let expression_type_op = self.infer_expression(expr, ctx);
+                    // `-` yields its operand's type, so a type expected of the
+                    // negation is expected of the operand. The signedness check
+                    // below still runs on what the operand came back as, which
+                    // is what rejects `-` under an unsigned expected type.
+                    let expression_type_op = self.infer_expression_expecting(expr, expected, ctx);
                     if let Some(expression_type) = expression_type_op {
                         if expression_type.is_signed_integer() {
                             ctx.set_node_typeinfo(NodeId::Expr(expr_id), expression_type.clone());
@@ -2384,7 +2525,9 @@ impl TypeChecker {
                     None
                 }
                 UnaryOperatorKind::BitNot => {
-                    let expression_type_op = self.infer_expression(expr, ctx);
+                    // `~` yields its operand's type, so a type expected of the
+                    // complement is expected of the operand.
+                    let expression_type_op = self.infer_expression_expecting(expr, expected, ctx);
                     if let Some(expression_type) = expression_type_op {
                         if expression_type.is_number() {
                             ctx.set_node_typeinfo(NodeId::Expr(expr_id), expression_type.clone());
@@ -2401,18 +2544,26 @@ impl TypeChecker {
                 }
             },
             Expr::Parenthesized { expr } => {
-                let inner_type = self.infer_expression(expr, ctx);
+                // Parentheses group; they do not change what is expected.
+                let inner_type = self.infer_expression_expecting(expr, expected, ctx);
                 if let Some(ref type_info) = inner_type {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), type_info.clone());
                 }
                 inner_type
             }
             Expr::Binary { left, right, op } => {
+                // A recorded type answers unconditionally. Re-deriving it would
+                // re-run every check below and report the subtree's diagnostics
+                // a second time, and it could not change an outcome: the only
+                // visit that records a type before an expected type exists is
+                // the generic-argument pre-pass, and where what it recorded
+                // disagrees with what is later expected it has already rejected
+                // the call with `ConflictingTypeInference`.
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                let left_type = self.infer_expression(left, ctx);
-                let right_type = self.infer_expression(right, ctx);
+                let (left_type, right_type) =
+                    self.infer_binary_operands(left, right, &op, expected, ctx);
                 // NOTE: Only detects division by literal zero (e.g., `x / 0`).
                 // Constant expressions and const-declared zero values are not detected.
                 if matches!(op, OperatorKind::Div | OperatorKind::Mod) {
@@ -2524,15 +2675,32 @@ impl TypeChecker {
                 }
             }
             Expr::ArrayLiteral { elements } => {
+                // A recorded type answers unconditionally, for the same reason
+                // as `Binary` above: re-deriving it would report the elements'
+                // diagnostics twice without changing any outcome.
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
+                // `[T; N]` expected of the literal is `T` expected of every one
+                // of its elements, and an element that is itself an array
+                // literal receives the inner array type — so a nested
+                // initializer types all the way down.
+                let element_expected = match expected.map(|e| &e.ty.kind) {
+                    Some(TypeInfoKind::Array(element_type, _)) => Some((**element_type).clone()),
+                    _ => None,
+                };
+                let element_source = TypeMismatchContext::ArrayElement;
+                let element_expected = element_expected
+                    .as_ref()
+                    .map(|ty| Expected::new(ty, &element_source));
                 // Compound-literal-position check moved to analysis rule A015.
                 if !elements.is_empty()
-                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
+                    && let Some(element_type_info) =
+                        self.infer_expression_expecting(elements[0], element_expected, ctx)
                 {
                     for &element_id in &elements[1..] {
-                        let element_type = self.infer_expression(element_id, ctx);
+                        let element_type =
+                            self.infer_expression_expecting(element_id, element_expected, ctx);
                         if let Some(element_type) = element_type
                             && element_type != element_type_info
                         {
@@ -2564,6 +2732,20 @@ impl TypeChecker {
                 Some(TypeInfo::string())
             }
             Expr::NumberLiteral { .. } => {
+                // An expected integer type outranks any type already recorded:
+                // the recorded one may be this arm's own `i32` fallback from an
+                // earlier visit — the generic-argument pre-pass reaches
+                // literals before any expected type exists — and the position
+                // the literal appears in is the authority on which type it
+                // denotes. The position is recorded with the type so a range
+                // error can say where the type came from.
+                if let Some(expected) = expected
+                    && expected.ty.kind.is_number()
+                {
+                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), expected.ty.clone());
+                    ctx.set_literal_type_source(expr_id, expected.source.clone());
+                    return Some(expected.ty.clone());
+                }
                 if ctx.get_node_typeinfo(NodeId::Expr(expr_id)).is_some() {
                     return ctx.get_node_typeinfo(NodeId::Expr(expr_id));
                 }
@@ -2859,7 +3041,15 @@ impl TypeChecker {
         let sig_param_types = signature.param_types.clone();
         for (i, arg) in call_args.iter().enumerate() {
             self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
-            let arg_type = self.infer_expression(arg.1, ctx);
+            // The parameter's declared type is what a bare integer literal
+            // argument denotes; the mismatch check below reports the one
+            // diagnostic when the argument cannot denote it.
+            let source = method_arg_context(&type_name, &method_name, i);
+            let arg_type = self.infer_expression_expecting(
+                arg.1,
+                sig_param_types.get(i).map(|ty| Expected::new(ty, &source)),
+                ctx,
+            );
             if let Some(arg_type) = arg_type
                 && i < sig_param_types.len()
                 && arg_type != sig_param_types[i]
@@ -2867,12 +3057,7 @@ impl TypeChecker {
                 self.push_error(TypeCheckError::TypeMismatch {
                     expected: sig_param_types[i].clone(),
                     found: arg_type,
-                    context: TypeMismatchContext::MethodArgument {
-                        type_name: type_name.clone(),
-                        method_name: method_name.clone(),
-                        arg_name: format!("arg{i}"),
-                        arg_index: i,
-                    },
+                    context: source,
                     location,
                 });
             }
@@ -3171,7 +3356,15 @@ impl TypeChecker {
         let sig_param_types = signature.param_types.clone();
         for (i, arg) in call_args.iter().enumerate() {
             self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
-            let arg_type = self.infer_expression(arg.1, ctx);
+            // The parameter's declared type is what a bare integer literal
+            // argument denotes; the mismatch check below reports the one
+            // diagnostic when the argument cannot denote it.
+            let source = function_arg_context(&path, i);
+            let arg_type = self.infer_expression_expecting(
+                arg.1,
+                sig_param_types.get(i).map(|ty| Expected::new(ty, &source)),
+                ctx,
+            );
             if let Some(arg_type) = arg_type
                 && i < sig_param_types.len()
                 && arg_type != sig_param_types[i]
@@ -3179,11 +3372,7 @@ impl TypeChecker {
                 self.push_error(TypeCheckError::TypeMismatch {
                     expected: sig_param_types[i].clone(),
                     found: arg_type,
-                    context: TypeMismatchContext::FunctionArgument {
-                        function_name: path.clone(),
-                        arg_name: format!("arg{i}"),
-                        arg_index: i,
-                    },
+                    context: source,
                     location,
                 });
             }
@@ -3326,22 +3515,24 @@ impl TypeChecker {
                     let sig_return_type = signature.return_type.clone();
                     for (i, arg) in call_args.iter().enumerate() {
                         self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
-                        let arg_type = self.infer_expression(arg.1, ctx);
+                        // The parameter's declared type is what a bare integer
+                        // literal argument denotes; the mismatch check below
+                        // reports the one diagnostic when it cannot denote it.
+                        let source = method_arg_context(&type_name, &method_name, i);
+                        let arg_type = self.infer_expression_expecting(
+                            arg.1,
+                            sig_param_types.get(i).map(|ty| Expected::new(ty, &source)),
+                            ctx,
+                        );
 
                         if let Some(arg_type) = arg_type
                             && i < sig_param_types.len()
                             && arg_type != sig_param_types[i]
                         {
-                            let arg_name = format!("arg{i}");
                             self.push_error(TypeCheckError::TypeMismatch {
                                 expected: sig_param_types[i].clone(),
                                 found: arg_type,
-                                context: TypeMismatchContext::MethodArgument {
-                                    type_name: type_name.clone(),
-                                    method_name: method_name.clone(),
-                                    arg_name,
-                                    arg_index: i,
-                                },
+                                context: source,
                                 location,
                             });
                         }
@@ -3502,22 +3693,25 @@ impl TypeChecker {
                         let sig_return_type = signature.return_type.clone();
                         for (i, arg) in call_args.iter().enumerate() {
                             self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
-                            let arg_type = self.infer_expression(arg.1, ctx);
-    
+                            // The parameter's declared type is what a bare
+                            // integer literal argument denotes; the mismatch
+                            // check below reports the one diagnostic when it
+                            // cannot denote it.
+                            let source = method_arg_context(&type_name, &method_name, i);
+                            let arg_type = self.infer_expression_expecting(
+                                arg.1,
+                                sig_param_types.get(i).map(|ty| Expected::new(ty, &source)),
+                                ctx,
+                            );
+
                             if let Some(arg_type) = arg_type
                                 && i < sig_param_types.len()
                                 && arg_type != sig_param_types[i]
                             {
-                                let arg_name = format!("arg{i}");
                                 self.push_error(TypeCheckError::TypeMismatch {
                                     expected: sig_param_types[i].clone(),
                                     found: arg_type,
-                                    context: TypeMismatchContext::MethodArgument {
-                                        type_name: type_name.clone(),
-                                        method_name: method_name.clone(),
-                                        arg_name,
-                                        arg_index: i,
-                                    },
+                                    context: source,
                                     location,
                                 });
                             }
@@ -3696,24 +3890,43 @@ impl TypeChecker {
         // Infer argument types and validate against parameter types
         for (i, arg) in call_args.iter().enumerate() {
             self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
-            let arg_type = self.infer_expression(arg.1, ctx);
+            // The parameter's declared type — after substitution, which is the
+            // form the argument is compared against — is what a bare integer
+            // literal argument denotes. A parameter whose type is still generic
+            // is inert: only a concrete integer type is ever consumed.
+            let expected = sig_param_types
+                .get(i)
+                .map(|param_type| param_type.substitute(&substitutions));
+            let source = function_arg_context(&func_name, i);
+            // Only a parameter the signature *declares* can explain a literal's
+            // type. Where substitution changed the parameter, the type was
+            // inferred from the other arguments — often from this literal's own
+            // `i32` default, which the type-parameter pre-pass observed before
+            // any expected type existed — so naming the parameter would assert
+            // a cause that is not there. The expected type is withheld with it:
+            // no accepted program's types change, because the pre-pass binds a
+            // type parameter from the first argument that mentions it and has
+            // already rejected any call where a later argument disagrees.
+            let declared_expected = expected.as_ref().filter(|substituted| {
+                sig_param_types
+                    .get(i)
+                    .is_some_and(|declared| declared == *substituted)
+            });
+            let arg_type = self.infer_expression_expecting(
+                arg.1,
+                declared_expected.map(|ty| Expected::new(ty, &source)),
+                ctx,
+            );
             if let Some(arg_type) = arg_type
-                && i < sig_param_types.len()
+                && let Some(expected) = expected
+                && arg_type != expected
             {
-                let expected = sig_param_types[i].substitute(&substitutions);
-                if arg_type != expected {
-                    let arg_name = format!("arg{i}");
-                    self.push_error(TypeCheckError::TypeMismatch {
-                        expected,
-                        found: arg_type,
-                        context: TypeMismatchContext::FunctionArgument {
-                            function_name: func_name.clone(),
-                            arg_name,
-                            arg_index: i,
-                        },
-                        location,
-                    });
-                }
+                self.push_error(TypeCheckError::TypeMismatch {
+                    expected,
+                    found: arg_type,
+                    context: source,
+                    location,
+                });
             }
         }
 
@@ -4757,5 +4970,199 @@ impl TypeChecker {
     fn exit_files(&mut self) {
         self.current_file_label = None;
         self.symbol_table.reset_to_root();
+    }
+}
+
+/// Literal-closure is the syntactic question "can a type expected of this
+/// expression reach every leaf of it", so it is decided on the AST alone and
+/// tested on hand-built expression nodes rather than through a parse.
+#[cfg(test)]
+mod literal_closure_tests {
+    use super::TypeChecker;
+    use inference_ast::arena::AstArena;
+    use inference_ast::ids::ExprId;
+    use inference_ast::nodes::{Expr, ExprData, Location, OperatorKind, UnaryOperatorKind};
+
+    fn push(arena: &mut AstArena, kind: Expr) -> ExprId {
+        arena.exprs.alloc(ExprData {
+            location: Location::default(),
+            kind,
+        })
+    }
+
+    fn number(arena: &mut AstArena) -> ExprId {
+        push(
+            arena,
+            Expr::NumberLiteral {
+                value: "1".to_string(),
+            },
+        )
+    }
+
+    fn boolean(arena: &mut AstArena) -> ExprId {
+        push(arena, Expr::BoolLiteral { value: true })
+    }
+
+    fn identifier(arena: &mut AstArena) -> ExprId {
+        let ident = arena.idents.alloc(inference_ast::nodes::Ident {
+            location: Location::default(),
+            name: "a".to_string(),
+        });
+        push(arena, Expr::Identifier(ident))
+    }
+
+    fn binary(arena: &mut AstArena, left: ExprId, op: OperatorKind, right: ExprId) -> ExprId {
+        push(arena, Expr::Binary { left, right, op })
+    }
+
+    fn unary(arena: &mut AstArena, op: UnaryOperatorKind, expr: ExprId) -> ExprId {
+        push(arena, Expr::PrefixUnary { expr, op })
+    }
+
+    #[test]
+    fn a_bare_literal_is_closed() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        assert!(TypeChecker::is_literal_closed(&arena, literal));
+    }
+
+    #[test]
+    fn an_identifier_is_not_closed() {
+        let mut arena = AstArena::default();
+        let name = identifier(&mut arena);
+        assert!(!TypeChecker::is_literal_closed(&arena, name));
+    }
+
+    #[test]
+    fn a_non_numeric_literal_is_not_closed() {
+        let mut arena = AstArena::default();
+        let literal = boolean(&mut arena);
+        assert!(!TypeChecker::is_literal_closed(&arena, literal));
+    }
+
+    #[test]
+    fn parentheses_preserve_closure() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let parenthesized = push(&mut arena, Expr::Parenthesized { expr: literal });
+        assert!(TypeChecker::is_literal_closed(&arena, parenthesized));
+
+        let name = identifier(&mut arena);
+        let around_name = push(&mut arena, Expr::Parenthesized { expr: name });
+        assert!(!TypeChecker::is_literal_closed(&arena, around_name));
+    }
+
+    #[test]
+    fn negation_and_complement_preserve_closure_but_logical_not_does_not() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let negated = unary(&mut arena, UnaryOperatorKind::Neg, literal);
+        let complemented = unary(&mut arena, UnaryOperatorKind::BitNot, literal);
+        let notted = unary(&mut arena, UnaryOperatorKind::Not, literal);
+        assert!(TypeChecker::is_literal_closed(&arena, negated));
+        assert!(TypeChecker::is_literal_closed(&arena, complemented));
+        assert!(!TypeChecker::is_literal_closed(&arena, notted));
+    }
+
+    #[test]
+    fn every_arithmetic_bitwise_and_shift_operator_preserves_closure() {
+        let mut arena = AstArena::default();
+        let left = number(&mut arena);
+        let right = number(&mut arena);
+        for op in [
+            OperatorKind::Add,
+            OperatorKind::Sub,
+            OperatorKind::Mul,
+            OperatorKind::Div,
+            OperatorKind::Mod,
+            OperatorKind::BitAnd,
+            OperatorKind::BitOr,
+            OperatorKind::BitXor,
+            OperatorKind::Shl,
+            OperatorKind::Shr,
+        ] {
+            let expr = binary(&mut arena, left, op.clone(), right);
+            assert!(
+                TypeChecker::is_literal_closed(&arena, expr),
+                "`{op:?}` should preserve literal closure"
+            );
+        }
+    }
+
+    #[test]
+    fn comparison_equality_logical_and_pow_do_not_preserve_closure() {
+        let mut arena = AstArena::default();
+        let left = number(&mut arena);
+        let right = number(&mut arena);
+        for op in [
+            OperatorKind::Eq,
+            OperatorKind::Ne,
+            OperatorKind::Lt,
+            OperatorKind::Le,
+            OperatorKind::Gt,
+            OperatorKind::Ge,
+            OperatorKind::And,
+            OperatorKind::Or,
+            OperatorKind::Pow,
+        ] {
+            let expr = binary(&mut arena, left, op.clone(), right);
+            assert!(
+                !TypeChecker::is_literal_closed(&arena, expr),
+                "`{op:?}` should not preserve literal closure"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_operator_needs_both_operands_closed() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let name = identifier(&mut arena);
+        let literal_left = binary(&mut arena, literal, OperatorKind::Add, name);
+        let literal_right = binary(&mut arena, name, OperatorKind::Add, literal);
+        assert!(!TypeChecker::is_literal_closed(&arena, literal_left));
+        assert!(!TypeChecker::is_literal_closed(&arena, literal_right));
+    }
+
+    #[test]
+    fn closure_is_recursive_through_nested_forms() {
+        let mut arena = AstArena::default();
+        let one = number(&mut arena);
+        let two = number(&mut arena);
+        let sum = binary(&mut arena, one, OperatorKind::Add, two);
+        let grouped = push(&mut arena, Expr::Parenthesized { expr: sum });
+        let negated = unary(&mut arena, UnaryOperatorKind::Neg, grouped);
+        let three = number(&mut arena);
+        let shifted = binary(&mut arena, negated, OperatorKind::Shl, three);
+        assert!(TypeChecker::is_literal_closed(&arena, shifted));
+
+        // One non-closed leaf anywhere breaks closure for the whole tree.
+        let name = identifier(&mut arena);
+        let tainted = binary(&mut arena, name, OperatorKind::Mul, three);
+        let grouped_taint = push(&mut arena, Expr::Parenthesized { expr: tainted });
+        let outer = binary(&mut arena, negated, OperatorKind::Add, grouped_taint);
+        assert!(!TypeChecker::is_literal_closed(&arena, outer));
+    }
+
+    #[test]
+    fn a_call_or_index_is_never_closed() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let name = identifier(&mut arena);
+        let indexed = push(
+            &mut arena,
+            Expr::ArrayIndexAccess {
+                array: name,
+                index: literal,
+            },
+        );
+        assert!(!TypeChecker::is_literal_closed(&arena, indexed));
+        let elements = push(
+            &mut arena,
+            Expr::ArrayLiteral {
+                elements: vec![literal],
+            },
+        );
+        assert!(!TypeChecker::is_literal_closed(&arena, elements));
     }
 }

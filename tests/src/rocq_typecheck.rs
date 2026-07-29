@@ -61,6 +61,7 @@ mod gate {
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
         ("spec_short_circuit.inf", "spec_short_circuit"),
         ("spec_narrow_abi.inf", "spec_narrow_abi"),
+        ("spec_literal_ctx.inf", "spec_literal_ctx"),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -385,25 +386,98 @@ mod gate {
         );
     }
 
-    /// Regeneration helper for the committed `.v` golden. `#[ignore]`d by design
-    /// (per CONTRIBUTING.md): it is not a behavioral test but rewrites the golden
-    /// from current emitter output. Run explicitly after an intentional change:
+    /// Committed `.v` golden for the contextual-literal-typing fixture.
+    /// Regenerate with the `#[ignore]`d [`regenerate::regenerate_literal_ctx_v`]
+    /// after an intentional emitter change.
+    fn literal_ctx_golden_path() -> PathBuf {
+        get_test_data_path().join("rocq").join("spec_literal_ctx.v")
+    }
+
+    /// A specification body types its integer literals from the positions they
+    /// appear in, and the emitted `.v` is where that becomes checkable end to
+    /// end: an obligation is only about the program that runs if its constants
+    /// are the constants the program computes.
+    ///
+    /// Every literal in the fixture is wider than `i32`, so each `Vi64` below is
+    /// load-bearing — a literal left at the `i32` default could not carry the
+    /// value at all. `4294967296` is peer-typed by the `i64` slot it is compared
+    /// against, `u64::MAX` is typed by the `u64` parameter it is passed to and
+    /// reaches Rocq as the bit pattern `(-1)`, and `main`'s argument literal is
+    /// typed by `scaled`'s parameter.
+    #[test]
+    fn spec_literal_ctx_matches_committed_v_golden() {
+        let generated = generate_v("spec_literal_ctx.inf", "spec_literal_ctx");
+        let golden_path = literal_ctx_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_literal_ctx_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_literal_ctx.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_literal_ctx_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a future
+        // regeneration cannot launder a typing regression into the golden.
+        assert!(
+            golden.contains("Vi64 4294967296"),
+            "the comparison operand must be peer-typed `i64`:\n{golden}"
+        );
+        assert!(
+            golden.contains("Vi64 (-1)"),
+            "`u64::MAX` at a `u64` parameter must reach Rocq as the `i64` bit \
+             pattern (-1):\n{golden}"
+        );
+        assert!(
+            !golden.contains("Vi32 4294967296"),
+            "no literal in this fixture fits `i32`; a `Vi32` spelling of one \
+             would mean the default won over the position:\n{golden}"
+        );
+        assert!(
+            golden.contains("BI_const_num (Vi64 4294967296)"),
+            "the executable `main` must pass its argument literal at `i64` \
+             width:\n{golden}"
+        );
+    }
+
+    /// Regeneration helpers for the committed `.v` goldens. `#[ignore]`d by
+    /// design (per CONTRIBUTING.md): they are not behavioral tests but rewrite a
+    /// golden from current emitter output. Run explicitly after an intentional
+    /// change, e.g.
     /// `cargo test -p inference-tests regenerate_prime_example_v -- --ignored`.
     #[cfg(test)]
     mod regenerate {
-        use super::{generate_v, prime_golden_path};
+        use super::{generate_v, literal_ctx_golden_path, prime_golden_path};
+        use std::path::Path;
+
+        fn write_golden(v: &str, path: &Path) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+            }
+            std::fs::write(path, v).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            println!("Regenerated: {} ({} bytes)", path.display(), v.len());
+        }
 
         #[test]
         #[ignore]
         fn regenerate_prime_example_v() {
             let v = generate_v("rocq_prime_example.inf", "rocq_prime_example");
-            let path = prime_golden_path();
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
-            }
-            std::fs::write(&path, &v).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-            println!("Regenerated: {} ({} bytes)", path.display(), v.len());
+            write_golden(&v, &prime_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_literal_ctx_v() {
+            let v = generate_v("spec_literal_ctx.inf", "spec_literal_ctx");
+            write_golden(&v, &literal_ctx_golden_path());
         }
     }
 }
