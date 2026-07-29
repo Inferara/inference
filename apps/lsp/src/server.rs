@@ -54,17 +54,49 @@ const SERVER_NAME: &str = env!("CARGO_PKG_NAME");
 /// version).
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The stack rust-analyzer gives its main loop, and this crate's historical
+/// figure. Kept as the floor [`SERVER_STACK_SIZE`] never drops below.
+const RUST_ANALYZER_MAIN_LOOP_STACK: usize = 64 * 1024 * 1024;
+
 /// The stack each of the server's threads runs on. The analysis pipeline
 /// (type-checker, analysis passes) recurses with the input's nesting depth, so a
 /// pathological or generated document can overflow the default stack and abort the
 /// whole process — taking every open document's state with it. A stack overflow
 /// aborts rather than unwinds, so a thread cannot *catch* it; the mitigation is
-/// headroom. 64 MiB (mirroring rust-analyzer's main-loop stack) clears realistic
-/// deep nesting by a wide margin. A thread must set this explicitly: a spawned
-/// thread's default stack is far smaller than the main thread's. `main` runs the
-/// router on a thread of this size and the analysis worker — where the deep
-/// recursion now happens — is spawned with the same headroom.
-pub(crate) const SERVER_STACK_SIZE: usize = 64 * 1024 * 1024;
+/// headroom. A thread must set this explicitly: a spawned thread's default stack
+/// is far smaller than the main thread's. `main` runs the router on a thread of
+/// this size and the analysis worker — where the deep recursion now happens — is
+/// spawned with the same headroom.
+///
+/// The size is the larger of that historical figure and the compiler front end's
+/// own [`inference_parser::MIN_COMPILE_STACK`]. That is a deliberate deviation
+/// from the rust-analyzer number this crate used to mirror: the server runs the
+/// same recursive phases the compiler does, so it owes them the same stack. All
+/// three spawn sites reserve the larger amount, which is four threads in a running
+/// server — the router, the two read-pool workers ([`READ_POOL_SIZE`]) and the
+/// analysis worker — so the reservation the editor's process carries doubles from
+/// 256 MiB to 512 MiB. It is affordable because the reservation is address space
+/// with lazy commit; the editor's resident memory still tracks the depth actually
+/// reached. The total, not the per-thread figure, is what to weigh if the front
+/// end's requirement is ever raised again.
+///
+/// Taking the larger of the two is what keeps them in step, and it is the half
+/// that matters: were this figure allowed to sit below the front end's, a file at
+/// the front end's limit would compile under the CLI while killing the editor
+/// process — a worse failure than the one the requirement exists to prevent. The
+/// assertion below is a machine-checked restatement of that invariant for a reader,
+/// not a gate; the `max` already makes it unfalsifiable. What the `max` does *not*
+/// do is ask anyone's permission: a raise to the front end's requirement silently
+/// quadruples into this process's total, which is why that total is the thing to
+/// weigh, above.
+pub(crate) const SERVER_STACK_SIZE: usize =
+    if inference_parser::MIN_COMPILE_STACK > RUST_ANALYZER_MAIN_LOOP_STACK {
+        inference_parser::MIN_COMPILE_STACK
+    } else {
+        RUST_ANALYZER_MAIN_LOOP_STACK
+    };
+
+const _: () = assert!(SERVER_STACK_SIZE >= inference_parser::MIN_COMPILE_STACK);
 
 /// A document the editor has opened, with the path the analysis host knows it by
 /// and the last version the editor reported (echoed back in published

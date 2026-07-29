@@ -323,6 +323,60 @@ pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VER
 /// pre-link cross-check) without depending on `inference-hassert` directly.
 pub use inference_wasm_codegen::HSpecMap;
 
+/// Runs `f` on a thread reserving [`inference_parser::MIN_COMPILE_STACK`].
+///
+/// The compiler's phases recurse once per level of the input's syntactic nesting,
+/// and a stack overflow aborts the process rather than unwinding — so the stack
+/// each phase gets cannot be left to whatever the host thread happens to have. That
+/// default varies with the platform and with how the thread was created — a test
+/// harness thread gets a fraction of what a process main thread gets — and none of
+/// them reach the front end's requirement. Every embedder that drives the pipeline
+/// in-process runs it through this helper, so the stack available to the recursive
+/// phases is the same everywhere the compiler runs.
+///
+/// This generalizes a mitigation that already shipped once in this repository for
+/// this exact failure: the language server hit it first — a pathological document
+/// aborting the whole process and taking every open file's state with it — and gave
+/// each of its threads an explicit big stack (`SERVER_STACK_SIZE`, `apps/lsp`). That
+/// server keeps its own long-lived threads rather than calling this helper, and now
+/// sizes them from the same constant.
+///
+/// `f` runs on a scoped thread and may borrow from its environment. Panics
+/// propagate unchanged: the payload is re-raised on the calling thread with
+/// [`std::panic::resume_unwind`], which does not run the panic hook a second time,
+/// so the message still prints exactly once and a wrapped driver keeps the exit
+/// code it had before. The one observable difference is the panic header, which
+/// now names this thread rather than `main` — which is also why the thread is
+/// named, since it makes an overflow say which thread overflowed.
+///
+/// The helper lives in the orchestration crate rather than beside the CLI driver
+/// because `core/cli` is binary-only — it has no library target, so the
+/// integration-test crates could not import a helper defined there — and because
+/// every in-process consumer of the pipeline already links this crate. The `infs`
+/// toolchain driver is deliberately not wrapped: it has no in-process compile path
+/// and always spawns `infc` as a subprocess, so wrapping that binary covers
+/// `infs build` and `infs run` as well, and `infs` need not grow a dependency on
+/// the compiler back end.
+///
+/// # Panics
+///
+/// Panics if the operating system refuses the stack reservation, which leaves no
+/// way to run the phases at all. Also re-raises any panic from `f` itself, so the
+/// caller observes it exactly as if `f` had run inline.
+pub fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("inference-compile".to_owned())
+            .stack_size(inference_parser::MIN_COMPILE_STACK)
+            .spawn_scoped(scope, f)
+            .expect("failed to spawn the compiler thread");
+        match worker.join() {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
 /// This function delegates to the [`inference_parser`] front end,
