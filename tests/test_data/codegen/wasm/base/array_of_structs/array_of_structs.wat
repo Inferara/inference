@@ -28,9 +28,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -80,9 +88,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -134,9 +150,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -196,9 +220,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -232,16 +258,24 @@
     unreachable
   )
   (func $copy_element_to_var (;4;) (type 4) (result i32)
-    (local $pts i32) (local $p i32) (local $__frame_ptr i32)
+    (local $pts i32) (local $p i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -268,8 +302,12 @@
     local.get $pts
     i32.const 8
     i32.add
-    i32.const 8
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -289,16 +327,24 @@
     unreachable
   )
   (func $write_whole_element (;5;) (type 5) (result i32)
-    (local $pts i32) (local $replacement i32) (local $__frame_ptr i32)
+    (local $pts i32) (local $replacement i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -335,8 +381,12 @@
     local.set $replacement
     local.get $pts
     local.get $replacement
-    i32.const 8
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
     local.get $pts
     i32.load
     local.get $pts
@@ -359,13 +409,19 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     local.get $pts
-    i32.const 16
-    memory.copy
+    i64.load align=1
+    i64.store align=1
+    local.get $__frame_ptr
+    local.get $pts
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     local.set $pts
     local.get $pts
@@ -385,16 +441,24 @@
     unreachable
   )
   (func $test_method_on_element (;7;) (type 7) (result i32)
-    (local $pts i32) (local $p i32) (local $__frame_ptr i32)
+    (local $pts i32) (local $p i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -419,8 +483,12 @@
     i32.const 16
     i32.add
     local.get $pts
-    i32.const 8
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
     local.get $__frame_ptr
     i32.const 16
     i32.add

@@ -10,16 +10,18 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $swap01 (;0;) (type 0) (result i32)
-    (local $a i32) (local $__frame_ptr i32)
+    (local $a i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 16
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 0
     i32.add
@@ -50,8 +52,12 @@
     local.get $__frame_ptr
     i32.const 8
     i32.add
-    i32.const 8
-    memory.copy
+    local.set 3
+    local.set 2
+    local.get 2
+    local.get 3
+    i64.load align=1
+    i64.store align=1
     local.get $a
     i32.load
     i32.const 100
@@ -69,16 +75,24 @@
     unreachable
   )
   (func $rotate3 (;1;) (type 1) (result i32)
-    (local $b i32) (local $__frame_ptr i32)
+    (local $b i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 0
     i32.add
@@ -122,8 +136,16 @@
     local.get $__frame_ptr
     i32.const 12
     i32.add
-    i32.const 12
-    memory.copy
+    local.set 3
+    local.set 2
+    local.get 2
+    local.get 3
+    i64.load align=1
+    i64.store align=1
+    local.get 2
+    local.get 3
+    i32.load offset=8 align=1
+    i32.store offset=8 align=1
     local.get $b
     i32.load
     i32.const 100
@@ -148,16 +170,24 @@
     unreachable
   )
   (func $swap01_i64 (;2;) (type 2) (result i64)
-    (local $c i32) (local $hundred i64) (local $__frame_ptr i32)
+    (local $c i32) (local $hundred i64) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 0
     i32.add
@@ -188,8 +218,16 @@
     local.get $__frame_ptr
     i32.const 16
     i32.add
-    i32.const 16
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
+    local.get 3
+    local.get 4
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     i64.const 100
     local.set $hundred
     local.get $c

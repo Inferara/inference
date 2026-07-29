@@ -1,0 +1,86 @@
+// Struct parameters larger than the byte threshold, so copy-on-entry is a
+// looped region copy rather than straight-line stores. A struct copy moves the
+// whole layout in one region — fields, the embedded array, and any padding
+// between them — so reading fields on both sides of the array pins that the
+// copy neither stopped early nor shifted.
+
+struct Block {
+    head: i64;
+    body: [i64; 18];
+    tail: i64;
+}
+
+struct Frame {
+    lead: u8;
+    body: [i64; 16];
+    trail: u8;
+}
+
+pub fn block_ends(b: Block) -> i64 {
+    return b.head * 1000 + b.tail;
+}
+
+pub fn block_body(b: Block, i: i32) -> i64 {
+    return b.body[i];
+}
+
+pub fn block_clobber(mut b: Block) -> i64 {
+    b.head = 777;
+    return b.head;
+}
+
+pub fn call_block_ends() -> i64 {
+    let x: Block = Block {
+        head: 3,
+        body: [41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 43],
+        tail: 4,
+    };
+    return block_ends(x);
+}
+
+pub fn call_block_body() -> i64 {
+    let y: Block = Block {
+        head: 3,
+        body: [41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 43],
+        tail: 4,
+    };
+    return block_body(y, 0) * 1000 + block_body(y, 9) * 100 + block_body(y, 17);
+}
+
+pub fn block_value_semantics() -> i64 {
+    let z: Block = Block {
+        head: 3,
+        body: [41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 43],
+        tail: 4,
+    };
+    let ignored: i64 = block_clobber(z);
+    return z.head * 1000 + z.tail;
+}
+
+// Narrow fields on both sides of the array make the copy's start and end bytes
+// readable, which straddling padding would otherwise hide.
+pub fn frame_edges(f: Frame) -> u8 {
+    return f.lead * 10 + f.trail;
+}
+
+pub fn call_frame_edges() -> u8 {
+    let w: Frame = Frame {
+        lead: 6,
+        body: [51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53],
+        trail: 7,
+    };
+    return frame_edges(w);
+}
+
+pub fn frame_body_ends(f: Frame) -> i64 {
+    return f.body[0] * 1000 + f.body[8] * 100 + f.body[15];
+}
+
+pub fn call_frame_body_ends() -> i64 {
+    let v: Frame = Frame {
+        lead: 6,
+        body: [51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53],
+        trail: 7,
+    };
+    return frame_body_ends(v);
+}

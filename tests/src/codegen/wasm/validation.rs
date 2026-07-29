@@ -12,8 +12,8 @@ mod codegen_validation_tests {
     use crate::utils::{
         codegen_output, codegen_output_no_analysis, codegen_output_with_mode,
         codegen_output_with_mode_no_analysis, codegen_with_full_config,
-        codegen_with_target_mode, codegen_with_target_mode_no_analysis, wasm_codegen,
-        wasm_codegen_no_analysis,
+        codegen_with_full_config_no_analysis, codegen_with_target_mode,
+        codegen_with_target_mode_no_analysis, wasm_codegen, wasm_codegen_no_analysis,
     };
     use inf_wasmparser::{Operator, Parser, Payload};
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
@@ -1283,8 +1283,9 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         let get_x_func = extract_function_body(&wat, "Point.get_x");
         assert!(
-            !get_x_func.contains("memory.copy"),
-            "Immutable self method should NOT have memory.copy (no frame copy):\n{get_x_func}"
+            !get_x_func.contains("__frame_ptr"),
+            "Immutable self method reads the caller's struct in place, so it allocates \
+             no frame and copies nothing into one:\n{get_x_func}"
         );
     }
 
@@ -1298,9 +1299,17 @@ mod codegen_validation_tests {
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         let set_value_func = extract_function_body(&wat, "Counter.set_value");
+        // A region copy moves untyped bytes, so its accesses carry the
+        // conservative one-byte alignment hint that a typed field store never
+        // does — which is what distinguishes the frame copy from the body's own
+        // `self.value = v` store.
         assert!(
-            set_value_func.contains("memory.copy"),
-            "Mutable self method should have memory.copy (frame copy):\n{set_value_func}"
+            set_value_func.contains("i32.store align=1"),
+            "Mutable self method should copy the caller's struct into its frame:\n{set_value_func}"
+        );
+        assert!(
+            set_value_func.contains("local.set $self"),
+            "...and rebind `self` to that copy so the body mutates it:\n{set_value_func}"
         );
     }
 
@@ -1320,6 +1329,287 @@ mod codegen_validation_tests {
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Self method with extra params WASM is invalid: {e}"));
+    }
+
+    // Wasm 1.0 corpus invariants ---
+
+    /// The bulk-memory operators, none of which codegen may emit.
+    ///
+    /// `memory.fill` and `memory.copy` are the two the compiler used to emit for
+    /// frame initialization and compound copies; `memory.init` and `data.drop`
+    /// belong to the same proposal and are listed so that reintroducing bulk
+    /// memory by another route is caught here too.
+    ///
+    /// This has to be an operator walk rather than a byte scan: the bulk opcodes
+    /// share the `0xfc` prefix with the LEB immediates of ordinary instructions
+    /// and with the compiler's own non-deterministic opcodes, so scanning for the
+    /// prefix reports matches in modules that contain no bulk op at all.
+    fn assert_no_bulk_memory_operator(wasm: &[u8], label: &str) {
+        for payload in Parser::new(0).parse_all(wasm) {
+            let payload = payload.unwrap_or_else(|e| panic!("failed to parse {label}: {e}"));
+            let Payload::CodeSectionEntry(body) = payload else {
+                continue;
+            };
+            let operators = body
+                .get_operators_reader()
+                .unwrap_or_else(|e| panic!("failed to read a function body of {label}: {e}"));
+            for op in operators {
+                let op =
+                    op.unwrap_or_else(|e| panic!("failed to decode an operator of {label}: {e}"));
+                assert!(
+                    !matches!(
+                        op,
+                        Operator::MemoryFill { .. }
+                            | Operator::MemoryCopy { .. }
+                            | Operator::MemoryInit { .. }
+                            | Operator::DataDrop { .. }
+                    ),
+                    "{label} must contain no bulk-memory operator, found: {op:?}"
+                );
+            }
+        }
+    }
+
+    /// Whether a module carries any of the compiler's custom verification
+    /// opcodes, which is what separates a proof-mode or analysis-skipped artifact
+    /// from an ordinary executable one.
+    ///
+    /// Fixture names do not answer this — `nondet` and `array_nondet` are compiled
+    /// in compile mode with analysis skipped, and a proof-mode module need not be
+    /// named for it — so the classification reads the operators themselves.
+    fn contains_verification_operator(wasm: &[u8]) -> bool {
+        for payload in Parser::new(0).parse_all(wasm) {
+            let Ok(Payload::CodeSectionEntry(body)) = payload else {
+                continue;
+            };
+            let Ok(operators) = body.get_operators_reader() else {
+                continue;
+            };
+            for op in operators {
+                let Ok(op) = op else { continue };
+                if matches!(
+                    op,
+                    Operator::Forall { .. }
+                        | Operator::Exists { .. }
+                        | Operator::Assume { .. }
+                        | Operator::Unique { .. }
+                        | Operator::I32Uzumaki { .. }
+                        | Operator::I64Uzumaki { .. }
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every golden `.wasm` under `tests/test_data/codegen`, sorted so failures
+    /// name the same file across runs.
+    ///
+    /// `out` directories are skipped: they are the gitignored landing place for
+    /// `infs build` run by hand against a fixture tree, so whatever they hold is
+    /// whichever compiler someone last pointed at it, not a golden this suite
+    /// maintains.
+    fn golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
+        fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("failed to read a directory entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "out") {
+                        continue;
+                    }
+                    collect(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "wasm") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        collect(
+            &crate::utils::get_test_data_path().join("codegen"),
+            &mut found,
+        );
+        found.sort();
+        found
+    }
+
+    /// Every codegen fixture that compiles as a stand-alone file.
+    ///
+    /// Multi-file fixtures keep their sources under a `src` directory and are
+    /// only meaningful as a tree, so they are excluded here; their merged output
+    /// is covered through [`golden_wasm_artifacts`].
+    fn single_file_corpus_sources() -> Vec<(String, String)> {
+        fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("failed to read a directory entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "src") {
+                        continue;
+                    }
+                    collect(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "inf") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect(
+            &crate::utils::get_test_data_path().join("codegen"),
+            &mut paths,
+        );
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+                (path.display().to_string(), source)
+            })
+            .collect()
+    }
+
+    /// No golden artifact in the corpus carries a bulk-memory operator.
+    ///
+    /// The goldens are the compiler's own output for every shape the suite
+    /// covers — frames of every size, compound parameters, sret returns, and the
+    /// non-deterministic modules that analysis would otherwise reject — so this
+    /// is the broadest statement of the invariant that can be made from
+    /// artifacts alone.
+    #[test]
+    fn corpus_goldens_contain_no_bulk_memory_operator() {
+        let artifacts = golden_wasm_artifacts();
+        assert!(
+            artifacts.len() >= 100,
+            "expected the corpus to hold at least 100 golden modules, found {}; \
+             a collector that silently found nothing would pass this test vacuously",
+            artifacts.len()
+        );
+        for path in &artifacts {
+            let wasm = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            assert_no_bulk_memory_operator(&wasm, &path.display().to_string());
+        }
+    }
+
+    /// Nor does any module the compiler produces in proof mode.
+    ///
+    /// Proof mode lowers `spec` bodies that compile mode drops, so it reaches
+    /// emission sites the goldens never exercise. Recompiling every single-file
+    /// fixture in proof mode covers those sites without needing a golden for
+    /// each. Analysis is skipped so that fixtures written to exercise a construct
+    /// analysis rejects still reach codegen.
+    #[test]
+    fn proof_mode_corpus_contains_no_bulk_memory_operator() {
+        let sources = single_file_corpus_sources();
+        assert!(
+            sources.len() >= 100,
+            "expected at least 100 single-file fixtures, found {}",
+            sources.len()
+        );
+        let mut compiled = 0usize;
+        for (label, source) in &sources {
+            let Ok(output) = codegen_with_full_config_no_analysis(
+                source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+                Target::Wasm32.default_opt_level(),
+            ) else {
+                continue;
+            };
+            assert_no_bulk_memory_operator(output.wasm(), label);
+            compiled += 1;
+        }
+        assert!(
+            compiled >= 100,
+            "expected at least 100 fixtures to reach proof-mode codegen, only {compiled} did"
+        );
+    }
+
+    /// Validates a module at the WebAssembly 1.0 feature level, through the
+    /// *upstream* `wasmparser` rather than this workspace's `inf-wasmparser`.
+    ///
+    /// The two crates in this file are deliberate, not an oversight.
+    /// `inf-wasmparser` is a fork taught to accept Inference's custom `0xfc`
+    /// opcodes, which makes it the right tool for walking a proof-mode module —
+    /// and the wrong one for this question, because a parser that has been
+    /// extended to accept the compiler's own inventions cannot testify that the
+    /// compiler's output is standard WebAssembly. Running an unmodified upstream
+    /// validator is the stronger statement: an independent implementation, which
+    /// knows nothing about this project, accepts the artifact as genuine Wasm 1.0.
+    ///
+    /// `WasmFeatures::WASM1` is the W3C Wasm 1.0 level: the MVP plus mutable
+    /// globals. `MVP` alone is the wrong gate — it predates mutable globals, and
+    /// every module the compiler emits exports `__stack_pointer` as a mutable
+    /// global, so `MVP` would reject the whole corpus for a reason that has
+    /// nothing to do with bulk memory. `WASM1` is what an MVP-class embedded
+    /// interpreter accepts, which is the level this compiler now targets.
+    ///
+    /// Bulk memory is a post-1.0 proposal, so a reintroduced `memory.fill` or
+    /// `memory.copy` fails here as well as in the operator walk above — stating
+    /// the invariant positively, in terms of what the artifact is rather than
+    /// what it lacks.
+    fn validate_as_wasm_1_0(wasm: &[u8], label: &str) {
+        use wasmparser::{Validator, WasmFeatures};
+
+        Validator::new_with_features(WasmFeatures::WASM1)
+            .validate_all(wasm)
+            .unwrap_or_else(|e| panic!("{label} does not validate as WebAssembly 1.0: {e}"));
+    }
+
+    /// Every executable golden validates at the WebAssembly 1.0 feature level.
+    ///
+    /// Modules carrying the compiler's custom verification opcodes are excluded:
+    /// those opcodes are not WebAssembly at all and are only ever consumed by the
+    /// proof toolchain.
+    #[test]
+    fn compile_mode_goldens_validate_as_wasm_1_0() {
+        let artifacts = golden_wasm_artifacts();
+        let mut validated = 0usize;
+        for path in &artifacts {
+            let wasm = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            if contains_verification_operator(&wasm) {
+                continue;
+            }
+            validate_as_wasm_1_0(&wasm, &path.display().to_string());
+            validated += 1;
+        }
+        assert!(
+            validated >= 100,
+            "expected at least 100 executable goldens to validate as Wasm 1.0, only {validated} did"
+        );
+    }
+
+    /// The freshly generated module for every single-file fixture validates as
+    /// WebAssembly 1.0 too, so the invariant holds for what the compiler emits
+    /// now and not only for what was checked in.
+    #[test]
+    fn compile_mode_corpus_validates_as_wasm_1_0() {
+        let sources = single_file_corpus_sources();
+        let mut validated = 0usize;
+        for (label, source) in &sources {
+            let Ok(output) = codegen_with_full_config_no_analysis(
+                source,
+                Target::Wasm32,
+                CompilationMode::Compile,
+                Target::Wasm32.default_opt_level(),
+            ) else {
+                continue;
+            };
+            if contains_verification_operator(output.wasm()) {
+                continue;
+            }
+            validate_as_wasm_1_0(output.wasm(), label);
+            validated += 1;
+        }
+        assert!(
+            validated >= 100,
+            "expected at least 100 fixtures to compile and validate as Wasm 1.0, only {validated} did"
+        );
     }
 
     // Helper functions ---

@@ -80,10 +80,11 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, CompoundFieldLayout, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT,
-    STACK_SIZE, StructSlot, align_to, align_to_frame, compute_struct_field_layout,
-    emit_array_param_copy, emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue,
-    emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
+    self, ArraySlot, CompoundFieldLayout, FrameLayout, STACK_POINTER_INIT, STACK_SIZE,
+    ScratchAlloc, StructSlot, align_to, align_to_frame, compute_struct_field_layout,
+    emit_array_param_copy, emit_memcpy_via_stack, emit_ptr_offset_addr, emit_sret_copy,
+    emit_stack_epilogue, emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type,
+    type_byte_size,
 };
 
 /// Origin of a function definition being lowered.
@@ -364,9 +365,9 @@ pub(crate) struct Compiler {
     loop_ctx: LoopContext,
     parent_blocks_stack: Vec<BlockKind>,
     /// When true, zero-valued stores into frame memory can be elided because
-    /// the function prologue's `memory.fill 0` guarantees all slots start at
-    /// zero. Set only during variable initialization (`Stmt::VarDef`), never
-    /// during assignment where slots may hold non-zero data.
+    /// the function prologue's zero fill guarantees all slots start at zero.
+    /// Set only during variable initialization (`Stmt::VarDef`), never during
+    /// assignment where slots may hold non-zero data.
     init_zero_elision: bool,
     /// WASM function indices for functions that originated in `spec` blocks,
     /// keyed by spec name. Populated during Stage 1 registration in proof mode;
@@ -409,6 +410,20 @@ pub(crate) struct Compiler {
     /// it is not mode-gated: the guard emits in both Compile and Proof modes.
     /// Reset per function alongside the rest of the per-function state.
     narrow_div_scratch_local: Option<u32>,
+    /// Local declarations for the function currently being compiled: the named
+    /// locals plus the eagerly reserved frame-pointer, bounds-check and
+    /// narrow-division temporaries.
+    ///
+    /// The declarations are held here rather than handed to `Function::new`
+    /// because the region fill and copy lowerings allocate further scratch locals
+    /// while the body is being emitted (see [`ScratchAlloc`]). The body is built
+    /// in a `Function` with an empty locals vector and re-prefixed with the
+    /// complete declarations once the emission is finished. Reset per function.
+    local_declarations: Vec<(u32, ValType)>,
+    /// Lazily allocated scratch locals for the region fill and copy lowerings,
+    /// numbered from one past the last eagerly declared local. Rebuilt per
+    /// function alongside `func`, whose local indices it hands out.
+    scratch: ScratchAlloc,
 }
 
 /// The nested blocks a statement introduces, classified by how a frame-layout
@@ -472,6 +487,8 @@ impl Compiler {
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
             narrow_div_scratch_local: None,
+            local_declarations: Vec::new(),
+            scratch: ScratchAlloc::new(0),
         }
     }
 
@@ -515,6 +532,49 @@ impl Compiler {
         self.func
             .as_mut()
             .expect("func() called outside function compilation")
+    }
+
+    /// The function body under construction together with its scratch-local
+    /// allocator.
+    ///
+    /// The memory lowering helpers need both, and taking them through one
+    /// accessor keeps the split borrow of the two `Compiler` fields at a single
+    /// place instead of at every call site.
+    fn func_and_scratch(&mut self) -> (&mut Function, &mut ScratchAlloc) {
+        let func = self
+            .func
+            .as_mut()
+            .expect("func_and_scratch() called outside function compilation");
+        (func, &mut self.scratch)
+    }
+
+    /// Finishes the function under construction, prefixing the body with the
+    /// complete local declarations.
+    ///
+    /// The body was emitted into a `Function` carrying an empty locals vector so
+    /// that the fill and copy lowerings could allocate scratch locals as they
+    /// went. Rebuilding the function with the named declarations plus one entry
+    /// per allocated scratch slot, then replaying the raw body past its
+    /// (one-byte, empty) locals vector, yields the encoding those emitters
+    /// assumed. A function that allocated no scratch is byte-identical to one
+    /// built with the declarations up front.
+    fn take_completed_function(&mut self) -> Function {
+        let body = self
+            .func
+            .take()
+            .expect("func must be Some after compilation")
+            .into_raw_body();
+        assert_eq!(
+            body.first(),
+            Some(&0x00),
+            "function body must start with the empty locals vector it was created with"
+        );
+
+        let mut declarations = std::mem::take(&mut self.local_declarations);
+        declarations.extend(self.scratch.declarations());
+        let mut completed = Function::new(declarations);
+        completed.raw(body[1..].iter().copied());
+        completed
     }
 
     /// Returns the WASM function index that the first method will occupy,
@@ -1241,7 +1301,19 @@ impl Compiler {
             );
         }
 
-        self.func = Some(Function::new(local_declarations));
+        // The body is emitted into a function with an empty locals vector: the
+        // region fill and copy lowerings allocate scratch locals on demand while
+        // it is being built, so the complete declaration list is not known until
+        // the body is finished. The declarations are re-attached at that point,
+        // and a function that allocates nothing gets exactly the list built above.
+        self.scratch = ScratchAlloc::new(
+            local_idx
+                + u32::from(has_frame)
+                + u32::from(self.bounds_check_scratch_local.is_some())
+                + u32::from(self.narrow_div_scratch_local.is_some()),
+        );
+        self.local_declarations = local_declarations;
+        self.func = Some(Function::new([]));
 
         // Exported functions are the module's WebAssembly ABI boundary; canonicalize
         // every narrow scalar parameter before anything else executes so the body
@@ -1268,7 +1340,8 @@ impl Compiler {
         }
 
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
-            emit_stack_prologue(func, layout);
+            let scratch = &mut self.scratch;
+            emit_stack_prologue(func, layout, scratch);
 
             // Copy-on-entry: for each compound-typed parameter (array, struct, or mut self),
             // copy the caller's data into the callee's frame to enforce value semantics.
@@ -1300,6 +1373,7 @@ impl Compiler {
                                     slot,
                                     param_local,
                                     &elem_type.kind,
+                                    scratch,
                                 );
                             }
                             // A struct parameter (bare `Custom` name or a
@@ -1313,7 +1387,13 @@ impl Compiler {
                             | TypeInfoKind::Qualified(_)
                             | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
-                                    emit_struct_param_copy(func, layout, slot, param_local);
+                                    emit_struct_param_copy(
+                                        func,
+                                        layout,
+                                        slot,
+                                        param_local,
+                                        scratch,
+                                    );
                                 }
                             }
                             _ => {}
@@ -1327,7 +1407,7 @@ impl Compiler {
                                 .get("self")
                                 .expect("`self` must be in locals_map for mut self method")
                                 .0;
-                            emit_struct_param_copy(func, layout, slot, self_local);
+                            emit_struct_param_copy(func, layout, slot, self_local, scratch);
                         }
                     }
                     _ => {}
@@ -1405,10 +1485,7 @@ impl Compiler {
             self.local_names.push((self.func_idx, local_name_entries));
         }
 
-        let completed_func = self
-            .func
-            .take()
-            .expect("func must be Some after compilation");
+        let completed_func = self.take_completed_function();
         self.bodies.push(completed_func);
         self.frame_layout = None;
         self.locals_map.clear();
@@ -2377,7 +2454,7 @@ impl Compiler {
             self.lower_struct_copy_var_init(arena, value_expr_id, local_idx, name, ctx);
         } else {
             // Elide syntactic-zero leaf stores only when this binding is not inside a loop.
-            // The prologue memory.fill zeroes the frame once per call, so a loop-scoped compound
+            // The prologue zeroes the frame once per call, so a loop-scoped compound
             // literal must emit explicit zero stores to re-initialize each iteration;
             // loop_exit_depths is non-empty exactly while lowering inside a loop. Reset before
             // LocalSet so the flag never leaks past lower_expression.
@@ -2529,9 +2606,10 @@ impl Compiler {
 
     /// Lowers struct copy initialization for a variable definition.
     ///
-    /// Emits `memory.copy` from the source struct pointer to the destination
-    /// frame slot, then sets the local to point to the destination. This
-    /// preserves value semantics: modifying the copy does not affect the original.
+    /// Copies the source struct's bytes into the destination frame slot (see
+    /// [`Self::emit_memory_copy`]), then sets the local to point to the
+    /// destination. This preserves value semantics: modifying the copy does not
+    /// affect the original.
     fn lower_struct_copy_var_init(
         &mut self,
         arena: &AstArena,
@@ -3583,7 +3661,8 @@ impl Compiler {
     ///
     /// For scalar-element arrays, emits per-element stores to the sret pointer.
     /// For struct-element arrays, emits per-element `lower_struct_literal_fields`
-    /// or `memory.copy` depending on the expression form.
+    /// or a whole-element region copy ([`Self::emit_memory_copy`]) depending on
+    /// the expression form.
     fn lower_array_sret_return(
         &mut self,
         arena: &AstArena,
@@ -3610,7 +3689,8 @@ impl Compiler {
                     .get(name)
                     .expect("Return identifier not found in locals_map");
                 let source_local = *source_local;
-                emit_sret_copy(self.func(), sret_idx, source_local, byte_size);
+                let (func, scratch) = self.func_and_scratch();
+                emit_sret_copy(func, sret_idx, source_local, byte_size, scratch);
             }
             Expr::ArrayLiteral { elements } => {
                 let elements = elements.clone();
@@ -3676,7 +3756,14 @@ impl Compiler {
                     .get(name)
                     .expect("Return identifier not found in locals_map");
                 let source_local = *source_local;
-                emit_sret_copy(self.func(), sret_idx, source_local, return_info.total_size);
+                let (func, scratch) = self.func_and_scratch();
+                emit_sret_copy(
+                    func,
+                    sret_idx,
+                    source_local,
+                    return_info.total_size,
+                    scratch,
+                );
             }
             Expr::StructLiteral { fields, .. } => {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
@@ -3754,8 +3841,8 @@ impl Compiler {
     /// Lowers an array index write (`arr[i] = value`).
     ///
     /// For scalar elements, emits a store at `base + index * elem_size`.
-    /// For struct elements, emits `memory.copy` from the source struct pointer
-    /// to `base + index * struct_size`.
+    /// For struct elements, copies the source struct's bytes to
+    /// `base + index * struct_size` (see [`Self::emit_memory_copy`]).
     fn lower_array_index_write(
         &mut self,
         arena: &AstArena,
@@ -4880,8 +4967,8 @@ impl Compiler {
     }
 
     /// Returns `true` if the expression is a syntactic zero value that matches
-    /// what `memory.fill 0` writes. Used to skip redundant stores into frame slots
-    /// that were already zero-initialized by the function prologue.
+    /// what the prologue's zero fill writes. Used to skip redundant stores into
+    /// frame slots that were already zero-initialized by the function prologue.
     ///
     /// Recognized patterns:
     /// - `NumberLiteral { value: "0" }` or `NumberLiteral { value: "-0" }`
@@ -4963,11 +5050,12 @@ impl Compiler {
     /// For scalar-element arrays, emits per-element stores. For struct-element
     /// arrays, uses `lower_struct_literal_fields` at each element's base offset
     /// to recursively emit field stores. Non-literal struct elements (identifiers,
-    /// function calls) are handled via `memory.copy`.
+    /// function calls) are handled by a whole-element region copy
+    /// ([`Self::emit_memory_copy`]).
     ///
     /// Zero-valued elements are skipped when `init_zero_elision` is set, which is
     /// only true during variable initialization (not assignment). This is safe
-    /// because the function prologue's `memory.fill 0` guarantees the frame is
+    /// because the function prologue's zero fill guarantees the frame is
     /// zeroed at initialization time, but assignment may target slots with
     /// non-zero data from prior operations. Sret returns use
     /// `lower_array_sret_return` directly, which always emits stores.
@@ -5060,8 +5148,9 @@ impl Compiler {
     /// rather than non-deterministic opcodes. For an `Array(inner, _)` element
     /// kind, each sub-array literal recurses at offset `dest_base_offset + i *
     /// stride` (where `stride` is the inner sub-array's total byte size); a
-    /// non-literal array element (identifier or call) is copied with
-    /// `memory.copy`. For a scalar leaf, the value is lowered and stored.
+    /// non-literal array element (identifier or call) is copied as a whole
+    /// region ([`Self::emit_memory_copy`]). For a scalar leaf, the value is
+    /// lowered and stored.
     ///
     /// The leaf store emits the **unconditional** `local.get; i32.const off;
     /// i32.add` address sequence (not [`memory::emit_ptr_offset_addr`], which
@@ -5188,7 +5277,8 @@ impl Compiler {
     /// For each element at index `i`, computes base offset `slot_offset + i * elem_size`.
     /// If the element is a `StructLiteral`, uses `lower_struct_literal_fields` to emit
     /// per-field stores. Otherwise (identifier, function call), evaluates the expression
-    /// to get a source pointer and emits `memory.copy` for the full struct size.
+    /// to get a source pointer and copies the full struct size from it (see
+    /// [`Self::emit_memory_copy`]).
     #[allow(clippy::too_many_arguments)]
     fn lower_array_literal_struct_elements(
         &mut self,
@@ -5306,12 +5396,13 @@ impl Compiler {
     ///
     /// For scalar fields, emits `base_ptr + base_offset + field.offset` then a store.
     /// For nested struct literal fields, recurses with `base_offset + field.offset`.
-    /// For compound fields with non-literal values (identifiers, function calls), emits
-    /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
+    /// For compound fields with non-literal values (identifiers, function calls), copies
+    /// the source region to `base_ptr + base_offset + field.offset` (see
+    /// [`Self::emit_memory_copy`]).
     ///
     /// When `skip_zero_stores` is `true`, scalar fields and nested array elements that
-    /// are syntactic zero values are skipped because the function prologue's
-    /// `memory.fill 0` already initialized the frame to zero. This flag must be `false`
+    /// are syntactic zero values are skipped because the function prologue's zero
+    /// fill already initialized the frame to zero. This flag must be `false`
     /// for sret return paths where the destination is caller memory, not the callee's
     /// zero-filled frame.
     ///
@@ -5430,7 +5521,7 @@ impl Compiler {
     /// [`Self::store_array_literal_elements`], which recurses over nested scalar
     /// arrays and nested arrays-of-structs; and 1D arrays of scalars/enums use
     /// direct element-wise stores. Any non-literal initializer (identifier,
-    /// function call) is copied whole with `memory.copy`.
+    /// function call) is copied whole as a byte region ([`Self::emit_memory_copy`]).
     #[allow(clippy::too_many_arguments)]
     fn lower_array_field(
         &mut self,
@@ -5562,8 +5653,9 @@ impl Compiler {
     /// <store instruction>
     /// ```
     ///
-    /// For compound fields (nested structs or arrays), emits a `memory.copy`
-    /// from the RHS pointer to the destination field address.
+    /// For compound fields (nested structs or arrays), copies the field's bytes
+    /// from the RHS pointer to the destination field address (see
+    /// [`Self::emit_memory_copy`]).
     fn lower_member_access_write(
         &mut self,
         arena: &AstArena,
@@ -5701,14 +5793,16 @@ impl Compiler {
         self.func().raw([OPCODE_PREFIX, opcode]);
     }
 
+    /// Copies `byte_size` bytes between a destination and a source address that
+    /// the caller has already pushed, destination first.
+    ///
+    /// The region is moved by plain loads and stores — straight-line for a small
+    /// region, an index loop with a static tail for a large one. See
+    /// [`emit_memcpy_via_stack`] for the shapes and for why a forward copy is
+    /// sound at every site that reaches it.
     fn emit_memory_copy(&mut self, byte_size: u32) {
-        #[allow(clippy::cast_possible_wrap)]
-        self.func()
-            .instruction(&Instruction::I32Const(byte_size as i32));
-        self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: MEMORY_INDEX,
-            dst_mem: MEMORY_INDEX,
-        });
+        let (func, scratch) = self.func_and_scratch();
+        emit_memcpy_via_stack(func, byte_size, scratch);
     }
 
     pub(crate) fn has_main(&self) -> bool {
@@ -5911,6 +6005,70 @@ fn try_const_index_byte_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prepares `compiler` to emit a function body whose eager declarations are
+    /// `declarations`, mirroring what `visit_function_definition` sets up before
+    /// lowering, and returns the compiler ready for `take_completed_function`.
+    fn begin_body(compiler: &mut Compiler, declarations: Vec<(u32, ValType)>, first_free: u32) {
+        compiler.local_declarations = declarations;
+        compiler.scratch = ScratchAlloc::new(first_free);
+        compiler.func = Some(Function::new([]));
+    }
+
+    /// A body with no scratch use must encode exactly as it would have if the
+    /// declarations had been handed to `Function::new` up front — this is what
+    /// keeps every artifact that needs no region loop and no copy unchanged.
+    #[test]
+    fn completed_function_without_scratch_matches_eager_declarations() {
+        let declarations = vec![(1, ValType::I32), (1, ValType::I64)];
+        let mut compiler = Compiler::new("test");
+        begin_body(&mut compiler, declarations.clone(), 2);
+        compiler.func().instruction(&Instruction::I32Const(7));
+        compiler.func().instruction(&Instruction::Drop);
+        compiler.func().instruction(&Instruction::End);
+
+        let mut expected = Function::new(declarations);
+        expected.instruction(&Instruction::I32Const(7));
+        expected.instruction(&Instruction::Drop);
+        expected.instruction(&Instruction::End);
+
+        assert_eq!(
+            compiler.take_completed_function().into_raw_body(),
+            expected.into_raw_body(),
+            "a function that allocates no scratch must be byte-identical"
+        );
+    }
+
+    /// Scratch locals are appended after the eager declarations, so their
+    /// indices — handed out from one past the last eager local — address the
+    /// slots the body already referenced.
+    #[test]
+    fn completed_function_appends_one_declaration_per_scratch_local() {
+        let declarations = vec![(1, ValType::I32)];
+        let mut compiler = Compiler::new("test");
+        begin_body(&mut compiler, declarations.clone(), 1);
+        let dst = compiler.scratch.dst();
+        let src = compiler.scratch.src();
+        assert_eq!(
+            (dst, src),
+            (1, 2),
+            "scratch numbering starts past the eager locals"
+        );
+        compiler.func().instruction(&Instruction::LocalGet(dst));
+        compiler.func().instruction(&Instruction::LocalSet(src));
+        compiler.func().instruction(&Instruction::End);
+
+        let mut expected = Function::new([(1, ValType::I32), (1, ValType::I32), (1, ValType::I32)]);
+        expected.instruction(&Instruction::LocalGet(dst));
+        expected.instruction(&Instruction::LocalSet(src));
+        expected.instruction(&Instruction::End);
+
+        assert_eq!(
+            compiler.take_completed_function().into_raw_body(),
+            expected.into_raw_body(),
+            "two scratch locals add two i32 declarations after the eager ones"
+        );
+    }
 
     #[test]
     fn finish_without_memory_omits_memory_section() {

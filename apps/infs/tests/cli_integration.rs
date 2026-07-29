@@ -3079,7 +3079,7 @@ fn wasm_opt_absent_table_never_invokes_optimizer() {
 }
 
 /// An enabled `[build.wasm-opt] level = "z"` forwards exactly the expected
-/// argument vector — the level flag, the three feature flags, the input, then
+/// argument vector — the level flag, the two feature flags, the input, then
 /// `-o` and the sibling temp target, in order — leaves the artifact in place,
 /// and prints the one-line size summary.
 #[test]
@@ -3117,23 +3117,22 @@ fn wasm_opt_enabled_forwards_exact_args_and_prints_summary() {
         "wasm-opt must be spawned exactly once for optimization, got: {invocations:?}"
     );
     let args = &invocations[0];
-    assert_eq!(args.len(), 7, "unexpected argument count: {args:?}");
+    assert_eq!(args.len(), 6, "unexpected argument count: {args:?}");
     assert_eq!(args[0], "-Oz");
     assert_eq!(args[1], "--mvp-features");
     assert_eq!(args[2], "--enable-mutable-globals");
-    assert_eq!(args[3], "--enable-bulk-memory");
     assert_eq!(
-        file_name_of(&args[4]),
+        file_name_of(&args[3]),
         Some("main.wasm"),
         "input must be out/main.wasm, got: {}",
-        args[4]
+        args[3]
     );
-    assert_eq!(args[5], "-o");
+    assert_eq!(args[4], "-o");
     assert_eq!(
-        file_name_of(&args[6]),
+        file_name_of(&args[5]),
         Some("main.wasm.opt"),
         "output must be the sibling temp file, got: {}",
-        args[6]
+        args[5]
     );
 
     assert!(

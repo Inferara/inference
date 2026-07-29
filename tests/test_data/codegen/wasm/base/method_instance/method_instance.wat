@@ -31,9 +31,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -61,9 +63,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -91,9 +95,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -121,9 +127,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -152,9 +160,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -184,9 +194,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -216,9 +228,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -249,13 +263,15 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     local.get $p
-    i32.const 8
-    memory.copy
+    i64.load align=1
+    i64.store align=1
     local.get $__frame_ptr
     local.set $p
     local.get $p

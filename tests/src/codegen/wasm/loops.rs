@@ -704,9 +704,9 @@ mod loops_tests {
     }
 
     // A compound `let`/`const` whose literal has syntactic-zero leaves, declared inside a loop,
-    // must be re-zeroed every iteration. The prologue `memory.fill` only zeroes the frame once
-    // per call, so loop-scoped zero leaves need explicit stores; eliding them makes the slot keep
-    // the previous iteration's value and accumulate. These goldens pin the explicit-store output.
+    // must be re-zeroed every iteration. The prologue's zero fill runs once per call, before the
+    // body, so loop-scoped zero leaves need explicit stores; eliding them makes the slot keep the
+    // previous iteration's value and accumulate. These goldens pin the explicit-store output.
     #[test]
     fn loop_zero_init_test() {
         let test_name = "loop_zero_init";

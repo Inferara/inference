@@ -1,0 +1,83 @@
+// Copies whose source and destination regions can coincide at runtime. A
+// forward byte-order copy is correct when the two regions are identical or
+// disjoint, and Inference's value semantics leave no way to make them partially
+// overlap — these are the source-level shapes that reach the identical case.
+
+struct Cell {
+    a: i32;
+    b: i32;
+}
+
+struct Holder {
+    data: [i32; 4];
+    tag: i32;
+}
+
+struct Pair {
+    p: [i32; 2];
+    q: [i32; 2];
+
+    fn get_p(self) -> [i32; 2] {
+        return self.p;
+    }
+}
+
+// Two runtime indices the compiler cannot prove equal or distinct; the harness
+// calls it with both.
+pub fn elem_copy(i: i32, j: i32) -> i32 {
+    let mut arr: [Cell; 4] = [
+        Cell { a: 1, b: 2 },
+        Cell { a: 3, b: 4 },
+        Cell { a: 5, b: 6 },
+        Cell { a: 7, b: 8 },
+    ];
+    arr[i] = arr[j];
+    return arr[i].a * 10 + arr[i].b;
+}
+
+// The neighbouring elements must be untouched by an element-sized copy.
+pub fn elem_copy_neighbours(i: i32, j: i32) -> i32 {
+    let mut brr: [Cell; 4] = [
+        Cell { a: 1, b: 2 },
+        Cell { a: 3, b: 4 },
+        Cell { a: 5, b: 6 },
+        Cell { a: 7, b: 8 },
+    ];
+    brr[i] = brr[j];
+    return brr[0].a * 1000 + brr[1].a * 100 + brr[2].a * 10 + brr[3].a;
+}
+
+// A compound field assigned from itself: source and destination are the same
+// bytes.
+pub fn field_self_assign() -> i32 {
+    let mut h: Holder = Holder { data: [1, 2, 3, 4], tag: 9 };
+    h.data = h.data;
+    return h.data[0] * 1000 + h.data[1] * 100 + h.data[3] * 10 + h.tag;
+}
+
+// A whole array reassigned from itself.
+pub fn whole_self_assign() -> i32 {
+    let mut m: [i32; 4] = [1, 2, 3, 4];
+    let n: [i32; 4] = m;
+    m = n;
+    return m[0] * 1000 + m[1] * 100 + m[2] * 10 + m[3];
+}
+
+// An immutable-self method reads the receiver in place — it allocates no frame
+// and copies nothing in — so its returned compound is copied straight out of
+// the receiver into the destination slot. Routing that result back into the
+// receiver's own other field, and then into the field it came from, exercises
+// both directions.
+pub fn method_result_into_other_field() -> i32 {
+    let mut r: Pair = Pair { p: [1, 2], q: [3, 4] };
+    let t: [i32; 2] = r.get_p();
+    r.q = t;
+    return r.p[0] * 1000 + r.p[1] * 100 + r.q[0] * 10 + r.q[1];
+}
+
+pub fn method_result_into_source_field() -> i32 {
+    let mut s: Pair = Pair { p: [5, 6], q: [7, 8] };
+    let u: [i32; 2] = s.get_p();
+    s.p = u;
+    return s.p[0] * 1000 + s.p[1] * 100 + s.q[0] * 10 + s.q[1];
+}

@@ -24,18 +24,26 @@
 //!
 //! | Concern                 | Location                            |
 //! |-------------------------|-------------------------------------|
-//! | WASM local registration | `pre_scan_locals()` in compiler.rs  |
+//! | Named WASM local registration | `pre_scan_locals()` in compiler.rs |
+//! | Scratch WASM local registration | [`ScratchAlloc`] here, spliced into the declarations by compiler.rs |
 //! | Frame layout computation| `compute_frame_layout()` here       |
 //! | Load/store helpers      | `store_instruction()` / `load_instruction()` here |
+//! | Whole-region fill/copy  | [`emit_stack_prologue()`] / [`emit_memcpy_via_locals()`] here |
 //! | Prologue/epilogue       | `emit_stack_prologue()` / `emit_stack_epilogue()` here |
 //! | Section assembly        | `finish()` in compiler.rs           |
+//!
+//! # WebAssembly feature level
+//!
+//! Every region fill and region copy is lowered to plain loads and stores — the
+//! bulk-memory `memory.fill` and `memory.copy` instructions are never emitted, so
+//! generated modules stay within the WebAssembly 1.0 instruction set.
 
 use crate::errors::CodegenError;
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::{FxHashMap, FxHashSet};
-use wasm_encoder::{Function, Instruction, MemArg};
+use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// One WASM memory page in bytes.
 pub(crate) const PAGE_SIZE: u32 = 65536;
@@ -44,8 +52,9 @@ pub(crate) const PAGE_SIZE: u32 = 65536;
 ///
 /// In the stack-first layout, the stack occupies addresses `[0, STACK_SIZE)` and grows
 /// downward from `STACK_SIZE` toward 0. Overflow below address 0 traps automatically
-/// via WASM out-of-bounds memory access — specifically, the `memory.fill` in the
-/// prologue fails its bounds check when the wrapped SP is used as a destination address.
+/// via WASM out-of-bounds memory access — specifically, the prologue's first
+/// zero-fill store is at the frame pointer itself, so a wrapped SP addresses far
+/// past the end of memory and the store traps before writing anything.
 ///
 /// Must not exceed `PAGE_SIZE`. When data sections are added (constant arrays, strings),
 /// reduce this to leave room above the stack region: `STACK_SIZE + data_size <= PAGE_SIZE`.
@@ -784,26 +793,216 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
     }
 }
 
+/// Byte size at or below which a whole-region fill or copy is emitted as
+/// straight-line stores rather than an index loop.
+///
+/// 128 bytes is sixteen eight-byte stores. At that scale straight-line code is
+/// comparable in size to the loop that would replace it, runs faster (no branch
+/// per chunk), and keeps typical stack frames loop-free — which matters for the
+/// Rocq translation, where a loop-free prologue is discharged without induction.
+///
+/// This is unrelated to [`UNROLL_THRESHOLD`]: that one counts *elements* and
+/// selects a typed per-element copy, this one counts *bytes* and selects the
+/// shape of an untyped whole-region copy.
+const BULK_UNROLL_LIMIT_BYTES: u32 = 128;
+
+/// One endpoint of a byte copy: a base pointer held in a WASM local, plus a
+/// constant displacement from it.
+///
+/// The displacement is folded into each access's `offset` immediate instead of
+/// being materialized with `i32.add`, so an unrolled copy emits no address
+/// arithmetic at all. Keeping a base and its displacement in one value also stops
+/// a call site from pairing one endpoint's local with the other's displacement,
+/// which four loose `u32` parameters would invite.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemAddr {
+    /// WASM local holding the base address.
+    pub local: u32,
+    /// Constant byte displacement from the base address.
+    pub offset: u32,
+}
+
+/// Lazily allocated i32 scratch locals for the fill and copy lowerings.
+///
+/// A function declares one of these locals only if it actually emits the
+/// construct that needs it, so a function that emits no copy and no region loop
+/// declares nothing and its bytes are unaffected by this lowering. Precision is
+/// by construction: allocation happens at the emission site, not from a
+/// predicate that would have to predict the emission conditions.
+///
+/// Indices are handed out in first-use order from the first free local — after
+/// the named locals and after the eagerly reserved frame-pointer, bounds-check
+/// and narrow-division temporaries — and the compiler appends one declaration per
+/// allocated slot to the end of the function's declaration list.
+///
+/// The allocator is per-function state: it is rebuilt at the start of every
+/// function body, alongside the `Function` its indices refer to.
+#[derive(Debug)]
+pub(crate) struct ScratchAlloc {
+    next_index: u32,
+    dst: Option<u32>,
+    src: Option<u32>,
+    counter: Option<u32>,
+}
+
+impl ScratchAlloc {
+    /// Creates an allocator that hands out indices starting at
+    /// `first_free_index`, which must be one past the last local the enclosing
+    /// function already declares.
+    pub(crate) fn new(first_free_index: u32) -> Self {
+        Self {
+            next_index: first_free_index,
+            dst: None,
+            src: None,
+            counter: None,
+        }
+    }
+
+    /// Local holding the destination base address of a stack-convention copy.
+    pub(crate) fn dst(&mut self) -> u32 {
+        Self::assign(&mut self.next_index, &mut self.dst)
+    }
+
+    /// Local holding the source base address of a stack-convention copy.
+    pub(crate) fn src(&mut self) -> u32 {
+        Self::assign(&mut self.next_index, &mut self.src)
+    }
+
+    /// Local holding the induction variable of a region fill or copy loop.
+    pub(crate) fn counter(&mut self) -> u32 {
+        Self::assign(&mut self.next_index, &mut self.counter)
+    }
+
+    /// The local declarations this function must append for the scratch slots
+    /// allocated so far.
+    ///
+    /// Every scratch local is an `i32`, so one declaration per allocated slot is
+    /// enough and their relative order does not matter; what matters is that they
+    /// are appended *after* the function's existing declarations, which is where
+    /// their indices were handed out from.
+    #[must_use = "returns the scratch local declarations to append"]
+    pub(crate) fn declarations(&self) -> Vec<(u32, ValType)> {
+        let allocated = [self.dst, self.src, self.counter]
+            .into_iter()
+            .flatten()
+            .count();
+        vec![(1, ValType::I32); allocated]
+    }
+
+    fn assign(next_index: &mut u32, slot: &mut Option<u32>) -> u32 {
+        if let Some(index) = *slot {
+            return index;
+        }
+        let index = *next_index;
+        *next_index += 1;
+        *slot = Some(index);
+        index
+    }
+}
+
+/// One statically sized unit of an untyped byte copy.
+///
+/// A region of any byte length is covered by whole 8-byte units followed by at
+/// most one unit of each smaller width, so descending through
+/// [`Self::DESCENDING`] once always lands exactly on the region's end.
+#[derive(Debug, Clone, Copy)]
+enum CopyWidth {
+    I64,
+    I32,
+    I16,
+    I8,
+}
+
+impl CopyWidth {
+    /// Widest first — the order a region is consumed in.
+    const DESCENDING: [Self; 4] = [Self::I64, Self::I32, Self::I16, Self::I8];
+
+    fn bytes(self) -> u32 {
+        match self {
+            Self::I64 => 8,
+            Self::I32 => 4,
+            Self::I16 => 2,
+            Self::I8 => 1,
+        }
+    }
+
+    /// Loads one unit. The narrow loads are zero-extending: a copy reproduces
+    /// raw bytes, and the paired narrow store writes back only the low bits, so
+    /// sign extension would be discarded work.
+    fn load(self, offset: u32) -> Instruction<'static> {
+        let memarg = copy_memarg(offset);
+        match self {
+            Self::I64 => Instruction::I64Load(memarg),
+            Self::I32 => Instruction::I32Load(memarg),
+            Self::I16 => Instruction::I32Load16U(memarg),
+            Self::I8 => Instruction::I32Load8U(memarg),
+        }
+    }
+
+    fn store(self, offset: u32) -> Instruction<'static> {
+        let memarg = copy_memarg(offset);
+        match self {
+            Self::I64 => Instruction::I64Store(memarg),
+            Self::I32 => Instruction::I32Store(memarg),
+            Self::I16 => Instruction::I32Store16(memarg),
+            Self::I8 => Instruction::I32Store8(memarg),
+        }
+    }
+}
+
+/// Memory immediate for a copy access.
+///
+/// The alignment hint is 0 (one byte) on every copy access, deliberately
+/// departing from the natural-alignment convention that
+/// [`store_instruction`]/[`load_instruction`] follow: a copy addresses a whole
+/// region whose base may be a struct field or array element aligned to as little
+/// as one byte, and an over-stated hint is a lie about the address. Hints carry
+/// no semantics in WebAssembly 1.0, so the conservative value costs nothing.
+fn copy_memarg(offset: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(offset),
+        align: 0,
+        memory_index: MEMORY_INDEX,
+    }
+}
+
 /// Emits the stack prologue for a function with stack-allocated arrays.
 ///
 /// The prologue decrements `__stack_pointer`, saves the frame pointer, and
-/// zero-initializes the entire frame via `memory.fill`.
+/// zero-initializes the entire frame with `i64.store`s of zero.
 ///
 /// # Stack overflow protection
 ///
 /// `i32.sub` uses modular arithmetic and never traps. If the subtraction wraps
-/// (SP goes "below 0"), the result is a large unsigned value (e.g., `0xFFFFFFF0`).
-/// The subsequent `memory.fill` uses this wrapped value as the destination address,
-/// which fails the WASM bounds check (`addr + size > mem_size`) and traps. This is
-/// the mechanism behind the stack-first "free trap" — the computed (possibly wrapped)
-/// stack pointer value must be used as the destination for `memory.fill` without being
-/// modified or bounds-checked first for this protection to hold.
+/// (SP goes "below 0"), the result is a large unsigned value: the frame is at
+/// most `STACK_SIZE` bytes, so a wrapped frame pointer is at least
+/// `2^32 - STACK_SIZE`, far beyond the one-page memory. WebAssembly 1.0 computes
+/// an effective address as `base + offset` without 32-bit wraparound, so the
+/// first zero-fill store — the one at offset 0, emitted first in both the
+/// unrolled and the looped form — fails its bounds check and traps before any
+/// byte is written.
+///
+/// That ordering is what makes the lowered fill observationally equal to the
+/// `memory.fill` it replaces, whose up-front bounds check also trapped with no
+/// partial write. One caveat applies equally to both forms and is not a
+/// difference between them: the prologue commits the wrapped pointer to
+/// `__stack_pointer` before it touches memory, so the global is already updated
+/// when the access traps. A trap unwinds the whole instance, making that
+/// unobservable unless the host re-enters afterwards — which is outside the
+/// semantic contract the compiler targets. Do not try to "fix" it by sinking
+/// `global.set` below the fill: that buys nothing here and the store at offset 0
+/// must stay the first memory access.
+///
+/// The trap is defense in depth. Analysis rules A035 (recursion) and A036
+/// (stack depth) statically reject any program whose frames could exhaust the
+/// stack, and `compute_frame_layout` independently asserts a single frame fits
+/// in `STACK_SIZE`, so an accepted program never reaches the wrapping case.
 ///
 /// **Optimization opportunity**: When all array elements are explicitly initialized
-/// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the `memory.fill` is redundant since
+/// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the zero-fill is redundant since
 /// every byte will be overwritten. This is intentionally not optimized to ensure
 /// deterministic behavior for partially-initialized arrays and to simplify the
-/// implementation. A future optimization pass could skip `memory.fill` when all
+/// implementation. A future optimization pass could skip the fill when all
 /// arrays in the frame are fully initialized — but must preserve the overflow trap
 /// by emitting an explicit guard (`if SP < 0 then unreachable`).
 ///
@@ -813,15 +1012,16 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 /// i32.sub
 /// local.tee $__frame_ptr
 /// global.set $__stack_pointer
-/// local.get $__frame_ptr
-/// i32.const 0
-/// i32.const <frame_size>
-/// memory.fill
+/// ;; then the zero fill, see emit_frame_zero_fill
 /// ```
-pub(crate) fn emit_stack_prologue(func: &mut Function, layout: &FrameLayout) {
+pub(crate) fn emit_stack_prologue(
+    func: &mut Function,
+    layout: &FrameLayout,
+    scratch: &mut ScratchAlloc,
+) {
     assert!(
         layout.total_size > 0,
-        "emit_stack_prologue called with zero-size frame; memory.fill would trap per WASM spec"
+        "emit_stack_prologue called with zero-size frame; there is nothing to zero-initialize"
     );
     cov_mark::hit!(wasm_codegen_emit_stack_prologue);
     #[allow(clippy::cast_possible_wrap)]
@@ -831,14 +1031,227 @@ pub(crate) fn emit_stack_prologue(func: &mut Function, layout: &FrameLayout) {
     func.instruction(&Instruction::I32Sub);
     func.instruction(&Instruction::LocalTee(layout.frame_ptr_local));
     func.instruction(&Instruction::GlobalSet(STACK_POINTER_GLOBAL));
-    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-    func.instruction(&Instruction::I32Const(0));
-    func.instruction(&Instruction::I32Const(frame_size));
-    func.instruction(&Instruction::MemoryFill(MEMORY_INDEX));
+    emit_frame_zero_fill(func, layout.frame_ptr_local, layout.total_size, scratch);
 }
 
-/// Threshold: arrays with more than this many elements use `memory.copy`
-/// instead of unrolled element-by-element copying.
+/// Zero-fills `total_size` bytes starting at the frame pointer.
+///
+/// Frame sizes are multiples of [`FRAME_ALIGNMENT`], so both forms decompose
+/// exactly and neither needs a tail. Small frames become straight-line
+/// `i64.store`s; larger ones become a loop that clears 16 bytes per iteration
+/// (two stores), which halves the branch overhead of an 8-byte body.
+///
+/// The store at offset 0 is emitted first in both forms, and in the looped form
+/// the induction variable starts at 0, so the frame's lowest address is always
+/// the first one touched. [`emit_stack_prologue`] documents why that ordering is
+/// load-bearing.
+///
+/// The loop is emitted atomically — no user expression is lowered inside it — so
+/// it cannot contain a `break` or `continue`, and it needs no entry in the
+/// compiler's loop-context or block-depth bookkeeping.
+fn emit_frame_zero_fill(
+    func: &mut Function,
+    frame_ptr: u32,
+    total_size: u32,
+    scratch: &mut ScratchAlloc,
+) {
+    /// Bytes cleared per iteration of the looped form.
+    const STRIDE: u32 = 16;
+
+    debug_assert_eq!(
+        total_size % FRAME_ALIGNMENT,
+        0,
+        "frame sizes are rounded to FRAME_ALIGNMENT, which the fill decomposition relies on"
+    );
+    let zero_store = |offset: u32| {
+        Instruction::I64Store(MemArg {
+            offset: u64::from(offset),
+            align: 3,
+            memory_index: MEMORY_INDEX,
+        })
+    };
+
+    if total_size <= BULK_UNROLL_LIMIT_BYTES {
+        cov_mark::hit!(wasm_codegen_frame_fill_unrolled);
+        for offset in (0..total_size).step_by(CopyWidth::I64.bytes() as usize) {
+            func.instruction(&Instruction::LocalGet(frame_ptr));
+            func.instruction(&Instruction::I64Const(0));
+            func.instruction(&zero_store(offset));
+        }
+        return;
+    }
+
+    cov_mark::hit!(wasm_codegen_frame_fill_loop);
+    let index = scratch.counter();
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(index));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    for offset in (0..STRIDE).step_by(CopyWidth::I64.bytes() as usize) {
+        func.instruction(&Instruction::LocalGet(frame_ptr));
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I64Const(0));
+        func.instruction(&zero_store(offset));
+    }
+    func.instruction(&Instruction::LocalGet(index));
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(STRIDE as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalTee(index));
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(total_size as i32));
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::BrIf(0));
+    func.instruction(&Instruction::End);
+}
+
+/// Copies `byte_size` bytes from `src` to `dst`, both given as a base local plus
+/// a constant displacement.
+///
+/// The copy runs forward in 8-byte chunks with a statically unrolled 4/2/1 tail.
+/// Small regions become straight-line loads and stores whose displacements are
+/// folded into the access offsets; larger ones become an 8-byte-per-iteration
+/// loop followed by the same static tail.
+///
+/// # Overlap
+///
+/// A forward byte-order copy is correct for regions that are identical or
+/// disjoint, and every site that reaches this helper is one of those two:
+///
+/// - Array and struct parameter copies read the caller's argument and write the
+///   callee's freshly decremented frame — disjoint, or identical when a callee
+///   returns its own parameter through the caller's slot.
+/// - The sret return copy writes the caller-provided destination from the
+///   callee frame — disjoint for the same reason, identical when a method
+///   returns the value it was called on.
+/// - Body-level compound copies (via [`emit_memcpy_via_stack`]) move between
+///   whole named slots, individual array elements at bounds-checked stride
+///   multiples, or layout-disjoint struct fields. A right-hand side that reads
+///   the destination is routed through the frame's scratch region first, so a
+///   self-referential reassignment never reads a slot it is concurrently
+///   writing.
+///
+/// Inference has value semantics and no references, so two distinct slots can
+/// never partially overlap; the memmove guarantee that `memory.copy` provided is
+/// not needed. For an identical source and destination each byte's read and
+/// write coincide, which a forward copy handles.
+///
+/// # Loop emission
+///
+/// The loop is emitted atomically after all sub-expression lowering, so no user
+/// `break` or `continue` can be lowered inside it and it bypasses the compiler's
+/// loop-context and block-depth bookkeeping safely.
+pub(crate) fn emit_memcpy_via_locals(
+    func: &mut Function,
+    dst: MemAddr,
+    src: MemAddr,
+    byte_size: u32,
+    scratch: &mut ScratchAlloc,
+) {
+    if byte_size == 0 {
+        return;
+    }
+
+    if byte_size <= BULK_UNROLL_LIMIT_BYTES {
+        cov_mark::hit!(wasm_codegen_memcpy_unrolled);
+        emit_copy_chunks(func, dst, src, 0, byte_size);
+        return;
+    }
+
+    cov_mark::hit!(wasm_codegen_memcpy_loop);
+    let chunk = CopyWidth::I64.bytes();
+    let looped_bytes = byte_size - byte_size % chunk;
+    let index = scratch.counter();
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(index));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    func.instruction(&Instruction::LocalGet(dst.local));
+    func.instruction(&Instruction::LocalGet(index));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(src.local));
+    func.instruction(&Instruction::LocalGet(index));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&CopyWidth::I64.load(src.offset));
+    func.instruction(&CopyWidth::I64.store(dst.offset));
+    func.instruction(&Instruction::LocalGet(index));
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(chunk as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalTee(index));
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(looped_bytes as i32));
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::BrIf(0));
+    func.instruction(&Instruction::End);
+
+    emit_copy_chunks(func, dst, src, looped_bytes, byte_size - looped_bytes);
+}
+
+/// Emits straight-line loads and stores covering `[start, start + len)` of both
+/// endpoints, in descending unit width, folding every displacement into the
+/// access offset immediates.
+fn emit_copy_chunks(func: &mut Function, dst: MemAddr, src: MemAddr, start: u32, len: u32) {
+    let end = start + len;
+    let mut at = start;
+    for width in CopyWidth::DESCENDING {
+        while end - at >= width.bytes() {
+            func.instruction(&Instruction::LocalGet(dst.local));
+            func.instruction(&Instruction::LocalGet(src.local));
+            func.instruction(&width.load(src.offset + at));
+            func.instruction(&width.store(dst.offset + at));
+            at += width.bytes();
+        }
+    }
+    debug_assert_eq!(
+        at, end,
+        "descending copy widths must land on the region end"
+    );
+}
+
+/// Copies `byte_size` bytes between two addresses already on the WASM operand
+/// stack, pushed destination first and source second.
+///
+/// That push order is the convention of every body-level compound copy site, and
+/// the source therefore pops first. The two addresses move into scratch locals
+/// so the copy can address them repeatedly; the copy itself is
+/// [`emit_memcpy_via_locals`], whose documentation covers overlap and loop
+/// emission.
+///
+/// A zero-byte region still consumes both addresses, matching the stack effect
+/// of the copy it replaces.
+pub(crate) fn emit_memcpy_via_stack(
+    func: &mut Function,
+    byte_size: u32,
+    scratch: &mut ScratchAlloc,
+) {
+    let dst_local = scratch.dst();
+    let src_local = scratch.src();
+    func.instruction(&Instruction::LocalSet(src_local));
+    func.instruction(&Instruction::LocalSet(dst_local));
+    emit_memcpy_via_locals(
+        func,
+        MemAddr {
+            local: dst_local,
+            offset: 0,
+        },
+        MemAddr {
+            local: src_local,
+            offset: 0,
+        },
+        byte_size,
+        scratch,
+    );
+}
+
+/// Threshold: arrays with more than this many elements are copied as an untyped
+/// byte region instead of element by element.
+///
+/// This counts elements and gates a *typed* copy that reads and writes with the
+/// element's own load/store instruction. It is deliberately not related to
+/// [`BULK_UNROLL_LIMIT_BYTES`], which counts bytes and picks the shape of an
+/// untyped region copy — the two answer different questions and changing one to
+/// track the other would rewrite the emitted bytes of every small-array
+/// parameter copy for no semantic gain.
 const UNROLL_THRESHOLD: u32 = 16;
 
 /// Emits copy-on-entry code for one array-typed parameter.
@@ -847,8 +1260,11 @@ const UNROLL_THRESHOLD: u32 = 16;
 /// the callee's frame at `slot.offset` from `__frame_ptr`, then updates
 /// `param_local` to point to the callee's copy.
 ///
-/// For arrays with N <= 16 elements, the copy is unrolled element by element.
-/// For larger arrays (N > 16), a single `memory.copy` instruction is used.
+/// For arrays with N <= 16 elements, the copy is unrolled element by element
+/// with the element type's own load/store. For larger arrays (N > 16), and for
+/// any array whose elements are compound (load/store instructions cannot move a
+/// struct or a nested array), the whole region is copied as untyped bytes by
+/// [`emit_memcpy_via_locals`].
 ///
 /// After the copy, the parameter local is overwritten with the callee's frame
 /// address so that subsequent reads/writes inside the function operate on the
@@ -866,13 +1282,8 @@ const UNROLL_THRESHOLD: u32 = 16;
 /// i32.store / i32.store8 / ...     ;; store to destination
 /// ;; ... repeat for each element
 ///
-/// ;; bulk copy (N > 16):
-/// local.get $__frame_ptr
-/// i32.const <offset>
-/// i32.add                          ;; destination
-/// local.get $param_ptr             ;; source
-/// i32.const <byte_size>
-/// memory.copy
+/// ;; region copy (N > 16 or compound elements):
+/// ;; see emit_memcpy_via_locals
 ///
 /// ;; update param local:
 /// local.get $__frame_ptr
@@ -886,6 +1297,7 @@ pub(crate) fn emit_array_param_copy(
     slot: &ArraySlot,
     param_local: u32,
     elem_type: &TypeInfoKind,
+    scratch: &mut ScratchAlloc,
 ) {
     cov_mark::hit!(wasm_codegen_emit_array_param_copy);
 
@@ -900,17 +1312,19 @@ pub(crate) fn emit_array_param_copy(
     );
 
     if slot.length > UNROLL_THRESHOLD || is_compound_element {
-        // Bulk copy via memory.copy.
-        // Always used for struct-element arrays because load/store instructions
-        // do not support compound types.
-        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-        if slot.offset > 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            func.instruction(&Instruction::I32Const(slot.offset as i32));
-            func.instruction(&Instruction::I32Add);
-        }
-        func.instruction(&Instruction::LocalGet(param_local));
-        emit_memory_copy_raw(func, byte_size);
+        emit_memcpy_via_locals(
+            func,
+            MemAddr {
+                local: layout.frame_ptr_local,
+                offset: slot.offset,
+            },
+            MemAddr {
+                local: param_local,
+                offset: 0,
+            },
+            byte_size,
+            scratch,
+        );
     } else {
         // Unrolled element-by-element copy
         let load_instr = load_instruction(elem_type);
@@ -958,16 +1372,12 @@ pub(crate) fn emit_array_param_copy(
 /// caller's original.
 ///
 /// Unlike array param copy (which may unroll element-by-element for small arrays),
-/// struct param copy always uses `memory.copy` because structs have heterogeneous
-/// field types that cannot be unrolled with a single load/store instruction pair.
+/// struct param copy always moves the slot as an untyped byte region: structs have
+/// heterogeneous field types that cannot be unrolled with a single load/store
+/// instruction pair.
 ///
 /// ```text
-/// local.get $__frame_ptr
-/// i32.const <offset>         ;; omitted when offset is 0
-/// i32.add                    ;; omitted when offset is 0
-/// local.get $param_ptr       ;; source
-/// i32.const <total_size>
-/// memory.copy
+/// ;; region copy, see emit_memcpy_via_locals
 ///
 /// ;; update param local:
 /// local.get $__frame_ptr
@@ -980,21 +1390,23 @@ pub(crate) fn emit_struct_param_copy(
     layout: &FrameLayout,
     slot: &StructSlot,
     param_local: u32,
+    scratch: &mut ScratchAlloc,
 ) {
     cov_mark::hit!(wasm_codegen_emit_struct_param_copy);
 
-    // destination: frame_ptr + slot.offset
-    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-    if slot.offset > 0 {
-        #[allow(clippy::cast_possible_wrap)]
-        func.instruction(&Instruction::I32Const(slot.offset as i32));
-        func.instruction(&Instruction::I32Add);
-    }
-
-    // source: param pointer
-    func.instruction(&Instruction::LocalGet(param_local));
-
-    emit_memory_copy_raw(func, slot.total_size);
+    emit_memcpy_via_locals(
+        func,
+        MemAddr {
+            local: layout.frame_ptr_local,
+            offset: slot.offset,
+        },
+        MemAddr {
+            local: param_local,
+            offset: 0,
+        },
+        slot.total_size,
+        scratch,
+    );
 
     // Update the parameter local to point to the callee's copy
     func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
@@ -1006,39 +1418,33 @@ pub(crate) fn emit_struct_param_copy(
     func.instruction(&Instruction::LocalSet(param_local));
 }
 
-/// Emits the `i32.const <size>` + `memory.copy` instruction pair.
-///
-/// The caller must have already pushed the destination and source addresses
-/// onto the WASM operand stack before calling this helper.
-fn emit_memory_copy_raw(func: &mut Function, byte_size: u32) {
-    #[allow(clippy::cast_possible_wrap)]
-    func.instruction(&Instruction::I32Const(byte_size as i32));
-    func.instruction(&Instruction::MemoryCopy {
-        src_mem: MEMORY_INDEX,
-        dst_mem: MEMORY_INDEX,
-    });
-}
-
-/// Emits a `memory.copy` from a source pointer to the sret destination.
+/// Copies a compound value from a source pointer to the sret destination.
 ///
 /// Used in `return arr` inside an sret function: copies the array data from
-/// the callee's frame slot to the caller-provided sret pointer.
-///
-/// ```text
-/// local.get $sret
-/// local.get $source
-/// i32.const <byte_size>
-/// memory.copy
-/// ```
+/// the callee's frame slot to the caller-provided sret pointer. The two regions
+/// are disjoint (the callee frame sits below the caller's slot), or identical
+/// when a method returns the value it was called on — both of which the forward
+/// copy in [`emit_memcpy_via_locals`] handles.
 pub(crate) fn emit_sret_copy(
     func: &mut Function,
     sret_local: u32,
     source_local: u32,
     byte_size: u32,
+    scratch: &mut ScratchAlloc,
 ) {
-    func.instruction(&Instruction::LocalGet(sret_local));
-    func.instruction(&Instruction::LocalGet(source_local));
-    emit_memory_copy_raw(func, byte_size);
+    emit_memcpy_via_locals(
+        func,
+        MemAddr {
+            local: sret_local,
+            offset: 0,
+        },
+        MemAddr {
+            local: source_local,
+            offset: 0,
+        },
+        byte_size,
+        scratch,
+    );
 }
 
 /// Emits the address computation `base_ptr + byte_offset` onto the WASM stack.
@@ -1953,6 +2359,485 @@ mod tests {
         assert_within(&array_of_i64);
 
         assert_within(&TypeInfoKind::Struct("Wide".to_string(), "Wide".to_string()));
+    }
+
+    /// A frame layout with the given size, holding no named slots — enough for
+    /// the prologue emitter, which only reads `total_size` and `frame_ptr_local`.
+    fn frame_of(total_size: u32, frame_ptr_local: u32) -> FrameLayout {
+        FrameLayout {
+            total_size,
+            array_offsets: FxHashMap::default(),
+            struct_offsets: FxHashMap::default(),
+            frame_ptr_local,
+            scratch_offset: None,
+        }
+    }
+
+    /// One zero-fill store of an unrolled prologue: `local.get $fp;
+    /// i64.const 0; i64.store align=3 offset=<offset>`.
+    fn fill_store(f: &mut Function, frame_ptr: u32, offset: u64) {
+        f.instruction(&Instruction::LocalGet(frame_ptr));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64Store(MemArg {
+            offset,
+            align: 3,
+            memory_index: MEMORY_INDEX,
+        }));
+    }
+
+    /// One zero-fill store of a looped prologue, addressed through the induction
+    /// variable: `local.get $fp; local.get $i; i32.add; i64.const 0;
+    /// i64.store align=3 offset=<offset>`.
+    fn fill_store_indexed(f: &mut Function, frame_ptr: u32, index: u32, offset: u64) {
+        f.instruction(&Instruction::LocalGet(frame_ptr));
+        f.instruction(&Instruction::LocalGet(index));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64Store(MemArg {
+            offset,
+            align: 3,
+            memory_index: MEMORY_INDEX,
+        }));
+    }
+
+    /// The `global.get`/`i32.sub`/`local.tee`/`global.set` prefix every prologue
+    /// opens with, before any memory is touched.
+    fn prologue_prefix(f: &mut Function, frame_size: i32, frame_ptr: u32) {
+        f.instruction(&Instruction::GlobalGet(0));
+        f.instruction(&Instruction::I32Const(frame_size));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalTee(frame_ptr));
+        f.instruction(&Instruction::GlobalSet(0));
+    }
+
+    /// The looped zero fill of a frame of `frame_size` bytes.
+    fn fill_loop(f: &mut Function, frame_ptr: u32, index: u32, frame_size: i32) {
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(index));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        fill_store_indexed(f, frame_ptr, index, 0);
+        fill_store_indexed(f, frame_ptr, index, 8);
+        f.instruction(&Instruction::LocalGet(index));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalTee(index));
+        f.instruction(&Instruction::I32Const(frame_size));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::BrIf(0));
+        f.instruction(&Instruction::End);
+    }
+
+    /// A copy endpoint: a base local plus a constant displacement.
+    fn addr(local: u32, offset: u32) -> MemAddr {
+        MemAddr { local, offset }
+    }
+
+    /// The load/store pair a copy of `width` bytes uses, spelled out
+    /// independently of [`CopyWidth`] so the tests pin the instruction choice
+    /// and the one-byte alignment hint rather than restating the emitter.
+    fn copy_load_store(
+        width: u32,
+        load_offset: u64,
+        store_offset: u64,
+    ) -> (Instruction<'static>, Instruction<'static>) {
+        let memarg = |offset| MemArg {
+            offset,
+            align: 0,
+            memory_index: MEMORY_INDEX,
+        };
+        match width {
+            8 => (
+                Instruction::I64Load(memarg(load_offset)),
+                Instruction::I64Store(memarg(store_offset)),
+            ),
+            4 => (
+                Instruction::I32Load(memarg(load_offset)),
+                Instruction::I32Store(memarg(store_offset)),
+            ),
+            2 => (
+                Instruction::I32Load16U(memarg(load_offset)),
+                Instruction::I32Store16(memarg(store_offset)),
+            ),
+            1 => (
+                Instruction::I32Load8U(memarg(load_offset)),
+                Instruction::I32Store8(memarg(store_offset)),
+            ),
+            other => panic!("no copy unit of width {other}"),
+        }
+    }
+
+    /// A straight-line copy expectation: region size and the `(width,
+    /// displacement)` units that must cover it.
+    type CopyCase = (u32, &'static [(u32, u32)]);
+
+    /// A looped copy expectation: region size, the bytes the loop covers, and
+    /// the `(width, displacement)` units of the static tail after it.
+    type CopyLoopCase = (u32, i32, &'static [(u32, u32)]);
+
+    /// Straight-line copy units `(width, displacement)`, each addressing both
+    /// endpoints through their base locals with the displacement folded into the
+    /// access offsets.
+    fn copy_units(f: &mut Function, dst: MemAddr, src: MemAddr, units: &[(u32, u32)]) {
+        for &(width, at) in units {
+            let (load, store) = copy_load_store(
+                width,
+                u64::from(src.offset + at),
+                u64::from(dst.offset + at),
+            );
+            f.instruction(&Instruction::LocalGet(dst.local));
+            f.instruction(&Instruction::LocalGet(src.local));
+            f.instruction(&load);
+            f.instruction(&store);
+        }
+    }
+
+    /// The 8-bytes-per-iteration copy loop covering `[0, looped_bytes)`.
+    fn copy_loop(f: &mut Function, dst: MemAddr, src: MemAddr, looped_bytes: i32, index: u32) {
+        let (load, store) = copy_load_store(8, u64::from(src.offset), u64::from(dst.offset));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(index));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(dst.local));
+        f.instruction(&Instruction::LocalGet(index));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(src.local));
+        f.instruction(&Instruction::LocalGet(index));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&load);
+        f.instruction(&store);
+        f.instruction(&Instruction::LocalGet(index));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalTee(index));
+        f.instruction(&Instruction::I32Const(looped_bytes));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::BrIf(0));
+        f.instruction(&Instruction::End);
+    }
+
+    #[test]
+    fn frame_fill_unrolled_below_limit() {
+        const FP: u32 = 2;
+        let actual =
+            body_of(|f| emit_stack_prologue(f, &frame_of(16, FP), &mut ScratchAlloc::new(3)));
+        let expected = body_of(|f| {
+            prologue_prefix(f, 16, FP);
+            fill_store(f, FP, 0);
+            fill_store(f, FP, 8);
+        });
+        assert_eq!(
+            actual, expected,
+            "a 16-byte frame is cleared by two i64 stores"
+        );
+    }
+
+    #[test]
+    fn frame_fill_unrolled_at_limit() {
+        const FP: u32 = 0;
+        #[allow(clippy::cast_possible_wrap)]
+        let limit = BULK_UNROLL_LIMIT_BYTES as i32;
+        let actual = body_of(|f| {
+            emit_stack_prologue(
+                f,
+                &frame_of(BULK_UNROLL_LIMIT_BYTES, FP),
+                &mut ScratchAlloc::new(1),
+            );
+        });
+        let expected = body_of(|f| {
+            prologue_prefix(f, limit, FP);
+            for offset in (0..u64::from(BULK_UNROLL_LIMIT_BYTES)).step_by(8) {
+                fill_store(f, FP, offset);
+            }
+        });
+        assert_eq!(
+            actual, expected,
+            "a frame exactly at the unroll limit stays straight-line"
+        );
+    }
+
+    #[test]
+    fn frame_fill_unrolled_declares_no_scratch_local() {
+        let mut scratch = ScratchAlloc::new(4);
+        body_of(|f| emit_stack_prologue(f, &frame_of(BULK_UNROLL_LIMIT_BYTES, 3), &mut scratch));
+        assert!(
+            scratch.declarations().is_empty(),
+            "an unrolled fill needs no induction variable, so it must declare no local"
+        );
+    }
+
+    /// The looped fill clears 16 bytes per iteration and compares the advanced
+    /// index against the frame size, which is always a multiple of 16 — so the
+    /// decomposition is exact and the loop needs no tail.
+    #[test]
+    fn frame_fill_loop_just_above_limit() {
+        const FP: u32 = 1;
+        const INDEX: u32 = 5;
+        let mut scratch = ScratchAlloc::new(INDEX);
+        let actual = body_of(|f| emit_stack_prologue(f, &frame_of(144, FP), &mut scratch));
+        let expected = body_of(|f| {
+            prologue_prefix(f, 144, FP);
+            fill_loop(f, FP, INDEX, 144);
+        });
+        assert_eq!(
+            actual, expected,
+            "a 144-byte frame is cleared by a 16-byte-stride loop"
+        );
+        assert_eq!(
+            scratch.declarations().len(),
+            1,
+            "the looped fill declares exactly its induction variable"
+        );
+    }
+
+    /// The looped form's shape does not grow with the frame: only the bound in
+    /// the comparison changes.
+    #[test]
+    fn frame_fill_loop_large_frame() {
+        const FP: u32 = 0;
+        const INDEX: u32 = 1;
+        let actual = body_of(|f| {
+            emit_stack_prologue(f, &frame_of(4096, FP), &mut ScratchAlloc::new(INDEX));
+        });
+        let expected = body_of(|f| {
+            prologue_prefix(f, 4096, FP);
+            fill_loop(f, FP, INDEX, 4096);
+        });
+        assert_eq!(
+            actual, expected,
+            "a large frame uses the same loop with a wider bound"
+        );
+    }
+
+    /// The frame pointer may have wrapped past the end of memory when the shadow
+    /// stack overflows, and WebAssembly computes effective addresses without
+    /// 32-bit wraparound. The lowest address in the frame must therefore be the
+    /// first one touched, so that such a frame traps before any byte is written —
+    /// the property the replaced `memory.fill`'s up-front bounds check provided.
+    #[test]
+    fn frame_fill_first_memory_access_is_the_store_at_offset_zero() {
+        const FP: u32 = 0;
+        for frame_size in [16, BULK_UNROLL_LIMIT_BYTES, 144, 4096] {
+            #[allow(clippy::cast_possible_wrap)]
+            let signed_size = frame_size as i32;
+            let body = body_of(|f| {
+                emit_stack_prologue(f, &frame_of(frame_size, FP), &mut ScratchAlloc::new(1));
+            });
+            let up_to_first_access = body_of(|f| {
+                prologue_prefix(f, signed_size, FP);
+                if frame_size > BULK_UNROLL_LIMIT_BYTES {
+                    f.instruction(&Instruction::I32Const(0));
+                    f.instruction(&Instruction::LocalSet(1));
+                    f.instruction(&Instruction::Loop(BlockType::Empty));
+                    fill_store_indexed(f, FP, 1, 0);
+                } else {
+                    fill_store(f, FP, 0);
+                }
+            });
+            assert!(
+                body.starts_with(&up_to_first_access),
+                "a {frame_size}-byte frame must reach its offset-0 store before any other access"
+            );
+        }
+    }
+
+    #[test]
+    fn memcpy_unrolled_tail_decompositions() {
+        let dst = addr(0, 0);
+        let src = addr(1, 0);
+        // Every region is covered by whole 8-byte units followed by at most one
+        // unit of each smaller width, so the tail shapes are fully enumerable.
+        // Grouped eight-per-line so the 8-byte run reads as a run.
+        #[rustfmt::skip]
+        let cases: &[CopyCase] = &[
+            (1, &[(1, 0)]),
+            (2, &[(2, 0)]),
+            (3, &[(2, 0), (1, 2)]),
+            (4, &[(4, 0)]),
+            (5, &[(4, 0), (1, 4)]),
+            (6, &[(4, 0), (2, 4)]),
+            (7, &[(4, 0), (2, 4), (1, 6)]),
+            (8, &[(8, 0)]),
+            (24, &[(8, 0), (8, 8), (8, 16)]),
+            (
+                127,
+                &[
+                    (8, 0), (8, 8), (8, 16), (8, 24), (8, 32), (8, 40), (8, 48), (8, 56),
+                    (8, 64), (8, 72), (8, 80), (8, 88), (8, 96), (8, 104), (8, 112),
+                    (4, 120), (2, 124), (1, 126),
+                ],
+            ),
+        ];
+        for &(byte_size, units) in cases {
+            let mut scratch = ScratchAlloc::new(2);
+            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut scratch));
+            let expected = body_of(|f| copy_units(f, dst, src, units));
+            assert_eq!(actual, expected, "{byte_size}-byte copy decomposition");
+            assert!(
+                scratch.declarations().is_empty(),
+                "a {byte_size}-byte copy is unrolled and must declare no scratch local"
+            );
+        }
+    }
+
+    #[test]
+    fn memcpy_unrolled_at_limit_is_all_eight_byte_units() {
+        let dst = addr(3, 0);
+        let src = addr(4, 0);
+        let units: Vec<(u32, u32)> = (0..BULK_UNROLL_LIMIT_BYTES)
+            .step_by(8)
+            .map(|at| (8, at))
+            .collect();
+        let actual = body_of(|f| {
+            emit_memcpy_via_locals(
+                f,
+                dst,
+                src,
+                BULK_UNROLL_LIMIT_BYTES,
+                &mut ScratchAlloc::new(5),
+            );
+        });
+        let expected = body_of(|f| copy_units(f, dst, src, &units));
+        assert_eq!(
+            actual, expected,
+            "a copy exactly at the unroll limit stays straight-line"
+        );
+    }
+
+    #[test]
+    fn memcpy_folds_displacements_into_offset_immediates() {
+        let dst = addr(6, 40);
+        let src = addr(7, 8);
+        let actual =
+            body_of(|f| emit_memcpy_via_locals(f, dst, src, 12, &mut ScratchAlloc::new(8)));
+        let expected = body_of(|f| copy_units(f, dst, src, &[(8, 0), (4, 8)]));
+        assert_eq!(
+            actual, expected,
+            "displaced endpoints address through offset immediates, so an unrolled copy \
+             emits no i32.add at all"
+        );
+    }
+
+    #[test]
+    fn memcpy_loop_above_limit_with_tails() {
+        const INDEX: u32 = 9;
+        let dst = addr(0, 0);
+        let src = addr(1, 0);
+        // `looped_bytes` is the largest multiple of 8 not exceeding the region;
+        // whatever remains is emitted as the same static tail an unrolled copy uses.
+        let cases: &[CopyLoopCase] = &[
+            (129, 128, &[(1, 128)]),
+            (131, 128, &[(2, 128), (1, 130)]),
+            (135, 128, &[(4, 128), (2, 132), (1, 134)]),
+            (136, 136, &[]),
+        ];
+        for &(byte_size, looped_bytes, tail) in cases {
+            let mut scratch = ScratchAlloc::new(INDEX);
+            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut scratch));
+            let expected = body_of(|f| {
+                copy_loop(f, dst, src, looped_bytes, INDEX);
+                copy_units(f, dst, src, tail);
+            });
+            assert_eq!(actual, expected, "{byte_size}-byte copy loop and tail");
+            assert_eq!(
+                scratch.declarations().len(),
+                1,
+                "a {byte_size}-byte copy declares exactly its induction variable"
+            );
+        }
+    }
+
+    #[test]
+    fn memcpy_loop_keeps_displacements_in_the_access_offsets() {
+        const INDEX: u32 = 4;
+        let dst = addr(2, 64);
+        let src = addr(3, 16);
+        let actual =
+            body_of(|f| emit_memcpy_via_locals(f, dst, src, 130, &mut ScratchAlloc::new(INDEX)));
+        let expected = body_of(|f| {
+            copy_loop(f, dst, src, 128, INDEX);
+            copy_units(f, dst, src, &[(2, 128)]);
+        });
+        assert_eq!(
+            actual, expected,
+            "the loop indexes with $i and keeps the constant displacement in the memarg"
+        );
+    }
+
+    #[test]
+    fn memcpy_of_zero_bytes_emits_nothing() {
+        let untouched = body_of(|_| {});
+        let mut scratch = ScratchAlloc::new(0);
+        let body = body_of(|f| emit_memcpy_via_locals(f, addr(0, 0), addr(1, 0), 0, &mut scratch));
+        assert_eq!(body, untouched, "an empty region copies nothing");
+        assert!(scratch.declarations().is_empty(), "and allocates nothing");
+    }
+
+    /// Body-level copy sites push the destination first and the source second,
+    /// so the source is on top and pops first.
+    #[test]
+    fn memcpy_via_stack_pops_source_before_destination() {
+        const FIRST_FREE: u32 = 3;
+        let mut scratch = ScratchAlloc::new(FIRST_FREE);
+        let actual = body_of(|f| emit_memcpy_via_stack(f, 8, &mut scratch));
+        let dst = addr(FIRST_FREE, 0);
+        let src = addr(FIRST_FREE + 1, 0);
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalSet(src.local));
+            f.instruction(&Instruction::LocalSet(dst.local));
+            copy_units(f, dst, src, &[(8, 0)]);
+        });
+        assert_eq!(actual, expected, "source pops into $s, destination into $d");
+    }
+
+    #[test]
+    fn memcpy_via_stack_consumes_both_addresses_for_an_empty_region() {
+        const FIRST_FREE: u32 = 0;
+        let mut scratch = ScratchAlloc::new(FIRST_FREE);
+        let actual = body_of(|f| emit_memcpy_via_stack(f, 0, &mut scratch));
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalSet(FIRST_FREE + 1));
+            f.instruction(&Instruction::LocalSet(FIRST_FREE));
+        });
+        assert_eq!(
+            actual, expected,
+            "an empty region still consumes the two pushed addresses"
+        );
+    }
+
+    #[test]
+    fn scratch_allocates_in_first_use_order_from_the_first_free_index() {
+        let mut scratch = ScratchAlloc::new(7);
+        assert_eq!(scratch.counter(), 7);
+        assert_eq!(scratch.dst(), 8);
+        assert_eq!(scratch.src(), 9);
+        assert_eq!(scratch.counter(), 7, "a second use returns the same local");
+        assert_eq!(scratch.declarations(), vec![(1, ValType::I32); 3]);
+    }
+
+    #[test]
+    fn scratch_declares_only_what_was_used() {
+        let unused = ScratchAlloc::new(2);
+        assert!(unused.declarations().is_empty());
+
+        let mut only_counter = ScratchAlloc::new(2);
+        assert_eq!(only_counter.counter(), 2);
+        assert_eq!(only_counter.declarations(), vec![(1, ValType::I32)]);
+    }
+
+    /// Repeated copies in one function share the scratch locals: each copy is
+    /// emitted atomically, so no copy is live across another.
+    #[test]
+    fn scratch_is_shared_across_copies_in_one_function() {
+        let mut scratch = ScratchAlloc::new(4);
+        body_of(|f| {
+            emit_memcpy_via_stack(f, 16, &mut scratch);
+            emit_memcpy_via_stack(f, 200, &mut scratch);
+        });
+        assert_eq!(
+            scratch.declarations().len(),
+            3,
+            "two copies, one of them looped, need one $d, one $s and one $i in total"
+        );
     }
 
     #[test]

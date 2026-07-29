@@ -2879,7 +2879,7 @@ fn qualified_struct_param_body_is_byte_identical_to_item_import_form() {
     // the braced item-import form. Comparing the emitted `mutate` body directly
     // (not just the runtime result) guards against a divergence that happens to
     // return the same value — both forms must produce the same frame prologue,
-    // `memory.copy`, parameter-rebind, and body.
+    // copy-on-entry, parameter-rebind, and body.
     let qualified_main = "\
 use lib::big;
 
@@ -2925,7 +2925,7 @@ pub fn run() -> i32 {
 #[test]
 fn qualified_enum_param_is_not_copied() {
     // An enum reached through a `::`-qualified parameter type is a scalar tag, not
-    // a struct: it must get NO frame slot and NO `memory.copy`. The fix widened
+    // a struct: it must get NO frame slot and NO copy-on-entry. The fix widened
     // the slot-allocation arms to include the qualified carrier, gated on the path
     // resolving to a *struct*; this guards that an enum carrier is turned away, so
     // a qualified-enum parameter stays a bare i32 like the bare-enum form.

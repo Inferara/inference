@@ -39,8 +39,8 @@ use crate::toolchain::{Platform, ToolchainPaths};
 const WASM_OPT_PATH_ENV: &str = "WASM_OPT_PATH";
 
 /// Minimum supported Binaryen major version. The forwarded flags
-/// (`--mvp-features` plus the mutable-globals / bulk-memory enables) and the
-/// `-Os`/`-Oz` levels are stable from Binaryen 116 onward.
+/// (`--mvp-features` plus the `--enable-*` feature flags) and the `-Os`/`-Oz`
+/// levels are stable from Binaryen 116 onward.
 const MIN_WASM_OPT_VERSION: u32 = 116;
 
 /// Identifies which precedence tier resolved `wasm-opt`.
@@ -140,8 +140,8 @@ pub(crate) fn post_build_optimize(
     let wasm_bytes = std::fs::read(&wasm_path)
         .with_context(|| format!("Failed to read {} for optimization", wasm_path.display()))?;
 
-    if let Some(construct) = find_verification_construct(&wasm_bytes)? {
-        bail!(
+    let uses_bulk_memory = match scan_artifact(&wasm_bytes)? {
+        ArtifactScan::VerificationConstruct(construct) => bail!(
             "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
              verification-only construct `{construct}`, which wasm-opt cannot \
              process. Verification constructs (forall/exists/assume/unique and \
@@ -149,8 +149,9 @@ pub(crate) fn post_build_optimize(
              strip. Move the construct into a `spec` block, or disable \
              optimization (`enabled = false` under `[build.wasm-opt]`, or pass \
              `--no-wasm-opt`)."
-        );
-    }
+        ),
+        ArtifactScan::Executable { uses_bulk_memory } => uses_bulk_memory,
+    };
 
     let wasm_opt = match resolve_wasm_opt_with_source()? {
         Some((path, _)) => path,
@@ -160,7 +161,7 @@ pub(crate) fn post_build_optimize(
     check_wasm_opt_version(&wasm_opt)?;
 
     let before = wasm_bytes.len() as u64;
-    optimize_in_place(&wasm_opt, &config.level, &wasm_path)?;
+    optimize_in_place(&wasm_opt, &config.level, &wasm_path, uses_bulk_memory)?;
     let after = std::fs::metadata(&wasm_path)
         .with_context(|| format!("Failed to stat optimized {}", wasm_path.display()))?
         .len();
@@ -449,22 +450,38 @@ fn wasm_opt_doctor_absent(name: &str, paths: Option<&ToolchainPaths>) -> DoctorC
     )
 }
 
-/// Scans `wasm_bytes` for a verification-only opcode and returns its source
-/// spelling (e.g. `"forall"`, `"i32.uzumaki"`) if one is present.
+/// What the pre-optimization scan found in `out/main.wasm`.
+///
+/// The two states are mutually exclusive by construction, so a caller can never
+/// read a bulk-memory verdict off an artifact the scan rejected outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactScan {
+    /// A verification-only construct leaked into an ordinary function; the
+    /// payload is its source spelling (e.g. `"forall"`, `"i32.uzumaki"`).
+    VerificationConstruct(&'static str),
+    /// An ordinary executable artifact, and whether it carries any bulk-memory
+    /// operator.
+    Executable { uses_bulk_memory: bool },
+}
+
+/// Scans `wasm_bytes` once for both facts the optimizer needs up front: whether
+/// a verification-only construct leaked into the artifact, and whether the
+/// artifact carries bulk memory.
 ///
 /// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
-/// carries none of these. Finding one means a verification construct leaked into
-/// an ordinary function — `wasm-opt` would reject the unknown `0xfc` opcode with
-/// an opaque error, so this pre-scan surfaces it with remediation instead.
+/// carries no verification construct. Finding one means it leaked into an
+/// ordinary function — `wasm-opt` would reject the unknown `0xfc` opcode with an
+/// opaque error, so the scan stops there and lets the caller surface it with
+/// remediation instead.
 ///
 /// # Errors
 ///
 /// Errors if the artifact cannot be parsed as WebAssembly.
-fn find_verification_construct(wasm_bytes: &[u8]) -> Result<Option<&'static str>> {
+fn scan_artifact(wasm_bytes: &[u8]) -> Result<ArtifactScan> {
+    let mut uses_bulk_memory = false;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|err| {
-            anyhow::anyhow!("failed to scan out/main.wasm for verification constructs: {err}")
-        })?;
+        let payload =
+            payload.map_err(|err| anyhow::anyhow!("failed to scan out/main.wasm: {err}"))?;
         let Payload::CodeSectionEntry(body) = payload else {
             continue;
         };
@@ -476,11 +493,27 @@ fn find_verification_construct(wasm_bytes: &[u8]) -> Result<Option<&'static str>
                 anyhow::anyhow!("failed to decode an operator while scanning out/main.wasm: {err}")
             })?;
             if let Some(name) = verification_construct_name(&op) {
-                return Ok(Some(name));
+                return Ok(ArtifactScan::VerificationConstruct(name));
             }
+            uses_bulk_memory |= is_bulk_memory(&op);
         }
     }
-    Ok(None)
+    Ok(ArtifactScan::Executable { uses_bulk_memory })
+}
+
+/// Whether `op` belongs to the bulk-memory proposal.
+///
+/// Inference codegen emits none of these, so one can reach a built artifact only
+/// through a statically merged external module — the linker's supported-feature
+/// envelope admits them. The segment-indexed forms are included even though the
+/// merge rejects them today, so that a widened linker cannot silently produce an
+/// artifact Binaryen is not told to parse.
+fn is_bulk_memory(op: &Operator) -> bool {
+    use Operator::{DataDrop, MemoryCopy, MemoryFill, MemoryInit};
+    matches!(
+        op,
+        MemoryFill { .. } | MemoryCopy { .. } | MemoryInit { .. } | DataDrop { .. }
+    )
 }
 
 /// The source spelling of a verification-only operator, or `None` for an
@@ -508,21 +541,38 @@ fn verification_construct_name(op: &Operator) -> Option<&'static str> {
 /// Builds the `wasm-opt` argument vector.
 ///
 /// `--mvp-features` pins the baseline feature set so the result is stable across
-/// Binaryen versions; the two `--enable-*` flags re-admit exactly the proposals
-/// Inference codegen relies on — a mutable exported `__stack_pointer` global
-/// (mutable-globals) and `memory.copy`/`memory.fill` (bulk-memory) — matching
-/// the linker's supported-feature envelope. `-O<level>` works uniformly for
-/// every value `WasmOptConfig` validates, so there is no second mapping table.
-fn wasm_opt_args(level: &str, input: &Path, output: &Path) -> Vec<OsString> {
-    vec![
+/// Binaryen versions, and `--enable-mutable-globals` re-admits the one proposal
+/// Inference codegen always relies on: the exported mutable `__stack_pointer`
+/// global.
+///
+/// Codegen itself emits plain WebAssembly 1.0, so bulk memory can enter an
+/// artifact only through a statically merged external module — the linker
+/// deliberately accepts `memory.copy`/`memory.fill` from one. Binaryen hard-
+/// rejects those bytes unless told to parse them, so `--enable-bulk-memory` is
+/// forwarded exactly when `enable_bulk_memory` reports the input carries such an
+/// operator. Withholding it everywhere else is what stops Binaryen from
+/// introducing bulk memory into an artifact that had none.
+///
+/// `-O<level>` works uniformly for every value `WasmOptConfig` validates, so
+/// there is no second mapping table.
+fn wasm_opt_args(
+    level: &str,
+    input: &Path,
+    output: &Path,
+    enable_bulk_memory: bool,
+) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from(format!("-O{level}")),
         OsString::from("--mvp-features"),
         OsString::from("--enable-mutable-globals"),
-        OsString::from("--enable-bulk-memory"),
-        input.as_os_str().to_os_string(),
-        OsString::from("-o"),
-        output.as_os_str().to_os_string(),
-    ]
+    ];
+    if enable_bulk_memory {
+        args.push(OsString::from("--enable-bulk-memory"));
+    }
+    args.push(input.as_os_str().to_os_string());
+    args.push(OsString::from("-o"));
+    args.push(output.as_os_str().to_os_string());
+    args
 }
 
 /// Runs `wasm-opt` over `wasm_path`, replacing it in place only if the optimized
@@ -535,13 +585,22 @@ fn wasm_opt_args(level: &str, input: &Path, output: &Path) -> Vec<OsString> {
 /// the original artifact untouched and makes a best-effort attempt to remove the
 /// temp file.
 ///
+/// `uses_bulk_memory` is the pre-scan's verdict on the input, and governs both
+/// the forwarded feature flags and the re-validation envelope so the two cannot
+/// drift apart.
+///
 /// # Errors
 ///
 /// Errors if `wasm-opt` cannot be spawned, exits nonzero, produces output that
 /// cannot be read or fails re-validation, or if the final rename fails.
-fn optimize_in_place(wasm_opt: &Path, level: &str, wasm_path: &Path) -> Result<()> {
+fn optimize_in_place(
+    wasm_opt: &Path,
+    level: &str,
+    wasm_path: &Path,
+    uses_bulk_memory: bool,
+) -> Result<()> {
     let tmp_path = optimized_tmp_path(wasm_path);
-    let args = wasm_opt_args(level, wasm_path, &tmp_path);
+    let args = wasm_opt_args(level, wasm_path, &tmp_path, uses_bulk_memory);
 
     let output = Command::new(wasm_opt)
         .args(&args)
@@ -570,7 +629,7 @@ fn optimize_in_place(wasm_opt: &Path, level: &str, wasm_path: &Path) -> Result<(
         }
     };
 
-    if let Err(err) = validate_optimized(&optimized) {
+    if let Err(err) = validate_optimized(&optimized, uses_bulk_memory) {
         let _ = std::fs::remove_file(&tmp_path);
         bail!(
             "wasm-opt produced an artifact that failed re-validation: {err}. The \
@@ -600,18 +659,28 @@ fn optimized_tmp_path(wasm_path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-/// Re-validates `bytes` against the same feature envelope the linker enforces
-/// (`GC_TYPES | MUTABLE_GLOBAL | BULK_MEMORY`), guarding against a `wasm-opt`
-/// that emits something outside the executable subset the pipeline supports.
+/// Re-validates `bytes` against the narrowest envelope the input artifact
+/// justified, guarding against a `wasm-opt` that emits something outside the
+/// executable subset the pipeline supports.
+///
+/// The baseline is WebAssembly 1.0 plus the mutable `__stack_pointer` global
+/// (`GC_TYPES` is the parser fork's value-type flag, not a proposal opt-in).
+/// `BULK_MEMORY` joins it only when `allow_bulk_memory` records that the
+/// pre-optimization artifact already carried bulk operators — which only a
+/// linked external module can produce, and which it would be wrong to reject
+/// after the linker accepted them. For the ordinary bulk-free artifact, leaving
+/// `BULK_MEMORY` out is precisely what makes this a guard: an optimizer that
+/// introduced `memory.copy` or `memory.fill` fails here instead of shipping.
 ///
 /// # Errors
 ///
 /// Errors with the validator's message when `bytes` is not valid WebAssembly
 /// within that feature set.
-fn validate_optimized(bytes: &[u8]) -> Result<()> {
-    let features = WasmFeatures::GC_TYPES
-        .union(WasmFeatures::MUTABLE_GLOBAL)
-        .union(WasmFeatures::BULK_MEMORY);
+fn validate_optimized(bytes: &[u8], allow_bulk_memory: bool) -> Result<()> {
+    let mut features = WasmFeatures::GC_TYPES.union(WasmFeatures::MUTABLE_GLOBAL);
+    if allow_bulk_memory {
+        features = features.union(WasmFeatures::BULK_MEMORY);
+    }
     inf_wasmparser::Validator::new_with_features(features)
         .validate_all(bytes)
         .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -646,6 +715,46 @@ mod tests {
         module.finish()
     }
 
+    /// Like [`module_with_raw_body`] but the module also declares a one-page
+    /// memory, so a body exercising memory operators can be *validated* rather
+    /// than merely parsed.
+    fn module_with_memory_and_raw_body(body: &[u8]) -> Vec<u8> {
+        use wasm_encoder::{
+            CodeSection, Function, FunctionSection, MemorySection, MemoryType, Module, TypeSection,
+        };
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: 1,
+            maximum: Some(1),
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+        let mut code = CodeSection::new();
+        let mut f = Function::new([]);
+        f.raw(body.iter().copied());
+        code.function(&f);
+        module.section(&code);
+        module.finish()
+    }
+
+    /// `i32.const 0` three times, `memory.fill 0`, `end` — a well-typed
+    /// bulk-memory body over the single shared memory.
+    const MEMORY_FILL_BODY: &[u8] = &[0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x00, 0x0b];
+
+    /// `i32.const 0` three times, `memory.copy 0 0`, `end`.
+    const MEMORY_COPY_BODY: &[u8] = &[
+        0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x00, 0x00, 0x0b,
+    ];
+
     #[test]
     fn parse_wasm_opt_version_reads_release_output() {
         assert_eq!(
@@ -675,12 +784,13 @@ mod tests {
 
     #[test]
     fn wasm_opt_args_are_exact_for_level_z() {
-        let args = wasm_opt_args("z", Path::new("in.wasm"), Path::new("out.wasm.opt"));
+        // The ordinary bulk-free artifact: no --enable-bulk-memory, so Binaryen
+        // cannot introduce what codegen never emitted.
+        let args = wasm_opt_args("z", Path::new("in.wasm"), Path::new("out.wasm.opt"), false);
         let expected: Vec<OsString> = [
             "-Oz",
             "--mvp-features",
             "--enable-mutable-globals",
-            "--enable-bulk-memory",
             "in.wasm",
             "-o",
             "out.wasm.opt",
@@ -693,15 +803,35 @@ mod tests {
 
     #[test]
     fn wasm_opt_args_are_exact_for_level_3() {
-        let args = wasm_opt_args("3", Path::new("a.wasm"), Path::new("b.wasm.opt"));
+        let args = wasm_opt_args("3", Path::new("a.wasm"), Path::new("b.wasm.opt"), false);
         let expected: Vec<OsString> = [
             "-O3",
             "--mvp-features",
             "--enable-mutable-globals",
-            "--enable-bulk-memory",
             "a.wasm",
             "-o",
             "b.wasm.opt",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn wasm_opt_args_enable_bulk_memory_for_a_bulk_bearing_input() {
+        // An artifact that carries bulk memory (only a linked external module
+        // can produce one) must be parseable by Binaryen, so the flag is
+        // appended after the always-on enables and before the input path.
+        let args = wasm_opt_args("z", Path::new("in.wasm"), Path::new("out.wasm.opt"), true);
+        let expected: Vec<OsString> = [
+            "-Oz",
+            "--mvp-features",
+            "--enable-mutable-globals",
+            "--enable-bulk-memory",
+            "in.wasm",
+            "-o",
+            "out.wasm.opt",
         ]
         .into_iter()
         .map(OsString::from)
@@ -933,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn find_verification_construct_detects_each_nondet_block() {
+    fn scan_artifact_detects_each_nondet_block() {
         for (sub_opcode, name) in [
             (0x3a_u8, "forall"),
             (0x3b, "exists"),
@@ -944,34 +1074,99 @@ mod tests {
             let body = [0x00, 0xfc, sub_opcode, 0x40, 0x0b, 0x0b];
             let module = module_with_raw_body(&body);
             assert_eq!(
-                find_verification_construct(&module).unwrap(),
-                Some(name),
+                scan_artifact(&module).unwrap(),
+                ArtifactScan::VerificationConstruct(name),
                 "sub-opcode {sub_opcode:#x} must be reported as `{name}`"
             );
         }
     }
 
     #[test]
-    fn find_verification_construct_detects_uzumaki() {
+    fn scan_artifact_detects_uzumaki() {
         // `<uzumaki> drop; end`, for both the i32 and i64 forms.
         let i32_body = [0x00, 0xfc, 0x31, 0x1a, 0x0b];
         assert_eq!(
-            find_verification_construct(&module_with_raw_body(&i32_body)).unwrap(),
-            Some("i32.uzumaki")
+            scan_artifact(&module_with_raw_body(&i32_body)).unwrap(),
+            ArtifactScan::VerificationConstruct("i32.uzumaki")
         );
         let i64_body = [0x00, 0xfc, 0x32, 0x1a, 0x0b];
         assert_eq!(
-            find_verification_construct(&module_with_raw_body(&i64_body)).unwrap(),
-            Some("i64.uzumaki")
+            scan_artifact(&module_with_raw_body(&i64_body)).unwrap(),
+            ArtifactScan::VerificationConstruct("i64.uzumaki")
         );
     }
 
     #[test]
-    fn find_verification_construct_ignores_plain_body() {
-        // An ordinary executable body (just `end`) carries no verification-only
-        // opcode.
+    fn scan_artifact_reports_a_plain_body_as_bulk_free() {
+        // An ordinary executable body (just `end`) carries neither a
+        // verification-only opcode nor bulk memory.
         let module = module_with_raw_body(&[0x0b]);
-        assert_eq!(find_verification_construct(&module).unwrap(), None);
+        assert_eq!(
+            scan_artifact(&module).unwrap(),
+            ArtifactScan::Executable {
+                uses_bulk_memory: false
+            }
+        );
+    }
+
+    #[test]
+    fn scan_artifact_detects_each_bulk_memory_operator() {
+        // The four bulk-memory operators, each in an otherwise ordinary body.
+        // `memory.init 0 0` and `data.drop 0` decode without their segments;
+        // the scan reads operators, it does not validate.
+        let memory_init: &[u8] = &[
+            0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00, 0x00, 0x0b,
+        ];
+        let data_drop: &[u8] = &[0xfc, 0x09, 0x00, 0x0b];
+        for (body, name) in [
+            (MEMORY_FILL_BODY, "memory.fill"),
+            (MEMORY_COPY_BODY, "memory.copy"),
+            (memory_init, "memory.init"),
+            (data_drop, "data.drop"),
+        ] {
+            let module = module_with_raw_body(body);
+            assert_eq!(
+                scan_artifact(&module).unwrap(),
+                ArtifactScan::Executable {
+                    uses_bulk_memory: true
+                },
+                "{name} must be reported as bulk memory"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_artifact_reports_verification_construct_ahead_of_bulk_memory() {
+        // A leaked construct is a hard error, so it wins over the bulk verdict
+        // even when both are present — the caller never has to choose.
+        let mut body = vec![0xfc, 0x31, 0x1a];
+        body.extend_from_slice(MEMORY_FILL_BODY);
+        assert_eq!(
+            scan_artifact(&module_with_raw_body(&body)).unwrap(),
+            ArtifactScan::VerificationConstruct("i32.uzumaki")
+        );
+    }
+
+    #[test]
+    fn validate_optimized_rejects_bulk_memory_the_input_did_not_have() {
+        // The guard that matters: an optimizer that introduced bulk memory into
+        // a clean artifact fails re-validation instead of shipping.
+        let module = module_with_memory_and_raw_body(MEMORY_FILL_BODY);
+        assert!(
+            validate_optimized(&module, false).is_err(),
+            "bulk memory must not validate when the input artifact carried none"
+        );
+        assert!(
+            validate_optimized(&module, true).is_ok(),
+            "the same module must validate once the input justified bulk memory"
+        );
+    }
+
+    #[test]
+    fn validate_optimized_accepts_a_plain_module_under_the_strict_envelope() {
+        // Wasm 1.0 output validates without any bulk-memory opt-in.
+        let module = module_with_memory_and_raw_body(&[0x0b]);
+        assert!(validate_optimized(&module, false).is_ok());
     }
 
     // Spawns a real executable stub, so it is gated to unix (mirroring the
@@ -988,7 +1183,7 @@ mod tests {
         std::fs::write(&wasm_path, original).unwrap();
 
         let fake = write_failing_wasm_opt(&dir);
-        let err = optimize_in_place(&fake, "z", &wasm_path).unwrap_err();
+        let err = optimize_in_place(&fake, "z", &wasm_path, false).unwrap_err();
         assert!(
             err.to_string().contains("wasm-opt failed"),
             "a nonzero exit must surface as a wasm-opt failure, got: {err}"

@@ -48,8 +48,11 @@ Pass 2 — lower_statement
   the appropriate push instruction followed by local.set <index>.
 ```
 
-The local declarations collected during Pass 1 are handed to `wasm_encoder::Function::new()`
-before any instructions are emitted, satisfying the binary format requirement.
+The local declarations collected during Pass 1 satisfy the binary format requirement — but
+they are not the *complete* declaration list a function may need, and they are not handed to
+`wasm_encoder::Function::new()` immediately. See
+[Local Declarations Are Finalized After the Body Is Built](#local-declarations-are-finalized-after-the-body-is-built)
+below for why.
 
 ### Diagram
 
@@ -64,15 +67,42 @@ visit_function_definition
         |         v
         |     locals_map: { "x" -> (0, i32), "y" -> (1, i64), ... }
         |
-        +---> Function::new(local_declarations)   <-- wasm-encoder
-        |         |
-        |         | local_declarations built from locals_map, sorted by index
+        +---> Function::new([])   <-- wasm-encoder; body starts with NO
+        |         |                  declarations, see note below
         |
         +---> lower_statement(body, ...)
+        |         |
+        |         | Emits push + local.set for each VariableDefinition /
+        |         | ConstantDefinition using indices from locals_map.
+        |         | Memory lowerings (region fill/copy) may allocate
+        |         | further scratch locals from `ScratchAlloc` as they go.
+        |
+        +---> take_completed_function()
                   |
-                  | Emits push + local.set for each VariableDefinition /
-                  | ConstantDefinition using indices from locals_map
+                  | Prefixes the already-encoded body with the complete
+                  | declaration list: locals_map's declarations followed by
+                  | one entry per allocated scratch local.
 ```
+
+### Local Declarations Are Finalized After the Body Is Built
+
+Pass 1's `locals_map` covers every named `let`/`const` local, plus the eagerly reserved
+frame-pointer, bounds-check, and narrow-division temporaries — everything computable by
+walking the AST without emitting any instructions. It does **not** cover the scratch i32
+locals (`ScratchAlloc`) that the region fill and region copy lowerings allocate on demand
+while the body is being emitted, for zero-initializing a stack frame or copying a compound
+value between two addresses without a bulk-memory instruction (see
+[docs/arrays-and-memory.md](arrays-and-memory.md#region-fill-and-copy-lowering)). Whether a
+function needs those, and how many, depends on what gets lowered — not something Pass 1 can
+predict without duplicating the emission logic.
+
+To reconcile this with the requirement that declarations precede instructions, the compiler
+builds the body into a `wasm_encoder::Function` created with an *empty* locals vector
+(`Function::new([])`). Once the body is fully emitted, `Compiler::take_completed_function`
+takes the raw encoded body, strips its (empty) locals-vector prefix, and re-encodes it behind
+the real declaration list — the names from `locals_map` followed by one `(1, ValType::I32)`
+entry per allocated scratch slot. A function that allocates no scratch locals is
+byte-identical to one built with the final declarations from the start.
 
 ### Scope Flattening
 
@@ -256,7 +286,9 @@ bindings in `tests/test_data/codegen/wasm/base/local_variables/local_variables.i
 
 ## Related Files
 
-- `core/wasm-codegen/src/compiler.rs` — `pre_scan_locals`, `lower_statement`, `lower_literal`
+- `core/wasm-codegen/src/compiler.rs` — `pre_scan_locals`, `lower_statement`, `lower_literal`, `take_completed_function`
+- `core/wasm-codegen/src/memory.rs` — `ScratchAlloc`
+- `core/wasm-codegen/docs/arrays-and-memory.md` — Region fill/copy lowering that uses `ScratchAlloc`
 - `core/wasm-codegen/README.md` — Crate-level overview and compilation phases
 - `tests/test_data/codegen/wasm/base/local_variables/local_variables.inf` — Comprehensive `let` test fixture
 - `tests/test_data/codegen/wasm/base/local_variables_exec/local_variables_exec.inf` — Executable test fixture

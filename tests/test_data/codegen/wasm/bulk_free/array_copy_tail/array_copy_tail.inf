@@ -1,0 +1,45 @@
+// Array parameters whose byte size is not a multiple of the eight-byte copy
+// chunk, so the looped copy is followed by a statically unrolled tail. Each
+// length picks a different combination of the descending 4/2/1 tail widths:
+//
+//   [u8; 129]  = 128 + 1          tail: 1
+//   [u8; 130]  = 128 + 2          tail: 2
+//   [u8; 131]  = 128 + 2 + 1      tail: 2, 1
+//   [u8; 135]  = 128 + 4 + 2 + 1  tail: 4, 2, 1
+//   [u32; 33]  = 128 + 4          tail: 4
+//   [u16; 67]  = 128 + 4 + 2      tail: 4, 2
+//
+// No Inference caller builds these: the array parameter ABI is a pointer, so
+// the test harness lays a byte pattern down in linear memory and passes its
+// address. That reads the copied bytes back one index at a time, which is what
+// makes a tail that drops or misplaces a byte visible.
+
+pub fn at_129(data: [u8; 129], i: i32) -> u8 {
+    return data[i];
+}
+
+pub fn at_130(data: [u8; 130], i: i32) -> u8 {
+    return data[i];
+}
+
+pub fn at_131(data: [u8; 131], i: i32) -> u8 {
+    return data[i];
+}
+
+pub fn at_135(data: [u8; 135], i: i32) -> u8 {
+    return data[i];
+}
+
+pub fn at_u32_33(data: [u32; 33], i: i32) -> u32 {
+    return data[i];
+}
+
+pub fn at_u16_67(data: [u16; 67], i: i32) -> u16 {
+    return data[i];
+}
+
+// The callee writes its own copy; the caller's bytes must be untouched.
+pub fn clobber_135(mut data: [u8; 135], i: i32) -> u8 {
+    data[i] = 255;
+    return data[i];
+}

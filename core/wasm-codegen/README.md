@@ -63,7 +63,7 @@ Typed AST (TypedContext)
    initialization (`let` and `const`), array and struct literal elements whose value is
    syntactically zero (the literal `0`, `-0`, `false`, or any of these wrapped in
    parentheses or a unary negation) are not stored to linear memory; the function
-   prologue's `memory.fill 0` already guarantees those bytes are zero. This
+   prologue's zero-fill already guarantees those bytes are zero. This
    zero-store elision applies only at initialization time — assignment statements always
    emit stores regardless of value because the destination may hold non-zero data from
    a prior operation. The elision is controlled by the `init_zero_elision` flag on
@@ -76,7 +76,7 @@ Typed AST (TypedContext)
    (nested structs and array-typed struct fields) use pointer semantics during member
    access: the member access expression pushes the field's base address rather than
    loading a scalar. `lower_struct_literal_fields` handles nested struct literal
-   initialization and array-field initialization with element-wise stores or `memory.copy`
+   initialization and array-field initialization with element-wise stores or a region copy
    depending on whether the RHS is a literal or an identifier. Arrays of structs are
    supported: each element occupies `struct_total_size` bytes, addressed by
    `base + index * elem_size`; element field reads/writes use the same dispatch as plain
@@ -133,6 +133,16 @@ already mask the count modulo 32/64, which is exactly the type width for `i32`/`
 i32, where wasm's mod-32 mask would produce a non-monotonic cliff, so a narrow-typed shift
 masks the count (`& 7` / `& 15`) before the wasm shift, extending wasm's own mod-width
 semantics to the declared type. The mask applies to both `<<` and `>>`.
+
+### WebAssembly Feature Level
+
+Every emitted function body, and the module as a whole, stays within the WebAssembly
+1.0 (MVP) instruction set. Whole-region memory operations that would naturally reach
+for the bulk-memory proposal's `memory.fill`/`memory.copy` — frame zero-initialization
+in the prologue, array/struct parameter copies, sret returns, and struct-to-struct
+assignment — are instead lowered to plain loads and stores: a straight-line sequence
+for small regions, an index-driven loop for large ones. See
+[docs/arrays-and-memory.md](docs/arrays-and-memory.md#region-fill-and-copy-lowering).
 
 ## Non-Deterministic Extensions
 
@@ -290,13 +300,19 @@ Execution: `wasmtime --invoke main module.wasm`
 ## Usage
 
 ```rust
-use inference_wasm_codegen::codegen;
+use inference_wasm_codegen::{CompilationMode, OptLevel, Target, codegen};
 use inference_type_checker::typed_context::TypedContext;
 
 fn compile(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
     // Generate WASM bytecode from typed AST
-    let wasm_bytes = codegen(typed_context)?;
-    Ok(wasm_bytes)
+    let output = codegen(
+        typed_context,
+        Target::Wasm32,
+        CompilationMode::Compile,
+        OptLevel::O2,
+        "module",
+    )?;
+    Ok(output.wasm().to_vec())
 }
 ```
 
@@ -304,7 +320,8 @@ The `codegen` function:
 1. Creates a compiler instance
 2. Traverses the typed AST and emits WASM instructions for function definitions
 3. Assembles the WASM module sections
-4. Returns the resulting WASM bytecode
+4. Returns a `CodegenOutput` carrying the WASM bytecode (`.wasm()`) plus target/mode
+   metadata and, in proof mode, the per-spec `hassert` obligation map
 
 ## Current Limitations
 
@@ -337,8 +354,10 @@ Detailed design documents live in `docs/`:
   prologue/epilogue emission, load/store instruction selection, copy-on-entry semantics for
   array and struct parameters, struct field layout (`compute_struct_field_layout`),
   `CompoundFieldLayout` for nested struct and array fields, member access lowering for scalar
-  and compound fields, struct literal lowering with nested dispatch, arrays of structs, and
-  struct uzumaki with array fields.
+  and compound fields, struct literal lowering with nested dispatch, arrays of structs, struct
+  uzumaki with array fields, and the region fill/copy lowering (`ScratchAlloc`,
+  `emit_memcpy_via_locals`) that keeps every whole-region memory operation within the
+  WebAssembly 1.0 instruction set.
 - [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
   lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
   tracking, and interaction with non-det blocks, if-statements, and array frames.
@@ -347,7 +366,7 @@ Detailed design documents live in `docs/`:
 
 - `lib.rs` - Public API, multi-file AST traversal in canonical arena order, two-stage index pre-scan across all files (imports → top-level functions → methods), root-only export policy (`should_export`), file-qualified spec name emission (`qualified_spec_name` with `_` join for non-entry specs), `SpecNameCollision` backstop
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
-- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
+- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`, `ScratchAlloc` and the region fill/copy lowering (`emit_memcpy_via_locals`, `emit_memcpy_via_stack`) that avoids bulk-memory instructions
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`)
@@ -403,7 +422,7 @@ Test data includes:
 - `array_zero_literal.inf` - Array literal initialization where all or some elements are
   syntactic zeros (`0`, `false`, `(0)`, `-0`, `-(0)`): verifies that zero-valued stores are
   elided during `let` initialization (the frame is already zeroed by the prologue's
-  `memory.fill`), that mixed-value arrays emit stores only for non-zero elements, that sret
+  zero-fill), that mixed-value arrays emit stores only for non-zero elements, that sret
   returns via `return [0, 0, 0]` always store (no elision), and that `[true, false, true]`
   emits stores for the `true` elements but not `false`; validated and executed via wasmtime
 - `array_index.inf` - Array index read access (both constant and variable indices) with i32
