@@ -90,21 +90,45 @@ fn accepts_a_closure_borrowing_its_environment() {
     assert!(source.starts_with("fn main"), "the borrow must not move");
 }
 
+/// Serializes replacement of the process-global panic hook.
+///
+/// The hook is process state shared with every concurrently running test in
+/// this binary, so a test that swaps it must hold this lock for the whole
+/// swap-restore window; two unserialized swappers could otherwise interleave
+/// take/set and leave the wrong hook installed at the end.
+static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A panic inside the closure reaches the caller carrying its original payload.
 ///
-/// The panic hook is silenced for the duration so the expected message does not
-/// read as a failure in the test log; it runs once on the worker thread, and
-/// `resume_unwind` deliberately does not run it again on the caller's.
+/// The expected panic fires on the helper's worker thread, whose output the
+/// test harness does not capture, so left alone it would spray a spurious
+/// "thread 'inference-compile' panicked" over the log of a passing run. The
+/// hook installed here silences exactly that thread and hands every other
+/// panic to the hook that was already installed, so a concurrently failing
+/// test keeps its diagnostic; the swap-restore window is serialized by
+/// [`PANIC_HOOK_LOCK`]. `resume_unwind` deliberately does not run the hook a
+/// second time on the caller's thread.
 #[test]
 fn propagates_a_panic_with_its_original_payload() {
     const MESSAGE: &str = "deep-syntax stack probe";
 
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let hook_guard = PANIC_HOOK_LOCK.lock().expect("panic-hook lock poisoned");
+    let previous_hook = std::sync::Arc::new(std::panic::take_hook());
+    let delegate = std::sync::Arc::clone(&previous_hook);
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() != Some("inference-compile") {
+            delegate(info);
+        }
+    }));
     let outcome = std::panic::catch_unwind(|| {
         inference::with_compiler_stack(|| -> usize { panic!("{MESSAGE}") })
     });
-    std::panic::set_hook(previous_hook);
+    drop(std::panic::take_hook());
+    std::panic::set_hook(
+        std::sync::Arc::try_unwrap(previous_hook)
+            .unwrap_or_else(|_| unreachable!("the filtering hook held the only other reference")),
+    );
+    drop(hook_guard);
 
     let payload = outcome.expect_err("a panic inside the closure must reach the caller");
     let message = payload
