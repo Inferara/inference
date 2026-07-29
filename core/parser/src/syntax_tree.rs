@@ -41,6 +41,44 @@ pub struct SyntaxNode {
     pub children: Vec<SyntaxElement>,
 }
 
+/// Discards the subtree iteratively, so dropping a tree costs one frame however
+/// tall the tree is.
+///
+/// The implicit drop glue would descend once per level, which turns merely
+/// *discarding* a deeply nested tree into a stack overflow — and an overflow aborts
+/// the process rather than unwinding, so no caller can contain it. A deep tree is
+/// most often exactly the one a caller wants to throw away. Detaching the children
+/// into a worklist and draining it holds the depth at one: each node reached this
+/// way has already had its children moved out, so its own drop finds nothing to
+/// descend into. That makes any tree safe to discard on any thread, including a
+/// bare test thread with the platform's default stack.
+///
+/// This makes a tree safe to *discard*, not safe to *build*. Two independent
+/// height-recursions remain on the construction path, and together they bind sooner
+/// than the drop glue did for a parsed tree. The grammar's own recursive descent is
+/// one. The other is `Builder::leave`, which resolves every closed node's span
+/// through `first_non_trivia` and `last_non_trivia`; those stop at the first
+/// non-trivia *token*, so they cost nothing for a shape whose extremal children are
+/// tokens — a parenthesized nest, whose parentheses bound both ends — but descend
+/// the subtree's full height for one whose extremal children are nodes, such as a
+/// left-leaning operator spine. Bounding either side takes a limit on the depth the
+/// grammar will descend to, which does not exist yet; until it does, a tree deep
+/// enough to need this drop can only be built directly rather than parsed.
+///
+/// The remaining height-recursive operations, none of which may be applied to a tree
+/// of unbounded height, are `first_descendant_loc`, `debug_into`, and the derived
+/// `Clone`, `PartialEq` and `Debug` on both this type and [`SyntaxElement`].
+impl Drop for SyntaxNode {
+    fn drop(&mut self) {
+        let mut worklist = std::mem::take(&mut self.children);
+        while let Some(element) = worklist.pop() {
+            if let SyntaxElement::Node(mut node) = element {
+                worklist.append(&mut node.children);
+            }
+        }
+    }
+}
+
 /// Builds the owned CST from processed parser steps and the full token stream.
 ///
 /// `tokens` is the complete lossless lexer output (trivia included, terminated by
@@ -478,5 +516,70 @@ SourceFile@0..2
         assert_eq!(tree.loc.offset_end, 0);
         // No statement child for empty input.
         assert!(tree.child(SyntaxKind::ExpressionStatement).is_none());
+    }
+
+    /// A tower of `depth` single-child nodes under a `SourceFile` root.
+    ///
+    /// Built directly rather than through [`build`], whose throwaway rule cannot
+    /// produce nesting, and rather than through the real grammar, which would
+    /// make the test measure parsing rather than dropping. Every level is a real
+    /// [`SyntaxNode`], which is all the drop glue under test sees.
+    fn nest(depth: usize) -> SyntaxNode {
+        let mut node = SyntaxNode {
+            kind: SyntaxKind::SourceFile,
+            loc: Location::default(),
+            children: Vec::new(),
+        };
+        for _ in 0..depth {
+            node = SyntaxNode {
+                kind: SyntaxKind::ParenthesizedExpression,
+                loc: Location::default(),
+                children: vec![SyntaxElement::Node(node)],
+            };
+        }
+        node
+    }
+
+    /// The height of a single-child tower, counted without recursing.
+    fn tower_height(root: &SyntaxNode) -> usize {
+        let mut height = 0;
+        let mut cursor = root;
+        while let Some(SyntaxElement::Node(child)) = cursor.children.first() {
+            height += 1;
+            cursor = child;
+        }
+        height
+    }
+
+    /// Dropping a tree costs one frame regardless of its height.
+    ///
+    /// The derived drop glue descended once per level, so merely discarding a
+    /// tree a few thousand levels tall aborted the process — and an abort cannot
+    /// be caught, so the only way to assert the iterative drop is to perform it
+    /// on a thread whose stack is too small for the recursive one and require
+    /// the thread to finish. The stack here is the platform default a bare
+    /// thread gets; the height is two orders of magnitude past the roughly 8,200
+    /// levels the recursive drop managed on it.
+    ///
+    /// `Clone`, `PartialEq` and `Debug` are still recursive, so the tree is only
+    /// walked iteratively and never compared or printed.
+    #[test]
+    fn deep_tree_drops_on_a_default_sized_stack() {
+        const DEPTH: usize = 500_000;
+        const STACK_BYTES: usize = 2 * 1024 * 1024;
+
+        let worker = std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn(|| {
+                let tree = nest(DEPTH);
+                tower_height(&tree)
+            })
+            .expect("failed to spawn the drop-test thread");
+
+        assert_eq!(
+            worker.join().ok(),
+            Some(DEPTH),
+            "the tree must be built to full height and dropped without the thread dying"
+        );
     }
 }
