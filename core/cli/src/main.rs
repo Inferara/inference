@@ -679,11 +679,13 @@ fn run() {
         let source_fname = source_fname.as_str();
         let codegen_output = match inference_wasm_codegen::codegen(
             &tctx,
-            target,
-            mode,
-            opt_level,
             source_fname,
-            emit_features,
+            inference_wasm_codegen::CodegenOptions {
+                target,
+                mode,
+                opt_level,
+                features: emit_features,
+            },
         ) {
             Ok(o) => o,
             Err(e) => {

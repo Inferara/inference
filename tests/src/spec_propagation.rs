@@ -41,11 +41,13 @@ mod helpers {
             .typed_context();
         inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            mode,
-            OptLevel::O3,
             module_name,
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .expect("codegen should succeed")
     }
@@ -65,11 +67,13 @@ mod helpers {
             .typed_context();
         inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            mode,
-            OptLevel::O3,
             "output",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
     }
 
@@ -1757,11 +1761,13 @@ mod scenario_11_overlong_spec_name {
             .typed_context();
         let err = inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O3,
             "output",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .expect_err("codegen must reject a spec name exceeding 255 bytes");
 
@@ -1793,11 +1799,13 @@ mod scenario_11_overlong_spec_name {
             .typed_context();
         inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O3,
             "output",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .expect("a 255-byte spec name is at the cap and must be accepted");
     }

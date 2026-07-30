@@ -38,11 +38,13 @@ mod helpers {
             .typed_context();
         inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            mode,
-            OptLevel::O3,
             module_name,
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"))
     }
@@ -491,11 +493,13 @@ mod fixture_nondet_body_modifier_rejected {
             .typed_context();
         let err = inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O3,
             "nbm",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .expect_err("exists/assume body-modifier specs have no assertion encoding");
         let msg = err.to_string();
@@ -536,11 +540,13 @@ mod over_long_spec_function_name_rejected {
             .typed_context();
         let err = inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O3,
             "olsfn",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .expect_err("a 300-char spec function name overflows the inference.hspecs name cap");
         let msg = err.to_string();

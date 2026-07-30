@@ -107,11 +107,13 @@ mod gate {
             .typed_context();
         let output = inference_wasm_codegen::codegen(
             &typed_context,
-            Target::Wasm32,
-            CompilationMode::Proof,
-            OptLevel::O3,
             module_name,
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                target: Target::Wasm32,
+                mode: CompilationMode::Proof,
+                opt_level: OptLevel::O3,
+                features: inference_wasm_codegen::EmitFeatures::default(),
+            },
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"));
         // Empty explicit maps: the per-spec indices and the hassert obligations

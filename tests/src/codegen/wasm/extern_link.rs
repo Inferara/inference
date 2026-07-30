@@ -312,15 +312,13 @@ mod extern_link_tests {
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
             .collect();
 
-        let target = inference_wasm_codegen::Target::default();
-        let mode = inference_wasm_codegen::CompilationMode::Proof;
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
-            target,
-            mode,
-            target.default_opt_level(),
             "c1prog",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                mode: inference_wasm_codegen::CompilationMode::Proof,
+                ..Default::default()
+            },
         )
         .expect("proof-mode codegen succeeds");
 
@@ -405,15 +403,13 @@ mod extern_link_tests {
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
             .collect();
 
-        let target = inference_wasm_codegen::Target::default();
-        let mode = inference_wasm_codegen::CompilationMode::Proof;
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
-            target,
-            mode,
-            target.default_opt_level(),
             "hprog",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions {
+                mode: inference_wasm_codegen::CompilationMode::Proof,
+                ..Default::default()
+            },
         )
         .expect("proof-mode codegen succeeds");
 
