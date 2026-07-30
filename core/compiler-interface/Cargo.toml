@@ -8,3 +8,4 @@ repository = { workspace = true }
 description = "Shared compiler ABI version constants for infs/infc handshake"
 
 [dependencies]
+thiserror.workspace = true

@@ -59,15 +59,16 @@ wasm-fmt = { path = "./tools/wasm-fmt", version = "0.0.1" }
 wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
+wasm-encoder = "0.254.0"
 
-anyhow = "1.0.101"
-thiserror = "2.0.18"
-serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = "1.0.99"
-toml = "1.1.2"
+anyhow = "1.0.104"
+thiserror = "2.0.19"
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
 cov-mark = { version = "2.2.0", default-features = false }
-leb128 = "0.2.6"
-rustc-hash = "2.1.2"
+leb128 = "0.2.7"
+rustc-hash = "2.1.3"
 # Held at 0.27.x to match rust-analyzer's pin — this stack's architectural
 # reference, and the source of the IDE-layer patterns we mirror. Revisit when RA
 # moves (#157).

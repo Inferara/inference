@@ -79,13 +79,38 @@ pub(crate) enum AnalysisMode {
     Skip,
 }
 
-/// Core codegen pipeline: parse, type-check, optionally analyze, then generate WASM.
+/// Core codegen pipeline: parse, type-check, optionally analyze, then generate
+/// WASM within the WebAssembly 1.0 instruction set.
 fn codegen_impl(
     source_code: &str,
     target: inference_wasm_codegen::Target,
     mode: inference_wasm_codegen::CompilationMode,
     opt_level: inference_wasm_codegen::OptLevel,
     analysis: AnalysisMode,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    codegen_impl_with_features(
+        source_code,
+        target,
+        mode,
+        opt_level,
+        analysis,
+        inference_wasm_codegen::EmitFeatures::default(),
+    )
+}
+
+/// [`codegen_impl`] with an explicit post-MVP feature set, for tests that pin the
+/// bytes an opt-in produces.
+///
+/// The widest of the feature-aware seams: the opt-in golden family spans both
+/// compilation modes and includes fixtures analysis legitimately rejects, so it
+/// needs every knob rather than one of the narrower wrappers.
+pub(crate) fn codegen_impl_with_features(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+    opt_level: inference_wasm_codegen::OptLevel,
+    analysis: AnalysisMode,
+    features: inference_wasm_codegen::EmitFeatures,
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
     let arena = build_ast(source_code.to_string());
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
@@ -94,7 +119,7 @@ fn codegen_impl(
     if let AnalysisMode::Run = analysis {
         let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     }
-    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level, "output")
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level, "output", features)
 }
 
 /// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).
@@ -263,6 +288,30 @@ pub(crate) fn wasm_codegen_no_analysis(source_code: &str) -> Vec<u8> {
     codegen_output_no_analysis(source_code).wasm().to_vec()
 }
 
+/// Generates WebAssembly bytes from source code with an explicit post-MVP feature
+/// set, using the default target (`Wasm32`) and mode (`Compile`).
+///
+/// The analogue of [`wasm_codegen`] for the opt-in instruction levels: passing
+/// `EmitFeatures::default()` here must reproduce `wasm_codegen` exactly.
+pub(crate) fn wasm_codegen_with_features(
+    source_code: &str,
+    features: inference_wasm_codegen::EmitFeatures,
+) -> Vec<u8> {
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    codegen_impl_with_features(
+        source_code,
+        target,
+        mode,
+        target.default_opt_level(),
+        AnalysisMode::Run,
+        features,
+    )
+    .unwrap()
+    .wasm()
+    .to_vec()
+}
+
 /// Builds a multi-file arena from `(module_path, source)` pairs, type-checks,
 /// analyzes, and generates WASM — the multi-file analogue of [`wasm_codegen`].
 ///
@@ -326,8 +375,15 @@ fn codegen_output_multi_file_impl(
     }
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level(), "output")
-        .expect("multi-file codegen should succeed")
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        target,
+        mode,
+        target.default_opt_level(),
+        "output",
+        inference_wasm_codegen::EmitFeatures::default(),
+    )
+    .expect("multi-file codegen should succeed")
 }
 
 /// Resolves the on-disk directory for a multi-file golden fixture.
@@ -362,6 +418,26 @@ pub(crate) fn get_project_entry_path(module_path: &str, test_name: &str) -> std:
 /// Panics if the entry is missing, any file has a syntax error, type checking,
 /// analysis, or codegen fails. Use [`try_codegen_project`] for negative cases.
 pub(crate) fn wasm_codegen_project(module_path: &str, test_name: &str) -> Vec<u8> {
+    wasm_codegen_project_with_features(
+        module_path,
+        test_name,
+        inference_wasm_codegen::EmitFeatures::default(),
+    )
+}
+
+/// [`wasm_codegen_project`] with an explicit post-MVP feature set.
+///
+/// The project analogue of [`codegen_impl_with_features`], and the single
+/// implementation of the project route: the default-feature helper above is this
+/// function with `EmitFeatures::default()`, which is exactly what the two-argument
+/// [`inference::codegen`] wrapper passes, so a project fixture's opt-in bytes are
+/// pinned through the same closure walk and canonical ordering that produced its
+/// default-level golden.
+pub(crate) fn wasm_codegen_project_with_features(
+    module_path: &str,
+    test_name: &str,
+    features: inference_wasm_codegen::EmitFeatures,
+) -> Vec<u8> {
     let entry = get_project_entry_path(module_path, test_name);
     let parse = inference::parse_project(&entry)
         .unwrap_or_else(|e| panic!("parse_project failed for {}: {e}", entry.display()));
@@ -369,10 +445,18 @@ pub(crate) fn wasm_codegen_project(module_path: &str, test_name: &str) -> Vec<u8
         .unwrap_or_else(|e| panic!("multi-file project type check failed for {test_name}: {e}"));
     inference::analyze(&typed_context)
         .unwrap_or_else(|e| panic!("multi-file project analysis failed for {test_name}: {e:?}"));
-    inference::codegen(&typed_context, "output")
-        .unwrap_or_else(|e| panic!("multi-file project codegen failed for {test_name}: {e}"))
-        .wasm()
-        .to_vec()
+    let target = inference_wasm_codegen::Target::default();
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        target,
+        inference_wasm_codegen::CompilationMode::default(),
+        target.default_opt_level(),
+        "output",
+        features,
+    )
+    .unwrap_or_else(|e| panic!("multi-file project codegen failed for {test_name}: {e}"))
+    .wasm()
+    .to_vec()
 }
 
 /// Compiles a multi-file golden fixture in Proof mode (analysis skipped, so
@@ -394,6 +478,7 @@ pub(crate) fn proof_wasm_codegen_project(module_path: &str, test_name: &str) -> 
         inference_wasm_codegen::CompilationMode::Proof,
         target.default_opt_level(),
         "output",
+        inference_wasm_codegen::EmitFeatures::default(),
     )
     .unwrap_or_else(|e| panic!("multi-file proof codegen failed for {test_name}: {e}"))
     .wasm()
@@ -1104,6 +1189,7 @@ fn try_codegen_impl(
             mode,
             target.default_opt_level(),
             "output",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
     }))
     .map_err(|panic| {

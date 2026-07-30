@@ -27,6 +27,13 @@
 //!
 //! The [`OptLevel`] enum represents optimization levels. These are preserved for future
 //! integration with wasm-opt or similar post-processing tools.
+//!
+//! # Emission Features
+//!
+//! [`EmitFeatures`] records which post-MVP WebAssembly instruction families code
+//! generation may use. It is an independent axis from the mode: the same features
+//! apply in `Compile` and `Proof` mode, so the `.v` always describes the same
+//! program as the shipped `.wasm`.
 
 /// Compilation target for code generation.
 ///
@@ -43,11 +50,13 @@
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Target {
-    /// General-purpose WebAssembly target with strict MVP baseline.
+    /// General-purpose WebAssembly target, MVP baseline by default.
     ///
     /// Supports Inference non-deterministic operations via custom 0xfc prefix
-    /// instructions. No post-MVP features are enabled, ensuring compatibility with
-    /// the custom instruction space.
+    /// instructions. No post-MVP feature is enabled unless the build requests it
+    /// through [`EmitFeatures`]; the requestable ones occupy 0xfc sub-opcodes
+    /// disjoint from the custom instruction space, so an opt-in never makes a
+    /// module ambiguous to decode.
     ///
     /// Used in both `compile` and `proof` modes.
     #[default]
@@ -169,7 +178,71 @@ impl OptLevel {
     }
 }
 
+/// The post-MVP WebAssembly instruction families code generation is permitted to
+/// emit.
+///
+/// The default — every field `false` — keeps the emitted module inside the
+/// WebAssembly 1.0 instruction set, which is what every build produces unless it
+/// asks for more. A field is a *permission*, not an instruction: setting
+/// `bulk_memory` lets the region fill and copy lowerings use `memory.fill` and
+/// `memory.copy` where they otherwise expand to plain loads and stores, and the
+/// resulting bytes are those Inference emitted before the WebAssembly 1.0
+/// lowering existed.
+///
+/// Deliberately not named `WasmFeatures`: `inf_wasmparser::WasmFeatures` is the
+/// *validation envelope* a module is checked against, which is strictly wider
+/// than what code generation knows how to produce, and confusing the two would
+/// invite validating against whatever happened to be emitted.
+///
+/// Independent of [`CompilationMode`]: nothing may gate a field on the mode, or
+/// the Rocq translation would describe a different program than the shipped
+/// binary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmitFeatures {
+    /// Permits `memory.copy` and `memory.fill` for whole-region copies and frame
+    /// zero-fills.
+    pub bulk_memory: bool,
+}
+
+impl EmitFeatures {
+    /// The proposal name of the first requested feature `target` does not
+    /// accept, or `None` when the whole set is permitted.
+    ///
+    /// Destructuring `Self` makes a newly added field a compile error here, so a
+    /// feature cannot reach code generation without a decision about every
+    /// target having been recorded.
+    #[must_use]
+    pub fn first_rejected_by(self, target: Target) -> Option<&'static str> {
+        let Self { bulk_memory } = self;
+        if bulk_memory && !target.permits_bulk_memory() {
+            return Some("bulk-memory");
+        }
+        None
+    }
+}
+
 impl Target {
+    /// Whether a module using bulk memory instructions is accepted by this
+    /// target's runtime.
+    ///
+    /// `Soroban` rejects them for now. Whether its validator admits the
+    /// bulk-memory opcodes is unverified, and a build-time refusal is a better
+    /// failure than a contract that is rejected at deploy time; relax this once
+    /// there is evidence.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.permits_bulk_memory());
+    /// assert!(!Target::Soroban.permits_bulk_memory());
+    /// ```
+    #[must_use]
+    pub fn permits_bulk_memory(self) -> bool {
+        matches!(self, Self::Wasm32)
+    }
+
     /// Returns whether this target supports proof mode.
     ///
     /// Only `Wasm32` supports proof mode because it uses custom 0xfc non-deterministic
@@ -275,5 +348,59 @@ mod tests {
         assert!(!OptLevel::O3.is_min_size());
         assert!(!OptLevel::Os.is_min_size());
         assert!(OptLevel::Oz.is_min_size());
+    }
+
+    #[test]
+    fn emit_features_default_is_wasm_1_0() {
+        assert_eq!(EmitFeatures::default(), EmitFeatures { bulk_memory: false });
+    }
+
+    #[test]
+    fn default_features_are_permitted_by_every_target() {
+        for target in [Target::Wasm32, Target::Soroban] {
+            assert_eq!(EmitFeatures::default().first_rejected_by(target), None);
+        }
+    }
+
+    #[test]
+    fn wasm32_permits_bulk_memory() {
+        assert_eq!(
+            EmitFeatures { bulk_memory: true }.first_rejected_by(Target::Wasm32),
+            None
+        );
+    }
+
+    #[test]
+    fn soroban_rejects_bulk_memory() {
+        assert_eq!(
+            EmitFeatures { bulk_memory: true }.first_rejected_by(Target::Soroban),
+            Some("bulk-memory")
+        );
+    }
+
+    /// Every name a user may request must map onto some emission flag, or the
+    /// request would validate and then quietly do nothing.
+    ///
+    /// The exhaustive match enforces that a decision was *made*, not that a
+    /// dedicated field exists: a new `WasmFeatureName` fails to compile here until
+    /// it has an arm, and that arm may legitimately reuse an existing field when
+    /// two proposals gate the same emission. What it cannot do is be omitted. The
+    /// inequality against the default is what rules out an arm that decides
+    /// nothing.
+    #[test]
+    fn every_requestable_name_maps_onto_an_emission_flag() {
+        use inference_compiler_interface::WasmFeatureName;
+
+        for name in WasmFeatureName::ALL {
+            let requested = match name {
+                WasmFeatureName::BulkMemory => EmitFeatures { bulk_memory: true },
+            };
+            assert_ne!(
+                requested,
+                EmitFeatures::default(),
+                "`{}` must set a field",
+                name.as_str()
+            );
+        }
     }
 }

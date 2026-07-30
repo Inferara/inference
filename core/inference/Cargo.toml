@@ -23,4 +23,4 @@ inference-type-checker.workspace = true
 inference-analysis.workspace = true
 
 [dev-dependencies]
-wasm-encoder = "0.249.0"
+wasm-encoder.workspace = true

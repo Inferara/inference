@@ -18,6 +18,7 @@ mod binops_unary_combos;
 mod binops_u32;
 mod bounds_check;
 mod bulk_free;
+mod bulk_memory_golden;
 mod div_overflow;
 mod enum_abi;
 mod export_narrow_params;

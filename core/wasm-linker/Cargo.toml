@@ -10,14 +10,13 @@ keywords = ["compiler", "webassembly", "linker", "wasm"]
 categories = ["compilers", "wasm"]
 
 [dependencies]
-wasm-encoder = "0.249.0"
+wasm-encoder.workspace = true
 inf-wasmparser.workspace = true
 inference-hassert.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 wat = "1.225.0"
-wasm-encoder = "0.249.0"
 inf-wasmparser = { workspace = true }
 inference-wasm-to-v-translator = { workspace = true }
 rustc-hash = { workspace = true }

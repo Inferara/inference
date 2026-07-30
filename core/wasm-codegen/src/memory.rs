@@ -25,7 +25,7 @@
 //! | Concern                 | Location                            |
 //! |-------------------------|-------------------------------------|
 //! | Named WASM local registration | `pre_scan_locals()` in compiler.rs |
-//! | Scratch WASM local registration | [`ScratchAlloc`] here, spliced into the declarations by compiler.rs |
+//! | Scratch WASM local registration | [`RegionEmit`] here, spliced into the declarations by compiler.rs |
 //! | Frame layout computation| `compute_frame_layout()` here       |
 //! | Load/store helpers      | `store_instruction()` / `load_instruction()` here |
 //! | Whole-region fill/copy  | [`emit_stack_prologue()`] / [`emit_memcpy_via_locals()`] here |
@@ -34,11 +34,20 @@
 //!
 //! # WebAssembly feature level
 //!
-//! Every region fill and region copy is lowered to plain loads and stores — the
-//! bulk-memory `memory.fill` and `memory.copy` instructions are never emitted, so
-//! generated modules stay within the WebAssembly 1.0 instruction set.
+//! By default every region fill and region copy is lowered to plain loads and
+//! stores, so generated modules stay within the WebAssembly 1.0 instruction set.
+//! A build that permits [`EmitFeatures::bulk_memory`] instead gets the single
+//! `memory.fill` or `memory.copy` each region operation is a lowering of.
+//!
+//! The two forms are chosen at one place per operation — the first statement of
+//! [`emit_frame_zero_fill`], [`emit_memcpy_via_locals`] and
+//! [`emit_memcpy_via_stack`] — and the bulk form allocates no scratch local,
+//! which [`RegionEmit`] asserts. Everything upstream of those three functions,
+//! including every frame layout and every call site in compiler.rs, is identical
+//! either way.
 
 use crate::errors::CodegenError;
+use crate::target::EmitFeatures;
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
@@ -822,35 +831,47 @@ pub(crate) struct MemAddr {
     pub offset: u32,
 }
 
-/// Lazily allocated i32 scratch locals for the fill and copy lowerings.
+/// The per-function state of the region fill and copy lowerings: which
+/// WebAssembly features they may use, and the i32 scratch locals the
+/// feature-free forms need.
 ///
-/// A function declares one of these locals only if it actually emits the
-/// construct that needs it, so a function that emits no copy and no region loop
-/// declares nothing and its bytes are unaffected by this lowering. Precision is
-/// by construction: allocation happens at the emission site, not from a
-/// predicate that would have to predict the emission conditions.
+/// The two concerns travel together because they are two halves of one decision.
+/// Only the lowered forms need scratch locals, so a single value answers both
+/// "which shape does this region operation take" and "which locals must the
+/// function declare" — and the accessors can assert that the bulk form never
+/// allocates, which is what makes the bulk output byte-identical to a build from
+/// before the lowering existed. That invariant is machine-checked rather than
+/// reviewed.
+///
+/// A function declares a scratch local only if it actually emits the construct
+/// that needs it, so a function that emits no copy and no region loop declares
+/// nothing and its bytes are unaffected by the lowering. Precision is by
+/// construction: allocation happens at the emission site, not from a predicate
+/// that would have to predict the emission conditions.
 ///
 /// Indices are handed out in first-use order from the first free local — after
 /// the named locals and after the eagerly reserved frame-pointer, bounds-check
 /// and narrow-division temporaries — and the compiler appends one declaration per
 /// allocated slot to the end of the function's declaration list.
 ///
-/// The allocator is per-function state: it is rebuilt at the start of every
-/// function body, alongside the `Function` its indices refer to.
+/// This is per-function state: it is rebuilt at the start of every function body,
+/// alongside the `Function` its indices refer to.
 #[derive(Debug)]
-pub(crate) struct ScratchAlloc {
+pub(crate) struct RegionEmit {
+    features: EmitFeatures,
     next_index: u32,
     dst: Option<u32>,
     src: Option<u32>,
     counter: Option<u32>,
 }
 
-impl ScratchAlloc {
-    /// Creates an allocator that hands out indices starting at
-    /// `first_free_index`, which must be one past the last local the enclosing
+impl RegionEmit {
+    /// Creates the state for one function body. Indices are handed out starting
+    /// at `first_free_index`, which must be one past the last local the enclosing
     /// function already declares.
-    pub(crate) fn new(first_free_index: u32) -> Self {
+    pub(crate) fn new(first_free_index: u32, features: EmitFeatures) -> Self {
         Self {
+            features,
             next_index: first_free_index,
             dst: None,
             src: None,
@@ -858,19 +879,39 @@ impl ScratchAlloc {
         }
     }
 
+    /// Whether region operations may be emitted as single bulk-memory
+    /// instructions.
+    pub(crate) fn bulk_memory(&self) -> bool {
+        self.features.bulk_memory
+    }
+
     /// Local holding the destination base address of a stack-convention copy.
     pub(crate) fn dst(&mut self) -> u32 {
+        self.assert_lowering();
         Self::assign(&mut self.next_index, &mut self.dst)
     }
 
     /// Local holding the source base address of a stack-convention copy.
     pub(crate) fn src(&mut self) -> u32 {
+        self.assert_lowering();
         Self::assign(&mut self.next_index, &mut self.src)
     }
 
     /// Local holding the induction variable of a region fill or copy loop.
     pub(crate) fn counter(&mut self) -> u32 {
+        self.assert_lowering();
         Self::assign(&mut self.next_index, &mut self.counter)
+    }
+
+    /// Only the feature-free lowerings need a scratch local. A bulk-memory build
+    /// that reached here would declare an extra local and shift every subsequent
+    /// index, so the byte-identity of its output is enforced here instead of
+    /// being re-checked against goldens.
+    fn assert_lowering(&self) {
+        debug_assert!(
+            !self.features.bulk_memory,
+            "a bulk-memory region operation is a single instruction and must allocate no scratch local"
+        );
     }
 
     /// The local declarations this function must append for the scratch slots
@@ -969,23 +1010,23 @@ fn copy_memarg(offset: u32) -> MemArg {
 /// Emits the stack prologue for a function with stack-allocated arrays.
 ///
 /// The prologue decrements `__stack_pointer`, saves the frame pointer, and
-/// zero-initializes the entire frame with `i64.store`s of zero.
+/// zero-initializes the entire frame — see [`emit_frame_zero_fill`] for the shape
+/// the fill takes.
 ///
 /// # Stack overflow protection
 ///
 /// `i32.sub` uses modular arithmetic and never traps. If the subtraction wraps
 /// (SP goes "below 0"), the result is a large unsigned value: the frame is at
 /// most `STACK_SIZE` bytes, so a wrapped frame pointer is at least
-/// `2^32 - STACK_SIZE`, far beyond the one-page memory. WebAssembly 1.0 computes
-/// an effective address as `base + offset` without 32-bit wraparound, so the
-/// first zero-fill store — the one at offset 0, emitted first in both the
-/// unrolled and the looped form — fails its bounds check and traps before any
-/// byte is written.
+/// `2^32 - STACK_SIZE`, far beyond the one-page memory. WebAssembly computes an
+/// effective address as `base + offset` without 32-bit wraparound, so the first
+/// zero-fill store — the one at offset 0, emitted first in both the unrolled and
+/// the looped form — fails its bounds check and traps before any byte is written.
 ///
 /// That ordering is what makes the lowered fill observationally equal to the
-/// `memory.fill` it replaces, whose up-front bounds check also trapped with no
-/// partial write. One caveat applies equally to both forms and is not a
-/// difference between them: the prologue commits the wrapped pointer to
+/// `memory.fill` a bulk-memory build emits instead, whose up-front bounds check
+/// likewise traps with no partial write. One caveat applies equally to every form
+/// and is not a difference between them: the prologue commits the wrapped pointer to
 /// `__stack_pointer` before it touches memory, so the global is already updated
 /// when the access traps. A trap unwinds the whole instance, making that
 /// unobservable unless the host re-enters afterwards — which is outside the
@@ -1017,7 +1058,7 @@ fn copy_memarg(offset: u32) -> MemArg {
 pub(crate) fn emit_stack_prologue(
     func: &mut Function,
     layout: &FrameLayout,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
     assert!(
         layout.total_size > 0,
@@ -1031,20 +1072,22 @@ pub(crate) fn emit_stack_prologue(
     func.instruction(&Instruction::I32Sub);
     func.instruction(&Instruction::LocalTee(layout.frame_ptr_local));
     func.instruction(&Instruction::GlobalSet(STACK_POINTER_GLOBAL));
-    emit_frame_zero_fill(func, layout.frame_ptr_local, layout.total_size, scratch);
+    emit_frame_zero_fill(func, layout.frame_ptr_local, layout.total_size, region);
 }
 
 /// Zero-fills `total_size` bytes starting at the frame pointer.
 ///
-/// Frame sizes are multiples of [`FRAME_ALIGNMENT`], so both forms decompose
-/// exactly and neither needs a tail. Small frames become straight-line
-/// `i64.store`s; larger ones become a loop that clears 16 bytes per iteration
-/// (two stores), which halves the branch overhead of an 8-byte body.
+/// With bulk memory permitted this is one `memory.fill` over the whole frame.
+/// Otherwise the fill is decomposed: frame sizes are multiples of
+/// [`FRAME_ALIGNMENT`], so both lowered forms decompose exactly and neither needs
+/// a tail. Small frames become straight-line `i64.store`s; larger ones become a
+/// loop that clears 16 bytes per iteration (two stores), which halves the branch
+/// overhead of an 8-byte body.
 ///
-/// The store at offset 0 is emitted first in both forms, and in the looped form
-/// the induction variable starts at 0, so the frame's lowest address is always
-/// the first one touched. [`emit_stack_prologue`] documents why that ordering is
-/// load-bearing.
+/// The frame's lowest address is the first one touched in all three forms — the
+/// `memory.fill` bounds-checks the whole region up front, the unrolled form
+/// stores at offset 0 first, and the looped form starts its induction variable at
+/// 0. [`emit_stack_prologue`] documents why that ordering is load-bearing.
 ///
 /// The loop is emitted atomically — no user expression is lowered inside it — so
 /// it cannot contain a `break` or `continue`, and it needs no entry in the
@@ -1053,10 +1096,20 @@ fn emit_frame_zero_fill(
     func: &mut Function,
     frame_ptr: u32,
     total_size: u32,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
     /// Bytes cleared per iteration of the looped form.
     const STRIDE: u32 = 16;
+
+    if region.bulk_memory() {
+        cov_mark::hit!(wasm_codegen_frame_fill_bulk);
+        func.instruction(&Instruction::LocalGet(frame_ptr));
+        func.instruction(&Instruction::I32Const(0));
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(total_size as i32));
+        func.instruction(&Instruction::MemoryFill(MEMORY_INDEX));
+        return;
+    }
 
     debug_assert_eq!(
         total_size % FRAME_ALIGNMENT,
@@ -1082,7 +1135,7 @@ fn emit_frame_zero_fill(
     }
 
     cov_mark::hit!(wasm_codegen_frame_fill_loop);
-    let index = scratch.counter();
+    let index = region.counter();
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::LocalSet(index));
     func.instruction(&Instruction::Loop(BlockType::Empty));
@@ -1108,15 +1161,18 @@ fn emit_frame_zero_fill(
 /// Copies `byte_size` bytes from `src` to `dst`, both given as a base local plus
 /// a constant displacement.
 ///
-/// The copy runs forward in 8-byte chunks with a statically unrolled 4/2/1 tail.
-/// Small regions become straight-line loads and stores whose displacements are
-/// folded into the access offsets; larger ones become an 8-byte-per-iteration
-/// loop followed by the same static tail.
+/// With bulk memory permitted this is one `memory.copy` over the whole region.
+/// Otherwise the copy runs forward in 8-byte chunks with a statically unrolled
+/// 4/2/1 tail: small regions become straight-line loads and stores whose
+/// displacements are folded into the access offsets; larger ones become an
+/// 8-byte-per-iteration loop followed by the same static tail.
 ///
 /// # Overlap
 ///
-/// A forward byte-order copy is correct for regions that are identical or
-/// disjoint, and every site that reaches this helper is one of those two:
+/// `memory.copy` has memmove semantics, so the overlap reasoning below constrains
+/// only the lowered forms. A forward byte-order copy is correct for regions that
+/// are identical or disjoint, and every site that reaches this helper is one of
+/// those two:
 ///
 /// - Array and struct parameter copies read the caller's argument and write the
 ///   callee's freshly decremented frame — disjoint, or identical when a callee
@@ -1132,9 +1188,9 @@ fn emit_frame_zero_fill(
 ///   writing.
 ///
 /// Inference has value semantics and no references, so two distinct slots can
-/// never partially overlap; the memmove guarantee that `memory.copy` provided is
-/// not needed. For an identical source and destination each byte's read and
-/// write coincide, which a forward copy handles.
+/// never partially overlap; the memmove guarantee is not needed. For an identical
+/// source and destination each byte's read and write coincide, which a forward
+/// copy handles.
 ///
 /// # Loop emission
 ///
@@ -1146,8 +1202,19 @@ pub(crate) fn emit_memcpy_via_locals(
     dst: MemAddr,
     src: MemAddr,
     byte_size: u32,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
+    // Ahead of the zero-size early return: `memory.copy` of zero bytes is well
+    // defined and is what a bulk-memory build has always emitted here, whereas
+    // the lowered form has nothing to emit.
+    if region.bulk_memory() {
+        cov_mark::hit!(wasm_codegen_memcpy_bulk);
+        emit_ptr_offset_addr(func, dst.local, dst.offset);
+        emit_ptr_offset_addr(func, src.local, src.offset);
+        emit_memory_copy_raw(func, byte_size);
+        return;
+    }
+
     if byte_size == 0 {
         return;
     }
@@ -1161,7 +1228,7 @@ pub(crate) fn emit_memcpy_via_locals(
     cov_mark::hit!(wasm_codegen_memcpy_loop);
     let chunk = CopyWidth::I64.bytes();
     let looped_bytes = byte_size - byte_size % chunk;
-    let index = scratch.counter();
+    let index = region.counter();
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::LocalSet(index));
     func.instruction(&Instruction::Loop(BlockType::Empty));
@@ -1212,20 +1279,25 @@ fn emit_copy_chunks(func: &mut Function, dst: MemAddr, src: MemAddr, start: u32,
 /// stack, pushed destination first and source second.
 ///
 /// That push order is the convention of every body-level compound copy site, and
-/// the source therefore pops first. The two addresses move into scratch locals
-/// so the copy can address them repeatedly; the copy itself is
+/// it is exactly the order `memory.copy` consumes its operands in, so a
+/// bulk-memory build appends the size and the instruction and is done.
+///
+/// The lowered form instead moves the two addresses into scratch locals so the
+/// copy can address them repeatedly; the copy itself is
 /// [`emit_memcpy_via_locals`], whose documentation covers overlap and loop
 /// emission.
 ///
-/// A zero-byte region still consumes both addresses, matching the stack effect
-/// of the copy it replaces.
-pub(crate) fn emit_memcpy_via_stack(
-    func: &mut Function,
-    byte_size: u32,
-    scratch: &mut ScratchAlloc,
-) {
-    let dst_local = scratch.dst();
-    let src_local = scratch.src();
+/// A zero-byte region still consumes both addresses in either form, matching the
+/// stack effect of a copy of any other size.
+pub(crate) fn emit_memcpy_via_stack(func: &mut Function, byte_size: u32, region: &mut RegionEmit) {
+    if region.bulk_memory() {
+        cov_mark::hit!(wasm_codegen_memcpy_via_stack_bulk);
+        emit_memory_copy_raw(func, byte_size);
+        return;
+    }
+
+    let dst_local = region.dst();
+    let src_local = region.src();
     func.instruction(&Instruction::LocalSet(src_local));
     func.instruction(&Instruction::LocalSet(dst_local));
     emit_memcpy_via_locals(
@@ -1239,8 +1311,20 @@ pub(crate) fn emit_memcpy_via_stack(
             offset: 0,
         },
         byte_size,
-        scratch,
+        region,
     );
+}
+
+/// Emits the `i32.const <size>` + `memory.copy` pair that completes a bulk copy
+/// whose destination and source addresses are already on the operand stack,
+/// destination first.
+fn emit_memory_copy_raw(func: &mut Function, byte_size: u32) {
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(byte_size as i32));
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: MEMORY_INDEX,
+        dst_mem: MEMORY_INDEX,
+    });
 }
 
 /// Threshold: arrays with more than this many elements are copied as an untyped
@@ -1297,7 +1381,7 @@ pub(crate) fn emit_array_param_copy(
     slot: &ArraySlot,
     param_local: u32,
     elem_type: &TypeInfoKind,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
     cov_mark::hit!(wasm_codegen_emit_array_param_copy);
 
@@ -1323,7 +1407,7 @@ pub(crate) fn emit_array_param_copy(
                 offset: 0,
             },
             byte_size,
-            scratch,
+            region,
         );
     } else {
         // Unrolled element-by-element copy
@@ -1390,7 +1474,7 @@ pub(crate) fn emit_struct_param_copy(
     layout: &FrameLayout,
     slot: &StructSlot,
     param_local: u32,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
     cov_mark::hit!(wasm_codegen_emit_struct_param_copy);
 
@@ -1405,7 +1489,7 @@ pub(crate) fn emit_struct_param_copy(
             offset: 0,
         },
         slot.total_size,
-        scratch,
+        region,
     );
 
     // Update the parameter local to point to the callee's copy
@@ -1430,7 +1514,7 @@ pub(crate) fn emit_sret_copy(
     sret_local: u32,
     source_local: u32,
     byte_size: u32,
-    scratch: &mut ScratchAlloc,
+    region: &mut RegionEmit,
 ) {
     emit_memcpy_via_locals(
         func,
@@ -1443,7 +1527,7 @@ pub(crate) fn emit_sret_copy(
             offset: 0,
         },
         byte_size,
-        scratch,
+        region,
     );
 }
 
@@ -1491,6 +1575,27 @@ mod tests {
     use inference_type_checker::type_info::TypeInfo;
     use inference_type_checker::{StructFieldInfo, StructInfo};
     use inference_type_checker::typed_context::TypedContext;
+
+    /// Region state for a WebAssembly 1.0 build — the default — handing out
+    /// scratch locals from `first_free_index`.
+    fn lowered(first_free_index: u32) -> RegionEmit {
+        RegionEmit::new(first_free_index, EmitFeatures::default())
+    }
+
+    /// Region state for a build permitted to emit bulk-memory instructions.
+    fn bulk(first_free_index: u32) -> RegionEmit {
+        RegionEmit::new(first_free_index, EmitFeatures { bulk_memory: true })
+    }
+
+    /// The `i32.const <size>` + `memory.copy` pair every bulk copy ends with,
+    /// spelled out here so the expectations do not restate the emitter.
+    fn bulk_copy(f: &mut Function, byte_size: i32) {
+        f.instruction(&Instruction::I32Const(byte_size));
+        f.instruction(&Instruction::MemoryCopy {
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
+        });
+    }
 
     #[test]
     fn align_to_frame_zero() {
@@ -2518,8 +2623,7 @@ mod tests {
     #[test]
     fn frame_fill_unrolled_below_limit() {
         const FP: u32 = 2;
-        let actual =
-            body_of(|f| emit_stack_prologue(f, &frame_of(16, FP), &mut ScratchAlloc::new(3)));
+        let actual = body_of(|f| emit_stack_prologue(f, &frame_of(16, FP), &mut lowered(3)));
         let expected = body_of(|f| {
             prologue_prefix(f, 16, FP);
             fill_store(f, FP, 0);
@@ -2537,11 +2641,7 @@ mod tests {
         #[allow(clippy::cast_possible_wrap)]
         let limit = BULK_UNROLL_LIMIT_BYTES as i32;
         let actual = body_of(|f| {
-            emit_stack_prologue(
-                f,
-                &frame_of(BULK_UNROLL_LIMIT_BYTES, FP),
-                &mut ScratchAlloc::new(1),
-            );
+            emit_stack_prologue(f, &frame_of(BULK_UNROLL_LIMIT_BYTES, FP), &mut lowered(1));
         });
         let expected = body_of(|f| {
             prologue_prefix(f, limit, FP);
@@ -2557,10 +2657,10 @@ mod tests {
 
     #[test]
     fn frame_fill_unrolled_declares_no_scratch_local() {
-        let mut scratch = ScratchAlloc::new(4);
-        body_of(|f| emit_stack_prologue(f, &frame_of(BULK_UNROLL_LIMIT_BYTES, 3), &mut scratch));
+        let mut region = lowered(4);
+        body_of(|f| emit_stack_prologue(f, &frame_of(BULK_UNROLL_LIMIT_BYTES, 3), &mut region));
         assert!(
-            scratch.declarations().is_empty(),
+            region.declarations().is_empty(),
             "an unrolled fill needs no induction variable, so it must declare no local"
         );
     }
@@ -2572,8 +2672,8 @@ mod tests {
     fn frame_fill_loop_just_above_limit() {
         const FP: u32 = 1;
         const INDEX: u32 = 5;
-        let mut scratch = ScratchAlloc::new(INDEX);
-        let actual = body_of(|f| emit_stack_prologue(f, &frame_of(144, FP), &mut scratch));
+        let mut region = lowered(INDEX);
+        let actual = body_of(|f| emit_stack_prologue(f, &frame_of(144, FP), &mut region));
         let expected = body_of(|f| {
             prologue_prefix(f, 144, FP);
             fill_loop(f, FP, INDEX, 144);
@@ -2583,7 +2683,7 @@ mod tests {
             "a 144-byte frame is cleared by a 16-byte-stride loop"
         );
         assert_eq!(
-            scratch.declarations().len(),
+            region.declarations().len(),
             1,
             "the looped fill declares exactly its induction variable"
         );
@@ -2596,7 +2696,7 @@ mod tests {
         const FP: u32 = 0;
         const INDEX: u32 = 1;
         let actual = body_of(|f| {
-            emit_stack_prologue(f, &frame_of(4096, FP), &mut ScratchAlloc::new(INDEX));
+            emit_stack_prologue(f, &frame_of(4096, FP), &mut lowered(INDEX));
         });
         let expected = body_of(|f| {
             prologue_prefix(f, 4096, FP);
@@ -2620,7 +2720,7 @@ mod tests {
             #[allow(clippy::cast_possible_wrap)]
             let signed_size = frame_size as i32;
             let body = body_of(|f| {
-                emit_stack_prologue(f, &frame_of(frame_size, FP), &mut ScratchAlloc::new(1));
+                emit_stack_prologue(f, &frame_of(frame_size, FP), &mut lowered(1));
             });
             let up_to_first_access = body_of(|f| {
                 prologue_prefix(f, signed_size, FP);
@@ -2668,12 +2768,12 @@ mod tests {
             ),
         ];
         for &(byte_size, units) in cases {
-            let mut scratch = ScratchAlloc::new(2);
-            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut scratch));
+            let mut region = lowered(2);
+            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut region));
             let expected = body_of(|f| copy_units(f, dst, src, units));
             assert_eq!(actual, expected, "{byte_size}-byte copy decomposition");
             assert!(
-                scratch.declarations().is_empty(),
+                region.declarations().is_empty(),
                 "a {byte_size}-byte copy is unrolled and must declare no scratch local"
             );
         }
@@ -2688,13 +2788,7 @@ mod tests {
             .map(|at| (8, at))
             .collect();
         let actual = body_of(|f| {
-            emit_memcpy_via_locals(
-                f,
-                dst,
-                src,
-                BULK_UNROLL_LIMIT_BYTES,
-                &mut ScratchAlloc::new(5),
-            );
+            emit_memcpy_via_locals(f, dst, src, BULK_UNROLL_LIMIT_BYTES, &mut lowered(5));
         });
         let expected = body_of(|f| copy_units(f, dst, src, &units));
         assert_eq!(
@@ -2707,8 +2801,7 @@ mod tests {
     fn memcpy_folds_displacements_into_offset_immediates() {
         let dst = addr(6, 40);
         let src = addr(7, 8);
-        let actual =
-            body_of(|f| emit_memcpy_via_locals(f, dst, src, 12, &mut ScratchAlloc::new(8)));
+        let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, 12, &mut lowered(8)));
         let expected = body_of(|f| copy_units(f, dst, src, &[(8, 0), (4, 8)]));
         assert_eq!(
             actual, expected,
@@ -2731,15 +2824,15 @@ mod tests {
             (136, 136, &[]),
         ];
         for &(byte_size, looped_bytes, tail) in cases {
-            let mut scratch = ScratchAlloc::new(INDEX);
-            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut scratch));
+            let mut region = lowered(INDEX);
+            let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, byte_size, &mut region));
             let expected = body_of(|f| {
                 copy_loop(f, dst, src, looped_bytes, INDEX);
                 copy_units(f, dst, src, tail);
             });
             assert_eq!(actual, expected, "{byte_size}-byte copy loop and tail");
             assert_eq!(
-                scratch.declarations().len(),
+                region.declarations().len(),
                 1,
                 "a {byte_size}-byte copy declares exactly its induction variable"
             );
@@ -2751,8 +2844,7 @@ mod tests {
         const INDEX: u32 = 4;
         let dst = addr(2, 64);
         let src = addr(3, 16);
-        let actual =
-            body_of(|f| emit_memcpy_via_locals(f, dst, src, 130, &mut ScratchAlloc::new(INDEX)));
+        let actual = body_of(|f| emit_memcpy_via_locals(f, dst, src, 130, &mut lowered(INDEX)));
         let expected = body_of(|f| {
             copy_loop(f, dst, src, 128, INDEX);
             copy_units(f, dst, src, &[(2, 128)]);
@@ -2766,10 +2858,10 @@ mod tests {
     #[test]
     fn memcpy_of_zero_bytes_emits_nothing() {
         let untouched = body_of(|_| {});
-        let mut scratch = ScratchAlloc::new(0);
-        let body = body_of(|f| emit_memcpy_via_locals(f, addr(0, 0), addr(1, 0), 0, &mut scratch));
+        let mut region = lowered(0);
+        let body = body_of(|f| emit_memcpy_via_locals(f, addr(0, 0), addr(1, 0), 0, &mut region));
         assert_eq!(body, untouched, "an empty region copies nothing");
-        assert!(scratch.declarations().is_empty(), "and allocates nothing");
+        assert!(region.declarations().is_empty(), "and allocates nothing");
     }
 
     /// Body-level copy sites push the destination first and the source second,
@@ -2777,8 +2869,8 @@ mod tests {
     #[test]
     fn memcpy_via_stack_pops_source_before_destination() {
         const FIRST_FREE: u32 = 3;
-        let mut scratch = ScratchAlloc::new(FIRST_FREE);
-        let actual = body_of(|f| emit_memcpy_via_stack(f, 8, &mut scratch));
+        let mut region = lowered(FIRST_FREE);
+        let actual = body_of(|f| emit_memcpy_via_stack(f, 8, &mut region));
         let dst = addr(FIRST_FREE, 0);
         let src = addr(FIRST_FREE + 1, 0);
         let expected = body_of(|f| {
@@ -2792,8 +2884,8 @@ mod tests {
     #[test]
     fn memcpy_via_stack_consumes_both_addresses_for_an_empty_region() {
         const FIRST_FREE: u32 = 0;
-        let mut scratch = ScratchAlloc::new(FIRST_FREE);
-        let actual = body_of(|f| emit_memcpy_via_stack(f, 0, &mut scratch));
+        let mut region = lowered(FIRST_FREE);
+        let actual = body_of(|f| emit_memcpy_via_stack(f, 0, &mut region));
         let expected = body_of(|f| {
             f.instruction(&Instruction::LocalSet(FIRST_FREE + 1));
             f.instruction(&Instruction::LocalSet(FIRST_FREE));
@@ -2806,20 +2898,20 @@ mod tests {
 
     #[test]
     fn scratch_allocates_in_first_use_order_from_the_first_free_index() {
-        let mut scratch = ScratchAlloc::new(7);
-        assert_eq!(scratch.counter(), 7);
-        assert_eq!(scratch.dst(), 8);
-        assert_eq!(scratch.src(), 9);
-        assert_eq!(scratch.counter(), 7, "a second use returns the same local");
-        assert_eq!(scratch.declarations(), vec![(1, ValType::I32); 3]);
+        let mut region = lowered(7);
+        assert_eq!(region.counter(), 7);
+        assert_eq!(region.dst(), 8);
+        assert_eq!(region.src(), 9);
+        assert_eq!(region.counter(), 7, "a second use returns the same local");
+        assert_eq!(region.declarations(), vec![(1, ValType::I32); 3]);
     }
 
     #[test]
     fn scratch_declares_only_what_was_used() {
-        let unused = ScratchAlloc::new(2);
+        let unused = lowered(2);
         assert!(unused.declarations().is_empty());
 
-        let mut only_counter = ScratchAlloc::new(2);
+        let mut only_counter = lowered(2);
         assert_eq!(only_counter.counter(), 2);
         assert_eq!(only_counter.declarations(), vec![(1, ValType::I32)]);
     }
@@ -2828,15 +2920,148 @@ mod tests {
     /// emitted atomically, so no copy is live across another.
     #[test]
     fn scratch_is_shared_across_copies_in_one_function() {
-        let mut scratch = ScratchAlloc::new(4);
+        let mut region = lowered(4);
         body_of(|f| {
-            emit_memcpy_via_stack(f, 16, &mut scratch);
-            emit_memcpy_via_stack(f, 200, &mut scratch);
+            emit_memcpy_via_stack(f, 16, &mut region);
+            emit_memcpy_via_stack(f, 200, &mut region);
         });
         assert_eq!(
-            scratch.declarations().len(),
+            region.declarations().len(),
             3,
             "two copies, one of them looped, need one $d, one $s and one $i in total"
+        );
+    }
+
+    /// `memory.fill` takes destination, fill byte, length — in that order. The
+    /// wrapped stack pointer has to reach the instruction as the destination
+    /// operand for the overflow trap `emit_stack_prologue` documents to fire, so
+    /// the operand order is pinned, not just the instruction choice.
+    #[test]
+    fn bulk_frame_fill_is_one_memory_fill() {
+        const FP: u32 = 2;
+
+        cov_mark::check!(wasm_codegen_frame_fill_bulk);
+        let actual = body_of(|f| emit_stack_prologue(f, &frame_of(4096, FP), &mut bulk(3)));
+        let expected = body_of(|f| {
+            prologue_prefix(f, 4096, FP);
+            f.instruction(&Instruction::LocalGet(FP));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32Const(4096));
+            f.instruction(&Instruction::MemoryFill(MEMORY_INDEX));
+        });
+        assert_eq!(actual, expected);
+    }
+
+    /// A frame large enough to be looped by the lowering, and one small enough to
+    /// be unrolled, are both one instruction in bulk mode — the size thresholds
+    /// belong to the lowering alone.
+    #[test]
+    fn bulk_frame_fill_ignores_the_unroll_threshold() {
+        for total_size in [16, BULK_UNROLL_LIMIT_BYTES, 4096] {
+            let mut region = bulk(1);
+            body_of(|f| emit_stack_prologue(f, &frame_of(total_size, 0), &mut region));
+            assert!(
+                region.declarations().is_empty(),
+                "a {total_size}-byte bulk fill must declare no scratch local"
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_memcpy_pushes_both_addresses_then_copies() {
+        cov_mark::check!(wasm_codegen_memcpy_bulk);
+        let actual = body_of(|f| {
+            emit_memcpy_via_locals(f, addr(1, 48), addr(2, 0), 200, &mut bulk(3));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32Const(48));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Const(200));
+            f.instruction(&Instruction::MemoryCopy {
+                src_mem: MEMORY_INDEX,
+                dst_mem: MEMORY_INDEX,
+            });
+        });
+        assert_eq!(
+            actual, expected,
+            "a zero displacement is folded away, a non-zero one becomes an i32.add"
+        );
+    }
+
+    /// A zero-byte region is a well-defined `memory.copy` and reaches the
+    /// instruction, unlike the lowering, which has nothing to emit. The two
+    /// disagree only in whether a no-op is spelled out, and the bulk behavior is
+    /// what the pre-lowering compiler emitted.
+    #[test]
+    fn bulk_memcpy_emits_a_zero_length_copy() {
+        let actual = body_of(|f| {
+            emit_memcpy_via_locals(f, addr(0, 0), addr(1, 0), 0, &mut bulk(2));
+        });
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::MemoryCopy {
+                src_mem: MEMORY_INDEX,
+                dst_mem: MEMORY_INDEX,
+            });
+        });
+        assert_eq!(actual, expected);
+    }
+
+    /// The body-level convention pushes destination then source, which is already
+    /// `memory.copy`'s operand order: bulk mode appends the length and the
+    /// instruction and never spills to a local.
+    #[test]
+    fn bulk_memcpy_via_stack_consumes_the_pushed_addresses_in_place() {
+        cov_mark::check!(wasm_codegen_memcpy_via_stack_bulk);
+        let mut region = bulk(7);
+        let actual = body_of(|f| emit_memcpy_via_stack(f, 24, &mut region));
+        let expected = body_of(|f| {
+            f.instruction(&Instruction::I32Const(24));
+            f.instruction(&Instruction::MemoryCopy {
+                src_mem: MEMORY_INDEX,
+                dst_mem: MEMORY_INDEX,
+            });
+        });
+        assert_eq!(actual, expected);
+        assert!(
+            region.declarations().is_empty(),
+            "a bulk copy must not declare the $d/$s spill locals"
+        );
+    }
+
+    /// Every region operation in bulk mode is exactly its one instruction — no
+    /// loop, no tail, no scratch. Region sizes well above every lowering threshold
+    /// are used, so a size that would have been looped or unrolled still produces
+    /// only the instruction. Pinning the whole expected body rather than searching
+    /// it for a `loop` opcode keeps the assertion exact: a raw-byte search can
+    /// match an immediate that merely happens to hold the same value.
+    #[test]
+    fn bulk_region_operations_are_exactly_their_instructions() {
+        let mut region = bulk(0);
+        let actual = body_of(|f| {
+            emit_stack_prologue(f, &frame_of(4096, 0), &mut region);
+            emit_memcpy_via_locals(f, addr(0, 0), addr(1, 0), 4096, &mut region);
+            emit_memcpy_via_stack(f, 4096, &mut region);
+        });
+        let expected = body_of(|f| {
+            prologue_prefix(f, 4096, 0);
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32Const(4096));
+            f.instruction(&Instruction::MemoryFill(MEMORY_INDEX));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::LocalGet(1));
+            bulk_copy(f, 4096);
+            bulk_copy(f, 4096);
+        });
+        assert_eq!(actual, expected);
+        assert!(
+            region.declarations().is_empty(),
+            "no bulk region operation may declare a scratch local"
         );
     }
 

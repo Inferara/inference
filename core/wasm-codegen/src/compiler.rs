@@ -58,6 +58,7 @@
 //! regular `end` instruction (0x0b).
 
 use crate::errors::CodegenError;
+use crate::target::EmitFeatures;
 use rustc_hash::FxHashMap;
 
 use inference_ast::arena::AstArena;
@@ -80,11 +81,10 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, CompoundFieldLayout, FrameLayout, STACK_POINTER_INIT, STACK_SIZE,
-    ScratchAlloc, StructSlot, align_to, align_to_frame, compute_struct_field_layout,
-    emit_array_param_copy, emit_memcpy_via_stack, emit_ptr_offset_addr, emit_sret_copy,
-    emit_stack_epilogue, emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type,
-    type_byte_size,
+    self, ArraySlot, CompoundFieldLayout, FrameLayout, RegionEmit, STACK_POINTER_INIT, STACK_SIZE,
+    StructSlot, align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy,
+    emit_memcpy_via_stack, emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue,
+    emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 /// Origin of a function definition being lowered.
@@ -416,14 +416,20 @@ pub(crate) struct Compiler {
     ///
     /// The declarations are held here rather than handed to `Function::new`
     /// because the region fill and copy lowerings allocate further scratch locals
-    /// while the body is being emitted (see [`ScratchAlloc`]). The body is built
+    /// while the body is being emitted (see [`RegionEmit`]). The body is built
     /// in a `Function` with an empty locals vector and re-prefixed with the
     /// complete declarations once the emission is finished. Reset per function.
     local_declarations: Vec<(u32, ValType)>,
-    /// Lazily allocated scratch locals for the region fill and copy lowerings,
-    /// numbered from one past the last eagerly declared local. Rebuilt per
-    /// function alongside `func`, whose local indices it hands out.
-    scratch: ScratchAlloc,
+    /// Which post-MVP instruction families the region fill and copy emitters may
+    /// use. Set once by [`crate::codegen`] for the whole module and copied into
+    /// each function's [`RegionEmit`]; `Compiler::new` call sites keep the
+    /// WebAssembly 1.0 default.
+    emit_features: EmitFeatures,
+    /// The region fill and copy state for the function being compiled: the
+    /// permitted features plus the lazily allocated scratch locals, numbered from
+    /// one past the last eagerly declared local. Rebuilt per function alongside
+    /// `func`, whose local indices it hands out.
+    region_emit: RegionEmit,
 }
 
 /// The nested blocks a statement introduces, classified by how a frame-layout
@@ -488,8 +494,18 @@ impl Compiler {
             bounds_check_scratch_local: None,
             narrow_div_scratch_local: None,
             local_declarations: Vec::new(),
-            scratch: ScratchAlloc::new(0),
+            emit_features: EmitFeatures::default(),
+            region_emit: RegionEmit::new(0, EmitFeatures::default()),
         }
+    }
+
+    /// Permits the post-MVP instruction families in `features` for every function
+    /// this compiler emits.
+    ///
+    /// [`crate::codegen`] sets what the build requested; [`Self::new`] call sites
+    /// keep the default, so their emitted bytes stay within WebAssembly 1.0.
+    pub(crate) fn set_emit_features(&mut self, features: EmitFeatures) {
+        self.emit_features = features;
     }
 
     /// Enables or disables runtime array bounds-check emission.
@@ -540,12 +556,12 @@ impl Compiler {
     /// The memory lowering helpers need both, and taking them through one
     /// accessor keeps the split borrow of the two `Compiler` fields at a single
     /// place instead of at every call site.
-    fn func_and_scratch(&mut self) -> (&mut Function, &mut ScratchAlloc) {
+    fn func_and_region(&mut self) -> (&mut Function, &mut RegionEmit) {
         let func = self
             .func
             .as_mut()
-            .expect("func_and_scratch() called outside function compilation");
-        (func, &mut self.scratch)
+            .expect("func_and_region() called outside function compilation");
+        (func, &mut self.region_emit)
     }
 
     /// Finishes the function under construction, prefixing the body with the
@@ -571,7 +587,7 @@ impl Compiler {
         );
 
         let mut declarations = std::mem::take(&mut self.local_declarations);
-        declarations.extend(self.scratch.declarations());
+        declarations.extend(self.region_emit.declarations());
         let mut completed = Function::new(declarations);
         completed.raw(body[1..].iter().copied());
         completed
@@ -1306,11 +1322,12 @@ impl Compiler {
         // it is being built, so the complete declaration list is not known until
         // the body is finished. The declarations are re-attached at that point,
         // and a function that allocates nothing gets exactly the list built above.
-        self.scratch = ScratchAlloc::new(
+        self.region_emit = RegionEmit::new(
             local_idx
                 + u32::from(has_frame)
                 + u32::from(self.bounds_check_scratch_local.is_some())
                 + u32::from(self.narrow_div_scratch_local.is_some()),
+            self.emit_features,
         );
         self.local_declarations = local_declarations;
         self.func = Some(Function::new([]));
@@ -1340,8 +1357,8 @@ impl Compiler {
         }
 
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
-            let scratch = &mut self.scratch;
-            emit_stack_prologue(func, layout, scratch);
+            let region = &mut self.region_emit;
+            emit_stack_prologue(func, layout, region);
 
             // Copy-on-entry: for each compound-typed parameter (array, struct, or mut self),
             // copy the caller's data into the callee's frame to enforce value semantics.
@@ -1373,7 +1390,7 @@ impl Compiler {
                                     slot,
                                     param_local,
                                     &elem_type.kind,
-                                    scratch,
+                                    region,
                                 );
                             }
                             // A struct parameter (bare `Custom` name or a
@@ -1387,13 +1404,7 @@ impl Compiler {
                             | TypeInfoKind::Qualified(_)
                             | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
-                                    emit_struct_param_copy(
-                                        func,
-                                        layout,
-                                        slot,
-                                        param_local,
-                                        scratch,
-                                    );
+                                    emit_struct_param_copy(func, layout, slot, param_local, region);
                                 }
                             }
                             _ => {}
@@ -1407,7 +1418,7 @@ impl Compiler {
                                 .get("self")
                                 .expect("`self` must be in locals_map for mut self method")
                                 .0;
-                            emit_struct_param_copy(func, layout, slot, self_local, scratch);
+                            emit_struct_param_copy(func, layout, slot, self_local, region);
                         }
                     }
                     _ => {}
@@ -3689,8 +3700,8 @@ impl Compiler {
                     .get(name)
                     .expect("Return identifier not found in locals_map");
                 let source_local = *source_local;
-                let (func, scratch) = self.func_and_scratch();
-                emit_sret_copy(func, sret_idx, source_local, byte_size, scratch);
+                let (func, region) = self.func_and_region();
+                emit_sret_copy(func, sret_idx, source_local, byte_size, region);
             }
             Expr::ArrayLiteral { elements } => {
                 let elements = elements.clone();
@@ -3756,14 +3767,8 @@ impl Compiler {
                     .get(name)
                     .expect("Return identifier not found in locals_map");
                 let source_local = *source_local;
-                let (func, scratch) = self.func_and_scratch();
-                emit_sret_copy(
-                    func,
-                    sret_idx,
-                    source_local,
-                    return_info.total_size,
-                    scratch,
-                );
+                let (func, region) = self.func_and_region();
+                emit_sret_copy(func, sret_idx, source_local, return_info.total_size, region);
             }
             Expr::StructLiteral { fields, .. } => {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
@@ -5796,13 +5801,14 @@ impl Compiler {
     /// Copies `byte_size` bytes between a destination and a source address that
     /// the caller has already pushed, destination first.
     ///
-    /// The region is moved by plain loads and stores — straight-line for a small
+    /// The region is moved by one `memory.copy` when the build permits bulk
+    /// memory, and otherwise by plain loads and stores — straight-line for a small
     /// region, an index loop with a static tail for a large one. See
     /// [`emit_memcpy_via_stack`] for the shapes and for why a forward copy is
     /// sound at every site that reaches it.
     fn emit_memory_copy(&mut self, byte_size: u32) {
-        let (func, scratch) = self.func_and_scratch();
-        emit_memcpy_via_stack(func, byte_size, scratch);
+        let (func, region) = self.func_and_region();
+        emit_memcpy_via_stack(func, byte_size, region);
     }
 
     pub(crate) fn has_main(&self) -> bool {
@@ -6011,7 +6017,7 @@ mod tests {
     /// lowering, and returns the compiler ready for `take_completed_function`.
     fn begin_body(compiler: &mut Compiler, declarations: Vec<(u32, ValType)>, first_free: u32) {
         compiler.local_declarations = declarations;
-        compiler.scratch = ScratchAlloc::new(first_free);
+        compiler.region_emit = RegionEmit::new(first_free, EmitFeatures::default());
         compiler.func = Some(Function::new([]));
     }
 
@@ -6047,8 +6053,8 @@ mod tests {
         let declarations = vec![(1, ValType::I32)];
         let mut compiler = Compiler::new("test");
         begin_body(&mut compiler, declarations.clone(), 1);
-        let dst = compiler.scratch.dst();
-        let src = compiler.scratch.src();
+        let dst = compiler.region_emit.dst();
+        let src = compiler.region_emit.src();
         assert_eq!(
             (dst, src),
             (1, 2),

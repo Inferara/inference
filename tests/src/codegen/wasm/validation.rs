@@ -1403,14 +1403,60 @@ mod codegen_validation_tests {
         false
     }
 
-    /// Every golden `.wasm` under `tests/test_data/codegen`, sorted so failures
-    /// name the same file across runs.
+    /// Asserts a module carries at least one bulk-memory operator.
+    ///
+    /// The inverse of [`assert_no_bulk_memory_operator`], and it earns its keep
+    /// for the same reason the corpus gate does: a golden family whose whole
+    /// purpose is to hold the opt-in instruction level would still pass a byte
+    /// comparison if the opt-in silently stopped taking effect and the goldens
+    /// were regenerated. Requiring the operator makes that regeneration fail.
+    fn assert_has_bulk_memory_operator(wasm: &[u8], label: &str) {
+        for payload in Parser::new(0).parse_all(wasm) {
+            let payload = payload.unwrap_or_else(|e| panic!("failed to parse {label}: {e}"));
+            let Payload::CodeSectionEntry(body) = payload else {
+                continue;
+            };
+            let operators = body
+                .get_operators_reader()
+                .unwrap_or_else(|e| panic!("failed to read a function body of {label}: {e}"));
+            for op in operators {
+                let op =
+                    op.unwrap_or_else(|e| panic!("failed to decode an operator of {label}: {e}"));
+                if matches!(
+                    op,
+                    Operator::MemoryFill { .. }
+                        | Operator::MemoryCopy { .. }
+                        | Operator::MemoryInit { .. }
+                        | Operator::DataDrop { .. }
+                ) {
+                    return;
+                }
+            }
+        }
+        panic!("{label} carries no bulk-memory operator, so it is not an opt-in artifact");
+    }
+
+    /// Root of the opt-in golden family: modules the compiler produced with a
+    /// post-MVP feature requested, so they are deliberately not Wasm 1.0.
+    ///
+    /// Both partitions are defined by this one path — the default gates exclude
+    /// the subtree and the opt-in gates cover exactly it — so the two can only
+    /// disagree about which side a golden belongs to, never leave one ungated.
+    fn bulk_memory_golden_root() -> std::path::PathBuf {
+        crate::utils::get_test_data_path()
+            .join("codegen")
+            .join("wasm")
+            .join("bulk_memory_golden")
+    }
+
+    /// Every golden `.wasm` under `tests/test_data/codegen`, both partitions,
+    /// sorted so failures name the same file across runs.
     ///
     /// `out` directories are skipped: they are the gitignored landing place for
     /// `infs build` run by hand against a fixture tree, so whatever they hold is
     /// whichever compiler someone last pointed at it, not a golden this suite
     /// maintains.
-    fn golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
+    fn all_golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
         fn collect(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
             let entries = std::fs::read_dir(dir)
                 .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()));
@@ -1433,6 +1479,25 @@ mod codegen_validation_tests {
         );
         found.sort();
         found
+    }
+
+    /// The goldens the WebAssembly 1.0 invariants below apply to: everything
+    /// except the opt-in family.
+    fn golden_wasm_artifacts() -> Vec<std::path::PathBuf> {
+        let root = bulk_memory_golden_root();
+        all_golden_wasm_artifacts()
+            .into_iter()
+            .filter(|path| !path.starts_with(&root))
+            .collect()
+    }
+
+    /// The opt-in family, which the inverse gates below apply to.
+    fn bulk_memory_golden_artifacts() -> Vec<std::path::PathBuf> {
+        let root = bulk_memory_golden_root();
+        all_golden_wasm_artifacts()
+            .into_iter()
+            .filter(|path| path.starts_with(&root))
+            .collect()
     }
 
     /// Every codegen fixture that compiles as a stand-alone file.
@@ -1560,6 +1625,24 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("{label} does not validate as WebAssembly 1.0: {e}"));
     }
 
+    /// [`validate_as_wasm_1_0`] with the bulk-memory proposal added — the exact
+    /// level a `bulk-memory` build claims to target.
+    ///
+    /// Stating the opt-in positively is what makes the family's goldens more than
+    /// a byte record: the same unmodified upstream validator that rejects them at
+    /// Wasm 1.0 must accept them here, so an artifact carrying some *other*
+    /// post-MVP instruction that crept in fails rather than passing as "not 1.0,
+    /// therefore fine".
+    fn validate_with_bulk_memory(wasm: &[u8], label: &str) {
+        use wasmparser::{Validator, WasmFeatures};
+
+        Validator::new_with_features(WasmFeatures::WASM1.union(WasmFeatures::BULK_MEMORY))
+            .validate_all(wasm)
+            .unwrap_or_else(|e| {
+                panic!("{label} does not validate as WebAssembly 1.0 + bulk memory: {e}")
+            });
+    }
+
     /// Every executable golden validates at the WebAssembly 1.0 feature level.
     ///
     /// Modules carrying the compiler's custom verification opcodes are excluded:
@@ -1609,6 +1692,91 @@ mod codegen_validation_tests {
         assert!(
             validated >= 100,
             "expected at least 100 fixtures to compile and validate as Wasm 1.0, only {validated} did"
+        );
+    }
+
+    // Opt-in feature family invariants ---
+
+    /// The two partitions together are the whole corpus, and they do not overlap.
+    ///
+    /// Total cover is structural today — one partition is the walk and the other
+    /// is the walk minus a subtree — and this test is what keeps it that way. The
+    /// arrangement that would break it is the natural one to reach for as opt-in
+    /// families multiply: redefining either side as an explicit list of roots, or
+    /// giving one side a skip rule the other lacks. Either turns the subtraction
+    /// into two independent walks, and the first golden that falls outside both is
+    /// then gated by nothing — the Wasm 1.0 tests skip what is not theirs and the
+    /// opt-in tests only look inside their own root.
+    ///
+    /// Comparing merged sorted paths rather than counts states set equality, so a
+    /// golden that swapped sides is caught too; the floors keep a collector that
+    /// silently found nothing from passing vacuously.
+    #[test]
+    fn golden_partitions_cover_every_artifact() {
+        let all = all_golden_wasm_artifacts();
+        let default_level = golden_wasm_artifacts();
+        let opt_in = bulk_memory_golden_artifacts();
+
+        assert!(
+            all.len() >= 180,
+            "expected the corpus to hold at least 180 golden modules across both \
+             partitions, found {}",
+            all.len()
+        );
+        assert!(
+            opt_in.len() >= 50,
+            "expected the opt-in family to hold at least 50 golden modules, found {}",
+            opt_in.len()
+        );
+
+        let mut merged: Vec<std::path::PathBuf> =
+            default_level.iter().chain(opt_in.iter()).cloned().collect();
+        merged.sort();
+        assert_eq!(
+            merged, all,
+            "every golden must belong to exactly one partition; a path missing from \
+             the merged list is gated by neither the Wasm 1.0 nor the opt-in tests"
+        );
+    }
+
+    /// Every artifact in the opt-in family carries a bulk-memory operator.
+    #[test]
+    fn bulk_memory_goldens_all_carry_a_bulk_memory_operator() {
+        let artifacts = bulk_memory_golden_artifacts();
+        assert!(
+            artifacts.len() >= 50,
+            "expected at least 50 opt-in goldens, found {}",
+            artifacts.len()
+        );
+        for path in &artifacts {
+            let wasm = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            assert_has_bulk_memory_operator(&wasm, &path.display().to_string());
+        }
+    }
+
+    /// And every executable one validates at exactly Wasm 1.0 plus bulk memory.
+    ///
+    /// Modules carrying the compiler's custom verification opcodes are excluded
+    /// for the same reason as in the Wasm 1.0 gate: those opcodes are not
+    /// WebAssembly at any feature level.
+    #[test]
+    fn bulk_memory_goldens_validate_at_wasm_1_0_plus_bulk_memory() {
+        let artifacts = bulk_memory_golden_artifacts();
+        let mut validated = 0usize;
+        for path in &artifacts {
+            let wasm = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            if contains_verification_operator(&wasm) {
+                continue;
+            }
+            validate_with_bulk_memory(&wasm, &path.display().to_string());
+            validated += 1;
+        }
+        assert!(
+            validated >= 40,
+            "expected at least 40 executable opt-in goldens to validate at Wasm 1.0 + \
+             bulk memory, only {validated} did"
         );
     }
 

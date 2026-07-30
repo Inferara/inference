@@ -42,6 +42,7 @@ fn proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> CodegenOutput {
         CompilationMode::Proof,
         OptLevel::O3,
         "output",
+        inference_wasm_codegen::EmitFeatures::default(),
     )
     .expect("multi-file proof codegen should succeed")
 }
@@ -70,6 +71,7 @@ fn try_proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> anyhow::Result<C
         CompilationMode::Proof,
         OptLevel::O3,
         "output",
+        inference_wasm_codegen::EmitFeatures::default(),
     )
 }
 

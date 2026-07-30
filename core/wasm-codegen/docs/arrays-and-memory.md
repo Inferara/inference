@@ -5,9 +5,10 @@
 This document explains how Inference compiles fixed-size array types, struct types, and nested compound types to WebAssembly linear memory with a shadow stack (similar to Rust/LLVM).
 
 Every whole-region memory operation this produces — frame zero-initialization, array and
-struct parameter copies, sret returns, struct-to-struct assignment — is lowered to plain
-loads and stores rather than the bulk-memory proposal's `memory.fill`/`memory.copy`, so
-generated modules stay within the WebAssembly 1.0 (MVP) instruction set. See
+struct parameter copies, sret returns, struct-to-struct assignment — is by default lowered
+to plain loads and stores rather than the bulk-memory proposal's
+`memory.fill`/`memory.copy`, so generated modules stay within the WebAssembly 1.0 (MVP)
+instruction set. A build that opts into bulk memory gets the instructions instead. See
 [Region Fill and Copy Lowering](#region-fill-and-copy-lowering).
 
 Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism. Each function that uses arrays:
@@ -128,11 +129,23 @@ global.set $__stack_pointer    ;; restore stack pointer
 
 Two operations move or clear an entire region of linear memory without caring about its
 contents: zero-initializing a fresh stack frame in the prologue, and copying a compound
-value (array or struct) between two addresses. Both used to be a single bulk-memory
-instruction (`memory.fill` / `memory.copy`). They are now lowered to plain loads and
-stores instead, so that generated modules stay within the WebAssembly 1.0 (MVP)
-instruction set — no post-MVP proposal, including bulk-memory, is required to run
-Inference-compiled code.
+value (array or struct) between two addresses. Each is naturally a single bulk-memory
+instruction (`memory.fill` / `memory.copy`), and by default each is lowered to plain loads
+and stores instead, so that generated modules stay within the WebAssembly 1.0 (MVP)
+instruction set — no post-MVP proposal is required to run Inference-compiled code.
+
+### Opting Back In
+
+A build that permits bulk memory — `EmitFeatures { bulk_memory: true }` on `codegen()`,
+which `infc --wasm-features bulk-memory` sets — emits the single instruction at each site
+instead of its lowering. The choice is made at the first statement of
+`emit_frame_zero_fill`, `emit_memcpy_via_locals` and `emit_memcpy_via_stack`, ahead of
+every early return and every scratch allocation; nothing upstream of those three
+functions differs, so frame layouts and the analysis rules that reason about them
+(A035, A036) are unaffected. The bulk form allocates no scratch local, which `RegionEmit`
+asserts, and the resulting bytes reproduce what the compiler emitted before this lowering
+existed. The feature applies identically in Compile and Proof mode, so the `.v` always
+describes the same program as the `.wasm`.
 
 ### Two Shapes: Straight-Line and Looped
 
@@ -172,7 +185,7 @@ one-byte alignment hint (`copy_memarg`), since a copy's base may be a struct fie
 array element aligned to less than the natural alignment that `store_instruction` /
 `load_instruction` assume for typed accesses.
 
-### `ScratchAlloc`: Lazily Allocated Locals
+### `RegionEmit`: Lazily Allocated Locals
 
 The loop and copy shapes need scratch i32 locals — an induction variable, and (for
 `emit_memcpy_via_stack`, the entry point used by every body-level compound copy) a
@@ -183,9 +196,10 @@ because whether — and how many times — a function needs them is a property o
 instructions emitted while lowering its body, not something that can be predicted ahead
 of emission without duplicating the emission logic.
 
-`ScratchAlloc` hands out indices for `dst`, `src`, and `counter` in first-use order,
-starting one past the last eagerly reserved local. A function that never emits a loop
-or a body-level compound copy allocates nothing. To make this possible, the compiler
+`RegionEmit` hands out indices for `dst`, `src`, and `counter` in first-use order, starting
+one past the last eagerly reserved local. A function that never emits a loop or a
+body-level compound copy allocates nothing, and a build that permits bulk memory never
+allocates at all. To make this possible, the compiler
 builds the function body into a `wasm_encoder::Function` created with an *empty* locals
 vector (`Function::new([])`) instead of the final declarations, and only once the body
 is fully emitted does `Compiler::take_completed_function` splice the complete
@@ -196,8 +210,8 @@ declarations from the start. See
 [docs/local-variables-lowering.md](local-variables-lowering.md#local-declarations-are-finalized-after-the-body-is-built)
 for how this interacts with the local pre-scan.
 
-The allocator, like the function body itself, is rebuilt at the start of every function
-(`ScratchAlloc::new(first_free_index)`), and its slots are shared across every copy and
+The state, like the function body itself, is rebuilt at the start of every function
+(`RegionEmit::new(first_free_index, features)`), and its slots are shared across every copy and
 loop emitted in that function — safe because each loop or copy is emitted atomically
 (see below), so none is ever live across another.
 
@@ -271,10 +285,10 @@ This module contains all memory-related helpers:
 | `emit_stack_epilogue()` | Generate frame deallocation code |
 | `emit_array_param_copy()` | Copy caller's array data into callee's frame |
 | `emit_struct_param_copy()` | Copy caller's struct data into callee's frame via a region copy |
-| `ScratchAlloc` | Lazily allocated i32 scratch locals (`dst`, `src`, `counter`) for region fill/copy loops, numbered from the first free local after the eager declarations |
-| `emit_frame_zero_fill()` | Zero-fills a frame: straight-line `i64.store`s below `BULK_UNROLL_LIMIT_BYTES`, an index loop above it |
-| `emit_memcpy_via_locals()` | Copies `byte_size` bytes between two `MemAddr` endpoints: straight-line loads/stores below `BULK_UNROLL_LIMIT_BYTES`, a loop with a static tail above it |
-| `emit_memcpy_via_stack()` | Pops a destination and source address off the WASM operand stack into scratch locals, then calls `emit_memcpy_via_locals()`; the entry point for every body-level compound copy |
+| `RegionEmit` | The permitted WebAssembly features plus the lazily allocated i32 scratch locals (`dst`, `src`, `counter`) the lowered forms need, numbered from the first free local after the eager declarations |
+| `emit_frame_zero_fill()` | Zero-fills a frame: one `memory.fill` when the build permits bulk memory, otherwise straight-line `i64.store`s below `BULK_UNROLL_LIMIT_BYTES` and an index loop above it |
+| `emit_memcpy_via_locals()` | Copies `byte_size` bytes between two `MemAddr` endpoints: one `memory.copy` when the build permits bulk memory, otherwise straight-line loads/stores below `BULK_UNROLL_LIMIT_BYTES` and a loop with a static tail above it |
+| `emit_memcpy_via_stack()` | The entry point for every body-level compound copy, taking its destination and source from the WASM operand stack: appends the size and one `memory.copy` when the build permits bulk memory, otherwise pops both addresses into scratch locals and calls `emit_memcpy_via_locals()` |
 | `MemAddr` | A copy endpoint: a WASM local holding a base pointer plus a constant byte displacement |
 | `CopyWidth` | The four copy unit widths (`I64`, `I32`, `I16`, `I8`) with their load/store instruction and byte count |
 
@@ -1131,6 +1145,9 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_frame_fill_loop` | `emit_frame_zero_fill()` | A frame above `BULK_UNROLL_LIMIT_BYTES` was zero-filled with a 16-byte-stride loop |
 | `wasm_codegen_memcpy_unrolled` | `emit_memcpy_via_locals()` | A region at or below `BULK_UNROLL_LIMIT_BYTES` was copied with straight-line loads/stores |
 | `wasm_codegen_memcpy_loop` | `emit_memcpy_via_locals()` | A region above `BULK_UNROLL_LIMIT_BYTES` was copied with an 8-byte-stride loop plus a static tail |
+| `wasm_codegen_frame_fill_bulk` | `emit_frame_zero_fill()` | A frame was zero-filled with one `memory.fill` because the build permits bulk memory |
+| `wasm_codegen_memcpy_bulk` | `emit_memcpy_via_locals()` | A region was copied with one `memory.copy` because the build permits bulk memory |
+| `wasm_codegen_memcpy_via_stack_bulk` | `emit_memcpy_via_stack()` | A body-level compound copy consumed its two pushed addresses with one `memory.copy` |
 
 ## Examples
 

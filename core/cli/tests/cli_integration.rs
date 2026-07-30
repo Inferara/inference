@@ -365,14 +365,14 @@ fn abi_version_flag_prints_and_exits() {
 }
 
 /// Pins the ABI version string to the literal value introduced for the
-/// `--out-dir` flag. The `abi_version_flag_prints_and_exits` test above checks
-/// the binary against the shared constant; this one additionally asserts the
-/// concrete `1.1` so an accidental constant change is caught here too.
+/// `--wasm-features` flag. The `abi_version_flag_prints_and_exits` test above
+/// checks the binary against the shared constant; this one additionally asserts
+/// the concrete `1.2` so an accidental constant change is caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.1" or "1.10" — which would satisfy a substring match — cannot pass.
+/// "11.2" or "1.20" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_one() {
+fn abi_version_is_one_dot_two() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +380,102 @@ fn abi_version_is_one_dot_one() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.1",
-        "ABI version must be exactly 1.1, not merely contain it"
+        "1.2",
+        "ABI version must be exactly 1.2, not merely contain it"
+    );
+}
+
+/// A source with a compound copy, so the artifact is one whose bytes differ
+/// between the WebAssembly 1.0 lowering and the bulk-memory instructions.
+const COMPOUND_COPY_SOURCE: &str = "\
+struct Point { x: i32; y: i32; }
+
+pub fn main() -> i32 {
+    let p: Point = Point { x: 1, y: 2 };
+    let q: Point = p;
+    return q.x;
+}
+";
+
+/// The `0xFC 0x0A` / `0xFC 0x0B` prefixed opcodes of `memory.copy` and
+/// `memory.fill`, spelled out so the assertion does not depend on a disassembler.
+fn contains_bulk_memory_opcode(wasm: &[u8]) -> bool {
+    wasm.windows(2)
+        .any(|w| w[0] == 0xFC && (w[1] == 0x0A || w[1] == 0x0B))
+}
+
+fn compile_source_with(args: &[&str], source: &str) -> Vec<u8> {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path()).args(args);
+    cmd.assert().success();
+
+    std::fs::read(temp.child("out").child("prog.wasm").path())
+        .expect("infc must have written out/prog.wasm")
+}
+
+/// `--wasm-features bulk-memory` reaches code generation: the artifact carries
+/// bulk-memory opcodes that the same source compiles without by default.
+#[test]
+fn wasm_features_bulk_memory_reaches_codegen() {
+    let default_build = compile_source_with(&[], COMPOUND_COPY_SOURCE);
+    assert!(
+        !contains_bulk_memory_opcode(&default_build),
+        "the default build must stay within WebAssembly 1.0"
+    );
+
+    let bulk_build = compile_source_with(&["--wasm-features", "bulk-memory"], COMPOUND_COPY_SOURCE);
+    assert!(
+        contains_bulk_memory_opcode(&bulk_build),
+        "--wasm-features bulk-memory must emit memory.copy/memory.fill"
+    );
+    assert_ne!(
+        default_build, bulk_build,
+        "the two instruction levels must produce different artifacts"
+    );
+}
+
+/// The features apply identically in proof mode — the `.v` must describe the same
+/// program as the `.wasm`, so nothing may gate them on the compilation mode.
+#[test]
+fn wasm_features_apply_in_proof_mode_too() {
+    let bulk_proof = compile_source_with(
+        &["--wasm-features", "bulk-memory", "--mode", "proof"],
+        COMPOUND_COPY_SOURCE,
+    );
+    assert!(
+        contains_bulk_memory_opcode(&bulk_proof),
+        "a proof-mode build must honor the requested features"
+    );
+}
+
+/// An unrecognized name fails the build before any phase runs, rather than being
+/// ignored — a build that quietly emitted a different instruction level than
+/// requested is the failure this rejects.
+#[test]
+fn unknown_wasm_feature_is_rejected_before_any_output() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--wasm-features")
+        .arg("memory.fill");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("is an instruction, not a feature"))
+        .stderr(predicate::str::contains("write `bulk-memory`"));
+
+    assert!(
+        !temp.child("out").child("trivial.wasm").path().exists(),
+        "a rejected feature request must leave no artifact"
     );
 }
 

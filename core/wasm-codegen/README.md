@@ -136,13 +136,20 @@ semantics to the declared type. The mask applies to both `<<` and `>>`.
 
 ### WebAssembly Feature Level
 
-Every emitted function body, and the module as a whole, stays within the WebAssembly
-1.0 (MVP) instruction set. Whole-region memory operations that would naturally reach
-for the bulk-memory proposal's `memory.fill`/`memory.copy` — frame zero-initialization
-in the prologue, array/struct parameter copies, sret returns, and struct-to-struct
-assignment — are instead lowered to plain loads and stores: a straight-line sequence
-for small regions, an index-driven loop for large ones. See
+By default every emitted function body, and the module as a whole, stays within the
+WebAssembly 1.0 (MVP) instruction set. Whole-region memory operations that would
+naturally reach for the bulk-memory proposal's `memory.fill`/`memory.copy` — frame
+zero-initialization in the prologue, array/struct parameter copies, sret returns, and
+struct-to-struct assignment — are instead lowered to plain loads and stores: a
+straight-line sequence for small regions, an index-driven loop for large ones. See
 [docs/arrays-and-memory.md](docs/arrays-and-memory.md#region-fill-and-copy-lowering).
+
+A build may opt back into the instructions by passing `EmitFeatures { bulk_memory: true }`
+to `codegen()` (`infc --wasm-features bulk-memory`), which restores the single
+`memory.fill`/`memory.copy` at each of those sites. The feature set applies identically
+in both compilation modes, so the Rocq translation always describes the same program as
+the emitted binary, and the `Soroban` target rejects it because its runtime's acceptance
+of the opcodes is unverified.
 
 ## Non-Deterministic Extensions
 
@@ -355,9 +362,9 @@ Detailed design documents live in `docs/`:
   array and struct parameters, struct field layout (`compute_struct_field_layout`),
   `CompoundFieldLayout` for nested struct and array fields, member access lowering for scalar
   and compound fields, struct literal lowering with nested dispatch, arrays of structs, struct
-  uzumaki with array fields, and the region fill/copy lowering (`ScratchAlloc`,
+  uzumaki with array fields, and the region fill/copy lowering (`RegionEmit`,
   `emit_memcpy_via_locals`) that keeps every whole-region memory operation within the
-  WebAssembly 1.0 instruction set.
+  WebAssembly 1.0 instruction set unless the build opts into bulk memory.
 - [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
   lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
   tracking, and interaction with non-det blocks, if-statements, and array frames.
@@ -366,10 +373,10 @@ Detailed design documents live in `docs/`:
 
 - `lib.rs` - Public API, multi-file AST traversal in canonical arena order, two-stage index pre-scan across all files (imports → top-level functions → methods), root-only export policy (`should_export`), file-qualified spec name emission (`qualified_spec_name` with `_` join for non-entry specs), `SpecNameCollision` backstop
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
-- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`, `ScratchAlloc` and the region fill/copy lowering (`emit_memcpy_via_locals`, `emit_memcpy_via_stack`) that avoids bulk-memory instructions
+- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`, `RegionEmit` and the region fill/copy lowering (`emit_memcpy_via_locals`, `emit_memcpy_via_stack`) that avoids bulk-memory instructions unless the build permits them
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
-- `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`)
+- `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
 - `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation, read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator; `diag.rs`: the `P001`–`P009` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
 

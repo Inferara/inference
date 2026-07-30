@@ -25,6 +25,7 @@
 //! target = "wasm32"
 //! optimize = "release"
 //! mode = "compile"        # "compile" (executable) or "proof" (Rocq specs)
+//! wasm-features = []      # post-MVP WebAssembly proposals to opt into
 //!
 //! [build.wasm-opt]        # optional: post-build optimization of the executable
 //! enabled = true          # table presence enables; set false to keep it off
@@ -35,12 +36,26 @@
 //! output-dir = "proofs/"  # honored only in proof mode
 //! ```
 //!
+//! ## Unknown Keys
+//!
+//! Every table whose keys are a fixed schema rejects keys it does not know, so a
+//! typo is a build error instead of a setting that silently does nothing. The
+//! `toml` parser names the offending key and the fields it expected. Only
+//! `[dependencies]` and `[wasm-dependencies]` accept arbitrary keys, because
+//! there the keys *are* the data — they name dependencies.
+//!
+//! The trade-off is deliberate: an older `infs` reading a manifest that uses a
+//! newer key fails rather than ignoring it. That matches how the compiler ABI
+//! gate treats toolchain/manifest skew — an error, never a silent downgrade that
+//! ships a differently-configured artifact than the manifest asked for.
+//!
 //! ## Reserved Names
 //!
 //! Project names cannot use Inference keywords or problematic directory names.
 //! See [`RESERVED_WORDS`] for the complete list.
 
 use anyhow::{Context, Result, bail};
+use inference_compiler_interface::{WasmFeatureName, WasmFeatureSource, resolve_wasm_features};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -97,6 +112,7 @@ pub const RESERVED_WORDS: &[&str] = &[
 
 /// The root manifest structure for `Inference.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct InferenceToml {
     /// Package metadata section.
     pub package: Package,
@@ -124,6 +140,7 @@ pub struct InferenceToml {
 
 /// Package metadata in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Package {
     /// The project name.
     pub name: String,
@@ -236,9 +253,16 @@ fn is_logical_name_segment(segment: &str) -> bool {
 /// The location of a single external `.wasm` module dependency.
 ///
 /// Only a filesystem `path` is supported today. The entry is a table — not a
-/// bare string — so future producers (version pins, registries) can add fields
-/// without a breaking change to the manifest format.
+/// bare string — so future producers (version pins, registries) have somewhere to
+/// add fields: a reader that knows a new field accepts entries carrying it, and
+/// entries that omit it, without either side changing shape.
+///
+/// That compatibility runs forward only. Like every fixed-schema table here the
+/// entry rejects unknown keys, so an `infs` predating a field refuses a manifest
+/// that uses it rather than silently dropping it — the deliberate policy for
+/// toolchain/manifest skew described at the module level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WasmDependency {
     /// Filesystem path to the compiled `.wasm` module, relative to the manifest.
     pub path: String,
@@ -246,6 +270,7 @@ pub struct WasmDependency {
 
 /// Build configuration section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     /// Target platform for compilation.
     #[serde(default = "default_target")]
@@ -268,12 +293,32 @@ pub struct BuildConfig {
     #[serde(default = "default_mode")]
     pub mode: String,
 
+    /// Post-MVP WebAssembly proposals the emitted module opts into, named after
+    /// the proposal (`"bulk-memory"`), never after an instruction.
+    ///
+    /// Empty (the default) means pure WebAssembly 1.0 output. Entries are kept as
+    /// raw strings and resolved against the shared vocabulary by
+    /// [`Self::resolved_wasm_features`]; validation runs on load, so a manifest
+    /// that reached a caller has already been checked.
+    ///
+    /// Flipping this changes the instruction set of every artifact the project
+    /// produces, in both compile and proof mode. That is why it lives in the
+    /// versioned manifest rather than in a flag.
+    #[serde(
+        rename = "wasm-features",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub wasm_features: Vec<String>,
+
     /// Optional `[build.wasm-opt]` sub-table. Absent means post-build
     /// optimization is off; present means on unless `enabled = false`.
     ///
     /// Declared last because a TOML sub-table must serialize after the scalar
     /// keys of its parent table, and `toml` emits struct fields in declaration
-    /// order.
+    /// order. Anything added below it would serialize *under* the
+    /// `[build.wasm-opt]` header and reparent into that sub-table on the next
+    /// parse.
     #[serde(rename = "wasm-opt", default, skip_serializing_if = "Option::is_none")]
     pub wasm_opt: Option<WasmOptConfig>,
 }
@@ -284,6 +329,7 @@ impl Default for BuildConfig {
             target: default_target(),
             optimize: default_optimize(),
             mode: default_mode(),
+            wasm_features: Vec::new(),
             wasm_opt: None,
         }
     }
@@ -301,18 +347,41 @@ impl BuildConfig {
         self.target == default_target()
             && self.optimize == default_optimize()
             && self.mode == default_mode()
+            && self.wasm_features.is_empty()
             && self.wasm_opt.is_none()
+    }
+
+    /// The `wasm-features` entries resolved into the shared compiler vocabulary.
+    ///
+    /// Callers get typed features without knowing how the raw strings are spelled
+    /// or validated. The resolution is the same call [`Self::validate`] makes on
+    /// load, so this cannot disagree with what the loader accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the diagnostic rejecting the first entry that is not a valid,
+    /// not-yet-seen feature name. For a manifest that came from
+    /// [`InferenceToml::from_toml`] this cannot fail — validation already ran. The
+    /// fallible signature is for the other constructor: [`Self::wasm_features`] is
+    /// a public `Vec<String>` field, so a test or tool that builds a
+    /// `BuildConfig` in memory can populate it without ever passing through the
+    /// loader, and this is where such a value is checked.
+    pub fn resolved_wasm_features(&self) -> Result<Vec<WasmFeatureName>> {
+        resolve_wasm_features(&self.wasm_features, WasmFeatureSource::Manifest)
+            .map_err(|message| anyhow::anyhow!("{message}"))
     }
 
     /// Validates the `mode` field, accepting only `"compile"` or `"proof"`
     /// (case-sensitive — TOML config values are conventionally lowercase, and
     /// matching the exact `infc --mode` flag spelling avoids surprising
-    /// near-misses like `"Proof"`).
+    /// near-misses like `"Proof"`), then the `wasm-features` entries and the
+    /// `[build.wasm-opt]` sub-table.
     ///
     /// # Errors
     ///
     /// Returns an error naming the field and the allowed values when `mode` is
-    /// neither `"compile"` nor `"proof"`.
+    /// neither `"compile"` nor `"proof"`, when a `wasm-features` entry is not a
+    /// supported proposal name, or when `[build.wasm-opt]` is invalid.
     fn validate(&self) -> Result<()> {
         if self.mode != "compile" && self.mode != "proof" {
             bail!(
@@ -320,6 +389,7 @@ impl BuildConfig {
                 self.mode
             );
         }
+        self.resolved_wasm_features()?;
         if let Some(wasm_opt) = &self.wasm_opt {
             wasm_opt.validate()?;
         }
@@ -331,6 +401,7 @@ impl BuildConfig {
 /// artifact via the external Binaryen `wasm-opt` binary. Table presence means
 /// enabled unless `enabled = false`. Proof-mode artifacts are never optimized.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WasmOptConfig {
     /// Whether the optimizer runs. Defaults to `true` so that merely declaring
     /// `[build.wasm-opt]` turns the feature on.
@@ -390,6 +461,7 @@ impl WasmOptConfig {
 
 /// Verification configuration for Rocq output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VerificationConfig {
     /// Output directory for generated Rocq proofs.
     #[serde(default = "default_output_dir", rename = "output-dir")]
@@ -653,14 +725,15 @@ impl InferenceToml {
     /// Missing optional sections (`[dependencies]`, `[build]`,
     /// `[verification]`) are filled in with their defaults; absent fields
     /// within present sections likewise default. Only `[package]` (with at
-    /// least `name` and `version`) is required. After structural parsing, the
-    /// `[build] mode` value is validated against its allowed set.
+    /// least `name` and `version`) is required. A key no fixed-schema table
+    /// knows is rejected during structural parsing. After that, the `[build]`
+    /// values are validated against their allowed sets.
     ///
     /// # Errors
     ///
     /// Returns an error if the input is not valid TOML, does not match the
-    /// manifest schema (e.g. `[package]` is missing), or carries an invalid
-    /// `[build] mode` value.
+    /// manifest schema (`[package]` is missing, or a table carries an unknown
+    /// key), or carries an invalid `[build]` value.
     pub fn from_toml(s: &str) -> Result<Self> {
         let manifest: Self = toml::from_str(s).context("Failed to parse Inference.toml")?;
         manifest.build.validate()?;
@@ -830,6 +903,7 @@ mod tests {
             target: String::from("wasm64"),
             optimize: String::from("debug"),
             mode: default_mode(),
+            wasm_features: Vec::new(),
             wasm_opt: None,
         };
         assert!(!config.is_default());
@@ -1847,5 +1921,283 @@ target = "wasm32"
         let source = temp.child("main.inf");
         source.write_str("").unwrap();
         assert!(find_manifest_dir(source.path()).is_none());
+    }
+
+    /// Builds a manifest whose `[build]` table carries `body`.
+    fn manifest_with_build(body: &str) -> String {
+        format!(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
+             [build]\n{body}"
+        )
+    }
+
+    #[test]
+    fn wasm_features_absent_yields_pure_wasm_1_0() {
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_build("mode = \"compile\"\n")).expect("parses");
+        assert!(manifest.build.wasm_features.is_empty());
+        assert!(manifest.build.is_default());
+        assert_eq!(manifest.build.resolved_wasm_features().unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn wasm_features_empty_array_is_still_the_default_config() {
+        // An explicit `[]` is indistinguishable from absence, so the whole
+        // `[build]` table is still skipped on serialization.
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_build("wasm-features = []\n")).expect("parses");
+        assert!(manifest.build.wasm_features.is_empty());
+        assert!(manifest.build.is_default());
+        let serialized = manifest.to_toml().expect("serializes");
+        assert!(
+            !serialized.contains("[build]"),
+            "a default [build] must be skipped entirely, got:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_matching_is_case_sensitive() {
+        // Pins the same decision `mode` makes: a near-miss is rejected, never
+        // silently accepted, because the value selects an instruction set.
+        let err = rejection_of(&manifest_with_build("wasm-features = [\"Bulk-Memory\"]\n"));
+        assert!(
+            err.contains("unknown WebAssembly feature"),
+            "`Bulk-Memory` must not resolve, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_written_under_the_wasm_opt_header_is_rejected() {
+        // The mistake the field-order rule exists to prevent, seen from the user's
+        // side: a key placed after the sub-table header belongs to that sub-table
+        // in TOML, so it never reaches `[build]`. Before unknown keys were an
+        // error this was silently dropped and the artifact shipped at 1.0.
+        let err = rejection_of(&manifest_with_build(
+            "mode = \"compile\"\n\n[build.wasm-opt]\nlevel = \"z\"\nwasm-features = [\"bulk-memory\"]\n",
+        ));
+        assert!(
+            err.contains("unknown field") && err.contains("wasm-features"),
+            "a reparented key must be reported against [build.wasm-opt], got: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_bulk_memory_parses_and_resolves() {
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_build("wasm-features = [\"bulk-memory\"]\n"))
+                .expect("parses");
+        assert_eq!(manifest.build.wasm_features, ["bulk-memory"]);
+        assert_eq!(
+            manifest.build.resolved_wasm_features().unwrap(),
+            vec![WasmFeatureName::BulkMemory]
+        );
+    }
+
+    #[test]
+    fn wasm_features_makes_build_config_non_default() {
+        // A requested feature must survive a round trip: were the config
+        // reported as default, the whole `[build]` table would be skipped and the
+        // request would vanish.
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_build("wasm-features = [\"bulk-memory\"]\n"))
+                .expect("parses");
+        assert!(!manifest.build.is_default());
+        let serialized = manifest.to_toml().expect("serializes");
+        assert!(
+            serialized.contains("wasm-features = [\"bulk-memory\"]"),
+            "the request must survive serialization, got:\n{serialized}"
+        );
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("reparses"),
+            manifest
+        );
+    }
+
+    #[test]
+    fn wasm_features_round_trip_keeps_the_key_above_the_wasm_opt_header() {
+        // Field declaration order is load-bearing: serialized *after* the
+        // `[build.wasm-opt]` header, the array would reparse as one of that
+        // sub-table's keys and the request would be lost (or rejected).
+        let src = manifest_with_build(
+            "mode = \"proof\"\nwasm-features = [\"bulk-memory\"]\n\n\
+             [build.wasm-opt]\nlevel = \"z\"\n",
+        );
+        let manifest = InferenceToml::from_toml(&src).expect("parses");
+        let serialized = manifest.to_toml().expect("serializes");
+
+        let key = serialized
+            .find("wasm-features")
+            .expect("the array must be serialized");
+        let header = serialized
+            .find("[build.wasm-opt]")
+            .expect("the sub-table must be serialized");
+        assert!(
+            key < header,
+            "wasm-features must precede the [build.wasm-opt] header, got:\n{serialized}"
+        );
+        assert_eq!(
+            InferenceToml::from_toml(&serialized).expect("reparses"),
+            manifest
+        );
+    }
+
+    #[test]
+    fn wasm_features_rejects_an_unknown_name_listing_the_supported_set() {
+        let err = InferenceToml::from_toml(&manifest_with_build("wasm-features = [\"simd\"]\n"))
+            .expect_err("`simd` is not in the vocabulary");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown WebAssembly feature") && msg.contains("`bulk-memory`"),
+            "the error must name the supported set, got: {msg}"
+        );
+        assert!(
+            msg.contains("`[build] wasm-features`"),
+            "the error must name the manifest surface, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_rejects_an_instruction_name_with_the_proposal_to_write() {
+        let err =
+            InferenceToml::from_toml(&manifest_with_build("wasm-features = [\"memory.fill\"]\n"))
+                .expect_err("an instruction is not a feature");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("is an instruction, not a feature") && msg.contains("write `bulk-memory`"),
+            "the error must redirect to the proposal name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_rejects_an_always_on_feature() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "wasm-features = [\"mutable-globals\"]\n",
+        ))
+        .expect_err("an inherent feature cannot be requested");
+        assert!(err.to_string().contains("always enabled"), "got: {err}");
+    }
+
+    #[test]
+    fn wasm_features_rejects_a_duplicate_entry() {
+        let err = InferenceToml::from_toml(&manifest_with_build(
+            "wasm-features = [\"bulk-memory\", \"bulk-memory\"]\n",
+        ))
+        .expect_err("a feature may appear at most once");
+        assert!(
+            err.to_string().contains("listed more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_features_rejects_surrounding_whitespace_rather_than_trimming() {
+        // Trimming would let an invisible typo change the instruction set of a
+        // shipped artifact, so the entry is rejected and the message says why.
+        let err =
+            InferenceToml::from_toml(&manifest_with_build("wasm-features = [\" bulk-memory\"]\n"))
+                .expect_err("a padded entry must not resolve");
+        assert!(
+            err.to_string().contains("surrounding whitespace"),
+            "got: {err}"
+        );
+    }
+
+    /// The rendered cause chain of a rejected manifest.
+    ///
+    /// A structural parse failure is wrapped in the "Failed to parse
+    /// Inference.toml" context, so plain `Display` would show only that wrapper.
+    /// The alternate form renders the whole chain, which is what the user sees on
+    /// the terminal and what these assertions are about.
+    fn rejection_of(src: &str) -> String {
+        let err = InferenceToml::from_toml(src)
+            .err()
+            .unwrap_or_else(|| panic!("this manifest must be rejected:\n{src}"));
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn unknown_key_at_the_manifest_root_is_rejected() {
+        let msg = rejection_of(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[buidl]\nmode = \"proof\"\n",
+        );
+        // `contains("buidl")` alone would be satisfied by toml's source-snippet
+        // echo of the offending line, so assert on the diagnosis itself.
+        assert!(
+            msg.contains("unknown field") && msg.contains("buidl"),
+            "the error must diagnose an unknown field and name it, got: {msg}"
+        );
+        assert!(
+            msg.contains("line"),
+            "the error must carry the toml span, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_every_fixed_schema_table_is_rejected() {
+        // The last case is a `[wasm-dependencies]` *entry*: the table's keys are
+        // free, the shape of an entry is not.
+        let cases = [
+            (
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nlicence = \"MIT\"\n",
+                "licence",
+            ),
+            (
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                 [build]\noptimise = \"release\"\n",
+                "optimise",
+            ),
+            (
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                 [build.wasm-opt]\nlevels = \"3\"\n",
+                "levels",
+            ),
+            (
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                 [verification]\noutput_dir = \"p/\"\n",
+                "output_dir",
+            ),
+            (
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                 [wasm-dependencies]\narith = { path = \"a.wasm\", revision = \"1\" }\n",
+                "revision",
+            ),
+        ];
+        for (src, offending) in cases {
+            let msg = rejection_of(src);
+            assert!(
+                msg.contains("unknown field") && msg.contains(offending),
+                "the error must diagnose an unknown field and name `{offending}`, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_miss_wasm_features_spellings_name_the_expected_fields() {
+        // The two spellings a user is most likely to reach for. Both must error
+        // and list what `[build]` actually accepts, including the real key.
+        for typo in ["wasm_features", "wasm-feature"] {
+            let msg = rejection_of(&manifest_with_build(&format!(
+                "{typo} = [\"bulk-memory\"]\n"
+            )));
+            assert!(
+                msg.contains(typo),
+                "the error must name the offending key `{typo}`, got: {msg}"
+            );
+            assert!(
+                msg.contains("wasm-features"),
+                "the error must list the expected key, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_dependencies_still_accepts_arbitrary_keys() {
+        // The keys of this table ARE the data (they name dependencies), so it is
+        // deliberately not held to a fixed schema.
+        let src = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+                   [wasm-dependencies]\nanything = { path = \"a.wasm\" }\n\
+                   \"crypto::sha256\" = { path = \"b.wasm\" }\n";
+        let manifest = InferenceToml::from_toml(src).expect("arbitrary module names must parse");
+        assert_eq!(manifest.wasm_dependencies.modules.len(), 2);
     }
 }

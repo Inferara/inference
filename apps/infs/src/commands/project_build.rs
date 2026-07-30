@@ -23,9 +23,23 @@
 //! filesystem walking and manifest parsing; placing subprocess-spawning code
 //! there would blur that boundary.
 //!
-//! The compatibility handshake ([`check_compiler_compatibility`]) also lives
+//! The compatibility handshake ([`probe_compiler_compatibility`]) also lives
 //! here: it is part of "running a project build", and keeping it beside the
-//! single spawning site keeps the coupling tight.
+//! single spawning site keeps the coupling tight. Every caller wants the probed
+//! capability, not just the pass/fail — the additive flags `infs` forwards
+//! (`--out-dir`, `--wasm-features`) are each gated on it.
+//!
+//! ## Which settings are parameters and which are read off the context
+//!
+//! [`run_project_build`] takes `mode` and `out_dir` as parameters but reads
+//! `[build] wasm-features` straight off `ctx`. The rule: a setting a CLI flag can
+//! override, or that a caller must be able to suppress, is threaded so the
+//! caller stays the single place that resolves it (`run` deliberately passes
+//! `mode = None` to force compile mode). A setting only the manifest can express,
+//! with no flag and nothing to suppress, is read from `ctx` — threading it would
+//! let two callers disagree about a property of the project itself. An
+//! instruction-set request is the latter: `build` and `run` emitting different
+//! instruction levels for one project is a bug, not a configuration.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -34,8 +48,11 @@ use std::process::{Command, Stdio};
 use crate::commands::build::BuildMode;
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
+use crate::project::manifest::MANIFEST_FILE_NAME;
 use crate::toolchain::find_infc;
-use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
+use inference_compiler_interface::{
+    COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, WasmFeatureName, render_feature_list,
+};
 
 /// Compiles the entry point of a discovered project (project mode).
 ///
@@ -65,6 +82,13 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// `infs run` always passes `out_dir = None` (and `mode = None`), so project
 /// `run` always builds an executable in `out/`.
 ///
+/// The manifest's `[build] wasm-features` is read straight off `ctx` rather than
+/// passed in, so `build` and `run` cannot disagree about the instruction level of
+/// the module they produce, and it applies in both compile and proof mode — a
+/// `.v` that described a different instruction set than the shipped `.wasm` would
+/// be worthless. The forward is gated exactly like `--out-dir`, and the resolved
+/// set is echoed to stdout.
+///
 /// After a successful `infc` exit, the optional `[build.wasm-opt]` post-build
 /// optimization is applied to `<root>/out/main.wasm` (see
 /// [`crate::commands::wasm_opt::post_build_optimize`]). `no_wasm_opt` (the
@@ -78,6 +102,7 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
+/// - the manifest requests `wasm-features` the resolved `infc` cannot honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 /// - post-build optimization is active and fails (missing/invalid artifact,
 ///   `wasm-opt` resolution, or the optimization itself)
@@ -125,6 +150,14 @@ pub(crate) fn run_project_build(
         }
         cmd.arg("--out-dir").arg(dir);
     }
+
+    let features = ctx.manifest.build.resolved_wasm_features()?;
+    forward_wasm_features(
+        &mut cmd,
+        compat,
+        &features,
+        Some(&ctx.root.join(MANIFEST_FILE_NAME)),
+    )?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -176,26 +209,82 @@ impl CompilerCompat {
     /// ABI minor ≥ 1 within the supported major. An unknown/old ABI is treated
     /// as unsupported.
     pub fn supports_out_dir(self) -> bool {
+        self.supports_abi_minor(1)
+    }
+
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--wasm-features` flag, which landed at ABI minor 2.
+    ///
+    /// The conservative reading matters more here than for `--out-dir`: an `infc`
+    /// that predates the flag cannot honor an instruction-set request, and
+    /// nothing in the ABI lets it say so. Refusing to build beats shipping a
+    /// module at an instruction level the manifest did not ask for.
+    pub fn supports_wasm_features(self) -> bool {
+        self.supports_abi_minor(2)
+    }
+
+    /// Whether the resolved `infc` is known to have the additive feature
+    /// introduced at `minor`: either it is the same build (`commit_matched`, the
+    /// strongest signal) or it advertises at least that minor within the
+    /// supported major. An unknown/old ABI is treated as unsupported.
+    ///
+    /// One predicate per flag is deliberate rather than a single "minimum minor"
+    /// accessor: each capability names the minor its flag landed at exactly once,
+    /// so a caller cannot accidentally gate a newer flag on an older floor.
+    fn supports_abi_minor(self, minor: u32) -> bool {
         if self.commit_matched {
             return true;
         }
-        matches!(self.abi, Some((major, minor)) if major == COMPILER_ABI_MAJOR && minor >= 1)
+        matches!(self.abi, Some((major, advertised)) if major == COMPILER_ABI_MAJOR && advertised >= minor)
     }
 }
 
-/// Runs a compatibility handshake against the resolved `infc` binary.
+/// Appends `--wasm-features <list>` to `cmd` when `features` is non-empty, after
+/// confirming the resolved `infc` can honor the request, and echoes the resolved
+/// set to stdout.
 ///
-/// This is the boolean-result face of [`probe_compiler_compatibility`]: it runs
-/// the same handshake (identical warnings and the major-mismatch hard error)
-/// and discards the probed capability. Callers that need the capability (to gate
-/// `--out-dir` forwarding) call [`probe_compiler_compatibility`] directly.
+/// Every path that spawns `infc` on behalf of a project routes through here:
+/// project `build`/`run`, and both single-file paths. The remediation message and
+/// the echo format are user-visible contract text, so they exist once.
+///
+/// The empty check lives inside rather than at the call sites so no caller can
+/// emit a bare `--wasm-features ""`, which the flag's comma-splitting would read
+/// as a single empty feature name and reject.
+///
+/// `manifest_path` names the file the remediation tells the user to edit, which
+/// matters as soon as a walk was involved: single-file mode may have found a
+/// manifest several directories up. `None` can only accompany an empty request —
+/// a feature can only have been requested by some manifest — and the fallback
+/// keeps the message well-formed regardless.
 ///
 /// # Errors
 ///
-/// Hard-errors only on a *major* ABI mismatch (with remediation); minor
-/// mismatch warns, exact/unknown is silent.
-pub(crate) fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
-    probe_compiler_compatibility(infc_path).map(|_| ())
+/// Returns a remediation-bearing error when `features` is non-empty and the
+/// resolved `infc` predates the flag. The flag is never emitted blind.
+pub(crate) fn forward_wasm_features(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    features: &[WasmFeatureName],
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    if features.is_empty() {
+        return Ok(());
+    }
+    if !compat.supports_wasm_features() {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "the resolved infc does not support `--wasm-features` (requires \
+             infc ABI ≥ 1.2); update the toolchain or remove `[build] \
+             wasm-features` from {manifest}."
+        );
+    }
+    let list = render_feature_list(features);
+    println!("wasm-features: {list}");
+    cmd.arg("--wasm-features").arg(list);
+    Ok(())
 }
 
 /// Runs the `infc` compatibility handshake and returns its capability.
@@ -443,6 +532,151 @@ mod project_tests {
         );
     }
 
+    /// `CompilerCompat::supports_wasm_features` is the same predicate one minor
+    /// later: commit match OR same-major ABI minor ≥ 2. In particular a minor-1
+    /// `infc` — which supports `--out-dir` — must NOT be sent `--wasm-features`.
+    #[test]
+    fn supports_wasm_features_capability_matrix() {
+        // Commit match alone is sufficient (ABI not even probed).
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_wasm_features(),
+            "a same-build infc supports every flag this infs knows"
+        );
+
+        // Same major, minor >= 2 → supported.
+        for minor in [2, 7] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_wasm_features(),
+                "minor {minor} must support --wasm-features"
+            );
+        }
+
+        // The flag landed at minor 2, so 0 and 1 are both unsupported. Minor 1 is
+        // the interesting one: the two capabilities must not be conflated.
+        for minor in [0, 1] {
+            let compat = CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, minor)),
+            };
+            assert!(
+                !compat.supports_wasm_features(),
+                "minor {minor} predates --wasm-features"
+            );
+        }
+        assert!(
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, 1)),
+            }
+            .supports_out_dir(),
+            "minor 1 still supports --out-dir; only the newer flag is gated out"
+        );
+
+        // Different major → not supported even at a high minor.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 9)),
+            }
+            .supports_wasm_features(),
+            "a foreign major is incompatible regardless of its minor"
+        );
+
+        // Unknown ABI → not supported.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            }
+            .supports_wasm_features(),
+            "an infc that cannot report its ABI must not be sent the flag"
+        );
+    }
+
+    /// The arguments accumulated on `cmd`, as owned strings.
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// An empty request appends nothing — and specifically not a bare
+    /// `--wasm-features ""`, which the flag's comma-splitting would read as a
+    /// single empty feature name and reject. The guard is inside the forwarder so
+    /// no call site can get this wrong; an old `infc` is irrelevant when nothing
+    /// is being requested of it.
+    #[test]
+    fn forward_wasm_features_appends_nothing_for_an_empty_request() {
+        let mut cmd = Command::new("infc");
+        let predates_the_flag = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 0)),
+        };
+        forward_wasm_features(&mut cmd, predates_the_flag, &[], None)
+            .expect("an empty request asks nothing of the compiler");
+        assert!(
+            args_of(&cmd).is_empty(),
+            "an empty request must not put a flag on the command"
+        );
+    }
+
+    #[test]
+    fn forward_wasm_features_appends_the_canonical_rendering() {
+        let mut cmd = Command::new("infc");
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        forward_wasm_features(&mut cmd, same_build, &[WasmFeatureName::BulkMemory], None)
+            .expect("a same-build infc supports the flag");
+        assert_eq!(args_of(&cmd), ["--wasm-features", "bulk-memory"]);
+    }
+
+    /// The gate refuses rather than forwards, and leaves the command untouched so
+    /// a caller that mishandled the error could not still spawn with the flag.
+    #[test]
+    fn forward_wasm_features_refuses_an_infc_that_predates_the_flag() {
+        let mut cmd = Command::new("infc");
+        let minor_one = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 1)),
+        };
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        let err = forward_wasm_features(
+            &mut cmd,
+            minor_one,
+            &[WasmFeatureName::BulkMemory],
+            Some(&manifest),
+        )
+        .expect_err("ABI minor 1 predates --wasm-features");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--wasm-features") && msg.contains("1.2"),
+            "the error must name the flag and the required ABI, got: {msg}"
+        );
+        assert!(
+            msg.contains("update the toolchain") && msg.contains("[build] wasm-features"),
+            "the error must offer both remediations, got: {msg}"
+        );
+        assert!(
+            msg.contains(&manifest.display().to_string()),
+            "the error must name which manifest to edit — single-file mode may \
+             have found one several directories up; got: {msg}"
+        );
+        assert!(
+            args_of(&cmd).is_empty(),
+            "a refused request must leave no flag on the command"
+        );
+    }
+
     /// The entry point is resolved as `<root>/src/main.inf` using path joins,
     /// so the resolved path always ends in the platform-correct components.
     #[test]
@@ -509,7 +743,7 @@ mod tests {
     fn abi_major_mismatch_is_hard_error() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "nottherightcommit", "2.0", false);
-        let err = check_compiler_compatibility(&stub).unwrap_err();
+        let err = probe_compiler_compatibility(&stub).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("ABI") && msg.contains("rebuild"),
@@ -525,7 +759,7 @@ mod tests {
         // any plausible local COMPILER_ABI_MINOR; the branch warns but does not
         // hard-error.
         let stub = write_stub(&dir, "nottherightcommit", "1.5", false);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(result.is_ok(), "minor mismatch should not hard-error");
     }
 
@@ -539,7 +773,7 @@ mod tests {
         // major constant so it stays valid across future major bumps.
         let abi = format!("{COMPILER_ABI_MAJOR}.0");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(
             result.is_ok(),
             "infs-newer-than-infc minor mismatch must warn, not hard-error; got: {:?}",
@@ -558,7 +792,7 @@ mod tests {
         // the equal-minor branch; the warn-only tests cover Greater and Less.
         let abi = format!("{COMPILER_ABI_MAJOR}.{COMPILER_ABI_MINOR}");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(
             result.is_ok(),
             "exact ABI match (differing commit) must be a silent Ok via the Equal arm; got: {:?}",
@@ -572,7 +806,7 @@ mod tests {
         // ABI "9.9" would trigger a major mismatch if the ABI check ran.
         // A matching commit hash must short-circuit before that.
         let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(
             result.is_ok(),
             "matching commit hash must short-circuit ABI check, got: {:?}",
@@ -584,7 +818,7 @@ mod tests {
     fn unknown_commit_and_unknown_abi_is_silent() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "unknown", "unknown", false);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(result.is_ok(), "unknown outputs must be graceful");
     }
 
@@ -592,7 +826,7 @@ mod tests {
     fn old_infc_returns_nonzero_for_flags_is_graceful() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "anything", "anything", true);
-        let result = check_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub);
         assert!(
             result.is_ok(),
             "non-zero exit from flag probes must be graceful"
@@ -640,6 +874,35 @@ mod tests {
         assert!(
             !compat.supports_out_dir(),
             "ABI minor 0 must not advertise --out-dir support"
+        );
+    }
+
+    #[test]
+    fn probe_capability_minor_2_supports_wasm_features() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let abi = format!("{COMPILER_ABI_MAJOR}.2");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert!(!compat.commit_matched);
+        assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 2)));
+        assert!(
+            compat.supports_wasm_features(),
+            "ABI minor 2 with matching major must support --wasm-features"
+        );
+    }
+
+    #[test]
+    fn probe_capability_minor_1_rejects_wasm_features() {
+        // The pairing that motivates a per-flag predicate: minor 1 supports
+        // `--out-dir` but predates `--wasm-features`.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let abi = format!("{COMPILER_ABI_MAJOR}.1");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert!(compat.supports_out_dir());
+        assert!(
+            !compat.supports_wasm_features(),
+            "ABI minor 1 must not advertise --wasm-features support"
         );
     }
 

@@ -75,7 +75,7 @@ visit_function_definition
         |         | Emits push + local.set for each VariableDefinition /
         |         | ConstantDefinition using indices from locals_map.
         |         | Memory lowerings (region fill/copy) may allocate
-        |         | further scratch locals from `ScratchAlloc` as they go.
+        |         | further scratch locals from `RegionEmit` as they go.
         |
         +---> take_completed_function()
                   |
@@ -89,9 +89,10 @@ visit_function_definition
 Pass 1's `locals_map` covers every named `let`/`const` local, plus the eagerly reserved
 frame-pointer, bounds-check, and narrow-division temporaries — everything computable by
 walking the AST without emitting any instructions. It does **not** cover the scratch i32
-locals (`ScratchAlloc`) that the region fill and region copy lowerings allocate on demand
+locals (`RegionEmit`) that the region fill and region copy lowerings allocate on demand
 while the body is being emitted, for zero-initializing a stack frame or copying a compound
-value between two addresses without a bulk-memory instruction (see
+value between two addresses without a bulk-memory instruction (a build that permits bulk
+memory emits the instruction and allocates no scratch local at all — see
 [docs/arrays-and-memory.md](arrays-and-memory.md#region-fill-and-copy-lowering)). Whether a
 function needs those, and how many, depends on what gets lowered — not something Pass 1 can
 predict without duplicating the emission logic.
@@ -287,8 +288,8 @@ bindings in `tests/test_data/codegen/wasm/base/local_variables/local_variables.i
 ## Related Files
 
 - `core/wasm-codegen/src/compiler.rs` — `pre_scan_locals`, `lower_statement`, `lower_literal`, `take_completed_function`
-- `core/wasm-codegen/src/memory.rs` — `ScratchAlloc`
-- `core/wasm-codegen/docs/arrays-and-memory.md` — Region fill/copy lowering that uses `ScratchAlloc`
+- `core/wasm-codegen/src/memory.rs` — `RegionEmit`
+- `core/wasm-codegen/docs/arrays-and-memory.md` — Region fill/copy lowering that uses `RegionEmit`
 - `core/wasm-codegen/README.md` — Crate-level overview and compilation phases
 - `tests/test_data/codegen/wasm/base/local_variables/local_variables.inf` — Comprehensive `let` test fixture
 - `tests/test_data/codegen/wasm/base/local_variables_exec/local_variables_exec.inf` — Executable test fixture

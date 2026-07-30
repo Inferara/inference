@@ -668,9 +668,10 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// downstream into the Rocq translator. The CLI passes the input file stem;
 /// library callers can pass any Rocq-identifier-compatible name.
 ///
-/// For target-specific or proof-mode compilation, call
-/// `inference_wasm_codegen::codegen()` directly with explicit `Target` and
-/// `CompilationMode` parameters.
+/// The output stays within the WebAssembly 1.0 instruction set. For
+/// target-specific or proof-mode compilation, or to opt into a post-MVP
+/// instruction family, call `inference_wasm_codegen::codegen()` directly with
+/// explicit `Target`, `CompilationMode` and `EmitFeatures` arguments.
 ///
 /// # Errors
 ///
@@ -692,6 +693,7 @@ pub fn codegen(
         mode,
         target.default_opt_level(),
         module_name,
+        inference_wasm_codegen::EmitFeatures::default(),
     )
 }
 

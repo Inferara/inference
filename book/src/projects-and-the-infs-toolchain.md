@@ -59,6 +59,9 @@ infc_version = "0.1.0"
 [build]
 # "compile" (default) or "proof"
 mode = "compile"
+# Post-MVP WebAssembly proposals to opt into; empty (the default) keeps the
+# output pure WebAssembly 1.0. Currently supported: "bulk-memory".
+# wasm-features = ["bulk-memory"]
 # target and optimize are recognized but not yet consumed.
 
 [verification]
@@ -82,12 +85,21 @@ The fields:
 | `authors` | `[package]` | array | absent | Optional author list |
 | `license` | `[package]` | string | absent | Optional SPDX identifier |
 | `mode` | `[build]` | `"compile"` \| `"proof"` | `"compile"` | Build mode (see below) |
+| `wasm-features` | `[build]` | array of proposal names | `[]` | Post-MVP WebAssembly proposals the artifact may use; `[]` = pure Wasm 1.0. Supported: `"bulk-memory"` |
 | `output-dir` | `[verification]` | path string | `"proofs/"` | Proof artifact directory; proof mode only |
 | `<name>` | `[wasm-dependencies]` | `{ path = "…" }` | — | External `.wasm` module dependency |
 
 `mode` is case-sensitive: `"Proof"` is rejected. The field is validated on
 load; an invalid value is an immediate error with the allowed set named in the
-message.
+message. The same load-time strictness applies to keys: every fixed-schema
+table rejects a key it does not recognize, naming the offending key and the
+fields the table accepts — a misspelled `wasm_features` fails the build rather
+than silently shipping a differently-configured artifact. Only
+`[dependencies]` and `[wasm-dependencies]` accept arbitrary keys, because their
+keys name the dependencies. `wasm-features` entries are WebAssembly *proposal* names
+(`"bulk-memory"`), not instruction names, and the setting is honored in project
+builds, single-file builds, and single-file `infs run`; see
+`apps/infs/docs/inference-toml.md` for the full reference.
 
 ### Reserved Project Names
 

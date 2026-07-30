@@ -60,6 +60,11 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// - `--out-dir <path>`: Override the output directory (default `out/`, relative
 ///   to the current working directory). Applies to both `.wasm` and `.v`.
 ///
+/// ## Instruction Set
+///
+/// - `--wasm-features <list>`: Opt into post-MVP WebAssembly proposals by name.
+///   The default output is pure WebAssembly 1.0.
+///
 /// Output flags only take effect when `--codegen` is active (explicitly or via default).
 ///
 /// ## Examples
@@ -225,6 +230,25 @@ pub(crate) struct Cli {
     /// may pass them by hand.
     #[clap(long = "wasm-dep", value_name = "NAME=PATH")]
     pub(crate) wasm_deps: Vec<String>,
+
+    /// Post-MVP WebAssembly features the emitted module may use, by proposal
+    /// name.
+    ///
+    /// Comma separated (`--wasm-features bulk-memory`) is the canonical form; the
+    /// flag may also be repeated, and the two may be mixed. Names are matched
+    /// exactly — an unknown name is an error rather than a silent no-op, because
+    /// silently ignoring it would ship a module at a different instruction level
+    /// than the caller asked for.
+    ///
+    /// Omitting the flag emits pure WebAssembly 1.0. `infs build` forwards the
+    /// project's `[build] wasm-features`; direct `infc` callers pass them by hand.
+    #[clap(
+        long = "wasm-features",
+        value_name = "LIST",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
+    pub(crate) wasm_features: Vec<String>,
 
     /// Print the git commit hash embedded at build time and exit 0.
     ///

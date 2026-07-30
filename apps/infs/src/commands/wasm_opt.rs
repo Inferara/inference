@@ -503,10 +503,14 @@ fn scan_artifact(wasm_bytes: &[u8]) -> Result<ArtifactScan> {
 
 /// Whether `op` belongs to the bulk-memory proposal.
 ///
-/// Inference codegen emits none of these, so one can reach a built artifact only
-/// through a statically merged external module — the linker's supported-feature
-/// envelope admits them. The segment-indexed forms are included even though the
-/// merge rejects them today, so that a widened linker cannot silently produce an
+/// Two sanctioned sources put one of these in a built artifact: a project that
+/// opts in with `[build] wasm-features = ["bulk-memory"]`, in which case codegen
+/// emits `memory.copy`/`memory.fill` directly; and a statically merged external
+/// module, which the linker's supported-feature envelope admits regardless of
+/// what the project requested. Neither is distinguishable here, and neither needs
+/// to be — the predicate answers what the bytes contain. The segment-indexed
+/// forms are included even though the merge rejects them today and codegen never
+/// emits them, so that a widened linker or codegen cannot silently produce an
 /// artifact Binaryen is not told to parse.
 fn is_bulk_memory(op: &Operator) -> bool {
     use Operator::{DataDrop, MemoryCopy, MemoryFill, MemoryInit};
@@ -545,13 +549,16 @@ fn verification_construct_name(op: &Operator) -> Option<&'static str> {
 /// Inference codegen always relies on: the exported mutable `__stack_pointer`
 /// global.
 ///
-/// Codegen itself emits plain WebAssembly 1.0, so bulk memory can enter an
-/// artifact only through a statically merged external module — the linker
-/// deliberately accepts `memory.copy`/`memory.fill` from one. Binaryen hard-
-/// rejects those bytes unless told to parse them, so `--enable-bulk-memory` is
-/// forwarded exactly when `enable_bulk_memory` reports the input carries such an
-/// operator. Withholding it everywhere else is what stops Binaryen from
-/// introducing bulk memory into an artifact that had none.
+/// Bulk memory reaches an artifact from either of two sanctioned sources: a
+/// project that opts in with `[build] wasm-features = ["bulk-memory"]`, or a
+/// statically merged external module (the linker accepts
+/// `memory.copy`/`memory.fill` from one whatever the project requested). Binaryen
+/// hard-rejects those bytes unless told to parse them, so
+/// `--enable-bulk-memory` is forwarded exactly when `enable_bulk_memory` reports
+/// that the *input* carries such an operator. Keying on the input rather than on
+/// either source keeps one rule for both, and withholding the flag everywhere
+/// else is what stops Binaryen from introducing bulk memory into an artifact that
+/// had none.
 ///
 /// `-O<level>` works uniformly for every value `WasmOptConfig` validates, so
 /// there is no second mapping table.
@@ -666,9 +673,9 @@ fn optimized_tmp_path(wasm_path: &Path) -> PathBuf {
 /// The baseline is WebAssembly 1.0 plus the mutable `__stack_pointer` global
 /// (`GC_TYPES` is the parser fork's value-type flag, not a proposal opt-in).
 /// `BULK_MEMORY` joins it only when `allow_bulk_memory` records that the
-/// pre-optimization artifact already carried bulk operators — which only a
-/// linked external module can produce, and which it would be wrong to reject
-/// after the linker accepted them. For the ordinary bulk-free artifact, leaving
+/// pre-optimization artifact already carried bulk operators — which it would be
+/// wrong to reject after a project opted into them or the linker accepted them
+/// from an external module. For the ordinary bulk-free artifact, leaving
 /// `BULK_MEMORY` out is precisely what makes this a guard: an optimizer that
 /// introduced `memory.copy` or `memory.fill` fails here instead of shipping.
 ///
@@ -784,8 +791,8 @@ mod tests {
 
     #[test]
     fn wasm_opt_args_are_exact_for_level_z() {
-        // The ordinary bulk-free artifact: no --enable-bulk-memory, so Binaryen
-        // cannot introduce what codegen never emitted.
+        // A bulk-free input: no --enable-bulk-memory, so Binaryen cannot
+        // introduce an instruction family the artifact did not already use.
         let args = wasm_opt_args("z", Path::new("in.wasm"), Path::new("out.wasm.opt"), false);
         let expected: Vec<OsString> = [
             "-Oz",
@@ -820,9 +827,10 @@ mod tests {
 
     #[test]
     fn wasm_opt_args_enable_bulk_memory_for_a_bulk_bearing_input() {
-        // An artifact that carries bulk memory (only a linked external module
-        // can produce one) must be parseable by Binaryen, so the flag is
-        // appended after the always-on enables and before the input path.
+        // An artifact that carries bulk memory — whether from a project that
+        // opted in or from a linked external module — must be parseable by
+        // Binaryen, so the flag is appended after the always-on enables and
+        // before the input path.
         let args = wasm_opt_args("z", Path::new("in.wasm"), Path::new("out.wasm.opt"), true);
         let expected: Vec<OsString> = [
             "-Oz",
