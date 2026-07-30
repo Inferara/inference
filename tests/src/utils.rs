@@ -119,7 +119,16 @@ pub(crate) fn codegen_impl_with_features(
     if let AnalysisMode::Run = analysis {
         let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     }
-    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level, "output", features)
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        "output",
+        inference_wasm_codegen::CodegenOptions {
+            target,
+            mode,
+            opt_level,
+            features,
+        },
+    )
 }
 
 /// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).
@@ -373,15 +382,10 @@ fn codegen_output_multi_file_impl(
     if let AnalysisMode::Run = analysis {
         inference_analysis::analyze(&typed_context).expect("multi-file analysis should succeed");
     }
-    let target = inference_wasm_codegen::Target::default();
-    let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(
         &typed_context,
-        target,
-        mode,
-        target.default_opt_level(),
         "output",
-        inference_wasm_codegen::EmitFeatures::default(),
+        inference_wasm_codegen::CodegenOptions::default(),
     )
     .expect("multi-file codegen should succeed")
 }
@@ -445,14 +449,13 @@ pub(crate) fn wasm_codegen_project_with_features(
         .unwrap_or_else(|e| panic!("multi-file project type check failed for {test_name}: {e}"));
     inference::analyze(&typed_context)
         .unwrap_or_else(|e| panic!("multi-file project analysis failed for {test_name}: {e:?}"));
-    let target = inference_wasm_codegen::Target::default();
     inference_wasm_codegen::codegen(
         &typed_context,
-        target,
-        inference_wasm_codegen::CompilationMode::default(),
-        target.default_opt_level(),
         "output",
-        features,
+        inference_wasm_codegen::CodegenOptions {
+            features,
+            ..Default::default()
+        },
     )
     .unwrap_or_else(|e| panic!("multi-file project codegen failed for {test_name}: {e}"))
     .wasm()
@@ -471,14 +474,13 @@ pub(crate) fn proof_wasm_codegen_project(module_path: &str, test_name: &str) -> 
         .unwrap_or_else(|e| panic!("parse_project failed for {}: {e}", entry.display()));
     let typed_context = inference::type_check(parse.arena)
         .unwrap_or_else(|e| panic!("multi-file proof type check failed for {test_name}: {e}"));
-    let target = inference_wasm_codegen::Target::default();
     inference_wasm_codegen::codegen(
         &typed_context,
-        target,
-        inference_wasm_codegen::CompilationMode::Proof,
-        target.default_opt_level(),
         "output",
-        inference_wasm_codegen::EmitFeatures::default(),
+        inference_wasm_codegen::CodegenOptions {
+            mode: inference_wasm_codegen::CompilationMode::Proof,
+            ..Default::default()
+        },
     )
     .unwrap_or_else(|e| panic!("multi-file proof codegen failed for {test_name}: {e}"))
     .wasm()
@@ -1180,16 +1182,11 @@ fn try_codegen_impl(
     if let AnalysisMode::Run = analysis {
         let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     }
-    let target = inference_wasm_codegen::Target::default();
-    let mode = inference_wasm_codegen::CompilationMode::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         inference_wasm_codegen::codegen(
             &typed_context,
-            target,
-            mode,
-            target.default_opt_level(),
             "output",
-            inference_wasm_codegen::EmitFeatures::default(),
+            inference_wasm_codegen::CodegenOptions::default(),
         )
     }))
     .map_err(|panic| {

@@ -671,7 +671,7 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// The output stays within the WebAssembly 1.0 instruction set. For
 /// target-specific or proof-mode compilation, or to opt into a post-MVP
 /// instruction family, call `inference_wasm_codegen::codegen()` directly with
-/// explicit `Target`, `CompilationMode` and `EmitFeatures` arguments.
+/// an explicit `CodegenOptions` value.
 ///
 /// # Errors
 ///
@@ -685,15 +685,10 @@ pub fn codegen(
     typed_context: &TypedContext,
     module_name: &str,
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
-    let target = inference_wasm_codegen::Target::default();
-    let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(
         typed_context,
-        target,
-        mode,
-        target.default_opt_level(),
         module_name,
-        inference_wasm_codegen::EmitFeatures::default(),
+        inference_wasm_codegen::CodegenOptions::default(),
     )
 }
 

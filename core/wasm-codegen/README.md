@@ -144,8 +144,8 @@ struct-to-struct assignment — are instead lowered to plain loads and stores: a
 straight-line sequence for small regions, an index-driven loop for large ones. See
 [docs/arrays-and-memory.md](docs/arrays-and-memory.md#region-fill-and-copy-lowering).
 
-A build may opt back into the instructions by passing `EmitFeatures { bulk_memory: true }`
-to `codegen()` (`infc --wasm-features bulk-memory`), which restores the single
+A build may opt back into the instructions by setting `EmitFeatures { bulk_memory: true }`
+in the `CodegenOptions` passed to `codegen()` (`infc --wasm-features bulk-memory`), which restores the single
 `memory.fill`/`memory.copy` at each of those sites. The feature set applies identically
 in both compilation modes, so the Rocq translation always describes the same program as
 the emitted binary, and the `Soroban` target rejects it because its runtime's acceptance
@@ -307,17 +307,20 @@ Execution: `wasmtime --invoke main module.wasm`
 ## Usage
 
 ```rust
-use inference_wasm_codegen::{CompilationMode, OptLevel, Target, codegen};
+use inference_wasm_codegen::{CodegenOptions, CompilationMode, OptLevel, Target, codegen};
 use inference_type_checker::typed_context::TypedContext;
 
 fn compile(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
     // Generate WASM bytecode from typed AST
     let output = codegen(
         typed_context,
-        Target::Wasm32,
-        CompilationMode::Compile,
-        OptLevel::O2,
         "module",
+        CodegenOptions {
+            target: Target::Wasm32,
+            mode: CompilationMode::Compile,
+            opt_level: OptLevel::O2,
+            ..Default::default()
+        },
     )?;
     Ok(output.wasm().to_vec())
 }

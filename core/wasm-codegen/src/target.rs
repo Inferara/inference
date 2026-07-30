@@ -178,6 +178,42 @@ impl OptLevel {
     }
 }
 
+/// The complete configuration [`crate::codegen`] compiles under: which platform
+/// the module targets, which compilation mode drives emission, how the output is
+/// optimized, and which post-MVP instruction families emission may use.
+///
+/// This is the input mirror of the configuration [`crate::CodegenOutput`]
+/// records on the artifact it describes. Bundling the four values keeps the
+/// `codegen` signature stable as configuration grows: a new knob is a new field
+/// here, not a new parameter at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodegenOptions {
+    /// The WebAssembly platform the module is compiled for.
+    pub target: Target,
+    /// Whether emission produces an executable or a proof artifact.
+    pub mode: CompilationMode,
+    /// The optimization level recorded on the output.
+    pub opt_level: OptLevel,
+    /// The post-MVP instruction families emission is permitted to use.
+    pub features: EmitFeatures,
+}
+
+/// Implemented by hand rather than derived: the default optimization level is
+/// target-derived ([`Target::default_opt_level`]), which a derived `Default`
+/// cannot express, and deriving it would silently pin `OptLevel`'s own default
+/// instead of the target's.
+impl Default for CodegenOptions {
+    fn default() -> Self {
+        let target = Target::default();
+        Self {
+            target,
+            mode: CompilationMode::default(),
+            opt_level: target.default_opt_level(),
+            features: EmitFeatures::default(),
+        }
+    }
+}
+
 /// The post-MVP WebAssembly instruction families code generation is permitted to
 /// emit.
 ///

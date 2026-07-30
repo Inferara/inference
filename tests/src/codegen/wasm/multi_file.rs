@@ -38,11 +38,13 @@ fn proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> CodegenOutput {
         .typed_context();
     inference_wasm_codegen::codegen(
         &typed_context,
-        Target::Wasm32,
-        CompilationMode::Proof,
-        OptLevel::O3,
         "output",
-        inference_wasm_codegen::EmitFeatures::default(),
+        inference_wasm_codegen::CodegenOptions {
+            target: Target::Wasm32,
+            mode: CompilationMode::Proof,
+            opt_level: OptLevel::O3,
+            features: inference_wasm_codegen::EmitFeatures::default(),
+        },
     )
     .expect("multi-file proof codegen should succeed")
 }
@@ -67,11 +69,13 @@ fn try_proof_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> anyhow::Result<C
         .typed_context();
     inference_wasm_codegen::codegen(
         &typed_context,
-        Target::Wasm32,
-        CompilationMode::Proof,
-        OptLevel::O3,
         "output",
-        inference_wasm_codegen::EmitFeatures::default(),
+        inference_wasm_codegen::CodegenOptions {
+            target: Target::Wasm32,
+            mode: CompilationMode::Proof,
+            opt_level: OptLevel::O3,
+            features: inference_wasm_codegen::EmitFeatures::default(),
+        },
     )
 }
 

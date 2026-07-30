@@ -10,7 +10,7 @@
 //! Typed AST (TypedContext)
 //!         |
 //!         v
-//!   codegen(tc, target, mode, opt_level, module_name, features)
+//!   codegen(tc, module_name, CodegenOptions { target, mode, opt_level, features })
 //!         |
 //!         v
 //!   CodegenOutput { wasm, target, mode, opt_level, module_name, has_main }
@@ -65,7 +65,7 @@ mod spec_section;
 pub mod target;
 
 pub use output::CodegenOutput;
-pub use target::{CompilationMode, EmitFeatures, OptLevel, Target};
+pub use target::{CodegenOptions, CompilationMode, EmitFeatures, OptLevel, Target};
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
 /// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
@@ -94,10 +94,11 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 ///
 /// [`validate_rocq_identifier`]: inference_wasm_to_v_translator::validate_rocq_identifier
 ///
-/// `features` names the post-MVP WebAssembly instruction families emission may
-/// use; [`EmitFeatures::default()`] keeps the output inside WebAssembly 1.0. It
-/// applies identically in both compilation modes, so the `.v` always describes
-/// the same program as the `.wasm`.
+/// `options` carries the full compilation configuration; see [`CodegenOptions`]
+/// for the field-by-field contract. Its `features` apply identically in both
+/// compilation modes, so the `.v` always describes the same program as the
+/// `.wasm`; [`CodegenOptions::default()`] compiles an executable Wasm32 module
+/// inside WebAssembly 1.0 at the target's default optimization level.
 ///
 /// # Errors
 ///
@@ -107,12 +108,16 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 /// - Code generation fails
 pub fn codegen(
     typed_context: &TypedContext,
-    target: Target,
-    mode: CompilationMode,
-    opt_level: OptLevel,
     module_name: &str,
-    features: EmitFeatures,
+    options: CodegenOptions,
 ) -> anyhow::Result<CodegenOutput> {
+    let CodegenOptions {
+        target,
+        mode,
+        opt_level,
+        features,
+    } = options;
+
     // Refuse a feature the target's runtime does not accept before a single byte
     // is emitted: a build-time refusal names the manifest entry to remove, where
     // the same module rejected at deploy time names nothing.
@@ -820,7 +825,7 @@ fn collect_emittable_functions(
 
 #[cfg(test)]
 mod feature_validation_tests {
-    use super::{CompilationMode, EmitFeatures, Target, codegen};
+    use super::{CodegenOptions, CompilationMode, EmitFeatures, Target, codegen};
     use inference_type_checker::typed_context::TypedContext;
 
     /// The refusal is reached before anything is emitted, so an empty program is
@@ -833,11 +838,13 @@ mod feature_validation_tests {
         let typed_context = TypedContext::default();
         codegen(
             &typed_context,
-            target,
-            mode,
-            target.default_opt_level(),
             "output",
-            features,
+            CodegenOptions {
+                target,
+                mode,
+                opt_level: target.default_opt_level(),
+                features,
+            },
         )
     }
 
