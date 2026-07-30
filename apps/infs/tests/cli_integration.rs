@@ -1382,6 +1382,641 @@ fn project_build_old_infc_with_output_dir_hard_errors() {
     );
 }
 
+// Project-mode `[build] wasm-features` Tests
+//
+// These pin the observable end of the opt-in: the manifest key must change the
+// instruction set of the emitted artifact, be visible in the build log, reach the
+// post-build optimizer's feature flags, and be refused rather than forwarded to
+// an `infc` that cannot honor it.
+
+/// `src/main.inf` whose struct local forces a stack frame. The frame's zero-fill
+/// lowers to `memory.fill` when bulk memory is enabled and to an explicit store
+/// sequence when it is not, which makes the instruction-level choice directly
+/// observable in the artifact bytes.
+const PROJECT_MAIN_STRUCT_SRC: &str = "struct P {\n    x: i32;\n    y: i32;\n}\n\n\
+     pub fn main() -> i32 {\n    let p: P = P { x: 1, y: 2 };\n    return p.x + p.y;\n}\n";
+
+/// Validates `bytes` at the pure WebAssembly 1.0 level.
+///
+/// `WasmFeatures::WASM1` is the MVP plus mutable globals, which is exactly
+/// Inference's baseline (every module that allocates a frame exports a mutable
+/// `__stack_pointer`). Crucially it excludes `BULK_MEMORY`, so this failing while
+/// [`wasm_is_valid`] succeeds *is* the proof that an artifact uses bulk memory —
+/// a module valid under `… | BULK_MEMORY` but not under `WASM1` must use
+/// something from that proposal.
+///
+/// Deciding the question with the validator rather than by matching operator
+/// names means these tests cannot drift from the compiler's notion of the
+/// proposal the way a hand-copied opcode list would.
+fn wasm_is_valid_at_wasm_1_0(bytes: &[u8]) -> bool {
+    inf_wasmparser::Validator::new_with_features(inf_wasmparser::WasmFeatures::WASM1)
+        .validate_all(bytes)
+        .is_ok()
+}
+
+/// Asserts `bytes` is a valid module that uses bulk memory.
+///
+/// Stated as the conjunction that pins it exactly: valid under the bulk-inclusive
+/// envelope, invalid without it.
+fn assert_artifact_uses_bulk_memory(bytes: &[u8], context: &str) {
+    assert!(
+        wasm_is_valid(bytes),
+        "{context}: the artifact must validate under the bulk-inclusive envelope"
+    );
+    assert!(
+        !wasm_is_valid_at_wasm_1_0(bytes),
+        "{context}: the artifact validates at pure WebAssembly 1.0, so it does \
+         NOT use bulk memory — the feature request did not reach codegen"
+    );
+}
+
+/// Asserts `bytes` is a valid module that stays within WebAssembly 1.0.
+fn assert_artifact_is_wasm_1_0(bytes: &[u8], context: &str) {
+    assert!(
+        wasm_is_valid_at_wasm_1_0(bytes),
+        "{context}: the artifact must validate at pure WebAssembly 1.0"
+    );
+}
+
+/// The echo line `infs` prints for a resolved non-empty feature set.
+const WASM_FEATURES_ECHO: &str = "wasm-features: bulk-memory";
+
+/// Asserts the feature echo appears exactly once in `stdout`, as a complete line,
+/// and that the superseded bare `features:` wording appears nowhere.
+///
+/// A `contains` assertion cannot pin the wording here: `"wasm-features:
+/// bulk-memory"` *contains* `"features: bulk-memory"`, so a substring match is
+/// satisfied by either spelling and would silently accept a rename in either
+/// direction. Whole-line equality fixes exactly one spelling — a regression to the
+/// bare wording yields zero matches and fails — and counting pins that one build
+/// echoes once. The explicit negative additionally catches a second echo being
+/// added alongside the first rather than replacing it.
+fn assert_echoes_features_once(stdout: &str) {
+    let matches = stdout
+        .lines()
+        .filter(|line| line.trim() == WASM_FEATURES_ECHO)
+        .count();
+    assert_eq!(
+        matches, 1,
+        "expected exactly one `{WASM_FEATURES_ECHO}` line, found {matches} in:\n{stdout}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("features:")),
+        "no line may use the superseded bare `features:` wording, got:\n{stdout}"
+    );
+}
+
+/// The stdout of a successful `infs` invocation, as a string.
+fn stdout_of(assert: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&assert.get_output().stdout).into_owned()
+}
+
+/// Reads `<root>/out/main.wasm`, asserting it exists.
+fn read_project_artifact(temp: &assert_fs::TempDir) -> Vec<u8> {
+    let path = temp.child("out").child("main.wasm");
+    assert!(
+        path.path().exists(),
+        "the build must have produced out/main.wasm"
+    );
+    std::fs::read(path.path()).expect("read out/main.wasm")
+}
+
+/// The baseline this feature is measured against: with no `wasm-features` key the
+/// artifact is pure WebAssembly 1.0 (no bulk operator) and nothing is echoed.
+#[test]
+fn project_build_without_wasm_features_emits_no_bulk_memory() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_STRUCT_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("features:").not());
+
+    assert_artifact_is_wasm_1_0(
+        &read_project_artifact(&temp),
+        "a build with no wasm-features key",
+    );
+}
+
+/// `[build] wasm-features = ["bulk-memory"]` reaches `infc` and changes the
+/// emitted instruction set, and the resolved set is echoed once to stdout.
+#[test]
+fn project_build_with_bulk_memory_emits_a_bulk_operator() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_features_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_uses_bulk_memory(&read_project_artifact(&temp), "an opted-in project build");
+}
+
+/// The same opted-in project with `[build.wasm-opt]`: the pre-optimization scan
+/// sees the bulk operator codegen now emits, so the optimizer invocation carries
+/// `--enable-bulk-memory`. Without it Binaryen would refuse to parse the input.
+#[test]
+fn wasm_opt_enables_bulk_memory_for_a_feature_opted_project() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+    let log = temp.child("wasm-opt.log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .env("FAKE_WASM_OPT_LOG", log.path())
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let invocations = optimizer_invocations(log.path());
+    assert_eq!(
+        invocations.len(),
+        1,
+        "wasm-opt must be spawned exactly once, got: {invocations:?}"
+    );
+    let args = &invocations[0];
+    assert_eq!(args.len(), 7, "unexpected argument count: {args:?}");
+    assert_eq!(args[0], "-Oz");
+    assert_eq!(args[1], "--mvp-features");
+    assert_eq!(args[2], "--enable-mutable-globals");
+    assert_eq!(
+        args[3], "--enable-bulk-memory",
+        "the input carries bulk memory, so Binaryen must be told to parse it"
+    );
+    assert_eq!(file_name_of(&args[4]), Some("main.wasm"));
+    assert_eq!(args[5], "-o");
+    assert_eq!(file_name_of(&args[6]), Some("main.wasm.opt"));
+}
+
+/// Old-infc wasm-features gate: a stub `infc` reporting ABI `1.1` — new enough
+/// for `--out-dir`, too old for `--wasm-features` — paired with a manifest that
+/// requests a feature must hard-error naming the required ABI and both
+/// remediations. It must never forward the flag blind, and must not claim what
+/// the older `infc` would emit instead (nothing in the ABI reveals that).
+///
+/// Unix-only: relies on an executable shell stub. The stub cannot compile
+/// anything, but the gate fires before the spawn, so the error is deterministic.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_wasm_features_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.1\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--wasm-features")
+            .and(predicate::str::contains("1.2"))
+            .and(predicate::str::contains("update the toolchain"))
+            .and(predicate::str::contains("[build] wasm-features")),
+    );
+}
+
+/// Single-file mode honors the enclosing project's `wasm-features`: building
+/// `src/main.inf` by path must not silently emit a module at a different
+/// instruction level than `infs build` does for the same project.
+#[test]
+fn single_file_build_honors_enclosing_manifest_wasm_features() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(std::path::Path::new("src").join("main.inf"));
+    assert_echoes_features_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_uses_bulk_memory(
+        &read_project_artifact(&temp),
+        "a single-file build inside an opted-in project",
+    );
+}
+
+/// A source outside any project takes the defaults: no manifest walk result, no
+/// feature request, no error, and a plain WebAssembly 1.0 artifact.
+#[test]
+fn single_file_build_outside_a_project_defaults_to_wasm_1_0() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("standalone.inf");
+    source.write_str(PROJECT_MAIN_STRUCT_SRC).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("standalone.inf");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("features:").not());
+
+    let bytes = std::fs::read(temp.child("out").child("standalone.wasm").path())
+        .expect("read out/standalone.wasm");
+    assert_artifact_is_wasm_1_0(&bytes, "a manifest-free single-file build");
+}
+
+/// Mode-independence, the invariant that keeps proof artifacts meaningful: a
+/// proof-mode build with `wasm-features` emits the same instruction set a
+/// compile-mode build would, and the Rocq translation describes it. A `.v` that
+/// disagreed with the shipped `.wasm` would be worthless as a proof artifact, so
+/// no code path may gate the feature on the build mode.
+///
+/// Proof mode also forwards `--out-dir`, so both artifacts land under `proofs/`.
+#[test]
+fn proof_build_with_bulk_memory_agrees_between_the_wasm_and_the_v() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nmode = \"proof\"\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_features_once(&stdout_of(&cmd.assert().success()));
+
+    let wasm = std::fs::read(temp.child("proofs").child("main.wasm").path())
+        .expect("proof mode must write proofs/main.wasm");
+    assert_artifact_uses_bulk_memory(
+        &wasm,
+        "a proof-mode build (the feature must not be gated on mode)",
+    );
+
+    let translation = std::fs::read_to_string(temp.child("proofs").child("main.v").path())
+        .expect("proof mode must write proofs/main.v");
+    assert!(
+        translation.contains("BI_memory_fill"),
+        "the Rocq translation must describe the operator the .wasm carries"
+    );
+}
+
+/// Project-mode `infs run` shares the project-build path, so the manifest's
+/// `wasm-features` governs the artifact it executes too. The bulk-bearing module
+/// must also still execute: `main` returns `1 + 2`. (Single-file `run` is covered
+/// separately — it reaches `infc` by a different route.)
+#[test]
+fn project_run_honors_wasm_features_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_features_once(&stdout);
+    assert!(
+        stdout.contains('3'),
+        "wasmtime must print main's return value (1 + 2), got:\n{stdout}"
+    );
+
+    assert_artifact_uses_bulk_memory(
+        &read_project_artifact(&temp),
+        "the artifact project-mode `run` executed",
+    );
+}
+
+/// The wire spelling, against an `infc` reached through the ABI branch.
+///
+/// Every real-`infc` test here takes the `commit_matched` short-circuit, because
+/// `infs` and `infc` are built from the same tree in dev and CI — so none of them
+/// exercises the `minor >= 2` positive branch, and none observes what actually
+/// lands on the command line. This stub reports a mismatched commit and ABI 1.2,
+/// forcing that branch, and logs its argv so the flag and its value can be
+/// checked as adjacent argv entries (a single `--wasm-features=…` token or a
+/// space-split value would both fail this).
+///
+/// The stub cannot compile, so no artifact appears; with no `[build.wasm-opt]`
+/// table the post-build step is a no-op and the build still succeeds.
+#[cfg(unix)]
+#[test]
+fn wasm_features_reaches_infc_as_two_adjacent_argv_entries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+    let argv_log = temp.child("argv.log");
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(&format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '{}.2\\n'; exit 0 ;;\n\
+           *) printf '%s\\n' \"$@\" >> '{}'; exit 0 ;;\n\
+         esac\n",
+        inference_compiler_interface::COMPILER_ABI_MAJOR,
+        argv_log.path().display()
+    ))
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_features_once(&stdout_of(&cmd.assert().success()));
+
+    let logged = std::fs::read_to_string(argv_log.path()).expect("the stub must log its argv");
+    let argv: Vec<&str> = logged.lines().collect();
+    let flag_positions: Vec<usize> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| **arg == "--wasm-features")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        flag_positions.len(),
+        1,
+        "`--wasm-features` must be forwarded exactly once, got argv: {argv:?}"
+    );
+    assert_eq!(
+        argv.get(flag_positions[0] + 1),
+        Some(&"bulk-memory"),
+        "the flag's value must be the next argv entry, got argv: {argv:?}"
+    );
+}
+
+/// The ABI gate on the single-file `build` route. After the shared forwarder
+/// extraction there is one gate, but each route into it is pinned separately —
+/// a route that forgot to probe would fail here and nowhere else.
+#[cfg(unix)]
+#[test]
+fn single_file_build_old_infc_with_wasm_features_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.1\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(std::path::Path::new("src").join("main.inf"));
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--wasm-features")
+            .and(predicate::str::contains("1.2"))
+            .and(predicate::str::contains("Inference.toml")),
+    );
+}
+
+/// Single-file `run` honors the enclosing manifest's `wasm-features` too.
+///
+/// This is the invocation that would otherwise reopen the hole: `infs run
+/// src/main.inf` compiles through a different `infc` invocation than `infs build`
+/// does and overwrites the same `out/main.wasm`, so a version of this path that
+/// ignored the key would leave the project's shipped artifact at whichever
+/// instruction level the last command happened to use.
+#[test]
+fn single_file_run_honors_enclosing_manifest_wasm_features() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(std::path::Path::new("src").join("main.inf"));
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_features_once(&stdout);
+    assert!(
+        stdout.contains('3'),
+        "wasmtime must print main's return value (1 + 2), got:\n{stdout}"
+    );
+
+    assert_artifact_uses_bulk_memory(
+        &read_project_artifact(&temp),
+        "the artifact single-file `run` executed",
+    );
+}
+
+/// The ABI gate covers single-file `run` as well: a stub `infc` reporting 1.1 is
+/// refused rather than handed a flag it cannot honor. Unix-only (executable stub);
+/// wasmtime is never reached because the gate fires during compilation.
+#[cfg(unix)]
+#[test]
+fn single_file_run_old_infc_with_wasm_features_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n",
+    );
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.1\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(std::path::Path::new("src").join("main.inf"));
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("--wasm-features").and(predicate::str::contains("1.2")));
+}
+
+/// Real-binary end-to-end: a genuine Binaryen `wasm-opt` accepts and optimizes a
+/// bulk-bearing artifact.
+///
+/// The fake-optimizer test proves the flag is *passed*; only a real Binaryen
+/// proves it is *sufficient*. Binaryen hard-rejects `0xFC` bulk opcodes unless
+/// told to parse them, so without `--enable-bulk-memory` this fails at the
+/// optimizer rather than in any assertion. The result must still validate, and
+/// must still use bulk memory — `wasm-opt` is not permitted to quietly lower it
+/// away into something the re-validation envelope would also accept.
+#[test]
+fn wasm_opt_real_binary_optimizes_a_bulk_bearing_artifact() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+    if !require_wasm_opt() {
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_STRUCT_SRC,
+        "[build]\nwasm-features = [\"bulk-memory\"]\n\n[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env_remove("WASM_OPT_PATH")
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-opt -Oz: main.wasm"));
+
+    assert_artifact_uses_bulk_memory(
+        &read_project_artifact(&temp),
+        "the real-Binaryen optimized artifact",
+    );
+}
+
+/// A manifest key no table knows is a build error naming the offending key —
+/// previously-ignored junk is now surfaced rather than silently doing nothing.
+#[test]
+fn project_build_rejects_an_unknown_manifest_key() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nwasm_features = [\"bulk-memory\"]\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("wasm_features").and(predicate::str::contains("wasm-features")),
+    );
+}
+
 // Phase 2: Toolchain Management Command Tests
 
 // Install Command Tests
@@ -3079,7 +3714,7 @@ fn wasm_opt_absent_table_never_invokes_optimizer() {
 }
 
 /// An enabled `[build.wasm-opt] level = "z"` forwards exactly the expected
-/// argument vector — the level flag, the three feature flags, the input, then
+/// argument vector — the level flag, the two feature flags, the input, then
 /// `-o` and the sibling temp target, in order — leaves the artifact in place,
 /// and prints the one-line size summary.
 #[test]
@@ -3117,23 +3752,22 @@ fn wasm_opt_enabled_forwards_exact_args_and_prints_summary() {
         "wasm-opt must be spawned exactly once for optimization, got: {invocations:?}"
     );
     let args = &invocations[0];
-    assert_eq!(args.len(), 7, "unexpected argument count: {args:?}");
+    assert_eq!(args.len(), 6, "unexpected argument count: {args:?}");
     assert_eq!(args[0], "-Oz");
     assert_eq!(args[1], "--mvp-features");
     assert_eq!(args[2], "--enable-mutable-globals");
-    assert_eq!(args[3], "--enable-bulk-memory");
     assert_eq!(
-        file_name_of(&args[4]),
+        file_name_of(&args[3]),
         Some("main.wasm"),
         "input must be out/main.wasm, got: {}",
-        args[4]
+        args[3]
     );
-    assert_eq!(args[5], "-o");
+    assert_eq!(args[4], "-o");
     assert_eq!(
-        file_name_of(&args[6]),
+        file_name_of(&args[5]),
         Some("main.wasm.opt"),
         "output must be the sibling temp file, got: {}",
-        args[6]
+        args[5]
     );
 
     assert!(

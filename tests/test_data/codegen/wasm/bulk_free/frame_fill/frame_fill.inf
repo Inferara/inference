@@ -1,0 +1,41 @@
+// Frame zero-fill across the byte threshold that selects the unrolled form over
+// the loop form. An array literal stores nothing for a zero-valued element, so
+// every zero read below is produced by the prologue fill and by nothing else.
+
+pub fn fill_128_unrolled() -> i64 {
+    let a: [i64; 16] = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
+    return a[0] * 1000 + a[7] * 100 + a[15];
+}
+
+pub fn fill_144_loop() -> i64 {
+    let b: [i64; 18] = [5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    return b[0] * 1000 + b[9] * 100 + b[17];
+}
+
+pub fn fill_160_loop() -> i64 {
+    let c: [i64; 20] = [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8];
+    return c[0] * 1000 + c[10] * 100 + c[19];
+}
+
+pub fn fill_320_loop() -> i64 {
+    let d: [i64; 40] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    return d[0] * 1000 + d[13] * 100 + d[26] * 10 + d[39];
+}
+
+// A frame holding several slots: the fill covers the whole frame in one go, so
+// the zeros of the later slots depend on the same single lowering.
+pub fn fill_multi_slot() -> i64 {
+    let e: [i64; 18] = [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let f: [i64; 4] = [0, 0, 0, 2];
+    return e[0] * 1000 + e[8] * 100 + f[0] * 10 + f[3];
+}
+
+// A dynamic index the compiler cannot fold, reading an element the literal
+// never wrote.
+pub fn fill_read_dynamic(i: i32) -> i64 {
+    let g: [i64; 20] = [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+    return g[i];
+}

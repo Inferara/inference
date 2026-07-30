@@ -37,9 +37,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -77,9 +79,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -121,9 +125,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -172,9 +178,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -216,16 +224,24 @@
     unreachable
   )
   (func $write_whole_elem (;4;) (type 4) (result i32)
-    (local $g i32) (local $p i32) (local $__frame_ptr i32)
+    (local $g i32) (local $p i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 32
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -262,8 +278,12 @@
     local.set $p
     local.get $g
     local.get $p
-    i32.const 8
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
     local.get $g
     i32.load
     local.get $g
@@ -286,13 +306,19 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     local.get $g
-    i32.const 16
-    memory.copy
+    i64.load align=1
+    i64.store align=1
+    local.get $__frame_ptr
+    local.get $g
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     local.set $g
     local.get $g
@@ -319,9 +345,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 6
     i32.store
@@ -381,9 +409,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     call $make_grid
     local.get $__frame_ptr
@@ -407,9 +437,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 11
     i32.store
@@ -476,9 +514,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i32.const 1
     i32.store
@@ -547,9 +593,11 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 4
     i32.add
@@ -581,9 +629,17 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     i64.const 1
     i64.store

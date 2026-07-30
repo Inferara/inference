@@ -1,0 +1,59 @@
+// Array parameters whose byte size is an exact multiple of the eight-byte copy
+// chunk, so the copy is a loop with no tail. All of these exceed sixteen
+// elements, which is what routes them through the untyped region copy rather
+// than the per-element typed copy.
+
+// 17 * 8 = 136 bytes — the smallest i64 array that both leaves the per-element
+// path and needs the looped region copy.
+pub fn sum_ends_17(data: [i64; 17]) -> i64 {
+    return data[0] + data[16];
+}
+
+// 20 * 8 = 160 bytes.
+pub fn sum_ends_20(data: [i64; 20]) -> i64 {
+    return data[0] + data[19];
+}
+
+pub fn pick_20(data: [i64; 20], i: i32) -> i64 {
+    return data[i];
+}
+
+pub fn clobber_20(mut data: [i64; 20], i: i32) -> i64 {
+    data[i] = 999;
+    return data[i];
+}
+
+// 20 * 4 = 80 bytes — past the element threshold but under the byte threshold,
+// so the region copy is straight-line rather than looped.
+pub fn sum_ends_i32_20(data: [i32; 20]) -> i32 {
+    return data[0] + data[19];
+}
+
+pub fn call_sum_ends_17() -> i64 {
+    let a: [i64; 17] = [11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 22];
+    return sum_ends_17(a);
+}
+
+pub fn call_sum_ends_20() -> i64 {
+    let b: [i64; 20] = [11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 29];
+    return sum_ends_20(b);
+}
+
+pub fn call_sum_ends_i32_20() -> i32 {
+    let c: [i32; 20] = [13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 31];
+    return sum_ends_i32_20(c);
+}
+
+// The callee mutates its own copy; the caller's array is unchanged.
+pub fn value_semantics_20() -> i64 {
+    let d: [i64; 20] = [11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 29];
+    let ignored: i64 = clobber_20(d, 0);
+    return d[0] * 1000 + d[19];
+}
+
+// An element the caller's literal left at zero must arrive as zero on the far
+// side of the copy.
+pub fn copy_preserves_zero() -> i64 {
+    let e: [i64; 20] = [11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 29];
+    return pick_20(e, 10);
+}

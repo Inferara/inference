@@ -1,0 +1,64 @@
+// Returning a compound larger than the byte threshold. The callee writes its
+// own frame and the return copy moves that frame into the destination slot the
+// caller passed, so the looped copy runs on the way out rather than on the way
+// in.
+
+struct Block {
+    head: i64;
+    body: [i64; 18];
+    tail: i64;
+}
+
+pub fn make_20() -> [i64; 20] {
+    let a: [i64; 20] = [11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 29];
+    return a;
+}
+
+pub fn read_20_first() -> i64 {
+    let b: [i64; 20] = make_20();
+    return b[0];
+}
+
+// An element no store ever wrote in the callee has to survive the return copy
+// as a zero.
+pub fn read_20_middle() -> i64 {
+    let c: [i64; 20] = make_20();
+    return c[10];
+}
+
+pub fn read_20_last() -> i64 {
+    let d: [i64; 20] = make_20();
+    return d[19];
+}
+
+pub fn read_20_dynamic(i: i32) -> i64 {
+    let e: [i64; 20] = make_20();
+    return e[i];
+}
+
+pub fn make_block() -> Block {
+    let f: Block = Block {
+        head: 3,
+        body: [41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 43],
+        tail: 4,
+    };
+    return f;
+}
+
+pub fn read_block_ends() -> i64 {
+    let g: Block = make_block();
+    return g.head * 1000 + g.tail;
+}
+
+pub fn read_block_body() -> i64 {
+    let h: Block = make_block();
+    return h.body[0] * 1000 + h.body[9] * 100 + h.body[17];
+}
+
+// The sret destination is a slot in a frame that also holds other live data;
+// a copy that overran its length would corrupt the neighbour.
+pub fn sret_neighbour_intact() -> i64 {
+    let guard: [i64; 2] = [61, 62];
+    let k: [i64; 20] = make_20();
+    return k[0] * 1000 + guard[0] * 10 + guard[1];
+}

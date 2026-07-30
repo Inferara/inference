@@ -5,7 +5,8 @@
 //! array or struct frames consume it; scalar locals live in WASM locals and
 //! never touch linear memory. Codegen already bounds each *individual* frame,
 //! but the *cumulative* depth across a call chain is unchecked and only traps
-//! opaquely at runtime (a `memory.fill` out-of-bounds in the frame prologue).
+//! opaquely at runtime (an out-of-bounds store in the frame prologue's
+//! zero-fill).
 //!
 //! Because A035 forbids recursion, the whole-program call graph is a DAG, so the
 //! worst-case shadow-stack usage is the **maximum-weight root-to-leaf path**,

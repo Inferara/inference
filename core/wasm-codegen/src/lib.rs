@@ -10,7 +10,7 @@
 //! Typed AST (TypedContext)
 //!         |
 //!         v
-//!   codegen(tc, target, mode, opt_level)
+//!   codegen(tc, target, mode, opt_level, module_name, features)
 //!         |
 //!         v
 //!   CodegenOutput { wasm, target, mode, opt_level, module_name, has_main }
@@ -65,7 +65,7 @@ mod spec_section;
 pub mod target;
 
 pub use output::CodegenOutput;
-pub use target::{CompilationMode, OptLevel, Target};
+pub use target::{CompilationMode, EmitFeatures, OptLevel, Target};
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
 /// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
@@ -94,10 +94,16 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 ///
 /// [`validate_rocq_identifier`]: inference_wasm_to_v_translator::validate_rocq_identifier
 ///
+/// `features` names the post-MVP WebAssembly instruction families emission may
+/// use; [`EmitFeatures::default()`] keeps the output inside WebAssembly 1.0. It
+/// applies identically in both compilation modes, so the `.v` always describes
+/// the same program as the `.wasm`.
+///
 /// # Errors
 ///
 /// Returns an error if:
-/// - Validation fails (proof + non-Wasm32, or Soroban + non-det)
+/// - Validation fails (proof + non-Wasm32, Soroban + non-det, or a feature the
+///   target does not accept)
 /// - Code generation fails
 pub fn codegen(
     typed_context: &TypedContext,
@@ -105,7 +111,21 @@ pub fn codegen(
     mode: CompilationMode,
     opt_level: OptLevel,
     module_name: &str,
+    features: EmitFeatures,
 ) -> anyhow::Result<CodegenOutput> {
+    // Refuse a feature the target's runtime does not accept before a single byte
+    // is emitted: a build-time refusal names the manifest entry to remove, where
+    // the same module rejected at deploy time names nothing.
+    if let Some(feature) = features.first_rejected_by(target) {
+        cov_mark::hit!(wasm_codegen_target_rejects_feature);
+        return Err(anyhow::anyhow!(
+            "{target:?} target does not support the '{feature}' WebAssembly feature. \
+             Its runtime is not known to accept those instructions, so a module using \
+             them may be rejected at deployment; drop '{feature}' from the requested \
+             features to build for {target:?}."
+        ));
+    }
+
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
         return Err(anyhow::anyhow!(
@@ -135,6 +155,7 @@ pub fn codegen(
     }
 
     let mut compiler = Compiler::new(module_name);
+    compiler.set_emit_features(features);
 
     // Runtime array bounds checks are emitted for every Compile-mode build
     // (Debug and Release, Wasm32 and Soroban): the executed/deployed artifact is
@@ -795,6 +816,93 @@ fn collect_emittable_functions(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod feature_validation_tests {
+    use super::{CompilationMode, EmitFeatures, Target, codegen};
+    use inference_type_checker::typed_context::TypedContext;
+
+    /// The refusal is reached before anything is emitted, so an empty program is
+    /// enough to exercise it.
+    fn compile_empty(
+        target: Target,
+        mode: CompilationMode,
+        features: EmitFeatures,
+    ) -> anyhow::Result<crate::CodegenOutput> {
+        let typed_context = TypedContext::default();
+        codegen(
+            &typed_context,
+            target,
+            mode,
+            target.default_opt_level(),
+            "output",
+            features,
+        )
+    }
+
+    #[test]
+    fn soroban_rejects_a_bulk_memory_request() {
+        cov_mark::check!(wasm_codegen_target_rejects_feature);
+        let err = compile_empty(
+            Target::Soroban,
+            CompilationMode::Compile,
+            EmitFeatures { bulk_memory: true },
+        )
+        .expect_err("Soroban does not accept bulk memory");
+        assert_eq!(
+            err.to_string(),
+            "Soroban target does not support the 'bulk-memory' WebAssembly feature. \
+             Its runtime is not known to accept those instructions, so a module using \
+             them may be rejected at deployment; drop 'bulk-memory' from the requested \
+             features to build for Soroban."
+        );
+    }
+
+    /// The feature check sits ahead of the mode checks deliberately: a build that
+    /// is wrong about its instruction set should be told that, not sent to fix an
+    /// unrelated mode conflict first. `Soroban` + `Proof` violates both rules at
+    /// once, so the message that comes back is what pins the order.
+    #[test]
+    fn the_feature_refusal_precedes_the_proof_mode_refusal() {
+        let err = compile_empty(
+            Target::Soroban,
+            CompilationMode::Proof,
+            EmitFeatures { bulk_memory: true },
+        )
+        .expect_err("both rules reject this build");
+        assert!(
+            err.to_string()
+                .contains("'bulk-memory' WebAssembly feature"),
+            "the feature refusal must win, got: {err}"
+        );
+    }
+
+    #[test]
+    fn soroban_accepts_the_default_feature_set() {
+        assert!(
+            compile_empty(
+                Target::Soroban,
+                CompilationMode::Compile,
+                EmitFeatures::default()
+            )
+            .is_ok(),
+            "the WebAssembly 1.0 default must be accepted by every target"
+        );
+    }
+
+    #[test]
+    fn wasm32_accepts_a_bulk_memory_request() {
+        assert!(
+            compile_empty(
+                Target::Wasm32,
+                CompilationMode::Compile,
+                EmitFeatures { bulk_memory: true }
+            )
+            .is_ok(),
+            "Wasm32 permits bulk memory"
+        );
+    }
 }
 
 #[cfg(test)]

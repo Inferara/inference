@@ -6,16 +6,18 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $copy_x (;0;) (type 0) (result i32)
-    (local $base i32) (local $P i32) (local $__frame_ptr i32)
+    (local $base i32) (local $P i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 16
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
     local.get $__frame_ptr
     i32.const 7
     i32.store
@@ -30,8 +32,12 @@
     i32.const 8
     i32.add
     local.get $base
-    i32.const 8
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
     local.get $__frame_ptr
     i32.const 8
     i32.add

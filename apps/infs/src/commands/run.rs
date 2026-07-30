@@ -13,6 +13,13 @@
 //! from the current directory, performs the same project build as `infs build`
 //! (so `<root>/out/main.wasm` is produced), and invokes `main` by convention.
 //!
+//! Single-file mode is not manifest-blind: it walks up to the nearest
+//! `Inference.toml` and honors `[build] wasm-features`, so running one file of a
+//! project cannot execute a module at a different WebAssembly instruction level
+//! than `infs build` would produce for it. `[wasm-dependencies]` is not resolved
+//! on this path (single-file `build` does resolve it); that asymmetry predates
+//! this and is tracked separately.
+//!
 //! ```bash
 //! infs run                                    # project mode: build + invoke main
 //! infs run program.inf                        # single-file: invoke main()
@@ -31,8 +38,10 @@
 //!   reach project mode through the CLI. The warning below is retained as a
 //!   defensive, self-documenting guard should the argument layout ever change.
 //! - **Gains the `infc` compatibility handshake** for free via the shared
-//!   project-build helper. Single-file `run` deliberately keeps its prior
-//!   no-handshake behavior to avoid an unrelated behavior change.
+//!   project-build helper. Single-file `run` keeps its prior no-handshake
+//!   behavior except when the enclosing manifest requests `wasm-features`, where
+//!   a capability probe is the only way to refuse a request the compiler cannot
+//!   honor.
 //! - **Always builds in compile mode**, regardless of the manifest's
 //!   `[build] mode`. `run` executes the WASM, and proof-mode WASM embeds the
 //!   custom non-deterministic opcodes (the `0xfc` family) that wasmtime cannot
@@ -58,10 +67,15 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::commands::project_build::run_project_build;
+use crate::commands::build::{enclosing_manifest, manifest_wasm_features};
+use crate::commands::project_build::{
+    forward_wasm_features, probe_compiler_compatibility, run_project_build,
+};
 use crate::errors::InfsError;
+use crate::project::manifest::MANIFEST_FILE_NAME;
 use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
+use inference_compiler_interface::WasmFeatureName;
 
 /// The entry point invoked in project mode and the default for single-file mode.
 const DEFAULT_ENTRY_POINT: &str = "main";
@@ -136,11 +150,18 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 ///
 /// 1. Validates source file exists
 /// 2. Checks for wasmtime availability
-/// 3. Locates the infc compiler
-/// 4. Compiles source to WASM via infc subprocess (no ABI handshake — single-file
-///    `run` deliberately keeps its prior no-handshake behavior)
-/// 5. Executes WASM with wasmtime, invoking `--entry-point`
-/// 6. Propagates exit code from wasmtime
+/// 3. Resolves the enclosing project's `[build] wasm-features`, if any
+/// 4. Locates the infc compiler
+/// 5. Compiles source to WASM via infc subprocess
+/// 6. Executes WASM with wasmtime, invoking `--entry-point`
+/// 7. Propagates exit code from wasmtime
+///
+/// The enclosing manifest's `wasm-features` is honored here for the same reason
+/// `infs build <path>` honors it: one project must not emit modules at two
+/// different WebAssembly instruction levels depending on how the build was
+/// invoked, and this path overwrites the very artifact `infs build` produces.
+/// `[wasm-dependencies]` is *not* resolved here — that gap predates this and is
+/// tracked separately.
 ///
 /// ## Errors
 ///
@@ -148,6 +169,8 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// - The source file does not exist
 /// - wasmtime is not found in PATH
 /// - infc compiler cannot be found
+/// - the enclosing manifest requests `wasm-features` the resolved `infc` cannot
+///   honor (which is also the only case that runs the ABI handshake here)
 /// - Compilation fails
 /// - WASM execution fails
 fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
@@ -157,9 +180,15 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 
     check_wasmtime_availability()?;
 
+    let enclosing = enclosing_manifest(path)?;
+    let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    let manifest_path = enclosing
+        .as_ref()
+        .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
+
     let infc_path = find_infc()?;
 
-    let wasm_path = compile_to_wasm(&infc_path, path)?;
+    let wasm_path = compile_to_wasm(&infc_path, path, &features, manifest_path.as_deref())?;
 
     run_wasmtime(&wasm_path, &args.entry_point, &args.args)
 }
@@ -256,13 +285,35 @@ fn check_wasmtime_availability() -> Result<()> {
 /// Compiles source file to WASM binary using infc subprocess.
 ///
 /// Calls infc with `--parse --codegen -o` flags to generate the WASM file
-/// in the `out/` directory.
-fn compile_to_wasm(infc_path: &Path, source_path: &Path) -> Result<PathBuf> {
+/// in the `out/` directory, forwarding `features` as `--wasm-features` so the
+/// artifact this command then executes carries the instruction set the enclosing
+/// project asked for.
+///
+/// The compatibility handshake runs only when there is a feature request to gate.
+/// Single-file `run` otherwise keeps its historical handshake-free behavior: the
+/// probe exists to refuse an unhonorable request, and paying for it on every run
+/// would add ABI warnings to invocations that ask nothing of the compiler.
+///
+/// # Errors
+///
+/// Returns an error if the resolved `infc` cannot honor a requested feature, if
+/// `infc` exits non-zero, or if the expected artifact is absent afterwards.
+fn compile_to_wasm(
+    infc_path: &Path,
+    source_path: &Path,
+    features: &[WasmFeatureName],
+    manifest_path: Option<&Path>,
+) -> Result<PathBuf> {
     let mut cmd = Command::new(infc_path);
     cmd.arg(source_path)
         .arg("--parse")
         .arg("--codegen")
         .arg("-o");
+
+    if !features.is_empty() {
+        let compat = probe_compiler_compatibility(infc_path)?;
+        forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
+    }
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())

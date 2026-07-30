@@ -25,4 +25,5 @@ wasmprinter = "0.245.1"
 
 [dev-dependencies]
 cov-mark = { workspace = true, features = ["enable"] }
+wasmparser = "0.245.1"
 wat = "1.225.0"

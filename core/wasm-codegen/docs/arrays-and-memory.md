@@ -4,6 +4,13 @@
 
 This document explains how Inference compiles fixed-size array types, struct types, and nested compound types to WebAssembly linear memory with a shadow stack (similar to Rust/LLVM).
 
+Every whole-region memory operation this produces — frame zero-initialization, array and
+struct parameter copies, sret returns, struct-to-struct assignment — is by default lowered
+to plain loads and stores rather than the bulk-memory proposal's
+`memory.fill`/`memory.copy`, so generated modules stay within the WebAssembly 1.0 (MVP)
+instruction set. A build that opts into bulk memory gets the instructions instead. See
+[Region Fill and Copy Lowering](#region-fill-and-copy-lowering).
+
 Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism. Each function that uses arrays:
 1. Computes a frame layout at compile time
 2. Emits a prologue to allocate the frame on entry
@@ -65,7 +72,8 @@ During `lower_statement()` and `lower_expression()`, arrays are lowered to:
 - **Array parameter copy** (automatic on function entry)
   - For each array-typed parameter, copy caller's data into callee's frame
   - Optimizes small arrays (≤ 16 elements) as unrolled element copies
-  - Large arrays use `memory.copy` instruction
+  - Larger arrays, and any array with compound (struct) elements, are copied as an
+    untyped byte region — see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)
 
 ### Phase 3: Module Assembly
 
@@ -104,10 +112,9 @@ i32.const <frame_size>
 i32.sub                        ;; decrement stack pointer
 local.tee $__frame_ptr         ;; save new frame base, duplicate on stack
 global.set $__stack_pointer    ;; update global
-local.get $__frame_ptr         ;; reload for memory.fill
-i32.const 0                    ;; fill with zeros
-i32.const <frame_size>
-memory.fill                    ;; zero-initialize entire frame
+;; zero-initialize the entire frame: a straight-line sequence of i64.store 0
+;; for small frames, or an index-driven loop for large ones — see
+;; "Region Fill and Copy Lowering" below
 
 ; Function body: arrays are accessed via $__frame_ptr + offset
 
@@ -117,6 +124,141 @@ i32.const <frame_size>
 i32.add                        ;; increment back up
 global.set $__stack_pointer    ;; restore stack pointer
 ```
+
+## Region Fill and Copy Lowering
+
+Two operations move or clear an entire region of linear memory without caring about its
+contents: zero-initializing a fresh stack frame in the prologue, and copying a compound
+value (array or struct) between two addresses. Each is naturally a single bulk-memory
+instruction (`memory.fill` / `memory.copy`), and by default each is lowered to plain loads
+and stores instead, so that generated modules stay within the WebAssembly 1.0 (MVP)
+instruction set — no post-MVP proposal is required to run Inference-compiled code.
+
+### Opting Back In
+
+A build that permits bulk memory — `EmitFeatures { bulk_memory: true }` on `codegen()`,
+which `infc --wasm-features bulk-memory` sets — emits the single instruction at each site
+instead of its lowering. The choice is made at the first statement of
+`emit_frame_zero_fill`, `emit_memcpy_via_locals` and `emit_memcpy_via_stack`, ahead of
+every early return and every scratch allocation; nothing upstream of those three
+functions differs, so frame layouts and the analysis rules that reason about them
+(A035, A036) are unaffected. The bulk form allocates no scratch local, which `RegionEmit`
+asserts, and the resulting bytes reproduce what the compiler emitted before this lowering
+existed. The feature applies identically in Compile and Proof mode, so the `.v` always
+describes the same program as the `.wasm`.
+
+### Two Shapes: Straight-Line and Looped
+
+Both the frame zero-fill (`emit_frame_zero_fill`) and the region copy
+(`emit_memcpy_via_locals`) pick one of two shapes based on the region's byte size
+against `BULK_UNROLL_LIMIT_BYTES` (128 bytes — sixteen 8-byte stores):
+
+- **Straight-line** (`byte_size <= 128`): the region is covered by a fixed sequence of
+  stores (fill) or load/store pairs (copy) with no branch. A copy decomposes the region
+  into whole 8-byte units followed by at most one 4-, 2-, and 1-byte unit
+  (`CopyWidth::DESCENDING`), so any byte count is covered exactly. Every access folds its
+  constant displacement into the instruction's `offset` immediate, so an unrolled copy
+  emits no `i32.add` at all.
+- **Looped** (`byte_size > 128`): a `loop` with an induction variable and a `br_if`
+  back-edge (no enclosing `block` — the loop exits by falling through) covers the
+  bulk of the region (16 bytes per iteration for a fill, 8 bytes for a copy), followed by
+  the same straight-line tail for the remainder. Frame sizes are always multiples of
+  `FRAME_ALIGNMENT` (16), so the fill loop never needs a tail.
+
+This threshold is unrelated to `UNROLL_THRESHOLD` (16), which gates a different
+decision — whether an *array parameter copy* is unrolled element-by-element with the
+element's own typed load/store, or handed to the region copy as untyped bytes.
+`UNROLL_THRESHOLD` counts elements; `BULK_UNROLL_LIMIT_BYTES` counts bytes and picks the
+shape of an untyped copy, including the untyped copy that a large or compound-element
+array falls back to.
+
+### `MemAddr` and `CopyWidth`
+
+`emit_memcpy_via_locals(func, dst, src, byte_size, scratch)` takes both endpoints as a
+`MemAddr { local, offset }` — a WASM local holding a base pointer plus a constant byte
+displacement — rather than four loose `u32` parameters, so a call site cannot pair one
+endpoint's local with the other's displacement. `CopyWidth` enumerates the four unit
+widths (`I64`, `I32`, `I16`, `I8`) with their load/store instruction and byte count;
+narrow loads are zero-extending (`i32.load16_u`, `i32.load8_u`) because a copy
+reproduces raw bytes, not a sign-extended value. Every copy memory access uses a
+one-byte alignment hint (`copy_memarg`), since a copy's base may be a struct field or
+array element aligned to less than the natural alignment that `store_instruction` /
+`load_instruction` assume for typed accesses.
+
+### `RegionEmit`: Lazily Allocated Locals
+
+The loop and copy shapes need scratch i32 locals — an induction variable, and (for
+`emit_memcpy_via_stack`, the entry point used by every body-level compound copy) a
+destination and source base local to hold the two addresses popped off the WASM
+operand stack. These are **not** part of the eagerly computed declaration list built by
+`pre_scan_locals` and the frame-pointer/bounds-check/narrow-division reservations,
+because whether — and how many times — a function needs them is a property of the
+instructions emitted while lowering its body, not something that can be predicted ahead
+of emission without duplicating the emission logic.
+
+`RegionEmit` hands out indices for `dst`, `src`, and `counter` in first-use order, starting
+one past the last eagerly reserved local. A function that never emits a loop or a
+body-level compound copy allocates nothing, and a build that permits bulk memory never
+allocates at all. To make this possible, the compiler
+builds the function body into a `wasm_encoder::Function` created with an *empty* locals
+vector (`Function::new([])`) instead of the final declarations, and only once the body
+is fully emitted does `Compiler::take_completed_function` splice the complete
+declaration list — the named locals followed by one `(1, ValType::I32)` entry per
+allocated scratch slot — onto the front of the already-encoded raw body bytes. A
+function that allocates no scratch is byte-identical to one built with the final
+declarations from the start. See
+[docs/local-variables-lowering.md](local-variables-lowering.md#local-declarations-are-finalized-after-the-body-is-built)
+for how this interacts with the local pre-scan.
+
+The state, like the function body itself, is rebuilt at the start of every function
+(`RegionEmit::new(first_free_index, features)`), and its slots are shared across every copy and
+loop emitted in that function — safe because each loop or copy is emitted atomically
+(see below), so none is ever live across another.
+
+### Loop Emission Is Atomic
+
+Both the fill loop and the copy loop are emitted as a single, self-contained unit — no
+user expression is lowered inside them. This means they cannot contain a user `break`
+or `continue`, so they need no entry in the compiler's `LoopContext` / block-depth
+bookkeeping (which exists to route those statements to the right structured-control-flow
+target); see [docs/loops-lowering.md](loops-lowering.md) for that bookkeeping.
+
+### Overlap and the Forward-Copy Argument
+
+`memory.copy` guarantees `memmove`-style correctness for overlapping regions; a plain
+forward loop of loads and stores does not, in general. `emit_memcpy_via_locals` is a
+forward copy — safe only because every call site reaches it with either disjoint
+regions or two addresses that are *identical*, never partially overlapping:
+
+- Array/struct parameter copies read the caller's argument and write the callee's
+  freshly decremented frame — disjoint, or identical when a callee returns its own
+  parameter through the caller's slot.
+- The sret return copy writes the caller-provided destination from the callee frame —
+  disjoint for the same reason, identical when a method returns the value it was called
+  on.
+- Body-level compound copies (via `emit_memcpy_via_stack`) move between whole named
+  slots, bounds-checked array elements, or layout-disjoint struct fields; a
+  self-referential reassignment is routed through the frame's scratch region first, so a
+  copy never reads a slot it is concurrently writing.
+
+Inference has value semantics and no references, so two distinct compound values can
+never partially alias — the case a forward copy would get wrong never arises.
+
+### Why the Overflow Trap Still Holds
+
+The stack-first layout's "free trap" (see [Memory Layout](#memory-layout) above) relied
+on `memory.fill`'s up-front bounds check: a wrapped, out-of-range frame pointer failed
+that check before any byte was written. The replacement fill has no single up-front
+check, so the ordering of its own stores has to reproduce the same property. Both the
+unrolled and looped fill shapes emit the store at frame offset 0 first — WebAssembly
+computes `base + offset` without 32-bit wraparound, so a frame pointer that wrapped past
+the end of the one-page memory fails that first store's bounds check and traps before
+writing anything, exactly as `memory.fill` did.
+
+This is defense in depth, not the primary safeguard: analysis rules A035 (recursion) and
+A036 (stack depth) statically reject any program whose frames could exhaust the stack,
+and `compute_frame_layout` independently asserts a single frame fits within
+`STACK_SIZE`, so an accepted program never reaches the wrapping case at all.
 
 ## Implementation Details
 
@@ -139,10 +281,16 @@ This module contains all memory-related helpers:
 | `emit_ptr_offset_addr()` | Emit `local.get $ptr; i32.const offset; i32.add` for a base-pointer + byte-offset address |
 | `store_instruction()` | Select `i32.store8`, `i32.store16`, `i32.store`, or `i64.store` |
 | `load_instruction()` | Select appropriate load (sign/zero-extending as needed) |
-| `emit_stack_prologue()` | Generate frame allocation code |
+| `emit_stack_prologue()` | Generate frame allocation code, including the zero-fill (delegates to `emit_frame_zero_fill()`) |
 | `emit_stack_epilogue()` | Generate frame deallocation code |
 | `emit_array_param_copy()` | Copy caller's array data into callee's frame |
-| `emit_struct_param_copy()` | Copy caller's struct data into callee's frame via `memory.copy` |
+| `emit_struct_param_copy()` | Copy caller's struct data into callee's frame via a region copy |
+| `RegionEmit` | The permitted WebAssembly features plus the lazily allocated i32 scratch locals (`dst`, `src`, `counter`) the lowered forms need, numbered from the first free local after the eager declarations |
+| `emit_frame_zero_fill()` | Zero-fills a frame: one `memory.fill` when the build permits bulk memory, otherwise straight-line `i64.store`s below `BULK_UNROLL_LIMIT_BYTES` and an index loop above it |
+| `emit_memcpy_via_locals()` | Copies `byte_size` bytes between two `MemAddr` endpoints: one `memory.copy` when the build permits bulk memory, otherwise straight-line loads/stores below `BULK_UNROLL_LIMIT_BYTES` and a loop with a static tail above it |
+| `emit_memcpy_via_stack()` | The entry point for every body-level compound copy, taking its destination and source from the WASM operand stack: appends the size and one `memory.copy` when the build permits bulk memory, otherwise pops both addresses into scratch locals and calls `emit_memcpy_via_locals()` |
+| `MemAddr` | A copy endpoint: a WASM local holding a base pointer plus a constant byte displacement |
+| `CopyWidth` | The four copy unit widths (`I64`, `I32`, `I16`, `I8`) with their load/store instruction and byte count |
 
 ### `compiler.rs` Additions
 
@@ -152,9 +300,9 @@ During the `pre_scan_locals()` phase (which walks all statements before instruct
 
 Later, during instruction emission, when an array literal is initialized, `lower_array_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
 
-For struct-element arrays the `else` branch delegates to `lower_array_literal_struct_elements`. For scalar-element arrays — including multi-dimensional ones (`[[i32; 3]; 2]`) — it delegates to `store_array_literal_elements`, which recurses on the declared array type (derived from the literal's `expr_id` type info) and stores each scalar leaf at `slot_offset + Σ idxᵢ · strideᵢ`, mirroring `emit_array_uzumaki_recursive`. A nested array element that is itself a literal recurses; a non-literal array element (an identifier or call, e.g. `let g = [r, r];`) is copied with `memory.copy` for its full sub-array byte size. Single-dimensional scalar arrays only reach the scalar leaf path and emit byte-identical output to before.
+For struct-element arrays the `else` branch delegates to `lower_array_literal_struct_elements`. For scalar-element arrays — including multi-dimensional ones (`[[i32; 3]; 2]`) — it delegates to `store_array_literal_elements`, which recurses on the declared array type (derived from the literal's `expr_id` type info) and stores each scalar leaf at `slot_offset + Σ idxᵢ · strideᵢ`, mirroring `emit_array_uzumaki_recursive`. A nested array element that is itself a literal recurses; a non-literal array element (an identifier or call, e.g. `let g = [r, r];`) is copied with a region copy for its full sub-array byte size (see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)). Single-dimensional scalar arrays only reach the scalar leaf path and emit byte-identical output to before.
 
-Nested **array-of-structs** literals (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], [..]]`) are also handled by `store_array_literal_elements`: the outer array's element is itself an array, so the `Array` arm recurses until it reaches a struct leaf. The struct leaf reuses the single-dimensional AoS machinery — its field layout is computed once via `compute_struct_field_layout`, then each element writes its fields at `base + i·stride + field_offset` through `lower_struct_literal_fields` (for a `StructLiteral` element) or a full-struct `memory.copy` (for a non-literal element such as `let p = Pt{..}; let g = [[p, p], [p, p]];`). An **enum** leaf (`[[Color; 2]; 2]`) is scalar-sized, so `lookup_struct` returns `None` and the element falls through to the scalar leaf path. Single-dimensional AoS (`[Pt; 3]`) never enters this helper — it takes the `lower_array_literal_struct_elements` branch in `lower_array_literal` — so its output is unaffected.
+Nested **array-of-structs** literals (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], [..]]`) are also handled by `store_array_literal_elements`: the outer array's element is itself an array, so the `Array` arm recurses until it reaches a struct leaf. The struct leaf reuses the single-dimensional AoS machinery — its field layout is computed once via `compute_struct_field_layout`, then each element writes its fields at `base + i·stride + field_offset` through `lower_struct_literal_fields` (for a `StructLiteral` element) or a full-struct region copy (for a non-literal element such as `let p = Pt{..}; let g = [[p, p], [p, p]];`). An **enum** leaf (`[[Color; 2]; 2]`) is scalar-sized, so `lookup_struct` returns `None` and the element falls through to the scalar leaf path. Single-dimensional AoS (`[Pt; 3]`) never enters this helper — it takes the `lower_array_literal_struct_elements` branch in `lower_array_literal` — so its output is unaffected.
 
 #### `compute_frame_layout()`
 
@@ -389,7 +537,7 @@ All frames are aligned to 16 bytes (matching LLVM/Rust WASM). This is:
 - A convention for consistency with other compilers
 - Applied after computing total array sizes
 
-Each array within a frame is aligned to its element type's natural alignment, matching the LLVM/Rust/BasicCABI convention. For example, a `[bool; 3]` array (1-byte elements) followed by a `[i32; 2]` array (4-byte elements) will have 1 byte of padding inserted so the i32 array starts at offset 4 (a 4-byte boundary). This makes `MemArg` alignment hints truthful and enables better hardware optimization on runtimes that use alignment hints for instruction selection (e.g., SSE-aligned loads on x86). Padding bytes are automatically zeroed by the `memory.fill` in the prologue.
+Each array within a frame is aligned to its element type's natural alignment, matching the LLVM/Rust/BasicCABI convention. For example, a `[bool; 3]` array (1-byte elements) followed by a `[i32; 2]` array (4-byte elements) will have 1 byte of padding inserted so the i32 array starts at offset 4 (a 4-byte boundary). This makes `MemArg` alignment hints truthful and enables better hardware optimization on runtimes that use alignment hints for instruction selection (e.g., SSE-aligned loads on x86). Padding bytes are automatically zeroed by the prologue's zero-fill (see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)).
 
 Example:
 
@@ -406,13 +554,13 @@ When an array-typed parameter is passed to a function:
 
 **Callee**:
 1. Allocates space in its frame (computed by `compute_frame_layout()`)
-2. Copies caller's data element-by-element or via `memory.copy`
+2. Copies caller's data element-by-element or via a region copy
 3. Updates the parameter local to point to the copy
 4. All subsequent reads/writes operate on the local copy
 
 **Benefit**: Mutations inside the callee don't affect the caller's array (value semantics).
 
-**Optimization**: Arrays with ≤ 16 elements are copied element-by-element (avoids `memory.copy` overhead). Larger arrays use `memory.copy`.
+**Optimization**: Arrays with ≤ 16 elements are copied element-by-element with the element's own typed load/store, avoiding the untyped region copy's overhead. Larger arrays, and any array with compound elements, use the region copy described in [Region Fill and Copy Lowering](#region-fill-and-copy-lowering).
 
 ```wasm
 ; Caller side (unrolled):
@@ -529,7 +677,7 @@ The empty-result `if` consumes only the comparison result and leaves `base` and 
 
 ## Zero-Store Elision During Initialization
 
-The function prologue emits `memory.fill 0` to zero-initialize the entire stack frame before any instructions run. This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
+The function prologue zero-initializes the entire stack frame before any instructions run (see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)). This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
 
 ### The Optimization
 
@@ -644,13 +792,12 @@ Compiles to:
 
 **1. Identifier** (`return arr`):
 
-Uses `memory.copy` to copy the source array's data to the sret destination:
+Copies the source array's data to the sret destination via `emit_sret_copy`, which
+delegates to the region copy described in [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)
+(straight-line loads/stores for this 12-byte example):
 
 ```wasm
-local.get $sret     ;; destination
-local.get $arr      ;; source (pointer to callee's frame copy)
-i32.const 12        ;; byte_size = length * elem_size
-memory.copy
+;; conceptually: emit_memcpy_via_locals(dst = $sret, src = $arr, byte_size = 12)
 ```
 
 **2. Array literal** (`return [1, 2, 3]`):
@@ -814,30 +961,24 @@ i32.add
 i32.store
 ```
 
-For compound fields (nested structs or array-typed fields), the write emits a `memory.copy` from the RHS pointer to the destination field address:
+For compound fields (nested structs or array-typed fields), the write emits a region copy from the RHS pointer to the destination field address:
 
 ```wasm
 local.get $p               ;; struct base pointer (destination)
 i32.const <field_offset>
 i32.add
 <lower RHS expression>     ;; RHS is a pointer to compound data (source)
-i32.const <compound_size>
-memory.copy
+;; region copy of <compound_size> bytes — see Region Fill and Copy Lowering
 ```
 
 The total byte size (`compound_size`) comes from `CompoundFieldLayout::byte_size()`: `NestedStruct.total_size` for nested structs, and `elem_size * length` for nested arrays.
 
 ### Struct Parameter Copy (`emit_struct_param_copy`)
 
-Struct-typed parameters arrive as i32 pointers (the caller's copy). The callee copies the data into its own frame slot using `memory.copy`, then updates the parameter local to point to the callee's copy:
+Struct-typed parameters arrive as i32 pointers (the caller's copy). The callee copies the data into its own frame slot with a region copy (`emit_memcpy_via_locals`, see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)), then updates the parameter local to point to the callee's copy:
 
 ```wasm
-local.get $__frame_ptr
-i32.const <slot_offset>    ;; omitted when offset is 0
-i32.add                    ;; destination: callee frame slot
-local.get $param           ;; source: caller's pointer
-i32.const <total_size>
-memory.copy
+;; region copy: destination = frame_ptr + slot_offset, source = $param, size = total_size
 
 local.get $__frame_ptr
 i32.const <slot_offset>
@@ -849,15 +990,10 @@ This enforces value semantics: mutations inside the callee do not affect the cal
 
 ### Struct-to-Struct Copy (`lower_struct_copy_var_init`)
 
-When a struct variable is initialized from another struct identifier (`let b = a;`), a `memory.copy` copies the source's data into the destination's frame slot:
+When a struct variable is initialized from another struct identifier (`let b = a;`), a region copy moves the source's data into the destination's frame slot:
 
 ```wasm
-local.get $__frame_ptr
-i32.const <dest_offset>
-i32.add                    ;; destination slot
-local.get $a               ;; source pointer (value of $a)
-i32.const <total_size>
-memory.copy
+;; region copy: destination = frame_ptr + dest_offset, source = $a, size = total_size
 
 local.get $__frame_ptr
 i32.const <dest_offset>
@@ -943,8 +1079,8 @@ pub(crate) enum CompoundFieldLayout {
 
 **Why this matters**: During `lower_struct_literal_fields`, the dispatch on `CompoundFieldLayout` determines:
 - `Scalar`: emit a single store instruction.
-- `NestedStruct`: if the RHS is a struct literal, recurse into `lower_struct_literal_fields` for the inner fields; otherwise emit `memory.copy`.
-- `NestedArray`: if the RHS is an array literal, emit element-by-element stores; otherwise emit `memory.copy`.
+- `NestedStruct`: if the RHS is a struct literal, recurse into `lower_struct_literal_fields` for the inner fields; otherwise emit a region copy.
+- `NestedArray`: if the RHS is an array literal, emit element-by-element stores; otherwise emit a region copy.
 
 The same layout is consulted during member access read/write to decide whether to emit a scalar load or leave a pointer on the stack.
 
@@ -956,7 +1092,7 @@ An array whose element type is a struct (e.g., `[Point; 3]`) is laid out in the 
 
 An array-of-structs literal (e.g., `[Point{x:1,y:2}, Point{x:3,y:4}]`) initializes each element in order. For each element:
 - If the element is a struct literal, `lower_struct_literal_fields` is called at `base + index * elem_size`.
-- If the element is a struct identifier, a `memory.copy` of `elem_size` bytes copies the source into position.
+- If the element is a struct identifier, a region copy of `elem_size` bytes copies the source into position.
 
 ### Element Field Access (`pts[1].x`)
 
@@ -975,7 +1111,7 @@ Writing (`pts[0].x = 99`) uses the same address calculation followed by a store 
 
 ### Element Copy (`let p: Point = pts[1]`)
 
-Copying a whole struct element to a variable emits a `memory.copy` of `elem_size` bytes from the element's address into the destination's frame slot, then sets the variable local to point to the copy.
+Copying a whole struct element to a variable emits a region copy of `elem_size` bytes from the element's address into the destination's frame slot, then sets the variable local to point to the copy.
 
 ## Limitations
 
@@ -999,12 +1135,19 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
 | `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |
-| `wasm_codegen_emit_struct_copy` | `lower_struct_copy_var_init()` | Struct-to-struct copy via `memory.copy` |
+| `wasm_codegen_emit_struct_copy` | `lower_struct_copy_var_init()` | Struct-to-struct copy via a region copy |
 | `wasm_codegen_emit_member_access_read` | `lower_member_access()` | Struct field read via load |
 | `wasm_codegen_emit_member_access_write` | `lower_member_access_write()` | Struct field write via store |
 | `wasm_codegen_emit_struct_uzumaki` | `lower_struct_uzumaki()` | Non-deterministic struct initialization (field-wise uzumaki stores) |
 | `wasm_codegen_uzumaki_domain_bool` | `emit_compound_uzumaki_domain_constraint()` → `emit_uzumaki_domain_constraint()` | A `bool` array or struct-field uzumaki leaf was constrained via `and 1` before its store |
 | `wasm_codegen_uzumaki_domain_enum` | `emit_compound_uzumaki_domain_constraint()` → `emit_uzumaki_domain_constraint()` | A non-empty-enum array or struct-field uzumaki leaf was constrained via `rem_u <variant count>` before its store |
+| `wasm_codegen_frame_fill_unrolled` | `emit_frame_zero_fill()` | A frame at or below `BULK_UNROLL_LIMIT_BYTES` was zero-filled with a straight-line sequence of `i64.store`s |
+| `wasm_codegen_frame_fill_loop` | `emit_frame_zero_fill()` | A frame above `BULK_UNROLL_LIMIT_BYTES` was zero-filled with a 16-byte-stride loop |
+| `wasm_codegen_memcpy_unrolled` | `emit_memcpy_via_locals()` | A region at or below `BULK_UNROLL_LIMIT_BYTES` was copied with straight-line loads/stores |
+| `wasm_codegen_memcpy_loop` | `emit_memcpy_via_locals()` | A region above `BULK_UNROLL_LIMIT_BYTES` was copied with an 8-byte-stride loop plus a static tail |
+| `wasm_codegen_frame_fill_bulk` | `emit_frame_zero_fill()` | A frame was zero-filled with one `memory.fill` because the build permits bulk memory |
+| `wasm_codegen_memcpy_bulk` | `emit_memcpy_via_locals()` | A region was copied with one `memory.copy` because the build permits bulk memory |
+| `wasm_codegen_memcpy_via_stack_bulk` | `emit_memcpy_via_stack()` | A body-level compound copy consumed its two pushed addresses with one `memory.copy` |
 
 ## Examples
 
@@ -1029,10 +1172,15 @@ pub fn get_array() -> i32 {
   (i32.sub)
   (local.tee 0)            ;; $__frame_ptr = new top
   (global.set 0)           ;; update stack pointer
+
+  ;; Zero-fill the 16-byte frame: below BULK_UNROLL_LIMIT_BYTES (128), so this
+  ;; is a straight-line sequence of i64.store 0 rather than a loop.
   (local.get 0)
-  (i32.const 0)
-  (i32.const 16)
-  (memory.fill)            ;; zero-fill frame
+  (i64.const 0)
+  (i64.store offset=0)
+  (local.get 0)
+  (i64.const 0)
+  (i64.store offset=8)
 
   ;; Initialize array
   (local.get 0)            ;; frame + 0

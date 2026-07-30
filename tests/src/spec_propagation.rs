@@ -45,6 +45,7 @@ mod helpers {
             mode,
             OptLevel::O3,
             module_name,
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect("codegen should succeed")
     }
@@ -68,6 +69,7 @@ mod helpers {
             mode,
             OptLevel::O3,
             "output",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
     }
 
@@ -1759,6 +1761,7 @@ mod scenario_11_overlong_spec_name {
             CompilationMode::Proof,
             OptLevel::O3,
             "output",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect_err("codegen must reject a spec name exceeding 255 bytes");
 
@@ -1794,6 +1797,7 @@ mod scenario_11_overlong_spec_name {
             CompilationMode::Proof,
             OptLevel::O3,
             "output",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect("a 255-byte spec name is at the cap and must be accepted");
     }

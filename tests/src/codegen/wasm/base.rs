@@ -2776,12 +2776,18 @@ mod base_codegen_tests {
         );
     }
 
-    /// The runtime `memory.fill` overflow trap is a defense-in-depth backstop:
-    /// analysis rule A036 (`StackDepthExceeded`) is the *primary* guard and now
-    /// rejects this two-frame chain at compile time (see
-    /// `analysis::rules_a036`). Codegen is exercised with analysis skipped here
-    /// to confirm the runtime backstop still traps when the chain reaches the
-    /// generator unchecked.
+    /// The runtime stack-overflow trap is a defense-in-depth backstop: analysis
+    /// rule A036 (`StackDepthExceeded`) is the *primary* guard and now rejects
+    /// this two-frame chain at compile time (see `analysis::rules_a036`).
+    /// Codegen is exercised with analysis skipped here to confirm the runtime
+    /// backstop still traps when the chain reaches the generator unchecked.
+    ///
+    /// The trap comes from the frame's zero-fill prologue. Decrementing the
+    /// stack pointer never traps on its own — it wraps — but a wrapped pointer
+    /// lands far beyond the module's single page, and an effective address is
+    /// base plus offset with no wraparound, so the fill's store at offset zero
+    /// fails its bounds check before any byte is written. Both fill forms emit
+    /// that store first, which is what keeps the trap all-or-nothing.
     #[test]
     fn stack_overflow_traps_at_runtime() {
         use wasmtime::{Engine, Module, Store, TypedFunc};
@@ -5938,7 +5944,8 @@ mod base_codegen_tests {
         assert_eq!(result, 15, "cube_3d should return 15 (c[1][0][0].y)");
 
         // grid_nonliteral builds [[p,p],[p,p]] from a local struct p{x:21,y:22}
-        // (non-literal struct elements -> memory.copy) and returns g[1][1].x + g[0][1].y.
+        // (a non-literal struct element is moved as a byte region, not stored
+        // field by field) and returns g[1][1].x + g[0][1].y.
         let grid_nonliteral: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "grid_nonliteral")
             .expect("Failed to get 'grid_nonliteral'");
@@ -7778,7 +7785,9 @@ mod regenerate {
         let dir = base_test_dir().join("const_in_forall");
         let source_code = std::fs::read_to_string(dir.join("const_in_forall.inf"))
             .expect("Failed to read const_in_forall.inf");
-        let actual = wasm_codegen(&source_code);
+        // Mirrors const_in_forall_test: the fixture places forall outside a
+        // spec, which A042 rejects, so the analysis pass must be skipped.
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let wasm_path = dir.join("const_in_forall.wasm");
@@ -8686,7 +8695,10 @@ mod regenerate {
         let dir = base_test_dir().join("struct_array_field_nondet");
         let source_code = std::fs::read_to_string(dir.join("struct_array_field_nondet.inf"))
             .expect("Failed to read struct_array_field_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        // Mirrors struct_array_field_nondet_golden_test: the fixture places
+        // non-det blocks outside a spec, which A042 rejects, so the analysis
+        // pass must be skipped.
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("struct_array_field_nondet.wasm");
@@ -8820,7 +8832,10 @@ mod regenerate {
         let dir = base_test_dir().join("multidim_array_uzumaki");
         let source_code = std::fs::read_to_string(dir.join("multidim_array_uzumaki.inf"))
             .expect("Failed to read multidim_array_uzumaki.inf");
-        let actual = wasm_codegen(&source_code);
+        // Mirrors multidim_array_uzumaki_test: the fixture places uzumaki
+        // assignments outside a spec, which A042 rejects, so the analysis
+        // pass must be skipped.
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("multidim_array_uzumaki.wasm");

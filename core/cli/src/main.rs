@@ -154,6 +154,7 @@ use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
 };
 use inference::{analyze, link, parse_project, type_check, wasm_to_v};
+use inference_wasm_codegen::EmitFeatures;
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -266,6 +267,37 @@ pub(crate) fn normalize_args(args: &mut Cli) {
     if matches!(effective_mode, CliMode::Proof) {
         args.generate_v_output = true;
     }
+}
+
+/// Resolves the `--wasm-features` entries into the emission flags code generation
+/// takes.
+///
+/// Validation is [`inference_compiler_interface::resolve_wasm_features`] — the
+/// same vocabulary and the same wording `infs` uses for the manifest key, so a
+/// name rejected in one place is rejected identically in the other. Its
+/// `WasmFeatureError` carries the whole diagnostic, so this surfaces it unchanged.
+///
+/// The mapping is an exhaustive match with no wildcard arm: a feature name cannot
+/// be added to the shared vocabulary without a codegen effect being decided for
+/// it here, which is why there is no "recognized but unsupported" state to
+/// report.
+///
+/// # Errors
+///
+/// Returns the shared diagnostic for the first entry that is not a valid,
+/// not-yet-seen feature name.
+fn resolve_emit_features(entries: &[String]) -> anyhow::Result<EmitFeatures> {
+    use inference_compiler_interface::{WasmFeatureName, WasmFeatureSource};
+
+    let requested =
+        inference_compiler_interface::resolve_wasm_features(entries, WasmFeatureSource::Flag)?;
+    let mut features = EmitFeatures::default();
+    for name in requested {
+        match name {
+            WasmFeatureName::BulkMemory => features.bulk_memory = true,
+        }
+    }
+    Ok(features)
 }
 
 /// Renders a `wasm_to_v` failure with the user-facing diagnostic shape
@@ -518,6 +550,18 @@ fn run() {
 
     normalize_args(&mut args);
 
+    // Resolve the requested instruction set before any phase runs: a misspelled
+    // feature is a mistake about the artifact, and reporting it after a full
+    // parse and type check would bury it under work the user has to discard
+    // anyway.
+    let emit_features = match resolve_emit_features(&args.wasm_features) {
+        Ok(features) => features,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+
     let output_path = args
         .out_dir
         .clone()
@@ -633,14 +677,20 @@ fn run() {
             args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
         let source_fname = source_fname.as_str();
-        let codegen_output =
-            match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level, source_fname) {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("Codegen failed: {e}");
-                    process::exit(1);
-                }
-            };
+        let codegen_output = match inference_wasm_codegen::codegen(
+            &tctx,
+            target,
+            mode,
+            opt_level,
+            source_fname,
+            emit_features,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Codegen failed: {e}");
+                process::exit(1);
+            }
+        };
         println!("Codegen complete");
 
         // Fold the resolved external modules into the codegen output: a single
@@ -758,6 +808,7 @@ mod tests {
             mode: None,
             wasm_lib_dirs: Vec::new(),
             wasm_deps: Vec::new(),
+            wasm_features: Vec::new(),
             commit_hash: false,
             abi_version: false,
         }
@@ -949,5 +1000,82 @@ mod tests {
         let value = OsString::from(format!("real{list_sep}"));
         let dirs = env_search_dirs(&value);
         assert_eq!(dirs, [PathBuf::from("real")]);
+    }
+
+    fn features(raw: &[&str]) -> anyhow::Result<EmitFeatures> {
+        resolve_emit_features(&raw.iter().map(|s| (*s).to_string()).collect::<Vec<_>>())
+    }
+
+    fn feature_error(raw: &[&str]) -> String {
+        features(raw)
+            .expect_err("the request must be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn no_wasm_features_flag_emits_wasm_1_0() {
+        assert_eq!(features(&[]).unwrap(), EmitFeatures::default());
+    }
+
+    #[test]
+    fn bulk_memory_sets_its_emission_flag() {
+        assert_eq!(
+            features(&["bulk-memory"]).unwrap(),
+            EmitFeatures { bulk_memory: true }
+        );
+    }
+
+    #[test]
+    fn unknown_feature_is_rejected_with_the_shared_wording() {
+        let err = feature_error(&["simd"]);
+        assert!(err.contains("unknown WebAssembly feature"), "{err}");
+        // The flag, not the manifest key, is what an `infc` caller must edit.
+        assert!(err.contains("`--wasm-features`"), "{err}");
+    }
+
+    #[test]
+    fn instruction_name_is_rejected_with_the_did_you_mean() {
+        let err = feature_error(&["memory.fill"]);
+        assert!(err.contains("is an instruction, not a feature"), "{err}");
+        assert!(err.contains("write `bulk-memory`"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_feature_is_rejected() {
+        let err = feature_error(&["bulk-memory", "bulk-memory"]);
+        assert!(err.contains("listed more than once"), "{err}");
+    }
+
+    /// Both accepted spellings reach the same flags: `--wasm-features a,b` is the
+    /// canonical form and repetition is accepted, so `infs` can forward one comma
+    /// list without callers who repeat the flag getting different output.
+    #[test]
+    fn comma_list_and_repetition_parse_alike() {
+        let comma = Cli::try_parse_from(["infc", "x.inf", "--wasm-features", "bulk-memory"])
+            .expect("comma form parses");
+        let repeated = Cli::try_parse_from([
+            "infc",
+            "x.inf",
+            "--wasm-features",
+            "bulk-memory",
+            "--wasm-features",
+            "bulk-memory",
+        ])
+        .expect("repetition parses");
+        assert_eq!(comma.wasm_features, ["bulk-memory"]);
+        assert_eq!(repeated.wasm_features, ["bulk-memory", "bulk-memory"]);
+        assert_eq!(
+            resolve_emit_features(&comma.wasm_features).unwrap(),
+            EmitFeatures { bulk_memory: true }
+        );
+        // The same name twice is a duplicate however it was spelled.
+        assert!(resolve_emit_features(&repeated.wasm_features).is_err());
+    }
+
+    #[test]
+    fn comma_separated_entries_split_into_separate_names() {
+        let cli = Cli::try_parse_from(["infc", "x.inf", "--wasm-features", "bulk-memory,simd"])
+            .expect("a comma list parses into entries");
+        assert_eq!(cli.wasm_features, ["bulk-memory", "simd"]);
     }
 }

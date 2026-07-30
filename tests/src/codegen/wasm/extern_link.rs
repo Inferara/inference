@@ -320,6 +320,7 @@ mod extern_link_tests {
             mode,
             target.default_opt_level(),
             "c1prog",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect("proof-mode codegen succeeds");
 
@@ -412,6 +413,7 @@ mod extern_link_tests {
             mode,
             target.default_opt_level(),
             "hprog",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect("proof-mode codegen succeeds");
 

@@ -59,17 +59,35 @@
 //! - **`--out-dir` is forwarded only to an `infc` that supports it**;
 //!   pairing a non-default `output-dir` with an older `infc` hard-errors with
 //!   remediation rather than failing opaquely in the subprocess.
+//!
+//! ## Manifest settings honored in single-file mode
+//!
+//! Two `[build]`-adjacent settings are read from the *enclosing* project even
+//! when a source path is given, by walking up to the nearest `Inference.toml`:
+//! `[wasm-dependencies]`, and `[build] wasm-features`. The latter is not an
+//! optional nicety — `infs build`, `infs build src/main.inf`, and `infs run
+//! src/main.inf` all write `out/main.wasm` for the same project, so they must not
+//! disagree about its WebAssembly instruction level; the feature request, its
+//! validation, and its ABI gate are identical on all three paths (see
+//! [`crate::commands::run`] for the third). A file outside any project takes the
+//! defaults and never errors.
+//!
+//! `[wasm-dependencies]` is resolved by single-file *build* only; that single-file
+//! `run` does not resolve it predates this and is tracked separately.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::commands::project_build::{check_compiler_compatibility, mode_flag, run_project_build};
+use crate::commands::project_build::{
+    forward_wasm_features, mode_flag, probe_compiler_compatibility, run_project_build,
+};
 use crate::errors::InfsError;
 use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME, find_manifest_dir};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
+use inference_compiler_interface::WasmFeatureName;
 
 /// Compilation mode forwarded to `infc --mode <…>`.
 ///
@@ -167,14 +185,19 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 /// - The source file does not exist
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
+/// - the enclosing manifest requests `wasm-features` the resolved `infc` cannot
+///   honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     if !path.exists() {
         bail!("Path not found: {}", path.display());
     }
 
+    let enclosing = enclosing_manifest(path)?;
+    let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+
     let infc_path = find_infc()?;
-    check_compiler_compatibility(&infc_path)?;
+    let compat = probe_compiler_compatibility(&infc_path)?;
 
     let mut cmd = Command::new(&infc_path);
     cmd.arg(path);
@@ -194,10 +217,15 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
         cmd.arg("--wasm-lib-dir").arg(dir);
     }
 
-    for (name, path) in manifest_wasm_dependencies(path)? {
+    for (name, path) in manifest_wasm_dependencies(enclosing.as_ref())? {
         cmd.arg("--wasm-dep")
             .arg(format_wasm_dep_arg(&name, &path)?);
     }
+
+    let manifest_path = enclosing
+        .as_ref()
+        .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
+    forward_wasm_features(&mut cmd, compat, &features, manifest_path.as_deref())?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -246,25 +274,73 @@ fn format_wasm_dep_arg(name: &str, path: &Path) -> Result<String> {
     Ok(format!("{name}={path}"))
 }
 
-/// Resolves the `[wasm-dependencies]` of the project enclosing `source_path`.
+/// Loads the manifest of the project enclosing `source_path`, paired with the
+/// directory that holds it.
 ///
-/// Walks up from the source file to the nearest `Inference.toml`, loads it, and
-/// returns each declared dependency's logical name paired with its absolute
-/// `.wasm` path (relative entries resolved against the manifest directory).
-/// A source compiled outside any project (no manifest found) yields an empty
-/// list — a manifest-free build is valid and simply has no manifest deps.
+/// Walks up from the source file to the nearest `Inference.toml`. `None` means
+/// the source lives outside any project, which is a valid manifest-free build —
+/// every manifest-derived setting then takes its default.
+///
+/// Each single-file path calls this exactly once and derives every manifest
+/// setting from the result, so a build cannot read one file for one setting and a
+/// different file for another, and a malformed manifest is reported once.
+/// `commands::run` shares it for the same reason.
+///
+/// The path is made absolute against the current directory before the walk. The
+/// walk ascends by taking parents, and a shallow relative path runs out of them
+/// immediately — `main.inf` has only `""` above it — so `cd src && infs build
+/// main.inf` would otherwise find no manifest at all and silently take every
+/// default, even though `infs build` from the same directory finds the project.
 ///
 /// ## Errors
 ///
-/// Returns an error only if a manifest exists but cannot be read or parsed; a
-/// missing manifest is not an error.
-fn manifest_wasm_dependencies(source_path: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let Some(manifest_dir) = find_manifest_dir(source_path) else {
+/// Returns an error if the current directory cannot be determined, or if a
+/// manifest exists but cannot be read or parsed.
+pub(crate) fn enclosing_manifest(source_path: &Path) -> Result<Option<(PathBuf, InferenceToml)>> {
+    let source_path = std::env::current_dir()
+        .context("Failed to determine the current working directory")?
+        .join(source_path);
+    let Some(manifest_dir) = find_manifest_dir(&source_path) else {
+        return Ok(None);
+    };
+    let manifest = InferenceToml::from_file(&manifest_dir.join(MANIFEST_FILE_NAME))?;
+    Ok(Some((manifest_dir, manifest)))
+}
+
+/// Resolves the `[wasm-dependencies]` of an already-loaded enclosing manifest.
+///
+/// Returns each declared dependency's logical name paired with its absolute
+/// `.wasm` path (relative entries resolved against the manifest directory).
+/// `None` — a source outside any project — yields an empty list.
+///
+/// ## Errors
+///
+/// Returns an error if any `[wasm-dependencies]` key is not a well-formed logical
+/// module name.
+fn manifest_wasm_dependencies(
+    enclosing: Option<&(PathBuf, InferenceToml)>,
+) -> Result<Vec<(String, PathBuf)>> {
+    let Some((manifest_dir, manifest)) = enclosing else {
         return Ok(Vec::new());
     };
-    let manifest_path = manifest_dir.join(MANIFEST_FILE_NAME);
-    let manifest = InferenceToml::from_file(&manifest_path)?;
-    manifest.resolved_wasm_dependencies(&manifest_dir)
+    manifest.resolved_wasm_dependencies(manifest_dir)
+}
+
+/// Resolves the `[build] wasm-features` of an already-loaded enclosing manifest.
+///
+/// `None` — a source outside any project — requests nothing, which is the pure
+/// WebAssembly 1.0 default. Centralizing that default is why both single-file
+/// paths call this rather than reaching into `build.wasm_features` themselves.
+///
+/// ## Errors
+///
+/// Returns an error if the manifest requests a feature that is not a supported
+/// proposal name. (A manifest loaded through [`enclosing_manifest`] has already
+/// been validated, so this is the programmatic-construction path.)
+pub(crate) fn manifest_wasm_features(
+    manifest: Option<&InferenceToml>,
+) -> Result<Vec<WasmFeatureName>> {
+    manifest.map_or_else(|| Ok(Vec::new()), |m| m.build.resolved_wasm_features())
 }
 
 /// Compiles the entry point of a discovered project (project mode).
@@ -376,7 +452,7 @@ mod manifest_dep_tests {
         let source = temp.child("src").child("main.inf");
         source.write_str("").unwrap();
 
-        let deps = manifest_wasm_dependencies(source.path()).expect("should resolve");
+        let deps = deps_for(source.path()).expect("should resolve");
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].0, "arith");
@@ -389,7 +465,7 @@ mod manifest_dep_tests {
         let source = temp.child("main.inf");
         source.write_str("").unwrap();
 
-        let deps = manifest_wasm_dependencies(source.path()).expect("should succeed");
+        let deps = deps_for(source.path()).expect("should succeed");
         assert!(deps.is_empty());
     }
 
@@ -405,7 +481,7 @@ mod manifest_dep_tests {
         let source = temp.child("main.inf");
         source.write_str("").unwrap();
 
-        let deps = manifest_wasm_dependencies(source.path()).expect("should succeed");
+        let deps = deps_for(source.path()).expect("should succeed");
         assert!(deps.is_empty());
     }
 
@@ -424,6 +500,130 @@ mod manifest_dep_tests {
             .expect("a path containing `=` must format");
         assert_eq!(arg, "arith=/a=b/arith.wasm");
         assert_eq!(arg.split_once('=').map(|(n, _)| n), Some("arith"));
+    }
+
+    /// Writes a manifest carrying `build_body` under `[build]`, plus a source
+    /// file nested one directory below it, and returns the source path.
+    fn project_with_build_body(temp: &assert_fs::TempDir, build_body: &str) -> std::path::PathBuf {
+        temp.child("Inference.toml")
+            .write_str(&format!(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+                 infc_version = \"0.1.0\"\n\n[build]\n{build_body}"
+            ))
+            .unwrap();
+        let source = temp.child("src").child("main.inf");
+        source.write_str("").unwrap();
+        source.path().to_path_buf()
+    }
+
+    /// The features a single-file path would request for `source`, going through
+    /// the same load-then-derive sequence the command does.
+    fn features_for(source: &Path) -> Result<Vec<WasmFeatureName>> {
+        let enclosing = enclosing_manifest(source)?;
+        manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))
+    }
+
+    /// The dependencies a single-file build would forward for `source`, through
+    /// the same load-then-derive sequence.
+    fn deps_for(source: &Path) -> Result<Vec<(String, PathBuf)>> {
+        let enclosing = enclosing_manifest(source)?;
+        manifest_wasm_dependencies(enclosing.as_ref())
+    }
+
+    #[test]
+    fn file_outside_any_project_requests_no_wasm_features() {
+        // Manifest-free is a valid build, not an error.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = temp.child("main.inf");
+        source.write_str("").unwrap();
+        assert!(enclosing_manifest(source.path()).unwrap().is_none());
+        assert!(features_for(source.path()).unwrap().is_empty());
+    }
+
+    /// A *relative* path given from a *subdirectory* must still find the project.
+    ///
+    /// The walk ascends by taking parents, and `main.inf` has none — only `""`,
+    /// whose parent is `None`. Without absolutizing first, `cd src && infs build
+    /// main.inf` finds no manifest and silently takes every default, while
+    /// `infs build` from that same directory finds the project. Serialized
+    /// because it moves the process working directory.
+    #[test]
+    #[serial_test::serial]
+    fn relative_source_path_from_a_subdirectory_finds_the_enclosing_manifest() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        project_with_build_body(&temp, "wasm-features = [\"bulk-memory\"]\n");
+
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path().join("src")).unwrap();
+        let resolved = features_for(Path::new("main.inf"));
+        std::env::set_current_dir(original).unwrap();
+
+        assert_eq!(
+            resolved.unwrap(),
+            vec![WasmFeatureName::BulkMemory],
+            "a bare relative filename must resolve against the current \
+             directory before the walk"
+        );
+    }
+
+    #[test]
+    fn enclosing_manifest_wasm_features_are_honored_from_a_nested_source() {
+        // The walk that finds `[wasm-dependencies]` finds this too, so building
+        // one file of a project sees the project's instruction level.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = project_with_build_body(&temp, "wasm-features = [\"bulk-memory\"]\n");
+        assert_eq!(
+            features_for(&source).unwrap(),
+            vec![WasmFeatureName::BulkMemory]
+        );
+    }
+
+    #[test]
+    fn manifest_without_the_key_requests_no_wasm_features() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = project_with_build_body(&temp, "mode = \"compile\"\n");
+        assert!(features_for(&source).unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_enclosing_wasm_feature_fails_the_single_file_build() {
+        // The manifest is rejected on load, so single-file mode surfaces the same
+        // diagnostic project mode would — it does not quietly build at 1.0.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = project_with_build_body(&temp, "wasm-features = [\"memory.fill\"]\n");
+        let err = features_for(&source).expect_err("an instruction name is not a feature");
+        assert!(
+            format!("{err:#}").contains("is an instruction, not a feature"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn one_manifest_read_serves_both_derived_settings() {
+        // The load happens once and both settings come off that one value, so a
+        // build cannot read one file for its features and another for its deps.
+        let temp = assert_fs::TempDir::new().unwrap();
+        temp.child("Inference.toml")
+            .write_str(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
+                 [build]\nwasm-features = [\"bulk-memory\"]\n\n\
+                 [wasm-dependencies]\narith = { path = \"libs/arith.wasm\" }\n",
+            )
+            .unwrap();
+        let source = temp.child("src").child("main.inf");
+        source.write_str("").unwrap();
+
+        let enclosing = enclosing_manifest(source.path())
+            .unwrap()
+            .expect("the manifest must be found");
+        assert_eq!(enclosing.0, temp.path());
+        assert_eq!(
+            manifest_wasm_features(Some(&enclosing.1)).unwrap(),
+            vec![WasmFeatureName::BulkMemory]
+        );
+        let deps = manifest_wasm_dependencies(Some(&enclosing)).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].1, temp.path().join("libs/arith.wasm"));
     }
 
     #[cfg(unix)]

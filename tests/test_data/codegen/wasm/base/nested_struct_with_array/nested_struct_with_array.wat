@@ -16,16 +16,30 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $test_deep_inner_arr_access (;0;) (type 0) (result i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 48
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 48
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=32
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=40
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -50,8 +64,16 @@
     i32.const 16
     i32.add
     local.get $ha
-    i32.const 16
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
+    local.get 3
+    local.get 4
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -73,16 +95,30 @@
     unreachable
   )
   (func $test_deep_inner_val (;1;) (type 1) (result i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 48
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 48
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=32
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=40
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -107,8 +143,16 @@
     i32.const 16
     i32.add
     local.get $ha
-    i32.const 16
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
+    local.get 3
+    local.get 4
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -130,16 +174,30 @@
     unreachable
   )
   (func $test_deep_tag (;2;) (type 2) (result i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 48
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 48
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=32
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=40
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -164,8 +222,16 @@
     i32.const 16
     i32.add
     local.get $ha
-    i32.const 16
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
+    local.get 3
+    local.get 4
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -187,16 +253,30 @@
     unreachable
   )
   (func $test_deep_inner_arr_sum (;3;) (type 3) (result i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 48
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 48
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=32
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=40
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -221,8 +301,16 @@
     i32.const 16
     i32.add
     local.get $ha
-    i32.const 16
-    memory.copy
+    local.set 4
+    local.set 3
+    local.get 3
+    local.get 4
+    i64.load align=1
+    i64.store align=1
+    local.get 3
+    local.get 4
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -259,13 +347,29 @@
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
     local.get $__frame_ptr
     local.get $d
-    i32.const 20
-    memory.copy
+    i64.load align=1
+    i64.store align=1
+    local.get $__frame_ptr
+    local.get $d
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
+    local.get $__frame_ptr
+    local.get $d
+    i32.load offset=16 align=1
+    i32.store offset=16 align=1
     local.get $__frame_ptr
     local.set $d
     local.get $d
@@ -283,16 +387,30 @@
     unreachable
   )
   (func $deep_return (;5;) (type 5) (param $sret i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
     global.get 0
     i32.const 48
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
-    i32.const 0
-    i32.const 48
-    memory.fill
+    i64.const 0
+    i64.store
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=8
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=16
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=24
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=32
+    local.get $__frame_ptr
+    i64.const 0
+    i64.store offset=40
     local.get $__frame_ptr
     i32.const 10
     i32.store
@@ -317,8 +435,16 @@
     i32.const 16
     i32.add
     local.get $ha
-    i32.const 16
-    memory.copy
+    local.set 5
+    local.set 4
+    local.get 4
+    local.get 5
+    i64.load align=1
+    i64.store align=1
+    local.get 4
+    local.get 5
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -330,8 +456,16 @@
     local.set $d
     local.get $sret
     local.get $d
-    i32.const 20
-    memory.copy
+    i64.load align=1
+    i64.store align=1
+    local.get $sret
+    local.get $d
+    i64.load offset=8 align=1
+    i64.store offset=8 align=1
+    local.get $sret
+    local.get $d
+    i32.load offset=16 align=1
+    i32.store offset=16 align=1
     local.get $__frame_ptr
     i32.const 48
     i32.add

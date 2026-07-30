@@ -233,6 +233,10 @@ infc_version = "{infc_version}"
 [build]
 # Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
 mode = "compile"
+# Post-MVP WebAssembly proposals to opt into. Empty (the default) emits pure
+# WebAssembly 1.0; "bulk-memory" lets codegen use memory.copy/memory.fill.
+# Changing this changes the instruction set of every artifact, in both modes.
+# wasm-features = ["bulk-memory"]
 # Not yet consumed:
 # target = "wasm32"
 # optimize = "release"

@@ -42,6 +42,7 @@ mod helpers {
             mode,
             OptLevel::O3,
             module_name,
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"))
     }
@@ -494,6 +495,7 @@ mod fixture_nondet_body_modifier_rejected {
             CompilationMode::Proof,
             OptLevel::O3,
             "nbm",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect_err("exists/assume body-modifier specs have no assertion encoding");
         let msg = err.to_string();
@@ -538,6 +540,7 @@ mod over_long_spec_function_name_rejected {
             CompilationMode::Proof,
             OptLevel::O3,
             "olsfn",
+            inference_wasm_codegen::EmitFeatures::default(),
         )
         .expect_err("a 300-char spec function name overflows the inference.hspecs name cap");
         let msg = err.to_string();

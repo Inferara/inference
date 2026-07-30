@@ -33,6 +33,7 @@ infc_version = "0.1.0"
 target = "wasm32"
 optimize = "debug"
 mode = "compile"    # "compile" (executable WASM) or "proof" (Rocq translation)
+wasm-features = []  # post-MVP WebAssembly proposals to opt into
 
 [build.wasm-opt]        # optional: post-build optimization of the executable
 enabled = true          # table presence enables; set false to keep it off
@@ -42,6 +43,59 @@ auto-install = false    # download wasm-opt automatically if it is missing
 [verification]
 output-dir = "proofs/"   # honored only in proof mode
 ```
+
+## Unknown Keys
+
+Every table with a fixed set of fields — the manifest root (which table names it
+accepts), `[package]`, `[build]`, `[build.wasm-opt]`, `[verification]`, and each
+`[wasm-dependencies]` entry — rejects a key it does not recognize. A misspelled
+key is a load error naming the offending key, its line and column, and the fields
+that table accepts:
+
+```
+TOML parse error at line 7, column 1
+  |
+7 | wasm_features = ["bulk-memory"]
+  | ^^^^^^^^^^^^^
+unknown field `wasm_features`, expected one of `target`, `optimize`, `mode`, `wasm-features`, `wasm-opt`
+```
+
+The exceptions are `[dependencies]` and `[wasm-dependencies]`, where the keys are
+the data: they name dependencies, so any well-formed name is accepted.
+
+The trade-off is deliberate. An older `infs` reading a manifest that uses a key
+added by a newer toolchain fails rather than ignoring it. That matches how the
+compiler ABI gate treats toolchain/manifest skew — an error, never a silent
+downgrade that ships a differently-configured artifact than the manifest asked
+for.
+
+## Settings Honored in Single-File Mode
+
+`infs build path/to/file.inf` and `infs run path/to/file.inf` compile one named
+file rather than the project's entry point, but they are not manifest-blind: each
+walks up from the source file to the nearest `Inference.toml`. Which settings are
+honored differs by command:
+
+| Setting | `infs build <path>` | `infs run <path>` |
+|---|---|---|
+| `[build] wasm-features` | honored | honored |
+| `[wasm-dependencies]` | honored | **not** resolved |
+
+`[build] wasm-features` is honored by both, with the same validation and the same
+ABI gate as project mode. This is deliberate rather than incidental: `infs build`,
+`infs build src/main.inf`, and `infs run src/main.inf` all write
+`out/main.wasm` for the same project, so if they disagreed about the instruction
+set, the artifact you ship would depend on which command last touched it.
+
+That `infs run <path>` does not resolve `[wasm-dependencies]` is a pre-existing
+gap, not a consequence of the above; it is tracked separately. A file that imports
+an external module therefore needs `infs build` (or `-L`) rather than single-file
+`run`.
+
+Everything else in the manifest is project-mode configuration: `[build] mode`,
+`[verification] output-dir`, and `[build.wasm-opt]` are not consulted in
+single-file mode. A source file outside any project takes every default and never
+errors for want of a manifest.
 
 ## Section Reference
 
@@ -126,6 +180,29 @@ The `[build]` section configures compilation settings.
 
   The value is case-sensitive: `"Proof"` is rejected.
 
+- **`wasm-features`** (array of strings, default: `[]`): Post-MVP WebAssembly
+  proposals the emitted module opts into. Empty — the default — means the output
+  is pure WebAssembly 1.0.
+  - Supported today: `"bulk-memory"`.
+  - Enabling `bulk-memory` lets code generation use `memory.fill` to zero a stack
+    frame and `memory.copy` to copy a struct or array, instead of the explicit
+    store/load sequences the 1.0 baseline requires.
+  - Names are **proposal** names, not instruction names: write `"bulk-memory"`,
+    not `"memory.fill"`. A proposal enables its whole instruction family, and
+    which instruction appears where is a code-generation decision.
+  - Matching is exact and case-sensitive, and whitespace is not trimmed:
+    `"Bulk-Memory"`, `"bulk_memory"` and `"bulk-memory "` are all rejected. A
+    silently-ignored typo would change the instruction set of a shipped artifact.
+  - Applies identically in compile and proof mode. The `.v` must describe the
+    same program as the `.wasm`, so nothing gates this on the build mode.
+  - **Changing this value invalidates proof artifacts generated before the
+    change**, because the translated instructions differ. That is the reason it
+    lives in the versioned manifest rather than in a command-line flag.
+  - Honored by single-file `build` and `run` as well as project mode (see
+    [Settings Honored in Single-File Mode](#settings-honored-in-single-file-mode)),
+    and requires an `infc` with ABI 1.2 or newer — an older compiler cannot honor
+    the request and is refused with remediation rather than handed the flag.
+
 #### Example
 
 ```toml
@@ -133,6 +210,7 @@ The `[build]` section configures compilation settings.
 target = "wasm32"
 optimize = "release"
 mode = "proof"
+wasm-features = ["bulk-memory"]
 ```
 
 ### [build.wasm-opt]
@@ -163,7 +241,7 @@ level = "z"
 
 #### When optimization runs
 
-- **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never consults the manifest and is unaffected.
+- **Project mode only, for executable artifacts.** Both `infs build` and `infs run` apply `[build.wasm-opt]` to `out/main.wasm` after a successful compile — `run` optimizes exactly the artifact it then executes, so what you run is what `build` would have shipped. Single-file mode (`infs build file.inf`) never runs the optimizer, whether or not a manifest is present.
 - **Proof-mode and `-v` builds are always skipped, silently.** A build counts as proof mode when the effective `[build] mode` is `"proof"`, `--mode proof` is passed, or `-v` is passed at all (even without `--mode`). Their WASM can carry the non-deterministic opcodes (`forall`, `exists`, `assume`, `unique`, `@` uzumaki) that `wasm-opt` cannot parse, and they are a different artifact class from an executable.
 - **A compile-mode artifact that still contains a non-deterministic opcode is a hard error**, not a silent skip. Compile-mode builds strip `spec` blocks, so a well-formed executable should never carry one of these opcodes — if it does, `infs` scans for it before invoking `wasm-opt` (which would otherwise fail with an opaque parse error) and reports the offending construct by name, with remediation: move it into a `spec` block, or turn optimization off.
 
@@ -259,6 +337,10 @@ output-dir = "proofs/"
 **Removed fields:**
 - `manifest_version` (u32): No longer used
 - `edition` (String): Removed, no longer needed
+
+Because `[package]` now rejects keys it does not recognize, a manifest that still
+carries one of these fails to load rather than ignoring it. Delete the key; no
+replacement is needed.
 
 ## Validation Rules
 
