@@ -389,11 +389,14 @@ fn eprint_translation_error(e: &anyhow::Error) {
             }
             WasmToVError::UnsupportedFeature { description } => {
                 eprintln!(
-                    "error: this WebAssembly module uses a feature not yet \
-                     supported by the Rocq translator: {description}\n\n  \
-                     The codegen pipeline emits a subset of WASM that the \
-                     translator recognises today; binaries from other toolchains \
-                     may include features that have not yet been wired through."
+                    "error: this module cannot be translated to Rocq: {description}\n\n  \
+                     The proof model a .v targets describes a subset of \
+                     WebAssembly, and this construct falls outside it. That is a \
+                     property of the model rather than unfinished work, so no \
+                     flag enables it.\n\n  \
+                     The module can still be compiled and run — drop '-v' (and \
+                     any explicit '--mode proof') to build the .wasm without a \
+                     proof artifact."
                 );
                 return;
             }

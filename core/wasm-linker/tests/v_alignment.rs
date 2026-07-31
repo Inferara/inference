@@ -30,7 +30,15 @@
 //! - **tail calls** (`return_call`, `return_call_indirect`),
 //! - **segment-indexed table initialization** (`table.init`, `elem.drop`,
 //!   `table.copy`),
-//! - **all floating-point** operators and value types (`f32`/`f64`).
+//! - **all floating-point** operators and value types (`f32`/`f64`),
+//! - **integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s`,
+//!   `i64.extend_i32_u`) — the last conversion family to be retracted. These
+//!   were kept because the translator did have an arm for them, but that arm
+//!   emitted `BI_cvtop`, a constructor the proof model never declares, so the
+//!   allow-list premise ("an allow-listed family has a translator lowering")
+//!   held only at the Rust level and failed at `coqc`. The translator now
+//!   rejects the whole conversion block, and
+//!   [`integer_width_conversions_are_rejected`] pins the retraction.
 //!
 //! Each of those is now rejected before reaching the merge, so it can never enter
 //! a linked output. The corpus below covers only what the linker still admits.
@@ -172,6 +180,30 @@ fn assert_output_rejected_as_nondet(label: &str, main: &[u8]) {
              returning a recoverable UnsupportedFeature error"
         ),
     }
+}
+
+/// The dual of [`assert_output_translates`] for a family the allow-list has
+/// retracted: the linker must refuse `main` outright, with a
+/// [`inference_wasm_linker::LinkError::UnsupportedConstruct`] whose message names
+/// the family. Retracting a family from `is_numeric` leaves it to the fail-closed
+/// `other =>` arm of `safety::check_operator`, which reaches every re-encoded body
+/// including the main module's — so the rejection lands here, one phase earlier
+/// than the translator's, and no linked output is ever produced.
+///
+/// `family` is the label the linker's `operator_family` carries; asserting on it
+/// rather than on the whole sentence keeps the test tied to the family
+/// classification instead of the diagnostic's phrasing.
+fn assert_link_rejected_as_unmodeled(label: &str, main: &[u8], family: &str) {
+    let lib = mathlib_sum();
+    let err = raw_link(main, &[("mathlib", &lib)])
+        .err()
+        .unwrap_or_else(|| panic!("{label}: the linker must refuse a retracted family"));
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(family),
+        "{label}: the rejection must name the `{family}` family; got {err:?}"
+    );
 }
 
 /// A main module that imports `mathlib::sum`, runs `body` (a WAT instruction
@@ -474,20 +506,25 @@ fn i64_arithmetic_and_bitwise_translate() {
 }
 
 #[test]
-fn integer_width_conversions_translate() {
-    // The three kept conversions: i32.wrap_i64 / i64.extend_i32_s /
-    // i64.extend_i32_u. (The saturating truncations and sign-extensions were
-    // removed from the allow-list because the translator has no lowering for
-    // them — see the header audit.)
-    let main = main_with_memory_body(
-        "(local i64)",
-        r#"
-        local.get 2 i32.wrap_i64 drop
-        local.get 0 i64.extend_i32_s drop
-        local.get 0 i64.extend_i32_u drop
-        "#,
-    );
-    assert_output_translates("integer width conversions", &main);
+fn integer_width_conversions_are_rejected() {
+    // i32.wrap_i64 / i64.extend_i32_s / i64.extend_i32_u, the last of the
+    // conversion block to leave the allow-list. They were kept on the premise
+    // that the translator lowered them, but that lowering emitted `BI_cvtop`,
+    // which the proof model does not declare — the same divergence that
+    // retracted the saturating truncations and sign-extensions before them.
+    for op in ["i32.wrap_i64", "i64.extend_i32_s", "i64.extend_i32_u"] {
+        let operand = if op == "i32.wrap_i64" {
+            "local.get 2"
+        } else {
+            "local.get 0"
+        };
+        let main = main_with_memory_body("(local i64)", &format!("{operand} {op} drop"));
+        assert_link_rejected_as_unmodeled(
+            op,
+            &main,
+            "integer width conversions (not supported by the Rocq translator)",
+        );
+    }
 }
 
 #[test]

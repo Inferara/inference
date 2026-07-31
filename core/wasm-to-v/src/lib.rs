@@ -83,11 +83,17 @@
 //! |-----------|-----------|
 //! | `i32` | `T_num T_i32` |
 //! | `i64` | `T_num T_i64` |
-//! | `f32` | `T_num T_f32` |
-//! | `f64` | `T_num T_f64` |
-//! | `v128` | `T_vec T_v128` |
+//! | `f32` | rejected as [`errors::WasmToVError::UnsupportedFeature`] |
+//! | `f64` | rejected as [`errors::WasmToVError::UnsupportedFeature`] |
+//! | `v128` | rejected as [`errors::WasmToVError::UnsupportedFeature`] |
 //! | `funcref` | `T_ref T_funcref` |
 //! | `externref` | `T_ref T_externref` |
+//!
+//! The proof model's `number_type` is `T_i32 | T_i64` and it declares no vector
+//! type, so `f32`, `f64`, and `v128` have nothing to map to. The rejection covers
+//! function parameters and results, locals, globals, and block result types
+//! through one chokepoint, so a float in a *signature* is refused even when no
+//! float instruction appears in any body.
 //!
 //! ## Expression Translation
 //!
@@ -149,6 +155,24 @@
 //! - **Parser errors**: The parsing phase fails fast on malformed WASM bytecode
 //! - **Translator errors**: The translation phase uses error recovery to collect
 //!   multiple failures before reporting the first error
+//!
+//! ### Rejection policy
+//!
+//! The translator emits only what the vendored proof stub in `rocq-stub/`
+//! declares. A construct outside that subset is refused with
+//! [`errors::WasmToVError::UnsupportedFeature`] naming it — never a `.v` that
+//! fails `coqc` downstream, and never a panic. Rejected: every floating-point,
+//! SIMD/vector, and conversion instruction (integer width conversions included —
+//! the model declares no conversion at all); `f32`/`f64`/`v128` in any type
+//! position; and the proposal families the model does not describe (GC,
+//! exception handling, stack switching, tail calls, wide arithmetic, typed
+//! references, `memory.discard`, segment-indexed table operations).
+//!
+//! No Inference program can reach any of this — the language has no floats, no
+//! vectors, and emits no conversion — so these arms are reachable only through
+//! foreign bytes, via the external linking path or [`wasm_parser::translate_bytes`].
+//! `core/wasm-linker` refuses the same content in external modules, making this
+//! the second of two layers.
 //!
 //! ## Performance Characteristics
 //!
@@ -849,6 +873,670 @@ mod link_robustness {
         assert!(
             output.contains("Definition only :"),
             "a non-function import must not shift the defined function's index:\n{output}",
+        );
+    }
+}
+
+/// Fail-closed rejection of every construct the WasmCert proof model the vendored
+/// stub mirrors cannot represent: floating-point, SIMD/vector, the conversion
+/// (`cvtop`) family, and the proposal families that previously hit `todo!()`.
+///
+/// The stub in `rocq-stub/` declares `number_type` with only `T_i32`/`T_i64`, no
+/// `T_v128`, and no `cvtop`/`BI_cvtop` (see its README "Scope"). Every fixture here
+/// therefore has no honest lowering: the translator must say so with a recoverable
+/// [`WasmToVError::UnsupportedFeature`] naming the construct, rather than emit a
+/// term the proof target cannot type, or abort the process.
+///
+/// Two failure modes are pinned, because both existed before this change:
+///
+/// * **silent ill-typed emission** — the float comparison arms emitted the *integer*
+///   relop family inside the float wrapper (`BI_relop T_f32 (Relop_f ROI_eq)`), where
+///   `Relop_f` wants `ROF_*` and `ROI_ge` is an unapplied function awaiting an `sx`.
+///   Nothing caught it: the `coqc` gate's corpus is Inference source, and no Inference
+///   program lowers to float WASM.
+/// * **`todo!()` panic** — sign-extension, saturating truncation, most SIMD, and nine
+///   proposal families aborted the process instead of returning. On the linking path
+///   that is strictly worse than the bug being fixed.
+///
+/// # Two invariants these fixtures are built around
+///
+/// **A float or vector may only be materialized by a `const` or by a load's result —
+/// never by a parameter, result, local, global, or block type.** The type section
+/// renders before any body, so a float in a signature steals the error from the
+/// operator under test; and since "floating-point" appears in *both* the operator
+/// and the value-type message, a class-adjective assertion would keep passing while
+/// silently exercising the wrong arm. Every fixture below drops its float/vector
+/// result instead of returning it.
+///
+/// **Every assertion pins the operator's debug name as its primary needle**, class
+/// adjective secondary. `translate_value_type` never prints an operator name, so the
+/// operator name is the only thing that discriminates which arm fired.
+///
+/// # Why there are two tiers of fixture
+///
+/// Those invariants together make one group of operators unreachable from WAT. An
+/// operator that *consumes* a float or vector needs an operand; the operand may only
+/// come from a const; and the const's arm rejects first — so `F32Add`, `I8x16Eq` and
+/// the rest could only ever pin the const's name, leaving their own arms untested.
+///
+/// * **WAT tier** — operators that consume only integers and merely *produce* a
+///   float/vector (`f32.const`, `f32.load`, `f32.convert_i32_s`, `v128.const`,
+///   `i8x16.splat`, …) plus the float-free integer conversions. These are reachable
+///   from ordinary WAT and pin their own operator.
+/// * **Hand-encoded tier** — the consuming operators, in a module whose single body
+///   holds the bare opcode. `wat` cannot assemble this (the body is stack-invalid),
+///   but the translator is a *parser*, not a validator: it walks the operator
+///   sequence, so the arm is reached directly. This is the only way `F32Eq` — the
+///   very operator the issue reports — is individually pinned, and it is also how
+///   the ill-typed `Relop_f ROI_eq` emission is reproduced in isolation. The
+///   precedent for hand-encoding what `wat` cannot express is `duplicate_named_module`
+///   in `link_robustness`. [`raw_body_harness_translates_a_supported_operator`] keeps
+///   the harness honest, so a rejection in this tier is always attributable to the
+///   operator rather than to a malformed fixture.
+#[cfg(test)]
+mod unsupported_surface {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    /// Translates `bytes` with empty spec/hspec maps — the standalone-binary path a
+    /// `wasm_to_v` over foreign WASM takes.
+    fn translate(bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes(
+            "Prog",
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+    }
+
+    /// A module with one `() -> ()` function whose body is `opcode` then `end`,
+    /// hand-encoded because the body is stack-invalid and `wat` would reject it.
+    /// `opcode` carries any immediates the instruction needs (a `memarg`, a SIMD
+    /// prefix byte). Section and body lengths are single-byte LEB128, which holds
+    /// for every opcode sequence here (all well under 128 bytes).
+    fn module_with_raw_body(opcode: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x00]; // zero local declarations
+        body.extend_from_slice(opcode);
+        body.push(0x0b); // end
+
+        let mut code = vec![0x01]; // one function body
+        code.push(body.len() as u8);
+        code.extend_from_slice(&body);
+
+        let mut module = vec![
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: () -> ()
+            0x03, 0x02, 0x01, 0x00, // function section: one func, type 0
+        ];
+        module.push(0x0a); // code section id
+        module.push(code.len() as u8);
+        module.extend_from_slice(&code);
+        module
+    }
+
+    /// The contract every row shares: translation returns a recoverable
+    /// [`WasmToVError::UnsupportedFeature`] whose description contains each of
+    /// `needles` (lowercased comparison, so an operator debug name is written
+    /// `f32load` rather than `F32Load`).
+    ///
+    /// Deliberately no `catch_unwind`: a `todo!()` still reachable for one of these
+    /// constructs fails the test as a panic, which is exactly the outcome this module
+    /// exists to rule out.
+    ///
+    /// This is the single place phrasing is pinned. If review moves a message, retune
+    /// the needle sets at their call sites — no row inspects the error any other way.
+    fn assert_rejected(label: &str, bytes: &[u8], needles: &[&str]) {
+        let err = translate(bytes)
+            .map(|v| panic!("{label}: must be rejected, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+
+        let Some(WasmToVError::UnsupportedFeature { description }) =
+            err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("{label}: expected UnsupportedFeature, got {err:?}");
+        };
+
+        let lowered = description.to_lowercase();
+        for needle in needles {
+            assert!(
+                lowered.contains(needle),
+                "{label}: the description must name `{needle}`; got {description:?}"
+            );
+        }
+    }
+
+    /// [`assert_rejected`] for the WAT tier.
+    fn assert_wat_rejected(label: &str, wat: &str, needles: &[&str]) {
+        let bytes = wat::parse_str(wat).expect("fixture WAT assembles");
+        assert_rejected(label, &bytes, needles);
+    }
+
+    /// [`assert_rejected`] for the hand-encoded tier.
+    fn assert_raw_rejected(label: &str, opcode: &[u8], needles: &[&str]) {
+        assert_rejected(label, &module_with_raw_body(opcode), needles);
+    }
+
+    /// Guards the hand-encoded tier itself: the same harness carrying a *supported*
+    /// integer operator must translate cleanly. Without this, a malformed skeleton
+    /// would make every raw-tier row pass for the wrong reason.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn raw_body_harness_translates_a_supported_operator() {
+        let v = translate(&module_with_raw_body(&[0x6a])) // i32.add
+            .expect("the raw-body harness must produce a translatable module");
+        assert!(
+            v.contains("BI_binop T_i32 (Binop_i BOI_add)"),
+            "the harness must lower its opcode as the operator it encodes:\n{v}"
+        );
+    }
+
+    // == WAT tier: operators that only PRODUCE a float/vector ==============
+
+    /// A float constant alone — the narrowest float fixture there is.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_constants_are_rejected() {
+        assert_wat_rejected(
+            "f32.const",
+            r#"(module (func (export "f") f32.const 1 drop))"#,
+            &["f32const", "floating-point"],
+        );
+        assert_wat_rejected(
+            "f64.const",
+            r#"(module (func (export "f") f64.const 1 drop))"#,
+            &["f64const", "floating-point"],
+        );
+    }
+
+    /// A float load consumes only an `i32` address, so the float appears
+    /// solely as the load's result and the load's own arm is what rejects.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_loads_are_rejected() {
+        assert_wat_rejected(
+            "f32.load",
+            r#"(module (memory 1) (func (export "f") i32.const 0 f32.load drop))"#,
+            &["f32load", "floating-point"],
+        );
+        assert_wat_rejected(
+            "f64.load",
+            r#"(module (memory 1) (func (export "f") i32.const 0 f64.load drop))"#,
+            &["f64load", "floating-point"],
+        );
+    }
+
+    /// Conversions *into* a float take an integer operand, so unlike the
+    /// float-source conversions they need no float const ahead of them and pin their
+    /// own operator. `f32.reinterpret_i32` covers the reinterpret direction that is
+    /// likewise integer-sourced.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn integer_sourced_float_conversions_are_rejected() {
+        assert_wat_rejected(
+            "f32.convert_i32_s",
+            r#"(module (func (export "f") i32.const 1 f32.convert_i32_s drop))"#,
+            &["f32converti32s", "conversion"],
+        );
+        assert_wat_rejected(
+            "f64.convert_i32_u",
+            r#"(module (func (export "f") i32.const 1 f64.convert_i32_u drop))"#,
+            &["f64converti32u", "conversion"],
+        );
+        assert_wat_rejected(
+            "f32.reinterpret_i32",
+            r#"(module (func (export "f") i32.const 1 f32.reinterpret_i32 drop))"#,
+            &["f32reinterpreti32", "conversion"],
+        );
+        assert_wat_rejected(
+            "f64.reinterpret_i64",
+            r#"(module (func (export "f") i64.const 1 f64.reinterpret_i64 drop))"#,
+            &["f64reinterpreti64", "conversion"],
+        );
+    }
+
+    /// The integer-only width conversions: no float anywhere, so nothing can
+    /// steal the error. They make the scope explicit — the stub declares no
+    /// `BI_cvtop` at all, so even an integer-to-integer conversion has no lowering.
+    ///
+    /// The wasm-linker's allow-list mirrors this: it rejects these three at link
+    /// time for the same reason (an allow-listed operator must have a translator
+    /// lowering, and `BI_cvtop` has none the proof model declares).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn integer_width_conversions_are_rejected() {
+        assert_wat_rejected(
+            "i32.wrap_i64",
+            r#"(module (func (export "f") i64.const 1 i32.wrap_i64 drop))"#,
+            &["i32wrapi64", "conversion"],
+        );
+        assert_wat_rejected(
+            "i64.extend_i32_s",
+            r#"(module (func (export "f") i32.const 1 i64.extend_i32_s drop))"#,
+            &["i64extendi32s", "conversion"],
+        );
+        assert_wat_rejected(
+            "i64.extend_i32_u",
+            r#"(module (func (export "f") i32.const 1 i64.extend_i32_u drop))"#,
+            &["i64extendi32u", "conversion"],
+        );
+    }
+
+    /// Sign extension, a `todo!()` panic before this change, folded into the
+    /// conversion class. Integer-only, so each pins its own operator.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sign_extension_operators_are_rejected_not_panic() {
+        assert_wat_rejected(
+            "i32.extend8_s",
+            r#"(module (func (export "f") i32.const 1 i32.extend8_s drop))"#,
+            &["i32extend8s", "conversion"],
+        );
+        assert_wat_rejected(
+            "i64.extend32_s",
+            r#"(module (func (export "f") i64.const 1 i64.extend32_s drop))"#,
+            &["i64extend32s", "conversion"],
+        );
+    }
+
+    /// The vector operators reachable from WAT: a constant, a load (`i32`
+    /// address only), and a splat (`i32` operand). `v128.const` and `v128.load`
+    /// emitted `BI_const_vec`/`BI_load_vec`, neither declared by the stub.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn vector_producing_operators_are_rejected_not_panic() {
+        assert_wat_rejected(
+            "v128.const",
+            r#"(module (func (export "f") v128.const i32x4 1 2 3 4 drop))"#,
+            &["v128const", "vector"],
+        );
+        assert_wat_rejected(
+            "v128.load",
+            r#"(module (memory 1) (func (export "f") i32.const 0 v128.load drop))"#,
+            &["v128load", "vector"],
+        );
+        assert_wat_rejected(
+            "i8x16.splat",
+            r#"(module (func (export "f") i32.const 1 i8x16.splat drop))"#,
+            &["i8x16splat", "vector"],
+        );
+    }
+
+    // == Hand-encoded tier: operators that CONSUME a float/vector ==========
+
+    /// The operators the issue actually reports. Each emitted
+    /// `BI_relop T_f32 (Relop_f ROI_*)` — the float wrapper around the integer
+    /// family, with `ROI_ge` left unapplied. Only the raw tier can reach them: a WAT
+    /// fixture would need two float operands, and the const feeding them rejects
+    /// first.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_comparisons_are_rejected() {
+        assert_raw_rejected("f32.eq", &[0x5b], &["f32eq", "floating-point"]);
+        assert_raw_rejected("f32.lt", &[0x5d], &["f32lt", "floating-point"]);
+        assert_raw_rejected("f64.ge", &[0x66], &["f64ge", "floating-point"]);
+    }
+
+    /// Float binops and unops, whose `Binop_f`/`Unop_f` families the stub
+    /// omits.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_arithmetic_is_rejected() {
+        assert_raw_rejected("f32.add", &[0x92], &["f32add", "floating-point"]);
+        assert_raw_rejected("f64.sqrt", &[0x9f], &["f64sqrt", "floating-point"]);
+        assert_raw_rejected("f32.copysign", &[0x98], &["f32copysign", "floating-point"]);
+    }
+
+    /// Float stores consume the value they write, so they too are raw-tier.
+    /// The opcode carries its `memarg` (alignment, offset).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_stores_are_rejected() {
+        assert_raw_rejected(
+            "f32.store",
+            &[0x38, 0x02, 0x00],
+            &["f32store", "floating-point"],
+        );
+        assert_raw_rejected(
+            "f64.store",
+            &[0x39, 0x03, 0x00],
+            &["f64store", "floating-point"],
+        );
+    }
+
+    /// The float-*source* conversions, unreachable from WAT because each needs a
+    /// float operand that only a rejecting const could supply. In the raw tier each pins its own
+    /// operator instead of degrading to a class-only assertion. `i32.trunc_sat_f32_s`
+    /// was a `todo!()` panic.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_sourced_conversions_are_rejected_not_panic() {
+        assert_raw_rejected("i32.trunc_f32_s", &[0xa8], &["i32truncf32s", "conversion"]);
+        assert_raw_rejected("f32.demote_f64", &[0xb6], &["f32demotef64", "conversion"]);
+        assert_raw_rejected(
+            "i64.reinterpret_f64",
+            &[0xbd],
+            &["i64reinterpretf64", "conversion"],
+        );
+        assert_raw_rejected(
+            "i32.trunc_sat_f32_s",
+            &[0xfc, 0x00],
+            &["i32truncsatf32s", "conversion"],
+        );
+    }
+
+    /// The lane-wise vector operators, all `todo!()` panics before this
+    /// change. Raw-tier for the same reason as the float relops: their operands can
+    /// only come from a `v128.const`, which would reject first. The SIMD prefix
+    /// `0xfd` plus a LEB128 sub-opcode is exactly what the parser must still decode
+    /// before dispatching, so these also cover the prefixed-opcode path.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn lane_wise_vector_operators_are_rejected_not_panic() {
+        assert_raw_rejected("i8x16.eq", &[0xfd, 0x23], &["i8x16eq", "vector"]);
+        assert_raw_rejected("f32x4.add", &[0xfd, 0xe4, 0x01], &["f32x4add", "vector"]);
+    }
+
+    // == Value types, with no unsupported operator anywhere ================
+
+    /// A float or vector that never reaches an operator must still be rejected: a
+    /// float parameter is emitted through the *type* section as
+    /// `Tf (T_num T_f32 :: nil) (nil)`, naming a `T_f32` the stub does not declare —
+    /// the same unverifiable `.v` the operator arms produced, reachable with no float
+    /// instruction at all.
+    ///
+    /// `translate_value_type` is the single chokepoint for all six positions, so each
+    /// row enters through a different one, and each also asserts the role clause the
+    /// message carries so a mis-threaded role surfaces here. The result and block
+    /// rows use `unreachable` to satisfy the type without a float constant. The
+    /// global row is safe despite its `f32.const` initializer: `translate_global`
+    /// resolves the value type before the init expression.
+    ///
+    /// These messages spell the type in wat form with no debug spelling, so the type
+    /// token plus `"value type"` is what identifies the arm.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn float_and_vector_value_types_are_rejected() {
+        assert_wat_rejected(
+            "param f32",
+            r#"(module (func (export "f") (param f32)))"#,
+            &["value type", "f32", "floating-point", "parameter"],
+        );
+        assert_wat_rejected(
+            "local f64",
+            r#"(module (func (export "f") (local f64)))"#,
+            &["value type", "f64", "floating-point", "local"],
+        );
+        assert_wat_rejected(
+            "result f32",
+            r#"(module (func (export "f") (result f32) unreachable))"#,
+            &["value type", "f32", "floating-point", "result"],
+        );
+        assert_wat_rejected(
+            "global f32",
+            r#"(module (global (export "g") f32 (f32.const 1)))"#,
+            &["value type", "f32", "floating-point", "global"],
+        );
+        assert_wat_rejected(
+            "param v128",
+            r#"(module (func (export "f") (param v128)))"#,
+            &["value type", "v128", "vector", "parameter"],
+        );
+        assert_wat_rejected(
+            "block result type f32",
+            r#"(module (func (export "f") block (result f32) unreachable end drop))"#,
+            &["value type", "f32", "floating-point", "block result"],
+        );
+    }
+
+    // == Unmodeled proposal families, one row each =========================
+
+    /// Every proposal family that previously hit `todo!()` now returns a grouped
+    /// family error. One row each, so no family can silently fall through to the
+    /// residual catch-all: the family label is the assertion, and `"no lowering"`
+    /// pins the suffix the family arms share.
+    ///
+    /// A panic here is worse than the bug this issue fixes — on the linking path it
+    /// aborts the process instead of producing a diagnostic — so every row doubles as
+    /// a crash-surface regression guard. All nine fixtures were verified to assemble
+    /// under `wat` 1.225.0 and to reach the operator match rather than dying at the
+    /// parse boundary.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn unsupported_proposal_families_are_rejected_not_panic() {
+        assert_wat_rejected(
+            "struct.new (GC)",
+            r#"(module (type $s (struct (field i32)))
+                 (func (export "f") i32.const 1 struct.new $s drop))"#,
+            &["garbage collection", "no lowering"],
+        );
+        assert_wat_rejected(
+            "ref.i31",
+            r#"(module (func (export "f") i32.const 1 ref.i31 drop))"#,
+            &["i31 references", "no lowering"],
+        );
+        // `ref.func` rather than `ref.null` deliberately: `ref.null` is rejected by
+        // its own pre-existing arm, so a null operand would never reach this family.
+        assert_wat_rejected(
+            "ref.as_non_null (typed refs)",
+            r#"(module (func $g) (func (export "f") ref.func $g ref.as_non_null drop))"#,
+            &["typed function references", "no lowering"],
+        );
+        assert_wat_rejected(
+            "i64.add128 (wide arithmetic)",
+            r#"(module (func (export "f") (result i64 i64)
+                 i64.const 1 i64.const 0 i64.const 1 i64.const 0 i64.add128))"#,
+            &["128-bit wide arithmetic", "no lowering"],
+        );
+        assert_wat_rejected(
+            "try/catch_all (legacy EH)",
+            r#"(module (func (export "f") try nop catch_all nop end))"#,
+            &["legacy exception handling", "no lowering"],
+        );
+        assert_wat_rejected(
+            "cont.new (stack switching)",
+            r#"(module (type $ft (func)) (type $ct (cont $ft))
+                 (func $g) (func (export "f") ref.func $g cont.new $ct drop))"#,
+            &["stack switching", "no lowering"],
+        );
+        assert_wat_rejected(
+            "table.init (segment table ops)",
+            r#"(module (table 1 funcref) (elem $e func)
+                 (func (export "f") i32.const 0 i32.const 0 i32.const 0 table.init 0 $e))"#,
+            &["segment-indexed table initialization", "no lowering"],
+        );
+        assert_wat_rejected(
+            "memory.discard",
+            r#"(module (memory 1) (func (export "f") i32.const 0 i32.const 0 memory.discard))"#,
+            &["memory.discard", "no lowering"],
+        );
+        assert_wat_rejected(
+            "return_call (tail calls)",
+            r#"(module (func $g (result i32) i32.const 1)
+                 (func (export "f") (result i32) return_call $g))"#,
+            &["tail calls", "no lowering"],
+        );
+    }
+
+    /// The two singletons, which deliberately do *not* share the family
+    /// wording. `typed select` is attributed to the translator, not the model — the
+    /// stub does declare `BI_select`, so a model-attributed reason would be false —
+    /// and `throw_ref` is modern exception handling rather than the legacy family.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn singleton_unsupported_instructions_are_rejected_not_panic() {
+        assert_wat_rejected(
+            "typed select",
+            r#"(module (func (export "f") (result i32)
+                 i32.const 1 i32.const 2 i32.const 0 select (result i32)))"#,
+            &["typed select"],
+        );
+        assert_wat_rejected(
+            "throw_ref",
+            r#"(module (func (export "f") unreachable throw_ref))"#,
+            &["throw_ref"],
+        );
+    }
+
+    // == Positive control =================================================
+
+    /// The acceptance criterion's other half: no behavior change for the integer
+    /// surface. A module spanning integer arithmetic and comparison, structured
+    /// control flow, locals, and memory access must still translate — and the emitted
+    /// `.v` must mention none of the constructors the stub omits, which is a stronger
+    /// statement than "it translated" and holds independently of how any rejection is
+    /// worded.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_integer_surface_still_translates() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (memory 1)
+              (func (export "compute") (param i32 i32) (result i32)
+                (local i32)
+                block
+                  loop
+                    local.get 0
+                    local.get 1
+                    i32.lt_s
+                    br_if 1
+                    local.get 0
+                    local.get 1
+                    i32.add
+                    local.set 2
+                    br 0
+                  end
+                end
+                i32.const 0
+                local.get 2
+                i32.store
+                i32.const 0
+                i32.load)
+              (func (export "wide") (param i64 i64) (result i64)
+                local.get 0
+                local.get 1
+                i64.add
+                local.get 0
+                local.get 1
+                i64.mul
+                i64.xor))
+            "#,
+        )
+        .expect("control fixture WAT assembles");
+        let v = translate(&bytes).expect("the integer-only surface must still translate");
+
+        for absent in [
+            "BI_cvtop",
+            "T_f32",
+            "T_f64",
+            "Relop_f",
+            "Binop_f",
+            "Unop_f",
+            "T_v128",
+            "BI_const_vec",
+            "BI_load_vec",
+        ] {
+            assert!(
+                !v.contains(absent),
+                "the integer surface must emit no `{absent}` (the Rocq stub declares none):\n{v}"
+            );
+        }
+
+        // The integer constructors the stub *does* declare must still be present, so
+        // this control cannot pass by emitting nothing.
+        for present in [
+            "BI_binop",
+            "Relop_i",
+            "BI_load",
+            "BI_store",
+            "BI_loop",
+            "BI_block",
+            "BI_local_get",
+        ] {
+            assert!(
+                v.contains(present),
+                "the integer surface must still emit `{present}`:\n{v}"
+            );
+        }
+    }
+
+    /// The mirror of the family rows above, and the guard on the sweep's
+    /// highest-risk swallow site.
+    ///
+    /// The segment-indexed table family is exactly `table.init` / `elem.drop` /
+    /// `table.copy`, and it sits amid operators the translator DOES lower —
+    /// `memory.init`, `data.drop`, `memory.copy`, `memory.fill`, and the five
+    /// `table.*` accessors — several of which read as "segment-related".
+    /// `data.drop` is the closest call of all. Nothing else guards them: the
+    /// `coqc` gate's corpus exercises neither `memory.init` nor `data.drop`, and
+    /// Inference codegen emits neither, so a one-variant mis-grouping would ship
+    /// as silent over-rejection of supported surface with every other test green.
+    ///
+    /// Plain `select` is here for the same reason against a different arm: it
+    /// must keep lowering to `BI_select None` while `TypedSelect`, its immediate
+    /// neighbour, rejects.
+    ///
+    /// Each row asserts the constructor, not merely that translation succeeded,
+    /// so an arm that survives but emits something else still fails.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_neighbours_of_the_rejected_families_still_translate() {
+        for (label, wat, constructor) in [
+            (
+                "memory.init / data.drop",
+                r#"(module (memory 1) (data $d "ab")
+                     (func (export "f")
+                       i32.const 0 i32.const 0 i32.const 2 memory.init $d
+                       data.drop $d))"#,
+                "BI_memory_init",
+            ),
+            (
+                "memory.copy / memory.fill",
+                r#"(module (memory 1)
+                     (func (export "f")
+                       i32.const 0 i32.const 1 i32.const 2 memory.copy
+                       i32.const 0 i32.const 0 i32.const 2 memory.fill))"#,
+                "BI_memory_copy",
+            ),
+            (
+                "table.get / set / grow / size / fill",
+                r#"(module (table 1 funcref) (func $g)
+                     (func (export "f") (result i32)
+                       i32.const 0 ref.func $g table.set
+                       i32.const 0 table.get drop
+                       ref.func $g i32.const 1 table.grow drop
+                       i32.const 0 ref.func $g i32.const 0 table.fill
+                       table.size))"#,
+                "BI_table_size",
+            ),
+            (
+                "plain select",
+                r#"(module (func (export "f") (result i32)
+                     i32.const 1 i32.const 2 i32.const 0 select))"#,
+                "BI_select None",
+            ),
+        ] {
+            let bytes = wat::parse_str(wat).expect("neighbour fixture WAT assembles");
+            let v = translate(&bytes)
+                .unwrap_or_else(|e| panic!("{label}: must still translate, got {e:?}"));
+            assert!(
+                v.contains(constructor),
+                "{label}: must still lower to `{constructor}`:\n{v}"
+            );
+        }
+
+        // The rest of the `data.drop` claim: it lowers as itself, not as the
+        // segment-indexed table family it reads like.
+        let bytes = wat::parse_str(
+            r#"(module (memory 1) (data $d "ab") (func (export "f") data.drop $d))"#,
+        )
+        .expect("data.drop fixture WAT assembles");
+        let v = translate(&bytes).expect("data.drop must still translate");
+        assert!(
+            v.contains("BI_data_drop"),
+            "data.drop must lower to `BI_data_drop`:\n{v}"
         );
     }
 }
