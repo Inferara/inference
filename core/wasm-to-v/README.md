@@ -94,7 +94,7 @@ Component model sections (Module, Instance, ComponentType, etc.) are recognized 
 
 ### Phase 2: Translation (`translator.rs`)
 
-The translator converts structured `WasmParseData` into Rocq code strings. Every section is translated before any error is reported, so the failure a caller sees is the first in module order rather than the first the walk reached; but if any section failed, the assembled module is discarded and that error is returned:
+The translator converts structured `WasmParseData` into Rocq code strings. Every section is translated before any error is reported, so the failure a caller sees is the first in the translator's section traversal order (imports, exports, tables, memories, globals, data, elements, then function bodies) — not the module's binary section order; but if any section failed, the assembled module is discarded and that error is returned:
 
 1. **Module header**: Generates required Rocq imports from standard libraries
 2. **Helper definitions**: Creates convenience constructors (`Vi32`, `Vi64`, `Mt`, `Mm`, `Mg`, `Mi`, `Me`, `Ma`)
@@ -482,7 +482,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 
 ### Known Issues
 
-- **One error at a time**: translation stops at the first offending construct, so a module with several unsupported constructs has to be fixed (or refused) one at a time
+- **One error at a time**: only one error surfaces per run — a function body stops at its first offending construct, and the module-level walk reports only the first error it accumulated — so a module with several unsupported constructs has to be fixed (or refused) one at a time
 - **Debug names, not mnemonics**: the float, vector, and conversion messages name the operator in its `wasmparser` debug form (`F32Add`), not its wat mnemonic (`f32.add`). Unambiguous, but not the spelling a reader of the `.wat` sees. Value types are the exception: they are spelled `f32`/`f64`/`v128`
 - **Control flow complexity**: Some complex control flow patterns (deeply nested blocks, unusual branch targets) may generate suboptimal or incorrect Rocq code
 - **Large data segments**: Memory initialization with large data segments produces verbose output that may be difficult to work with in Rocq
