@@ -473,7 +473,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 
 4. **Floating point, SIMD, and conversions**: not supported, rejected
    - `f32`/`f64`/`v128` value types and every float, vector, and conversion instruction are refused with `UnsupportedFeature`; see [Rejection Policy](#rejection-policy) for why, including why integer-to-integer conversions are refused too
-   - Supporting any of them means growing the wasm-verifier proof model first; the translator's grouped rejection arms are one arm per class, so the eventual change is localized
+   - Supporting any of them means growing the wasm-verifier proof contract first; the translator's grouped rejection arms are one arm per class, so the eventual change is localized
    - See [WebAssembly SIMD proposal](https://github.com/WebAssembly/simd)
 
 5. **Bulk Memory**: partially supported
