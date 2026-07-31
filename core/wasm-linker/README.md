@@ -239,14 +239,14 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a sign-extension op, a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a sign-extension op, an integer width conversion (`i32.wrap_i64`/`i64.extend_i32_s/u`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, sign-extension, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
 
 ## Supported Subset
 
 The linker accepts only the following WebAssembly feature set (see `SUPPORTED_WASM_FEATURES` in `src/lib.rs`):
 
-- Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons, loads/stores, and the three integer width conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`).
+- Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons, and loads/stores. No conversion instruction of any kind, integer width conversions included.
 - Mutable globals and bulk memory (`memory.copy`/`memory.fill`).
 
 Rejected at the feature gate (external modules using any of these produce `UnsupportedWasmFeature`):
@@ -260,6 +260,7 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 
 - Tail calls (`return_call`/`return_call_indirect`) — the Rocq translator has no lowering.
 - Segment-indexed table ops (`table.init`/`elem.drop`/`table.copy`) — carry element segments the merge cannot relocate, and the Rocq translator has no lowering.
+- Integer width conversions (`i32.wrap_i64`/`i64.extend_i32_s/u`) — the Rocq translator declares no `cvtop` family, so a conversion has no lowering even between two integer types. These are ordinary MVP instructions, so the feature gate cannot reject them; the allow-list is the only place they are refused.
 - Float instructions that reach the allow-list from the main-module re-encode path (which bypasses the feature gate), diagnosed with the exact mnemonic.
 - Verification-only constructs (`forall`/`exists`/`assume`/`unique` blocks, `i32.uzumaki`/`i64.uzumaki`) in an external body — they have no executable semantics.
 

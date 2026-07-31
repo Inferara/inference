@@ -471,6 +471,49 @@ entries are matched by name, not position.
   or hand-crafted `.wasm` that reintroduces one of these opcodes into an
   executable body.
 
+- **Float, SIMD/vector, and conversion constructs** (`translator.rs`,
+  the three grouped operator arms plus `translate_value_type`): rejected
+  as `WasmToVError::UnsupportedFeature`. The context in "Required Rocq
+  context" is the whole vocabulary the emitted `.v` may use, and it
+  contains no `T_f32`/`T_f64`, no vector type or vector instruction, and
+  no `cvtop`/`BI_cvtop`. Emitting any of them would produce a file that
+  fails `coqc` at the consumer, so the translator refuses instead:
+
+  | Rejected | Scope |
+  |---|---|
+  | float instructions | all loads, stores, constants, comparisons, unops, binops |
+  | vector instructions | the entire SIMD proposal, relaxed-SIMD included |
+  | conversion instructions | the whole `cvtop` block — sign-extension, saturating float-to-int, **and the integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s/u`), since the contract covers no conversion at all |
+  | `f32`, `f64`, `v128` value types | every position: parameters, results, locals, globals, block result types |
+  | unmodeled proposal families | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
+
+  Like the non-det rule above, this is unreachable from
+  Inference-compiled code — the language has no floating-point or vector
+  types and its codegen emits no conversion — so the `coqc` gate over
+  the Inference corpus can never exercise it. It is reachable only
+  through foreign bytes: the external linking path and the public
+  `translate_bytes` API. `core/wasm-linker` refuses the same content in
+  external modules, so this is the second of two layers, and on the CLI
+  path the linker's diagnostic normally arrives first.
+
+  A value-type rejection is safe at any position because the
+  section-level error accumulator is checked fail-closed: a rejected
+  entry fails the whole translation rather than being omitted from a
+  section and silently shifting every later index.
+
+  One exception to the contract-attributed reasoning: `select t`
+  (`TypedSelect`) is rejected even though the context *does* declare
+  `BI_select : option (list value_type) -> basic_instruction`. No
+  lowering is wired for it, and the message says so, attributing the
+  gap to the translator rather than to WasmCert.
+
+  The attribution in every message names the *contract*, not WasmCert:
+  vanilla WasmCert-Coq does model floats and conversions (which is why
+  the old float relop emission was *ill-typed* rather than unbound),
+  but the wasm-verifier program logic covers none of that surface, so
+  no such term can be verified. The stub mirrors the contract subset,
+  not all of WasmCert.
+
 ## Migration
 
 Three shapes exist in this project's history; only the third is emitted

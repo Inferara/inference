@@ -14,7 +14,7 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 - **Custom name section support**: Preserves function and local variable names from WASM debug information
 - **Expression tree reconstruction**: Converts linear WASM instructions into structured Rocq expressions
 - **Specification-to-`hassert` translation**: A `spec` block's WASM body is never translated as instructions — the function is omitted from the module record entirely, and its logical content becomes a `hassert` verification obligation (see [Non-Deterministic Instructions](#non-deterministic-instructions) and [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md))
-- **Partial output on error**: Section entries that fail to translate are skipped rather than aborting the entire module
+- **Fail-closed translation**: a section entry that cannot be translated fails the whole module rather than being dropped from the output — a `.v` is a proof artifact, so a partial one must never be returned as success (see [Rejection Policy](#rejection-policy))
 - **Zero-copy parsing**: Efficiently processes WASM bytecode using streaming parser
 
 ## Quick Start
@@ -94,7 +94,7 @@ Component model sections (Module, Instance, ComponentType, etc.) are recognized 
 
 ### Phase 2: Translation (`translator.rs`)
 
-The translator converts structured `WasmParseData` into Rocq code strings. Section entries that cannot be translated are skipped and the accumulated output is returned regardless:
+The translator converts structured `WasmParseData` into Rocq code strings. Every section is translated before any error is reported, so the failure a caller sees is the first in the translator's section traversal order (imports, exports, tables, memories, globals, data, elements, then function bodies) — not the module's binary section order; but if any section failed, the assembled module is discarded and that error is returned:
 
 1. **Module header**: Generates required Rocq imports from standard libraries
 2. **Helper definitions**: Creates convenience constructors (`Vi32`, `Vi64`, `Mt`, `Mm`, `Mg`, `Mi`, `Me`, `Ma`)
@@ -132,11 +132,13 @@ WasmParseData<'a>
 |-----------|-----------|
 | `i32` | `T_num T_i32` |
 | `i64` | `T_num T_i64` |
-| `f32` | `T_num T_f32` |
-| `f64` | `T_num T_f64` |
-| `v128` | `T_vec T_v128` |
+| `f32` | rejected — `UnsupportedFeature` |
+| `f64` | rejected — `UnsupportedFeature` |
+| `v128` | rejected — `UnsupportedFeature` |
 | `funcref` | `T_ref T_funcref` |
 | `externref` | `T_ref T_externref` |
+
+The proof model's `number_type` has exactly two constructors, `T_i32` and `T_i64`, and it declares no vector type at all, so `f32`, `f64`, and `v128` have nothing to map to. `translate_value_type` is the single chokepoint for every position a type can occupy — function parameters and results, locals, globals, and block result types — so a float in a *signature* is refused even when no float instruction appears in any body. The message names the position ("… in a function parameter") because a `.wasm` carries no source locations.
 
 ### WASM Instructions → Rocq Expressions
 
@@ -267,7 +269,7 @@ This dramatically improves readability of generated Rocq code and makes verifica
 
 ## Error Handling
 
-The parser phase (Phase 1) fails fast on malformed WASM bytecode. The translator phase (Phase 2) currently silently skips individual section entries that fail to translate, always returning whatever output has been accumulated. Errors from section translation (imports, exports, tables, globals, etc.) are collected into an internal `Vec` that is not yet acted upon.
+Both phases fail closed. The parser phase (Phase 1) fails fast on malformed WASM bytecode. The translator phase (Phase 2) collects errors from every section into an accumulator so that one failure does not mask later ones, but it checks that accumulator before returning: if any section failed, the assembled module is discarded and the first error is returned. A `.v` is a proof artifact, so a partial translation is never returned as success.
 
 ### Parser Errors
 
@@ -279,21 +281,41 @@ The parser returns an `anyhow::Result` and propagates the first error encountere
 
 ### Translator Errors
 
-The translator (`WasmParseData::translate`) matches each section item result and pushes failures into an error accumulator, but the accumulator is never checked before returning `Ok`. In practice this means:
+The translator (`WasmParseData::translate`) matches each section item result and pushes failures into an error accumulator, then checks it before emitting the obligation definitions. In practice this means:
 
-- Failed imports, exports, tables, globals, data, or element entries are silently omitted from the generated Rocq output
-- A failed function body translation causes that function to be omitted from the `mod_funcs` list
-- The returned `String` is always syntactically valid Rocq, but may be semantically incomplete
+- A failed import, export, table, global, data, or element entry fails the whole translation; it is never silently omitted from the generated Rocq output
+- A failed function body likewise fails the translation rather than dropping the function from `mod_funcs` and shifting every later index
+- An `Ok(String)` is therefore a complete translation of the whole module, not a best effort
+
+Accumulating before failing is deliberate: translating every section first means the error a caller sees is the first *in module order*, not the first the walk happened to reach.
 
 ### Error Categories
 
-Errors that may be silently dropped during translation include:
+Recoverable `WasmToVError`s the translator returns:
 
-- **Unsupported WASM features**: Unknown reference types
-- **Unimplemented instructions**: Opcodes not yet handled in `translate_basic_operator`
-- **Type mismatches**: Inconsistent type information between sections
+- **`UnsupportedFeature`**: a construct outside the subset the wasm-verifier proof contract covers — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction outside a spec function; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the contract does not cover. See [Rejection Policy](#rejection-policy).
+- **`WasmParse`**: malformed bytes, surfaced by the parser phase
+- **Identifier errors**: a module or function name that cannot be rendered as a legal Rocq identifier
 
 The tag section (exception handling) and component model sections are silently ignored by the parser itself rather than producing errors.
+
+### Rejection Policy
+
+The translator emits only what the vendored WasmCert proof stub in `rocq-stub/` declares. Anything else is refused with `UnsupportedFeature` naming the construct — never a `.v` that fails `coqc` downstream, and never a panic. Concretely, the following are rejected rather than translated:
+
+| Construct | Reason the message gives |
+|-----------|--------------------------|
+| Any `f32`/`f64` instruction | the wasm-verifier proof contract covers no floating-point surface |
+| Any SIMD/vector instruction | SIMD proposal — the wasm-verifier proof contract covers no vector types |
+| Any conversion instruction, **integer width conversions included** | the wasm-verifier proof contract covers no conversion instructions, integer width conversions included |
+| `f32`, `f64`, or `v128` as a value type, in any position | as above, per type, plus the position it occupies |
+| GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops | no lowering under the wasm-verifier proof contract |
+
+No Inference program can reach any of these: the language has no floating-point types, no vectors, and emits no conversion instruction, so `coqc` gating over Inference sources can never cover them. They are reachable only through foreign bytes — the external linking path (`infc -L` / `--wasm-dep`) and the public `translate_bytes` API — which is exactly why the refusal has to be explicit. This is the second layer of a two-layer defense: `core/wasm-linker` already refuses float, SIMD, conversion, sign-extension, and tail-call content in external modules, so on the CLI path the linker's mnemonic-bearing diagnostic normally fires first.
+
+Two consequences worth stating plainly. Rejecting on a *value type* means a module carrying an unused float signature stops translating even with no float instruction anywhere — correct, because the type-section entry is emitted wholesale and would be ill-typed regardless. And translation stops at the first offending construct, so a module with many unsupported constructs reports them one at a time.
+
+The one construct rejected for a translator-side reason rather than a model-side one is `select t`: the stub does declare a typed `BI_select`, but no lowering is wired for it, and the message says so.
 
 ## Non-Deterministic Instructions
 
@@ -404,17 +426,12 @@ core/wasm-to-v/
 
 ### Test Behavior
 
-The `test_parse_test_data` test in `lib.rs` (a `#[cfg(test)]` module test):
+The `test_parse_test_data` test in `lib.rs` (a `#[cfg(test)]` module test) discovers all `.wasm` files in `test_data/`, translates each, and reports statistics under `panic::catch_unwind`.
 
-1. Discovers all `.wasm` files in `test_data/`
-2. Attempts to translate each file to Rocq
-3. Catches panics from unimplemented features (using `panic::catch_unwind`)
-4. Reports success/failure statistics with categories:
-   - **Successful**: Translation completed without errors
-   - **Failed (errors)**: Translation returned an `Err` result
-   - **Failed (panics)**: Translation panicked (usually unimplemented features)
+> [!WARNING]
+> **This test is currently inert and measures nothing.** Every fixture's module name is its file stem (`token.2`, `unreached-valid.0`), and the illegal `.`/`-` characters fail `validate_rocq_identifier` before a single operator is reached. The run reports 0 successful / 125 errors / 0 panics and *passes*, so it reads as coverage while providing none. Reviving it — deriving a legal Rocq module name from the stem — is tracked in [Future Work](#future-work). Do not remove the `catch_unwind` harness before the corpus is revived; stripping the guard from an inert test and then reviving the corpus unguarded is the wrong order.
 
-This test serves as both a regression test suite and a feature coverage indicator.
+The "failed (panics)" category is a historical artifact. It counted `todo!()` arms in `translate_basic_operator`, of which there are now none: every operator either translates or returns a recoverable error. Panic-freedom for the operator surface is covered by the WAT-driven rejection matrix in `lib.rs` (`mod unsupported_surface`) instead.
 
 ## Performance Characteristics
 
@@ -446,26 +463,27 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
    - `ModuleSection`, `InstanceSection`, `ComponentSection`, etc. are parsed but not translated
    - See [WebAssembly Component Model proposal](https://github.com/WebAssembly/component-model)
 
-2. **Exception Handling**: Tag section (exception handling) is not supported
-   - The tag section is silently ignored during parsing; exception handling instructions in function bodies may cause panics or incorrect output
+2. **Exception Handling**: not supported, rejected
+   - The tag section is silently ignored during parsing; every exception-handling instruction — modern (`throw`, `throw_ref`, `try_table`) and legacy (`try`/`catch`/`rethrow`) — is refused with `UnsupportedFeature`
    - See [WebAssembly Exception Handling proposal](https://github.com/WebAssembly/exception-handling)
 
-3. **Reference Types**: Limited support for complex reference types
-   - `funcref` and `externref` are supported
-   - Typed function references and GC reference types are not yet implemented
+3. **Reference Types**: `funcref` and `externref` only
+   - Typed function references (`ref.as_non_null`, `br_on_null`, `call_ref`) and the GC reference types are rejected, not translated
    - See [WebAssembly Reference Types proposal](https://github.com/WebAssembly/reference-types)
 
-4. **SIMD Operations**: Vector operations (v128) are partially supported
-   - Some SIMD instructions may not translate correctly
+4. **Floating point, SIMD, and conversions**: not supported, rejected
+   - `f32`/`f64`/`v128` value types and every float, vector, and conversion instruction are refused with `UnsupportedFeature`; see [Rejection Policy](#rejection-policy) for why, including why integer-to-integer conversions are refused too
+   - Supporting any of them means growing the wasm-verifier proof contract first; the translator's grouped rejection arms are one arm per class, so the eventual change is localized
    - See [WebAssembly SIMD proposal](https://github.com/WebAssembly/simd)
 
-5. **Bulk Memory**: Bulk memory operations require additional validation
-   - `memory.copy`, `memory.fill`, `table.copy`, `table.init` need testing
+5. **Bulk Memory**: partially supported
+   - `memory.init`, `data.drop`, `memory.copy`, and `memory.fill` translate; the segment-indexed table operations (`table.init`, `elem.drop`, `table.copy`) are rejected — they have no lowering under the wasm-verifier proof contract
    - See [WebAssembly Bulk Memory proposal](https://github.com/WebAssembly/bulk-memory-operations)
 
 ### Known Issues
 
-- **Silent translation errors**: Errors during section translation (invalid imports, unsupported reference types, unimplemented opcodes) are collected into an internal accumulator that is never checked. The translator always returns `Ok`, so callers cannot detect incomplete output
+- **One error at a time**: only one error surfaces per run — a function body stops at its first offending construct, and the module-level walk reports only the first error it accumulated — so a module with several unsupported constructs has to be fixed (or refused) one at a time
+- **Debug names, not mnemonics**: the float, vector, and conversion messages name the operator in its `wasmparser` debug form (`F32Add`), not its wat mnemonic (`f32.add`). Unambiguous, but not the spelling a reader of the `.wat` sees. Value types are the exception: they are spelled `f32`/`f64`/`v128`
 - **Control flow complexity**: Some complex control flow patterns (deeply nested blocks, unusual branch targets) may generate suboptimal or incorrect Rocq code
 - **Large data segments**: Memory initialization with large data segments produces verbose output that may be difficult to work with in Rocq
 - **Name conflicts**: Generated Rocq identifiers may conflict with reserved keywords in edge cases
@@ -474,7 +492,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 
 Planned improvements for future releases:
 
-1. **Error propagation**: Check the translator's error accumulator before returning and surface failures to callers instead of silently producing incomplete output
+1. **Revive the `test_data` corpus**: derive a legal Rocq module name from dotted file stems so the 125 upstream fixtures exercise the translator again (today every one of them fails name validation first, so the suite measures nothing)
 2. **Optimization**: Generate more compact Rocq expressions by recognizing common patterns and idioms
 3. **Validation**: Add semantic validation beyond syntactic translation to catch invalid WASM constructs earlier
 4. **Component Model**: Full WebAssembly component model translation support for modern WASM applications
@@ -484,7 +502,7 @@ Planned improvements for future releases:
 8. **Better Diagnostics**: Include WASM byte offsets and section names in error messages
 9. **Name Sanitization**: Automatically handle Rocq keyword conflicts in generated identifiers
 10. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
-11. **SIMD Support**: Complete translation of all WebAssembly SIMD instructions
+11. **Float, SIMD, and conversion support**: requires the wasm-verifier proof model to grow those surfaces first; until then the translator refuses them rather than emitting terms the model cannot type
 
 ## Integration with Inference Compiler
 

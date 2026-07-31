@@ -82,7 +82,7 @@
 //!
 //! ### Type Translation
 //! - `translate_ref_type` - Reference types (funcref, externref)
-//! - `translate_value_type` - Value types (i32, i64, f32, f64, v128)
+//! - `translate_value_type` - Value types (i32, i64; f32, f64, and v128 are rejected)
 //! - `translate_block_type` - Block result types
 //! - `translate_function_type` - Function signatures from RecGroup
 //!
@@ -853,7 +853,7 @@ impl WasmParseData<'_> {
             if let Ok(locals_reader) = function_body.get_locals_reader() {
                 for local in locals_reader {
                     let (reps, val_type) = local.unwrap();
-                    let val_type = translate_value_type(&val_type)?;
+                    let val_type = translate_value_type(&val_type, "a function local")?;
                     for _ in 0..reps {
                         modfunc_locals.push_str(format!("{val_type} :: ").as_str());
                     }
@@ -899,13 +899,44 @@ fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
 }
 
 //Inductive value_type
-fn translate_value_type(val_type: &wpValType) -> anyhow::Result<String> {
+/// Translates one `value_type`, the single chokepoint for every position a type
+/// can occupy: function parameters and results, locals, globals, and block
+/// result types.
+///
+/// `role` names that position ("a function parameter", "a local", …) and is
+/// spelled into the rejection message. A `.wasm` carries no source locations and
+/// translation stops at the first offending construct, so the role is what
+/// narrows the search in a foreign binary.
+fn translate_value_type(val_type: &wpValType, role: &'static str) -> anyhow::Result<String> {
     let res = match val_type {
         wpValType::I32 => "T_num T_i32",
         wpValType::I64 => "T_num T_i64",
-        wpValType::F32 => "T_num T_f32",
-        wpValType::F64 => "T_num T_f64",
-        wpValType::V128 => "T_vec T_v128",
+        // The proof model's `number_type` is `T_i32 | T_i64` and it declares no
+        // `T_vec` constructor at all, so a float or vector is unrepresentable in
+        // a *signature* even when no float or vector instruction appears in any
+        // body. Rejecting here rather than at the five call sites keeps that
+        // leak closed in one place.
+        wpValType::F32 => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "floating-point value type `f32` in {role} (the wasm-verifier proof contract covers no floating-point types)"
+                ),
+            }));
+        }
+        wpValType::F64 => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "floating-point value type `f64` in {role} (the wasm-verifier proof contract covers no floating-point types)"
+                ),
+            }));
+        }
+        wpValType::V128 => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "vector value type `v128` in {role} (SIMD proposal — the wasm-verifier proof contract covers no vector types)"
+                ),
+            }));
+        }
         wpValType::Ref(ref_type) => {
             let ref_type_translated = translate_ref_type(ref_type)?;
             return Ok(format!("T_ref {ref_type_translated}"));
@@ -930,7 +961,7 @@ fn translate_module_import_desc(import: &Import) -> anyhow::Result<String> {
         TypeRef::Func(index) => format!("MID_func {index}%N"),
         TypeRef::Global(global_type) => {
             let tg_mut = translate_mutability(global_type.mutable);
-            let tg_t = translate_value_type(&global_type.content_type)?;
+            let tg_t = translate_value_type(&global_type.content_type, "an imported global")?;
             format!("MID_global {{|tg_mut := {tg_mut}; tg_t := {tg_t}|}}")
         }
         TypeRef::Memory(memory_type) => {
@@ -1045,7 +1076,7 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
 //Record global_type
 fn translate_global(global: &Global, remap: &FuncRemap) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
-    let tg_t = translate_value_type(&global.ty.content_type)?;
+    let tg_t = translate_value_type(&global.ty.content_type, "a global")?;
     let mg_init = translate_expr(
         &mut global.init_expr.get_operators_reader(),
         OperatorContext::default(),
@@ -1279,7 +1310,7 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
         BlockType::Empty => "BT_valtype None".to_string(),
         BlockType::FuncType(index) => format!("BT_id {index}%N"),
         BlockType::Type(valtype) => {
-            let valtype = translate_value_type(valtype)?;
+            let valtype = translate_value_type(valtype, "a block result type")?;
             format!("BT_valtype (Some ({valtype}))")
         }
     };
@@ -1393,14 +1424,14 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
             CompositeInnerType::Func(ft) => {
                 let mut params_str = String::new();
                 for param in ft.params() {
-                    let val_type = translate_value_type(param)?;
+                    let val_type = translate_value_type(param, "a function parameter")?;
                     params_str.push_str(format!("{val_type} :: ").as_str());
                 }
                 params_str.push_str("nil");
 
                 let mut results_str = String::new();
                 for result in ft.results() {
-                    let val_type = translate_value_type(result)?;
+                    let val_type = translate_value_type(result, "a function result")?;
                     results_str.push_str(format!("{val_type} :: ").as_str());
                 }
                 results_str.push_str("nil");
@@ -1415,6 +1446,23 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
         }
     }
     Ok(res)
+}
+
+/// The rejection every unmodeled proposal family shares: valid WASM the
+/// wasm-verifier proof contract does not cover, so there is nothing to lower it
+/// to. Inference codegen emits none of these constructs, and each of them used to
+/// hit an unimplemented-macro panic — a process abort on the linking path,
+/// strictly worse than a diagnostic.
+///
+/// `label` names the family instead of printing `{operator:?}`, whose debug form
+/// for these structured-payload variants is often large. The labels read the same
+/// as the linker's `operator_family` today; nothing enforces that, and nothing
+/// needs to — for a family both know, the linker rejects first on the CLI path,
+/// so the two labels are never visible in one run.
+fn unsupported_family(label: &str) -> anyhow::Error {
+    anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+        description: format!("{label} (no lowering under the wasm-verifier proof contract)"),
+    })
 }
 
 //Inductive basic_instruction
@@ -1542,14 +1590,6 @@ fn translate_basic_operator(
             let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 None ({memarg})")
         }
-        Operator::F32Load { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_f32 None ({memarg})")
-        }
-        Operator::F64Load { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_f64 None ({memarg})")
-        }
         Operator::I32Load8S { memarg } => {
             let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 (Some (Tp_i8, SX_S)) ({memarg})")
@@ -1598,14 +1638,6 @@ fn translate_basic_operator(
             let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i64 None ({memarg})")
         }
-        Operator::F32Store { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_f32 None ({memarg})")
-        }
-        Operator::F64Store { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_f64 None ({memarg})")
-        }
         Operator::I32Store8 { memarg } => {
             let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i32 (Some Tp_i8) ({memarg})")
@@ -1644,14 +1676,6 @@ fn translate_basic_operator(
         }
         Operator::I32Const { value } => format!("BI_const_num (Vi32 {value})"),
         Operator::I64Const { value } => format!("BI_const_num (Vi64 {value})"),
-        Operator::F32Const { value } => {
-            let val = value.bits();
-            format!("BI_const_num (VAL_float32 {val})")
-        }
-        Operator::F64Const { value } => {
-            let val = value.bits();
-            format!("BI_const_num (VAL_float64 {val})")
-        }
         Operator::I32Eqz => "BI_testop T_i32 TO_eqz".to_string(),
         Operator::I32Eq => "BI_relop T_i32 (Relop_i ROI_eq)".to_string(),
         Operator::I32Ne => "BI_relop T_i32 (Relop_i ROI_ne)".to_string(),
@@ -1674,18 +1698,6 @@ fn translate_basic_operator(
         Operator::I64LeU => "BI_relop T_i64 (Relop_i (ROI_le SX_U))".to_string(),
         Operator::I64GeS => "BI_relop T_i64 (Relop_i (ROI_ge SX_S))".to_string(),
         Operator::I64GeU => "BI_relop T_i64 (Relop_i (ROI_ge SX_U))".to_string(),
-        Operator::F32Eq => "BI_relop T_f32 (Relop_f ROI_eq)".to_string(),
-        Operator::F32Ne => "BI_relop T_f32 (Relop_f ROI_ne)".to_string(),
-        Operator::F32Lt => "BI_relop T_f32 (Relop_f ROI_lt)".to_string(),
-        Operator::F32Gt => "BI_relop T_f32 (Relop_f ROI_gt)".to_string(),
-        Operator::F32Le => "BI_relop T_f32 (Relop_f ROI_le)".to_string(),
-        Operator::F32Ge => "BI_relop T_f32 (Relop_f ROI_ge)".to_string(),
-        Operator::F64Eq => "BI_relop T_f64 (Relop_f ROI_eq)".to_string(),
-        Operator::F64Ne => "BI_relop T_f64 (Relop_f ROI_ne)".to_string(),
-        Operator::F64Lt => "BI_relop T_f64 (Relop_f ROI_lt)".to_string(),
-        Operator::F64Gt => "BI_relop T_f64 (Relop_f ROI_gt)".to_string(),
-        Operator::F64Le => "BI_relop T_f64 (Relop_f ROI_le)".to_string(),
-        Operator::F64Ge => "BI_relop T_f64 (Relop_f ROI_ge)".to_string(),
         Operator::I32Clz => "BI_unop T_i32 (Unop_i UOI_clz)".to_string(),
         Operator::I32Ctz => "BI_unop T_i32 (Unop_i UOI_ctz)".to_string(),
         Operator::I32Popcnt => "BI_unop T_i32 (Unop_i UOI_popcnt)".to_string(),
@@ -1722,104 +1734,151 @@ fn translate_basic_operator(
         Operator::I64ShrU => "BI_binop T_i64 (Binop_i (BOI_shr SX_U))".to_string(),
         Operator::I64Rotl => "BI_binop T_i64 (Binop_i BOI_rotl)".to_string(),
         Operator::I64Rotr => "BI_binop T_i64 (Binop_i BOI_rotr)".to_string(),
-        Operator::F32Abs => "BI_unop T_f32 (Unop_f UOF_abs)".to_string(),
-        Operator::F32Neg => "BI_unop T_f32 (Unop_f UOF_neg)".to_string(),
-        Operator::F32Ceil => "BI_unop T_f32 (Unop_f UOF_ceil)".to_string(),
-        Operator::F32Floor => "BI_unop T_f32 (Unop_f UOF_floor)".to_string(),
-        Operator::F32Trunc => "BI_unop T_f32 (Unop_f UOF_trunc)".to_string(),
-        Operator::F32Nearest => "BI_unop T_f32 (Unop_f UOF_nearest)".to_string(),
-        Operator::F32Sqrt => "BI_unop T_f32 (Unop_f UOF_sqrt)".to_string(),
-        Operator::F32Add => "BI_binop T_f32 (Binop_f BOF_add)".to_string(),
-        Operator::F32Sub => "BI_binop T_f32 (Binop_f BOF_sub)".to_string(),
-        Operator::F32Mul => "BI_binop T_f32 (Binop_f BOF_mul)".to_string(),
-        Operator::F32Div => "BI_binop T_f32 (Binop_f BOF_div)".to_string(),
-        Operator::F32Min => "BI_binop T_f32 (Binop_f BOF_min)".to_string(),
-        Operator::F32Max => "BI_binop T_f32 (Binop_f BOF_max)".to_string(),
-        Operator::F32Copysign => "BI_binop T_f32 (Binop_f BOF_copysign)".to_string(),
-        Operator::F64Abs => "BI_unop T_f64 (Unop_f UOF_abs)".to_string(),
-        Operator::F64Neg => "BI_unop T_f64 (Unop_f UOF_neg)".to_string(),
-        Operator::F64Ceil => "BI_unop T_f64 (Unop_f UOF_ceil)".to_string(),
-        Operator::F64Floor => "BI_unop T_f64 (Unop_f UOF_floor)".to_string(),
-        Operator::F64Trunc => "BI_unop T_f64 (Unop_f UOF_trunc)".to_string(),
-        Operator::F64Nearest => "BI_unop T_f64 (Unop_f UOF_nearest)".to_string(),
-        Operator::F64Sqrt => "BI_unop T_f64 (Unop_f UOF_sqrt)".to_string(),
-        Operator::F64Add => "BI_binop T_f64 (Binop_f BOF_add)".to_string(),
-        Operator::F64Sub => "BI_binop T_f64 (Binop_f BOF_sub)".to_string(),
-        Operator::F64Mul => "BI_binop T_f64 (Binop_f BOF_mul)".to_string(),
-        Operator::F64Div => "BI_binop T_f64 (Binop_f BOF_div)".to_string(),
-        Operator::F64Min => "BI_binop T_f64 (Binop_f BOF_min)".to_string(),
-        Operator::F64Max => "BI_binop T_f64 (Binop_f BOF_max)".to_string(),
-        Operator::F64Copysign => "BI_binop T_f64 (Binop_f BOF_copysign)".to_string(),
-        Operator::I32WrapI64 => "BI_cvtop T_i32 (CVO_wrap T_i64 None)".to_string(),
-        Operator::I32TruncF32S => "BI_cvtop T_i32 (CVO_trunc T_f32 (Some SX_S))".to_string(),
-        Operator::I32TruncF32U => "BI_cvtop T_i32 (CVO_trunc T_f32 (Some SX_U))".to_string(),
-        Operator::I32TruncF64S => "BI_cvtop T_i32 (CVO_trunc T_f64 (Some SX_S))".to_string(),
-        Operator::I32TruncF64U => "BI_cvtop T_i32 (CVO_trunc T_f64 (Some SX_U))".to_string(),
-        Operator::I64ExtendI32S => "BI_cvtop T_i64 (CVO_extend T_i32 (Some SX_S))".to_string(),
-        Operator::I64ExtendI32U => "BI_cvtop T_i64 (CVO_extend T_i32 (Some SX_U))".to_string(),
-        Operator::I64TruncF32S => "BI_cvtop T_i64 (CVO_trunc T_f32 (Some SX_S))".to_string(),
-        Operator::I64TruncF32U => "BI_cvtop T_i64 (CVO_trunc T_f32 (Some SX_U))".to_string(),
-        Operator::I64TruncF64S => "BI_cvtop T_i64 (CVO_trunc T_f64 (Some SX_S))".to_string(),
-        Operator::I64TruncF64U => "BI_cvtop T_i64 (CVO_trunc T_f64 (Some SX_U))".to_string(),
-        Operator::F32ConvertI32S => "BI_cvtop T_f32 (CVO_convert T_i32 (Some SX_S))".to_string(),
-        Operator::F32ConvertI32U => "BI_cvtop T_f32 (CVO_convert T_i32 (Some SX_U))".to_string(),
-        Operator::F32ConvertI64S => "BI_cvtop T_f32 (CVO_convert T_i64 (Some SX_S))".to_string(),
-        Operator::F32ConvertI64U => "BI_cvtop T_f32 (CVO_convert T_i64 (Some SX_U))".to_string(),
-        Operator::F32DemoteF64 => "BI_cvtop T_f32 (CVO_demote T_f64 None)".to_string(),
-        Operator::F64ConvertI32S => "BI_cvtop T_f64 (CVO_convert T_i32 (Some SX_S))".to_string(),
-        Operator::F64ConvertI32U => "BI_cvtop T_f64 (CVO_convert T_i32 (Some SX_U))".to_string(),
-        Operator::F64ConvertI64S => "BI_cvtop T_f64 (CVO_convert T_i64 (Some SX_S))".to_string(),
-        Operator::F64ConvertI64U => "BI_cvtop T_f64 (CVO_convert T_i64 (Some SX_U))".to_string(),
-        Operator::F64PromoteF32 => "BI_cvtop T_f64 (CVO_promote T_f32 None)".to_string(),
-        Operator::I32ReinterpretF32 => "BI_cvtop T_i32 (CVO_reinterpret T_f32 None)".to_string(),
-        Operator::I64ReinterpretF64 => "BI_cvtop T_i64 (CVO_reinterpret T_f64 None)".to_string(),
-        Operator::F32ReinterpretI32 => "BI_cvtop T_f32 (CVO_reinterpret T_i32 None)".to_string(),
-        Operator::F64ReinterpretI64 => "BI_cvtop T_f64 (CVO_reinterpret T_i64 None)".to_string(),
-        Operator::I32Extend8S => todo!(),
-        Operator::I32Extend16S => todo!(),
-        Operator::I64Extend8S => todo!(),
-        Operator::I64Extend16S => todo!(),
-        Operator::I64Extend32S => todo!(),
-        Operator::RefEq => todo!(),
-        Operator::StructNew { .. } => todo!(),
-        Operator::StructNewDefault { .. } => todo!(),
-        Operator::StructGet { .. } => todo!(),
-        Operator::StructGetS { .. } => todo!(),
-        Operator::StructGetU { .. } => todo!(),
-        Operator::StructSet { .. } => todo!(),
-        Operator::ArrayNew { .. } => todo!(),
-        Operator::ArrayNewDefault { .. } => todo!(),
-        Operator::ArrayNewFixed { .. } => todo!(),
-        Operator::ArrayNewData { .. } => todo!(),
-        Operator::ArrayNewElem { .. } => todo!(),
-        Operator::ArrayGet { .. } => todo!(),
-        Operator::ArrayGetS { .. } => todo!(),
-        Operator::ArrayGetU { .. } => todo!(),
-        Operator::ArraySet { .. } => todo!(),
-        Operator::ArrayLen => todo!(),
-        Operator::ArrayFill { .. } => todo!(),
-        Operator::ArrayCopy { .. } => todo!(),
-        Operator::ArrayInitData { .. } => todo!(),
-        Operator::ArrayInitElem { .. } => todo!(),
-        Operator::RefTestNonNull { .. } => todo!(),
-        Operator::RefTestNullable { .. } => todo!(),
-        Operator::RefCastNonNull { .. } => todo!(),
-        Operator::RefCastNullable { .. } => todo!(),
-        Operator::BrOnCast { .. } => todo!(),
-        Operator::BrOnCastFail { .. } => todo!(),
-        Operator::AnyConvertExtern => todo!(),
-        Operator::ExternConvertAny => todo!(),
-        Operator::RefI31 => todo!(),
-        Operator::I31GetS => todo!(),
-        Operator::I31GetU => todo!(),
-        Operator::I32TruncSatF32S => todo!(),
-        Operator::I32TruncSatF32U => todo!(),
-        Operator::I32TruncSatF64S => todo!(),
-        Operator::I32TruncSatF64U => todo!(),
-        Operator::I64TruncSatF32S => todo!(),
-        Operator::I64TruncSatF32U => todo!(),
-        Operator::I64TruncSatF64S => todo!(),
-        Operator::I64TruncSatF64U => todo!(),
+        // Vanilla WasmCert declares a full floating-point surface, but the
+        // wasm-verifier proof contract covers none of it — no `T_f32`/`T_f64`,
+        // no `relop_f`/`binop_f`/`unop_f`, no float value constructors — so a
+        // float term has no verifiable lowering. Inference has no
+        // floating-point types, so no Inference-compiled program reaches
+        // this arm; it is reachable only from foreign or hand-crafted `.wasm`.
+        // The float relop arms folded in here were additionally ill-typed,
+        // wrapping integer `ROI_*` constructors inside the float `Relop_f`.
+        Operator::F32Load { .. }
+        | Operator::F64Load { .. }
+        | Operator::F32Store { .. }
+        | Operator::F64Store { .. }
+        | Operator::F32Const { .. }
+        | Operator::F64Const { .. }
+        | Operator::F32Eq
+        | Operator::F32Ne
+        | Operator::F32Lt
+        | Operator::F32Gt
+        | Operator::F32Le
+        | Operator::F32Ge
+        | Operator::F64Eq
+        | Operator::F64Ne
+        | Operator::F64Lt
+        | Operator::F64Gt
+        | Operator::F64Le
+        | Operator::F64Ge
+        | Operator::F32Abs
+        | Operator::F32Neg
+        | Operator::F32Ceil
+        | Operator::F32Floor
+        | Operator::F32Trunc
+        | Operator::F32Nearest
+        | Operator::F32Sqrt
+        | Operator::F32Add
+        | Operator::F32Sub
+        | Operator::F32Mul
+        | Operator::F32Div
+        | Operator::F32Min
+        | Operator::F32Max
+        | Operator::F32Copysign
+        | Operator::F64Abs
+        | Operator::F64Neg
+        | Operator::F64Ceil
+        | Operator::F64Floor
+        | Operator::F64Trunc
+        | Operator::F64Nearest
+        | Operator::F64Sqrt
+        | Operator::F64Add
+        | Operator::F64Sub
+        | Operator::F64Mul
+        | Operator::F64Div
+        | Operator::F64Min
+        | Operator::F64Max
+        | Operator::F64Copysign => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "floating-point instruction {operator:?} (the wasm-verifier proof contract covers no floating-point surface)"
+                ),
+            }));
+        }
+        // The wasm-verifier proof contract covers no conversion surface
+        // (`cvtop`/`BI_cvtop`), so every conversion is untranslatable —
+        // including the three integer width conversions, which involve no float
+        // type at all. Inference codegen emits no conversion of any kind, so
+        // this arm is reachable only from foreign or hand-crafted `.wasm`.
+        Operator::I32WrapI64
+        | Operator::I32TruncF32S
+        | Operator::I32TruncF32U
+        | Operator::I32TruncF64S
+        | Operator::I32TruncF64U
+        | Operator::I64ExtendI32S
+        | Operator::I64ExtendI32U
+        | Operator::I64TruncF32S
+        | Operator::I64TruncF32U
+        | Operator::I64TruncF64S
+        | Operator::I64TruncF64U
+        | Operator::F32ConvertI32S
+        | Operator::F32ConvertI32U
+        | Operator::F32ConvertI64S
+        | Operator::F32ConvertI64U
+        | Operator::F32DemoteF64
+        | Operator::F64ConvertI32S
+        | Operator::F64ConvertI32U
+        | Operator::F64ConvertI64S
+        | Operator::F64ConvertI64U
+        | Operator::F64PromoteF32
+        | Operator::I32ReinterpretF32
+        | Operator::I64ReinterpretF64
+        | Operator::F32ReinterpretI32
+        | Operator::F64ReinterpretI64
+        | Operator::I32Extend8S
+        | Operator::I32Extend16S
+        | Operator::I64Extend8S
+        | Operator::I64Extend16S
+        | Operator::I64Extend32S
+        | Operator::I32TruncSatF32S
+        | Operator::I32TruncSatF32U
+        | Operator::I32TruncSatF64S
+        | Operator::I32TruncSatF64U
+        | Operator::I64TruncSatF32S
+        | Operator::I64TruncSatF32U
+        | Operator::I64TruncSatF64S
+        | Operator::I64TruncSatF64U => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "conversion instruction {operator:?} (the wasm-verifier proof contract covers no conversion instructions, integer width conversions included)"
+                ),
+            }));
+        }
+        Operator::RefEq
+        | Operator::StructNew { .. }
+        | Operator::StructNewDefault { .. }
+        | Operator::StructGet { .. }
+        | Operator::StructGetS { .. }
+        | Operator::StructGetU { .. }
+        | Operator::StructSet { .. }
+        | Operator::ArrayNew { .. }
+        | Operator::ArrayNewDefault { .. }
+        | Operator::ArrayNewFixed { .. }
+        | Operator::ArrayNewData { .. }
+        | Operator::ArrayNewElem { .. }
+        | Operator::ArrayGet { .. }
+        | Operator::ArrayGetS { .. }
+        | Operator::ArrayGetU { .. }
+        | Operator::ArraySet { .. }
+        | Operator::ArrayLen
+        | Operator::ArrayFill { .. }
+        | Operator::ArrayCopy { .. }
+        | Operator::ArrayInitData { .. }
+        | Operator::ArrayInitElem { .. }
+        | Operator::RefTestNonNull { .. }
+        | Operator::RefTestNullable { .. }
+        | Operator::RefCastNonNull { .. }
+        | Operator::RefCastNullable { .. }
+        | Operator::BrOnCast { .. }
+        | Operator::BrOnCastFail { .. }
+        | Operator::AnyConvertExtern
+        | Operator::ExternConvertAny => {
+            return Err(unsupported_family(
+                "garbage collection (struct.new / array.new / ref.cast)",
+            ));
+        }
+        Operator::RefI31 | Operator::I31GetS | Operator::I31GetU | Operator::RefI31Shared => {
+            return Err(unsupported_family("i31 references (ref.i31 / i31.get_s)"));
+        }
         Operator::MemoryInit { data_index, mem: _ } => format!("BI_memory_init {data_index}"),
         Operator::DataDrop { data_index } => format!("BI_data_drop {data_index}"),
         Operator::MemoryCopy {
@@ -1827,10 +1886,18 @@ fn translate_basic_operator(
             src_mem: _,
         } => "BI_memory_copy".to_string(),
         Operator::MemoryFill { mem: _ } => "BI_memory_fill".to_string(),
-        Operator::TableInit { .. } => todo!(),
-        Operator::ElemDrop { .. } => todo!(),
-        Operator::TableCopy { .. } => todo!(),
-        Operator::TypedSelect { .. } => todo!(),
+        Operator::TableInit { .. } | Operator::ElemDrop { .. } | Operator::TableCopy { .. } => {
+            return Err(unsupported_family(
+                "segment-indexed table initialization (table.init / elem.drop / table.copy)",
+            ));
+        }
+        Operator::TypedSelect { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description:
+                    "typed select (WasmCert supports it; no translator lowering is wired)"
+                        .into(),
+            }));
+        }
         Operator::RefNull { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: "ref.null (typed reference instruction)".into(),
@@ -1843,9 +1910,14 @@ fn translate_basic_operator(
         Operator::TableSet { table } => format!("BI_table_set {table}%N"),
         Operator::TableGrow { table } => format!("BI_table_grow {table}%N"),
         Operator::TableSize { table } => format!("BI_table_size {table}%N"),
-        Operator::ReturnCall { .. } => todo!(),
-        Operator::ReturnCallIndirect { .. } => todo!(),
-        Operator::MemoryDiscard { .. } => todo!(),
+        Operator::ReturnCall { .. } | Operator::ReturnCallIndirect { .. } => {
+            return Err(unsupported_family(
+                "tail calls (return_call / return_call_indirect)",
+            ));
+        }
+        Operator::MemoryDiscard { .. } => {
+            return Err(unsupported_family("memory.discard"));
+        }
         Operator::MemoryAtomicNotify { memarg: _ }
         | Operator::MemoryAtomicWait32 { memarg: _ }
         | Operator::MemoryAtomicWait64 { memarg: _ }
@@ -1917,360 +1989,275 @@ fn translate_basic_operator(
                 description: format!("atomic instruction {operator:?} (threads proposal)"),
             }));
         }
-        Operator::V128Load { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
+        // The SIMD proposal's `v128` type is outside the wasm-verifier proof
+        // contract, which covers neither the vector value type nor any
+        // vector instruction. Inference has no vector types, so this arm is
+        // reachable only from foreign or hand-crafted `.wasm`. The arms folded in
+        // here were also miswired beyond being undeclared — the four
+        // `V128Load*Lane` variants emitted the *store* constructor, and the six
+        // splats applied a three-argument constructor to two arguments.
+        Operator::V128Load { .. }
+        | Operator::V128Load8x8S { .. }
+        | Operator::V128Load8x8U { .. }
+        | Operator::V128Load16x4S { .. }
+        | Operator::V128Load16x4U { .. }
+        | Operator::V128Load32x2S { .. }
+        | Operator::V128Load32x2U { .. }
+        | Operator::V128Load8Splat { .. }
+        | Operator::V128Load16Splat { .. }
+        | Operator::V128Load32Splat { .. }
+        | Operator::V128Load64Splat { .. }
+        | Operator::V128Load32Zero { .. }
+        | Operator::V128Load64Zero { .. }
+        | Operator::V128Store { .. }
+        | Operator::V128Load8Lane { .. }
+        | Operator::V128Load16Lane { .. }
+        | Operator::V128Load32Lane { .. }
+        | Operator::V128Load64Lane { .. }
+        | Operator::V128Store8Lane { .. }
+        | Operator::V128Store16Lane { .. }
+        | Operator::V128Store32Lane { .. }
+        | Operator::V128Store64Lane { .. }
+        | Operator::V128Const { .. }
+        | Operator::I8x16Shuffle { .. }
+        | Operator::I8x16ExtractLaneS { .. }
+        | Operator::I8x16ExtractLaneU { .. }
+        | Operator::I8x16ReplaceLane { .. }
+        | Operator::I16x8ExtractLaneS { .. }
+        | Operator::I16x8ExtractLaneU { .. }
+        | Operator::I16x8ReplaceLane { .. }
+        | Operator::I32x4ExtractLane { .. }
+        | Operator::I32x4ReplaceLane { .. }
+        | Operator::I64x2ExtractLane { .. }
+        | Operator::I64x2ReplaceLane { .. }
+        | Operator::F32x4ExtractLane { .. }
+        | Operator::F32x4ReplaceLane { .. }
+        | Operator::F64x2ExtractLane { .. }
+        | Operator::F64x2ReplaceLane { .. }
+        | Operator::I8x16Swizzle
+        | Operator::I8x16Splat
+        | Operator::I16x8Splat
+        | Operator::I32x4Splat
+        | Operator::I64x2Splat
+        | Operator::F32x4Splat
+        | Operator::F64x2Splat
+        | Operator::I8x16Eq
+        | Operator::I8x16Ne
+        | Operator::I8x16LtS
+        | Operator::I8x16LtU
+        | Operator::I8x16GtS
+        | Operator::I8x16GtU
+        | Operator::I8x16LeS
+        | Operator::I8x16LeU
+        | Operator::I8x16GeS
+        | Operator::I8x16GeU
+        | Operator::I16x8Eq
+        | Operator::I16x8Ne
+        | Operator::I16x8LtS
+        | Operator::I16x8LtU
+        | Operator::I16x8GtS
+        | Operator::I16x8GtU
+        | Operator::I16x8LeS
+        | Operator::I16x8LeU
+        | Operator::I16x8GeS
+        | Operator::I16x8GeU
+        | Operator::I32x4Eq
+        | Operator::I32x4Ne
+        | Operator::I32x4LtS
+        | Operator::I32x4LtU
+        | Operator::I32x4GtS
+        | Operator::I32x4GtU
+        | Operator::I32x4LeS
+        | Operator::I32x4LeU
+        | Operator::I32x4GeS
+        | Operator::I32x4GeU
+        | Operator::I64x2Eq
+        | Operator::I64x2Ne
+        | Operator::I64x2LtS
+        | Operator::I64x2GtS
+        | Operator::I64x2LeS
+        | Operator::I64x2GeS
+        | Operator::F32x4Eq
+        | Operator::F32x4Ne
+        | Operator::F32x4Lt
+        | Operator::F32x4Gt
+        | Operator::F32x4Le
+        | Operator::F32x4Ge
+        | Operator::F64x2Eq
+        | Operator::F64x2Ne
+        | Operator::F64x2Lt
+        | Operator::F64x2Gt
+        | Operator::F64x2Le
+        | Operator::F64x2Ge
+        | Operator::V128Not
+        | Operator::V128And
+        | Operator::V128AndNot
+        | Operator::V128Or
+        | Operator::V128Xor
+        | Operator::V128Bitselect
+        | Operator::V128AnyTrue
+        | Operator::I8x16Abs
+        | Operator::I8x16Neg
+        | Operator::I8x16Popcnt
+        | Operator::I8x16AllTrue
+        | Operator::I8x16Bitmask
+        | Operator::I8x16NarrowI16x8S
+        | Operator::I8x16NarrowI16x8U
+        | Operator::I8x16Shl
+        | Operator::I8x16ShrS
+        | Operator::I8x16ShrU
+        | Operator::I8x16Add
+        | Operator::I8x16AddSatS
+        | Operator::I8x16AddSatU
+        | Operator::I8x16Sub
+        | Operator::I8x16SubSatS
+        | Operator::I8x16SubSatU
+        | Operator::I8x16MinS
+        | Operator::I8x16MinU
+        | Operator::I8x16MaxS
+        | Operator::I8x16MaxU
+        | Operator::I8x16AvgrU
+        | Operator::I16x8ExtAddPairwiseI8x16S
+        | Operator::I16x8ExtAddPairwiseI8x16U
+        | Operator::I16x8Abs
+        | Operator::I16x8Neg
+        | Operator::I16x8Q15MulrSatS
+        | Operator::I16x8AllTrue
+        | Operator::I16x8Bitmask
+        | Operator::I16x8NarrowI32x4S
+        | Operator::I16x8NarrowI32x4U
+        | Operator::I16x8ExtendLowI8x16S
+        | Operator::I16x8ExtendHighI8x16S
+        | Operator::I16x8ExtendLowI8x16U
+        | Operator::I16x8ExtendHighI8x16U
+        | Operator::I16x8Shl
+        | Operator::I16x8ShrS
+        | Operator::I16x8ShrU
+        | Operator::I16x8Add
+        | Operator::I16x8AddSatS
+        | Operator::I16x8AddSatU
+        | Operator::I16x8Sub
+        | Operator::I16x8SubSatS
+        | Operator::I16x8SubSatU
+        | Operator::I16x8Mul
+        | Operator::I16x8MinS
+        | Operator::I16x8MinU
+        | Operator::I16x8MaxS
+        | Operator::I16x8MaxU
+        | Operator::I16x8AvgrU
+        | Operator::I16x8ExtMulLowI8x16S
+        | Operator::I16x8ExtMulHighI8x16S
+        | Operator::I16x8ExtMulLowI8x16U
+        | Operator::I16x8ExtMulHighI8x16U
+        | Operator::I32x4ExtAddPairwiseI16x8S
+        | Operator::I32x4ExtAddPairwiseI16x8U
+        | Operator::I32x4Abs
+        | Operator::I32x4Neg
+        | Operator::I32x4AllTrue
+        | Operator::I32x4Bitmask
+        | Operator::I32x4ExtendLowI16x8S
+        | Operator::I32x4ExtendHighI16x8S
+        | Operator::I32x4ExtendLowI16x8U
+        | Operator::I32x4ExtendHighI16x8U
+        | Operator::I32x4Shl
+        | Operator::I32x4ShrS
+        | Operator::I32x4ShrU
+        | Operator::I32x4Add
+        | Operator::I32x4Sub
+        | Operator::I32x4Mul
+        | Operator::I32x4MinS
+        | Operator::I32x4MinU
+        | Operator::I32x4MaxS
+        | Operator::I32x4MaxU
+        | Operator::I32x4DotI16x8S
+        | Operator::I32x4ExtMulLowI16x8S
+        | Operator::I32x4ExtMulHighI16x8S
+        | Operator::I32x4ExtMulLowI16x8U
+        | Operator::I32x4ExtMulHighI16x8U
+        | Operator::I64x2Abs
+        | Operator::I64x2Neg
+        | Operator::I64x2AllTrue
+        | Operator::I64x2Bitmask
+        | Operator::I64x2ExtendLowI32x4S
+        | Operator::I64x2ExtendHighI32x4S
+        | Operator::I64x2ExtendLowI32x4U
+        | Operator::I64x2ExtendHighI32x4U
+        | Operator::I64x2Shl
+        | Operator::I64x2ShrS
+        | Operator::I64x2ShrU
+        | Operator::I64x2Add
+        | Operator::I64x2Sub
+        | Operator::I64x2Mul
+        | Operator::I64x2ExtMulLowI32x4S
+        | Operator::I64x2ExtMulHighI32x4S
+        | Operator::I64x2ExtMulLowI32x4U
+        | Operator::I64x2ExtMulHighI32x4U
+        | Operator::F32x4Ceil
+        | Operator::F32x4Floor
+        | Operator::F32x4Trunc
+        | Operator::F32x4Nearest
+        | Operator::F32x4Abs
+        | Operator::F32x4Neg
+        | Operator::F32x4Sqrt
+        | Operator::F32x4Add
+        | Operator::F32x4Sub
+        | Operator::F32x4Mul
+        | Operator::F32x4Div
+        | Operator::F32x4Min
+        | Operator::F32x4Max
+        | Operator::F32x4PMin
+        | Operator::F32x4PMax
+        | Operator::F64x2Ceil
+        | Operator::F64x2Floor
+        | Operator::F64x2Trunc
+        | Operator::F64x2Nearest
+        | Operator::F64x2Abs
+        | Operator::F64x2Neg
+        | Operator::F64x2Sqrt
+        | Operator::F64x2Add
+        | Operator::F64x2Sub
+        | Operator::F64x2Mul
+        | Operator::F64x2Div
+        | Operator::F64x2Min
+        | Operator::F64x2Max
+        | Operator::F64x2PMin
+        | Operator::F64x2PMax
+        | Operator::I32x4TruncSatF32x4S
+        | Operator::I32x4TruncSatF32x4U
+        | Operator::F32x4ConvertI32x4S
+        | Operator::F32x4ConvertI32x4U
+        | Operator::I32x4TruncSatF64x2SZero
+        | Operator::I32x4TruncSatF64x2UZero
+        | Operator::F64x2ConvertLowI32x4S
+        | Operator::F64x2ConvertLowI32x4U
+        | Operator::F32x4DemoteF64x2Zero
+        | Operator::F64x2PromoteLowF32x4
+        | Operator::I8x16RelaxedSwizzle
+        | Operator::I32x4RelaxedTruncF32x4S
+        | Operator::I32x4RelaxedTruncF32x4U
+        | Operator::I32x4RelaxedTruncF64x2SZero
+        | Operator::I32x4RelaxedTruncF64x2UZero
+        | Operator::F32x4RelaxedMadd
+        | Operator::F32x4RelaxedNmadd
+        | Operator::F64x2RelaxedMadd
+        | Operator::F64x2RelaxedNmadd
+        | Operator::I8x16RelaxedLaneselect
+        | Operator::I16x8RelaxedLaneselect
+        | Operator::I32x4RelaxedLaneselect
+        | Operator::I64x2RelaxedLaneselect
+        | Operator::F32x4RelaxedMin
+        | Operator::F32x4RelaxedMax
+        | Operator::F64x2RelaxedMin
+        | Operator::F64x2RelaxedMax
+        | Operator::I16x8RelaxedQ15mulrS
+        | Operator::I16x8RelaxedDotI8x16I7x16S
+        | Operator::I32x4RelaxedDotI8x16I7x16AddS => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!(
+                    "vector instruction {operator:?} (SIMD proposal — the wasm-verifier proof contract covers no vector types)"
+                ),
+            }));
         }
-        Operator::V128Load8x8S { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) ({memarg})")
-        }
-        Operator::V128Load8x8U { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) ({memarg})")
-        }
-        Operator::V128Load16x4S { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) ({memarg})")
-        }
-        Operator::V128Load16x4U { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
-        }
-        Operator::V128Load32x2S { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) ({memarg})")
-        }
-        Operator::V128Load32x2U { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) ({memarg})")
-        }
-        Operator::V128Load8Splat { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_splat Twv_8 ({memarg})")
-        }
-        Operator::V128Load16Splat { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_splat Twv_16 ({memarg})")
-        }
-        Operator::V128Load32Splat { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_splat Twv_32 ({memarg})")
-        }
-        Operator::V128Load64Splat { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_splat Twv_64 ({memarg})")
-        }
-        Operator::V128Load32Zero { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_zero Tztv_32 ({memarg})")
-        }
-        Operator::V128Load64Zero { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_load_vec LVA_zero Tztv_64 ({memarg})")
-        }
-        Operator::V128Store { memarg } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_64 ({memarg}) 0")
-        }
-        Operator::V128Load8Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
-        }
-        Operator::V128Load16Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
-        }
-        Operator::V128Load32Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
-        }
-        Operator::V128Load64Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
-        }
-        Operator::V128Store8Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
-        }
-        Operator::V128Store16Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
-        }
-        Operator::V128Store32Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
-        }
-        Operator::V128Store64Lane { memarg, lane } => {
-            let memarg = translate_memarg(memarg)?;
-            format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
-        }
-        Operator::V128Const { value } => {
-            let value = value.i128();
-            format!("BI_const_vec {value}")
-        }
-        Operator::I8x16Shuffle { .. } => todo!(),
-        Operator::I8x16ExtractLaneS { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_8_16) (Some SX_S) {lane}")
-        }
-        Operator::I8x16ExtractLaneU { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_8_16) (Some SX_U) {lane}")
-        }
-        //BI_replace_vec: shape_vec -> laneidx -> basic_instruction
-        Operator::I8x16ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_ishape SVI_8_16) {lane}")
-        }
-        Operator::I16x8ExtractLaneS { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_16_8) (Some SX_S) {lane}")
-        }
-        Operator::I16x8ExtractLaneU { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_16_8) (Some SX_U) {lane}")
-        }
-        Operator::I16x8ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_ishape SVI_16_8) {lane}")
-        }
-        Operator::I32x4ExtractLane { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_32_4) (Some SX_S) {lane}")
-        }
-        Operator::I32x4ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_ishape SVI_32_4) {lane}")
-        }
-        Operator::I64x2ExtractLane { lane } => {
-            format!("BI_extract_vec (SV_ishape SVI_64_2) (Some SX_S) {lane}")
-        }
-        Operator::I64x2ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_ishape SVI_64_2) {lane}")
-        }
-        Operator::F32x4ExtractLane { lane } => {
-            format!("BI_extract_vec (SV_fshape SVF_32_4) None {lane}")
-        }
-        Operator::F32x4ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_fshape SVF_32_4) {lane}")
-        }
-        Operator::F64x2ExtractLane { lane } => {
-            format!("BI_extract_vec (SV_fshape SVF_64_2) None {lane}")
-        }
-        Operator::F64x2ReplaceLane { lane } => {
-            format!("BI_replace_vec (SV_fshape SVF_64_2) {lane}")
-        }
-        Operator::I8x16Swizzle => todo!(),
-        Operator::I8x16Splat => "BI_load_vec LVA_splat Twv_8".to_string(),
-        Operator::I16x8Splat => "BI_load_vec LVA_splat Twv_16".to_string(),
-        Operator::I32x4Splat => "BI_load_vec LVA_splat Twv_32".to_string(),
-        Operator::I64x2Splat => "BI_load_vec LVA_splat Twv_64".to_string(),
-        Operator::F32x4Splat => "BI_load_vec LVA_splat Twv_32".to_string(),
-        Operator::F64x2Splat => "BI_load_vec LVA_splat Twv_64".to_string(),
-        Operator::I8x16Eq => todo!(),
-        Operator::I8x16Ne => todo!(),
-        Operator::I8x16LtS => todo!(),
-        Operator::I8x16LtU => todo!(),
-        Operator::I8x16GtS => todo!(),
-        Operator::I8x16GtU => todo!(),
-        Operator::I8x16LeS => todo!(),
-        Operator::I8x16LeU => todo!(),
-        Operator::I8x16GeS => todo!(),
-        Operator::I8x16GeU => todo!(),
-        Operator::I16x8Eq => todo!(),
-        Operator::I16x8Ne => todo!(),
-        Operator::I16x8LtS => todo!(),
-        Operator::I16x8LtU => todo!(),
-        Operator::I16x8GtS => todo!(),
-        Operator::I16x8GtU => todo!(),
-        Operator::I16x8LeS => todo!(),
-        Operator::I16x8LeU => todo!(),
-        Operator::I16x8GeS => todo!(),
-        Operator::I16x8GeU => todo!(),
-        Operator::I32x4Eq => todo!(),
-        Operator::I32x4Ne => todo!(),
-        Operator::I32x4LtS => todo!(),
-        Operator::I32x4LtU => todo!(),
-        Operator::I32x4GtS => todo!(),
-        Operator::I32x4GtU => todo!(),
-        Operator::I32x4LeS => todo!(),
-        Operator::I32x4LeU => todo!(),
-        Operator::I32x4GeS => todo!(),
-        Operator::I32x4GeU => todo!(),
-        Operator::I64x2Eq => todo!(),
-        Operator::I64x2Ne => todo!(),
-        Operator::I64x2LtS => todo!(),
-        Operator::I64x2GtS => todo!(),
-        Operator::I64x2LeS => todo!(),
-        Operator::I64x2GeS => todo!(),
-        Operator::F32x4Eq => todo!(),
-        Operator::F32x4Ne => todo!(),
-        Operator::F32x4Lt => todo!(),
-        Operator::F32x4Gt => todo!(),
-        Operator::F32x4Le => todo!(),
-        Operator::F32x4Ge => todo!(),
-        Operator::F64x2Eq => todo!(),
-        Operator::F64x2Ne => todo!(),
-        Operator::F64x2Lt => todo!(),
-        Operator::F64x2Gt => todo!(),
-        Operator::F64x2Le => todo!(),
-        Operator::F64x2Ge => todo!(),
-        Operator::V128Not => todo!(),
-        Operator::V128And => todo!(),
-        Operator::V128AndNot => todo!(),
-        Operator::V128Or => todo!(),
-        Operator::V128Xor => todo!(),
-        Operator::V128Bitselect => todo!(),
-        Operator::V128AnyTrue => todo!(),
-        Operator::I8x16Abs => todo!(),
-        Operator::I8x16Neg => todo!(),
-        Operator::I8x16Popcnt => todo!(),
-        Operator::I8x16AllTrue => todo!(),
-        Operator::I8x16Bitmask => todo!(),
-        Operator::I8x16NarrowI16x8S => todo!(),
-        Operator::I8x16NarrowI16x8U => todo!(),
-        Operator::I8x16Shl => todo!(),
-        Operator::I8x16ShrS => todo!(),
-        Operator::I8x16ShrU => todo!(),
-        Operator::I8x16Add => todo!(),
-        Operator::I8x16AddSatS => todo!(),
-        Operator::I8x16AddSatU => todo!(),
-        Operator::I8x16Sub => todo!(),
-        Operator::I8x16SubSatS => todo!(),
-        Operator::I8x16SubSatU => todo!(),
-        Operator::I8x16MinS => todo!(),
-        Operator::I8x16MinU => todo!(),
-        Operator::I8x16MaxS => todo!(),
-        Operator::I8x16MaxU => todo!(),
-        Operator::I8x16AvgrU => todo!(),
-        Operator::I16x8ExtAddPairwiseI8x16S => todo!(),
-        Operator::I16x8ExtAddPairwiseI8x16U => todo!(),
-        Operator::I16x8Abs => todo!(),
-        Operator::I16x8Neg => todo!(),
-        Operator::I16x8Q15MulrSatS => todo!(),
-        Operator::I16x8AllTrue => todo!(),
-        Operator::I16x8Bitmask => todo!(),
-        Operator::I16x8NarrowI32x4S => todo!(),
-        Operator::I16x8NarrowI32x4U => todo!(),
-        Operator::I16x8ExtendLowI8x16S => todo!(),
-        Operator::I16x8ExtendHighI8x16S => todo!(),
-        Operator::I16x8ExtendLowI8x16U => todo!(),
-        Operator::I16x8ExtendHighI8x16U => todo!(),
-        Operator::I16x8Shl => todo!(),
-        Operator::I16x8ShrS => todo!(),
-        Operator::I16x8ShrU => todo!(),
-        Operator::I16x8Add => todo!(),
-        Operator::I16x8AddSatS => todo!(),
-        Operator::I16x8AddSatU => todo!(),
-        Operator::I16x8Sub => todo!(),
-        Operator::I16x8SubSatS => todo!(),
-        Operator::I16x8SubSatU => todo!(),
-        Operator::I16x8Mul => todo!(),
-        Operator::I16x8MinS => todo!(),
-        Operator::I16x8MinU => todo!(),
-        Operator::I16x8MaxS => todo!(),
-        Operator::I16x8MaxU => todo!(),
-        Operator::I16x8AvgrU => todo!(),
-        Operator::I16x8ExtMulLowI8x16S => todo!(),
-        Operator::I16x8ExtMulHighI8x16S => todo!(),
-        Operator::I16x8ExtMulLowI8x16U => todo!(),
-        Operator::I16x8ExtMulHighI8x16U => todo!(),
-        Operator::I32x4ExtAddPairwiseI16x8S => todo!(),
-        Operator::I32x4ExtAddPairwiseI16x8U => todo!(),
-        Operator::I32x4Abs => todo!(),
-        Operator::I32x4Neg => todo!(),
-        Operator::I32x4AllTrue => todo!(),
-        Operator::I32x4Bitmask => todo!(),
-        Operator::I32x4ExtendLowI16x8S => todo!(),
-        Operator::I32x4ExtendHighI16x8S => todo!(),
-        Operator::I32x4ExtendLowI16x8U => todo!(),
-        Operator::I32x4ExtendHighI16x8U => todo!(),
-        Operator::I32x4Shl => todo!(),
-        Operator::I32x4ShrS => todo!(),
-        Operator::I32x4ShrU => todo!(),
-        Operator::I32x4Add => todo!(),
-        Operator::I32x4Sub => todo!(),
-        Operator::I32x4Mul => todo!(),
-        Operator::I32x4MinS => todo!(),
-        Operator::I32x4MinU => todo!(),
-        Operator::I32x4MaxS => todo!(),
-        Operator::I32x4MaxU => todo!(),
-        Operator::I32x4DotI16x8S => todo!(),
-        Operator::I32x4ExtMulLowI16x8S => todo!(),
-        Operator::I32x4ExtMulHighI16x8S => todo!(),
-        Operator::I32x4ExtMulLowI16x8U => todo!(),
-        Operator::I32x4ExtMulHighI16x8U => todo!(),
-        Operator::I64x2Abs => todo!(),
-        Operator::I64x2Neg => todo!(),
-        Operator::I64x2AllTrue => todo!(),
-        Operator::I64x2Bitmask => todo!(),
-        Operator::I64x2ExtendLowI32x4S => todo!(),
-        Operator::I64x2ExtendHighI32x4S => todo!(),
-        Operator::I64x2ExtendLowI32x4U => todo!(),
-        Operator::I64x2ExtendHighI32x4U => todo!(),
-        Operator::I64x2Shl => todo!(),
-        Operator::I64x2ShrS => todo!(),
-        Operator::I64x2ShrU => todo!(),
-        Operator::I64x2Add => todo!(),
-        Operator::I64x2Sub => todo!(),
-        Operator::I64x2Mul => todo!(),
-        Operator::I64x2ExtMulLowI32x4S => todo!(),
-        Operator::I64x2ExtMulHighI32x4S => todo!(),
-        Operator::I64x2ExtMulLowI32x4U => todo!(),
-        Operator::I64x2ExtMulHighI32x4U => todo!(),
-        Operator::F32x4Ceil => todo!(),
-        Operator::F32x4Floor => todo!(),
-        Operator::F32x4Trunc => todo!(),
-        Operator::F32x4Nearest => todo!(),
-        Operator::F32x4Abs => todo!(),
-        Operator::F32x4Neg => todo!(),
-        Operator::F32x4Sqrt => todo!(),
-        Operator::F32x4Add => todo!(),
-        Operator::F32x4Sub => todo!(),
-        Operator::F32x4Mul => todo!(),
-        Operator::F32x4Div => todo!(),
-        Operator::F32x4Min => todo!(),
-        Operator::F32x4Max => todo!(),
-        Operator::F32x4PMin => todo!(),
-        Operator::F32x4PMax => todo!(),
-        Operator::F64x2Ceil => todo!(),
-        Operator::F64x2Floor => todo!(),
-        Operator::F64x2Trunc => todo!(),
-        Operator::F64x2Nearest => todo!(),
-        Operator::F64x2Abs => todo!(),
-        Operator::F64x2Neg => todo!(),
-        Operator::F64x2Sqrt => todo!(),
-        Operator::F64x2Add => todo!(),
-        Operator::F64x2Sub => todo!(),
-        Operator::F64x2Mul => todo!(),
-        Operator::F64x2Div => todo!(),
-        Operator::F64x2Min => todo!(),
-        Operator::F64x2Max => todo!(),
-        Operator::F64x2PMin => todo!(),
-        Operator::F64x2PMax => todo!(),
-        Operator::I32x4TruncSatF32x4S => todo!(),
-        Operator::I32x4TruncSatF32x4U => todo!(),
-        Operator::F32x4ConvertI32x4S => todo!(),
-        Operator::F32x4ConvertI32x4U => todo!(),
-        Operator::I32x4TruncSatF64x2SZero => todo!(),
-        Operator::I32x4TruncSatF64x2UZero => todo!(),
-        Operator::F64x2ConvertLowI32x4S => todo!(),
-        Operator::F64x2ConvertLowI32x4U => todo!(),
-        Operator::F32x4DemoteF64x2Zero => todo!(),
-        Operator::F64x2PromoteLowF32x4 => todo!(),
-        Operator::I8x16RelaxedSwizzle => todo!(),
-        Operator::I32x4RelaxedTruncF32x4S => todo!(),
-        Operator::I32x4RelaxedTruncF32x4U => todo!(),
-        Operator::I32x4RelaxedTruncF64x2SZero => todo!(),
-        Operator::I32x4RelaxedTruncF64x2UZero => todo!(),
-        Operator::F32x4RelaxedMadd => todo!(),
-        Operator::F32x4RelaxedNmadd => todo!(),
-        Operator::F64x2RelaxedMadd => todo!(),
-        Operator::F64x2RelaxedNmadd => todo!(),
-        Operator::I8x16RelaxedLaneselect => todo!(),
-        Operator::I16x8RelaxedLaneselect => todo!(),
-        Operator::I32x4RelaxedLaneselect => todo!(),
-        Operator::I64x2RelaxedLaneselect => todo!(),
-        Operator::F32x4RelaxedMin => todo!(),
-        Operator::F32x4RelaxedMax => todo!(),
-        Operator::F64x2RelaxedMin => todo!(),
-        Operator::F64x2RelaxedMax => todo!(),
-        Operator::I16x8RelaxedQ15mulrS => todo!(),
-        Operator::I16x8RelaxedDotI8x16I7x16S => todo!(),
-        Operator::I32x4RelaxedDotI8x16I7x16AddS => todo!(),
         Operator::TryTable { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: "try_table (exception-handling instruction)".into(),
@@ -2281,12 +2268,20 @@ fn translate_basic_operator(
                 description: "throw (exception-handling instruction)".into(),
             }));
         }
-        Operator::ThrowRef => todo!(),
-        Operator::Try { .. } => todo!(),
-        Operator::Catch { .. } => todo!(),
-        Operator::Rethrow { .. } => todo!(),
-        Operator::Delegate { .. } => todo!(),
-        Operator::CatchAll => todo!(),
+        Operator::ThrowRef => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "throw_ref (exception-handling instruction)".into(),
+            }));
+        }
+        Operator::Try { .. }
+        | Operator::Catch { .. }
+        | Operator::Rethrow { .. }
+        | Operator::Delegate { .. }
+        | Operator::CatchAll => {
+            return Err(unsupported_family(
+                "legacy exception handling (try / catch / rethrow)",
+            ));
+        }
         Operator::GlobalAtomicGet {
             ordering: _,
             global_index: _,
@@ -2442,7 +2437,6 @@ fn translate_basic_operator(
                 description: format!("atomic GC instruction {operator:?} (GC + threads proposals)"),
             }));
         }
-        Operator::RefI31Shared => todo!(),
         Operator::CallRef { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: "call_ref (typed function reference instruction)".into(),
@@ -2453,22 +2447,39 @@ fn translate_basic_operator(
                 description: "return_call_ref (typed function reference instruction)".into(),
             }));
         }
-        Operator::RefAsNonNull => todo!(),
-        Operator::BrOnNull { .. } => todo!(),
-        Operator::BrOnNonNull { .. } => todo!(),
-        Operator::ContNew { .. } => todo!(),
-        Operator::ContBind { .. } => todo!(),
-        Operator::Suspend { .. } => todo!(),
-        Operator::Resume { .. } => todo!(),
-        Operator::ResumeThrow { .. } => todo!(),
-        Operator::Switch { .. } => todo!(),
-        Operator::I64Add128 { .. } => todo!(),
-        Operator::I64Sub128 { .. } => todo!(),
-        Operator::I64MulWideS => todo!(),
-        Operator::I64MulWideU => todo!(),
+        Operator::RefAsNonNull | Operator::BrOnNull { .. } | Operator::BrOnNonNull { .. } => {
+            return Err(unsupported_family(
+                "typed function references (ref.as_non_null / br_on_null)",
+            ));
+        }
+        Operator::ContNew { .. }
+        | Operator::ContBind { .. }
+        | Operator::Suspend { .. }
+        | Operator::Resume { .. }
+        | Operator::ResumeThrow { .. }
+        | Operator::Switch { .. } => {
+            return Err(unsupported_family(
+                "stack switching (cont.new / resume / suspend)",
+            ));
+        }
+        Operator::I64Add128 { .. }
+        | Operator::I64Sub128 { .. }
+        | Operator::I64MulWideS
+        | Operator::I64MulWideU => {
+            return Err(unsupported_family(
+                "128-bit wide arithmetic (i64.add128 / i64.mul_wide_s)",
+            ));
+        }
+        // Every variant the parser can currently produce is matched above. This
+        // residual exists because `Operator` is `#[non_exhaustive]`: a variant
+        // added upstream lands here and is refused rather than silently mistaken
+        // for something else. The wording claims only that no translation exists,
+        // which stays true whether or not the proof model could represent it.
         _ => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-                description: format!("operator {operator:?} not recognized"),
+                description: format!(
+                    "instruction {operator:?} (not translated to the WasmCert proof model)"
+                ),
             }));
         }
     };

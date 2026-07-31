@@ -357,17 +357,18 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
 }
 
 /// Whether `op` is a pure integer numeric operator: an integer comparison,
-/// arithmetic, bitwise, or width conversion instruction. These carry no index
-/// and no effect, so they are always safe to copy verbatim.
+/// arithmetic, or bitwise instruction. These carry no index and no effect, so
+/// they are always safe to copy verbatim.
 ///
 /// Float numeric operators are deliberately excluded — they are rejected up
 /// front by [`is_float`] (the Inference language has no `f32`/`f64` types). So
-/// are sign-extension (`i32.extend8_s`, …) and saturating float-to-int
-/// (`i32.trunc_sat_f32_s`, …): the Rocq translator has no lowering for either,
-/// and Inference codegen emits neither, so they reject as unmodeled families
-/// rather than copy into a body the `-v` proof path cannot render. Only the
-/// three integer width conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`) remain
-/// from the conversion block.
+/// is the whole conversion block: sign-extension (`i32.extend8_s`, …),
+/// saturating float-to-int (`i32.trunc_sat_f32_s`, …), and the integer width
+/// conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`). The Rocq translator
+/// declares no `cvtop` family at all, so not even an integer-to-integer
+/// conversion has a lowering, and Inference codegen emits none of them; they
+/// reject as unmodeled families rather than copy into a body the `-v` proof
+/// path cannot render.
 fn is_numeric(op: &Operator) -> bool {
     use Operator::*;
     matches!(
@@ -386,8 +387,6 @@ fn is_numeric(op: &Operator) -> bool {
             | I64Clz | I64Ctz | I64Popcnt | I64Add | I64Sub | I64Mul | I64DivS | I64DivU
             | I64RemS | I64RemU | I64And | I64Or | I64Xor | I64Shl | I64ShrS | I64ShrU | I64Rotl
             | I64Rotr
-        // integer width conversions
-            | I32WrapI64 | I64ExtendI32S | I64ExtendI32U
     )
 }
 
@@ -548,6 +547,12 @@ fn operator_family(op: &Operator) -> &'static str {
         // codegen narrows sub-i32 values with shifts/masks instead.
         I32Extend8S | I32Extend16S | I64Extend8S | I64Extend16S | I64Extend32S => {
             "sign-extension (not supported by the Rocq translator)"
+        }
+        // Integer width conversions. The Rocq translator declares no `cvtop`
+        // family, so a conversion has no lowering even between two integer
+        // types; Inference codegen emits none of them.
+        I32WrapI64 | I64ExtendI32S | I64ExtendI32U => {
+            "integer width conversions (not supported by the Rocq translator)"
         }
         // Segment-indexed table initialization. Carries element segments the
         // merge cannot relocate, and the Rocq translator has no lowering for it.
@@ -921,14 +926,27 @@ mod tests {
     }
 
     #[test]
-    fn integer_width_conversions_are_accepted() {
-        // The three integer width conversions survive the allow-list (they are
-        // the only conversions Inference codegen emits and the translator models).
-        for op in ops(
-            r#"(module (func (param i64) (result i64)
-                 local.get 0 i32.wrap_i64 i64.extend_i32_s) (export "f" (func 0)))"#,
-        ) {
-            check_operator(&op).expect("integer width conversion must be accepted");
-        }
+    fn integer_width_conversions_are_rejected() {
+        // The last conversions to leave the allow-list. They were kept because
+        // the translator did have an arm for each, but that arm emitted
+        // `BI_cvtop` — a constructor the Rocq proof model never declares — so
+        // the "allow-listed implies lowerable" premise held only at the Rust
+        // level. The model declares no conversion at all, integer-to-integer
+        // included.
+        assert_body_rejects_with(
+            r#"(module (func (param i64) (result i32)
+                 local.get 0 i32.wrap_i64) (export "f" (func 0)))"#,
+            &["integer width conversions"],
+        );
+        assert_body_rejects_with(
+            r#"(module (func (param i32) (result i64)
+                 local.get 0 i64.extend_i32_s) (export "f" (func 0)))"#,
+            &["integer width conversions"],
+        );
+        assert_body_rejects_with(
+            r#"(module (func (param i32) (result i64)
+                 local.get 0 i64.extend_i32_u) (export "f" (func 0)))"#,
+            &["integer width conversions"],
+        );
     }
 }
