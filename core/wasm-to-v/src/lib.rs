@@ -89,8 +89,9 @@
 //! | `funcref` | `T_ref T_funcref` |
 //! | `externref` | `T_ref T_externref` |
 //!
-//! The proof model's `number_type` is `T_i32 | T_i64` and it declares no vector
-//! type, so `f32`, `f64`, and `v128` have nothing to map to. The rejection covers
+//! The wasm-verifier proof contract admits only `T_i32 | T_i64` of `number_type`
+//! and no vector type, so `f32`, `f64`, and `v128` have nothing verifiable to map
+//! to. The rejection covers
 //! function parameters and results, locals, globals, and block result types
 //! through one chokepoint, so a float in a *signature* is refused even when no
 //! float instruction appears in any body.
@@ -877,9 +878,10 @@ mod link_robustness {
     }
 }
 
-/// Fail-closed rejection of every construct the WasmCert proof model the vendored
-/// stub mirrors cannot represent: floating-point, SIMD/vector, the conversion
-/// (`cvtop`) family, and the proposal families that previously hit `todo!()`.
+/// Fail-closed rejection of every construct outside the wasm-verifier proof
+/// contract (mirrored in-repo by the vendored stub): floating-point, SIMD/vector,
+/// the conversion (`cvtop`) family, and the proposal families that previously hit
+/// `todo!()`.
 ///
 /// The stub in `rocq-stub/` declares `number_type` with only `T_i32`/`T_i64`, no
 /// `T_v128`, and no `cvtop`/`BI_cvtop` (see its README "Scope"). Every fixture here
@@ -1102,7 +1104,7 @@ mod unsupported_surface {
     ///
     /// The wasm-linker's allow-list mirrors this: it rejects these three at link
     /// time for the same reason (an allow-listed operator must have a translator
-    /// lowering, and `BI_cvtop` has none the proof model declares).
+    /// lowering, and no `cvtop` lowering exists under the proof contract).
     #[test]
     #[cfg_attr(miri, ignore)]
     fn integer_width_conversions_are_rejected() {

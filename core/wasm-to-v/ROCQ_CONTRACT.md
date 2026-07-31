@@ -483,7 +483,7 @@ entries are matched by name, not position.
   |---|---|
   | float instructions | all loads, stores, constants, comparisons, unops, binops |
   | vector instructions | the entire SIMD proposal, relaxed-SIMD included |
-  | conversion instructions | the whole `cvtop` block — sign-extension, saturating float-to-int, **and the integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s/u`), since the model declares no conversion at all |
+  | conversion instructions | the whole `cvtop` block — sign-extension, saturating float-to-int, **and the integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s/u`), since the contract covers no conversion at all |
   | `f32`, `f64`, `v128` value types | every position: parameters, results, locals, globals, block result types |
   | unmodeled proposal families | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
 
@@ -501,11 +501,18 @@ entries are matched by name, not position.
   entry fails the whole translation rather than being omitted from a
   section and silently shifting every later index.
 
-  One exception to the model-attributed reasoning: `select t`
+  One exception to the contract-attributed reasoning: `select t`
   (`TypedSelect`) is rejected even though the context *does* declare
   `BI_select : option (list value_type) -> basic_instruction`. No
-  lowering is wired for it, and the message attributes the gap to the
-  translator rather than to the model.
+  lowering is wired for it, and the message says so, attributing the
+  gap to the translator rather than to WasmCert.
+
+  The attribution in every message names the *contract*, not WasmCert:
+  vanilla WasmCert-Coq does model floats and conversions (which is why
+  the old float relop emission was *ill-typed* rather than unbound),
+  but the wasm-verifier program logic covers none of that surface, so
+  no such term can be verified. The stub mirrors the contract subset,
+  not all of WasmCert.
 
 ## Migration
 

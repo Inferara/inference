@@ -293,7 +293,7 @@ Accumulating before failing is deliberate: translating every section first means
 
 Recoverable `WasmToVError`s the translator returns:
 
-- **`UnsupportedFeature`**: a construct outside the subset the WasmCert proof model represents — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction outside a spec function; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the model does not describe. See [Rejection Policy](#rejection-policy).
+- **`UnsupportedFeature`**: a construct outside the subset the wasm-verifier proof contract covers — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction outside a spec function; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the contract does not cover. See [Rejection Policy](#rejection-policy).
 - **`WasmParse`**: malformed bytes, surfaced by the parser phase
 - **Identifier errors**: a module or function name that cannot be rendered as a legal Rocq identifier
 
@@ -305,11 +305,11 @@ The translator emits only what the vendored WasmCert proof stub in `rocq-stub/` 
 
 | Construct | Reason the message gives |
 |-----------|--------------------------|
-| Any `f32`/`f64` instruction | the WasmCert proof model has no floating-point types |
-| Any SIMD/vector instruction | SIMD proposal — the WasmCert proof model has no vector types |
-| Any conversion instruction, **integer width conversions included** | the WasmCert proof model declares no conversion instructions, integer width conversions included |
+| Any `f32`/`f64` instruction | the wasm-verifier proof contract covers no floating-point surface |
+| Any SIMD/vector instruction | SIMD proposal — the wasm-verifier proof contract covers no vector types |
+| Any conversion instruction, **integer width conversions included** | the wasm-verifier proof contract covers no conversion instructions, integer width conversions included |
 | `f32`, `f64`, or `v128` as a value type, in any position | as above, per type, plus the position it occupies |
-| GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops | no lowering in the WasmCert proof model |
+| GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops | no lowering under the wasm-verifier proof contract |
 
 No Inference program can reach any of these: the language has no floating-point types, no vectors, and emits no conversion instruction, so `coqc` gating over Inference sources can never cover them. They are reachable only through foreign bytes — the external linking path (`infc -L` / `--wasm-dep`) and the public `translate_bytes` API — which is exactly why the refusal has to be explicit. This is the second layer of a two-layer defense: `core/wasm-linker` already refuses float, SIMD, conversion, sign-extension, and tail-call content in external modules, so on the CLI path the linker's mnemonic-bearing diagnostic normally fires first.
 
@@ -477,7 +477,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
    - See [WebAssembly SIMD proposal](https://github.com/WebAssembly/simd)
 
 5. **Bulk Memory**: partially supported
-   - `memory.init`, `data.drop`, `memory.copy`, and `memory.fill` translate; the segment-indexed table operations (`table.init`, `elem.drop`, `table.copy`) are rejected — they have no lowering in the WasmCert proof model
+   - `memory.init`, `data.drop`, `memory.copy`, and `memory.fill` translate; the segment-indexed table operations (`table.init`, `elem.drop`, `table.copy`) are rejected — they have no lowering under the wasm-verifier proof contract
    - See [WebAssembly Bulk Memory proposal](https://github.com/WebAssembly/bulk-memory-operations)
 
 ### Known Issues

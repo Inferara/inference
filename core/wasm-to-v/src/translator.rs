@@ -919,21 +919,21 @@ fn translate_value_type(val_type: &wpValType, role: &'static str) -> anyhow::Res
         wpValType::F32 => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "floating-point value type `f32` in {role} (the WasmCert proof model has no floating-point types)"
+                    "floating-point value type `f32` in {role} (the wasm-verifier proof contract covers no floating-point types)"
                 ),
             }));
         }
         wpValType::F64 => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "floating-point value type `f64` in {role} (the WasmCert proof model has no floating-point types)"
+                    "floating-point value type `f64` in {role} (the wasm-verifier proof contract covers no floating-point types)"
                 ),
             }));
         }
         wpValType::V128 => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "vector value type `v128` in {role} (SIMD proposal — the WasmCert proof model has no vector types)"
+                    "vector value type `v128` in {role} (SIMD proposal — the wasm-verifier proof contract covers no vector types)"
                 ),
             }));
         }
@@ -1448,8 +1448,8 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     Ok(res)
 }
 
-/// The rejection every unmodeled proposal family shares: valid WASM the vendored
-/// WasmCert proof model simply does not describe, so there is nothing to lower it
+/// The rejection every unmodeled proposal family shares: valid WASM the
+/// wasm-verifier proof contract does not cover, so there is nothing to lower it
 /// to. Inference codegen emits none of these constructs, and each of them used to
 /// hit an unimplemented-macro panic — a process abort on the linking path,
 /// strictly worse than a diagnostic.
@@ -1461,7 +1461,7 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
 /// so the two labels are never visible in one run.
 fn unsupported_family(label: &str) -> anyhow::Error {
     anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-        description: format!("{label} (no lowering in the WasmCert proof model)"),
+        description: format!("{label} (no lowering under the wasm-verifier proof contract)"),
     })
 }
 
@@ -1734,10 +1734,11 @@ fn translate_basic_operator(
         Operator::I64ShrU => "BI_binop T_i64 (Binop_i (BOI_shr SX_U))".to_string(),
         Operator::I64Rotl => "BI_binop T_i64 (Binop_i BOI_rotl)".to_string(),
         Operator::I64Rotr => "BI_binop T_i64 (Binop_i BOI_rotr)".to_string(),
-        // The vendored WasmCert proof model declares no floating-point number
-        // types (`T_f32`/`T_f64`), no float operator families (`relop_f`,
-        // `binop_f`, `unop_f`), and no float value constructors. Inference has
-        // no floating-point types, so no Inference-compiled program reaches
+        // Vanilla WasmCert declares a full floating-point surface, but the
+        // wasm-verifier proof contract covers none of it — no `T_f32`/`T_f64`,
+        // no `relop_f`/`binop_f`/`unop_f`, no float value constructors — so a
+        // float term has no verifiable lowering. Inference has no
+        // floating-point types, so no Inference-compiled program reaches
         // this arm; it is reachable only from foreign or hand-crafted `.wasm`.
         // The float relop arms folded in here were additionally ill-typed,
         // wrapping integer `ROI_*` constructors inside the float `Relop_f`.
@@ -1789,12 +1790,12 @@ fn translate_basic_operator(
         | Operator::F64Copysign => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "floating-point instruction {operator:?} (the WasmCert proof model has no floating-point types)"
+                    "floating-point instruction {operator:?} (the wasm-verifier proof contract covers no floating-point surface)"
                 ),
             }));
         }
-        // The vendored WasmCert proof model declares no `cvtop` family and no
-        // `BI_cvtop` instruction, so every conversion is unrepresentable —
+        // The wasm-verifier proof contract covers no conversion surface
+        // (`cvtop`/`BI_cvtop`), so every conversion is untranslatable —
         // including the three integer width conversions, which involve no float
         // type at all. Inference codegen emits no conversion of any kind, so
         // this arm is reachable only from foreign or hand-crafted `.wasm`.
@@ -1838,7 +1839,7 @@ fn translate_basic_operator(
         | Operator::I64TruncSatF64U => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "conversion instruction {operator:?} (the WasmCert proof model declares no conversion instructions, integer width conversions included)"
+                    "conversion instruction {operator:?} (the wasm-verifier proof contract covers no conversion instructions, integer width conversions included)"
                 ),
             }));
         }
@@ -1893,7 +1894,7 @@ fn translate_basic_operator(
         Operator::TypedSelect { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description:
-                    "typed select (the proof model supports it; no translator lowering is wired)"
+                    "typed select (WasmCert supports it; no translator lowering is wired)"
                         .into(),
             }));
         }
@@ -1988,8 +1989,8 @@ fn translate_basic_operator(
                 description: format!("atomic instruction {operator:?} (threads proposal)"),
             }));
         }
-        // The SIMD proposal's `v128` type has no counterpart in the vendored
-        // WasmCert proof model: it declares neither the vector value type nor any
+        // The SIMD proposal's `v128` type is outside the wasm-verifier proof
+        // contract, which covers neither the vector value type nor any
         // vector instruction. Inference has no vector types, so this arm is
         // reachable only from foreign or hand-crafted `.wasm`. The arms folded in
         // here were also miswired beyond being undeclared — the four
@@ -2253,7 +2254,7 @@ fn translate_basic_operator(
         | Operator::I32x4RelaxedDotI8x16I7x16AddS => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "vector instruction {operator:?} (SIMD proposal — the WasmCert proof model has no vector types)"
+                    "vector instruction {operator:?} (SIMD proposal — the wasm-verifier proof contract covers no vector types)"
                 ),
             }));
         }
