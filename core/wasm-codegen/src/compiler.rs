@@ -1245,6 +1245,7 @@ impl Compiler {
             &args,
             method_struct_name,
             module_path,
+            &self.extern_name_to_idx,
         )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
@@ -1360,8 +1361,9 @@ impl Compiler {
             let region = &mut self.region_emit;
             emit_stack_prologue(func, layout, region);
 
-            // Copy-on-entry: for each compound-typed parameter (array, struct, or mut self),
-            // copy the caller's data into the callee's frame to enforce value semantics.
+            // Copy-on-entry: for each compound-typed parameter (array, struct) and
+            // for a `self` receiver that was given a frame slot, copy the caller's
+            // data into the callee's frame to enforce value semantics.
             for arg in &args {
                 match &arg.kind {
                     ArgKind::Named { name, .. } => {
@@ -1410,13 +1412,19 @@ impl Compiler {
                             _ => {}
                         }
                     }
-                    ArgKind::SelfRef { is_mut: true } => {
-                        cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
+                    // The receiver is copied exactly when `compute_frame_layout`
+                    // gave it a slot — a `mut self`, or an immutable `self` that
+                    // escapes to an `external fn`. Keying the copy on the slot
+                    // rather than on a second, parallel condition keeps the two
+                    // in lockstep: an allocated slot that is never copied into
+                    // would leave `self` aliasing the caller's memory.
+                    ArgKind::SelfRef { .. } => {
                         if let Some(slot) = layout.struct_offsets.get("self") {
+                            cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
                             let self_local = self
                                 .locals_map
                                 .get("self")
-                                .expect("`self` must be in locals_map for mut self method")
+                                .expect("`self` parameter must be in locals_map")
                                 .0;
                             emit_struct_param_copy(func, layout, slot, self_local, region);
                         }
@@ -1819,12 +1827,171 @@ impl Compiler {
         }
     }
 
+    /// Returns `true` if the function body forwards `self` — or a projection of
+    /// it — to an `external fn`.
+    ///
+    /// A compound `external fn` parameter is lowered to a raw `i32` pointer and
+    /// the call site passes the argument's address through unchanged, while a
+    /// linked external shares the program's single linear memory. A foreign body
+    /// can therefore store through that pointer. An immutable `self` receiver is
+    /// otherwise passed by reference, so those stores would land in the
+    /// *caller's* memory and mutate a value the caller owns; when this returns
+    /// `true`, [`Self::compute_frame_layout`] gives the receiver its own frame
+    /// slot and the entry copy redirects the foreign stores into it.
+    ///
+    /// The scan is deliberately type-blind: *any* argument whose root is `self`
+    /// triggers, whether or not that argument is compound. Refining it by type
+    /// would require a second predicate that must agree with `lower_expression`'s
+    /// treatment of the argument, and a disagreement there fails in the unsafe
+    /// direction — a missing copy. A false positive only costs one extra copy.
+    ///
+    /// Callee resolution mirrors emission: `extern_name_to_idx` is read only by
+    /// [`Self::lower_function_call`], which is reachable only for a bare
+    /// `Expr::Identifier` callee, and `register_imports` fills the map before any
+    /// body is compiled, so it is complete at layout time.
+    ///
+    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
+    /// the same statements as local discovery and the other body scans. Like
+    /// [`Self::body_has_narrow_signed_div`] — and unlike
+    /// [`Self::body_has_dynamic_array_index`] — it descends into a `const`
+    /// binding's initializer, which lowers through the same path as a `let` and
+    /// so can hold a real extern call. Expression descent is full and recursive
+    /// because an extern call can sit in any expression position.
+    fn self_escapes_to_extern(
+        arena: &AstArena,
+        block_id: BlockId,
+        extern_names: &FxHashMap<String, u32>,
+    ) -> bool {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_escapes_self_to_extern(arena, *e, extern_names)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_escapes_self_to_extern(arena, *left, extern_names)
+                        || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_escapes_self_to_extern(arena, v, extern_names)),
+                Stmt::If { condition, .. } => {
+                    Self::expr_escapes_self_to_extern(arena, *condition, extern_names)
+                }
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_escapes_self_to_extern(arena, c, extern_names)),
+                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
+                    Def::Constant { value, .. } => {
+                        Self::expr_escapes_self_to_extern(arena, *value, extern_names)
+                    }
+                    _ => false,
+                },
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+            };
+        });
+        found
+    }
+
+    /// Recursively reports whether `expr_id` (or any sub-expression) calls an
+    /// `external fn` with an argument rooted at `self`. Supporting helper for
+    /// [`Self::self_escapes_to_extern`]; mirrors the expression-variant coverage
+    /// of [`Self::expr_has_dynamic_array_index`] so the gate and the emission it
+    /// guards descend through the same nodes.
+    fn expr_escapes_self_to_extern(
+        arena: &AstArena,
+        expr_id: ExprId,
+        extern_names: &FxHashMap<String, u32>,
+    ) -> bool {
+        match &arena[expr_id].kind {
+            Expr::FunctionCall { function, args, .. } => {
+                let callee_is_extern = matches!(
+                    &arena[*function].kind,
+                    Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
+                );
+                (callee_is_extern
+                    && args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_root_is_self(arena, *arg)))
+                    || Self::expr_escapes_self_to_extern(arena, *function, extern_names)
+                    || args.iter().any(|(_, arg)| {
+                        Self::expr_escapes_self_to_extern(arena, *arg, extern_names)
+                    })
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_escapes_self_to_extern(arena, *left, extern_names)
+                    || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_escapes_self_to_extern(arena, *array, extern_names)
+                    || Self::expr_escapes_self_to_extern(arena, *index, extern_names)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_escapes_self_to_extern(arena, *expr, extern_names)
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_escapes_self_to_extern(arena, *value, extern_names)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&e| Self::expr_escapes_self_to_extern(arena, e, extern_names)),
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
+    /// Reports whether `expr_id` denotes `self` or a projection of it —
+    /// `self`, `self.f`, `self.arr[i]`, `(self)`, and any nesting of those.
+    ///
+    /// These are exactly the argument shapes that lower to an address inside the
+    /// receiver, so a callee writing through that address writes into `self`.
+    /// `Parenthesized` is peeled although the type checker's own root extraction
+    /// does not: in the read position of a call argument `(self)` is legal and
+    /// lowers identically to `self`. Every remaining shape is enumerated rather
+    /// than swept by a wildcard so that a new projection form must be classified
+    /// here instead of silently defaulting to "not `self`" — the direction that
+    /// would drop the copy.
+    fn expr_root_is_self(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
+            Expr::MemberAccess { expr, .. }
+            | Expr::ArrayIndexAccess { array: expr, .. }
+            | Expr::Parenthesized { expr } => Self::expr_root_is_self(arena, *expr),
+            Expr::Binary { .. }
+            | Expr::PrefixUnary { .. }
+            | Expr::FunctionCall { .. }
+            | Expr::TypeMemberAccess { .. }
+            | Expr::StructLiteral { .. }
+            | Expr::ArrayLiteral { .. }
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
     /// Computes the stack frame layout for a function.
     ///
     /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
-    /// a method body, so that `ArgKind::SelfRef { is_mut: true }` can look up the
-    /// struct layout and allocate a frame slot for the mutable `self` copy.
-    #[allow(clippy::too_many_lines)]
+    /// a method body, so that an `ArgKind::SelfRef` needing its own copy can look up
+    /// the struct layout and allocate a frame slot for it. A `mut self` receiver
+    /// always needs one; an immutable `self` needs one exactly when it escapes to an
+    /// `external fn`, which is what `extern_names` — the registered import names — is
+    /// consulted for (see [`Self::self_escapes_to_extern`]).
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn compute_frame_layout(
         arena: &AstArena,
         block_id: BlockId,
@@ -1833,10 +2000,22 @@ impl Compiler {
         args: &[inference_ast::nodes::ArgData],
         method_struct_name: Option<&str>,
         module_path: &[String],
+        extern_names: &FxHashMap<String, u32>,
     ) -> Result<Option<FrameLayout>, CodegenError> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
+
+        // The escape scan is a full body walk, so it runs only where its answer
+        // can change the layout: a `mut self` receiver is copied regardless and a
+        // free function has no receiver at all. A program that registered no
+        // imports has nothing for `self` to escape to, so the walk is skipped
+        // outright — the common case pays nothing.
+        let immutable_self_escapes = !extern_names.is_empty()
+            && args
+                .iter()
+                .any(|arg| matches!(arg.kind, ArgKind::SelfRef { is_mut: false }))
+            && Self::self_escapes_to_extern(arena, block_id, extern_names);
 
         for arg in args {
             match &arg.kind {
@@ -1907,7 +2086,14 @@ impl Compiler {
                         _ => {}
                     }
                 }
-                ArgKind::SelfRef { is_mut } if *is_mut => {
+                // A `self` receiver gets its own frame slot when the callee must
+                // not write through the caller's pointer: always for `mut self`,
+                // and for an immutable `self` that reaches an `external fn`,
+                // whose foreign body can store through the address it is handed.
+                ArgKind::SelfRef { is_mut } if *is_mut || immutable_self_escapes => {
+                    if !*is_mut {
+                        cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
+                    }
                     let struct_name = method_struct_name.expect(
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
@@ -1930,7 +2116,7 @@ impl Compiler {
                         }
                     }
                 }
-                // Immutable self or non-self args: no frame slot needed
+                // A non-escaping immutable self, or a non-self arg: no frame slot
                 _ => {}
             }
         }
@@ -6458,6 +6644,138 @@ mod tests {
                     matches!(Compiler::nested_blocks(&leaf_kind), NestedBlocks::None),
                     "a statement carrying no sub-block must classify as None",
                 );
+            }
+        }
+    }
+
+    /// Tests for [`Compiler::self_escapes_to_extern`], the gate that decides
+    /// whether an immutable `self` receiver needs its own frame slot.
+    ///
+    /// The scan reads only the AST and the registered import names, so these
+    /// drive it directly on parsed source rather than through code generation:
+    /// the emitted bytes are pinned by the codegen fixtures, while these pin the
+    /// *shapes* the gate must recognize. A missed shape is a silently missing
+    /// copy, so the negative cases are as load-bearing as the positive ones.
+    mod self_escape_scan {
+        use super::*;
+
+        const PREAMBLE: &str = "\
+external fn sort_pair(p: Pair);
+external fn probe(p: Pair) -> i32;
+use { sort_pair, probe } from sortlib;
+";
+
+        /// Parses `body` as the body of `Pair::touch` and returns the arena and
+        /// that body's block, the two inputs the scan takes.
+        fn touch_body(body: &str) -> (AstArena, BlockId) {
+            let source = format!(
+                "{PREAMBLE}
+struct Pair {{
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {{
+{body}
+    }}
+}}
+"
+            );
+            let parsed = inference_parser::parse(&source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            let arena = parsed.arena;
+            let block_id = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .filter_map(|def_id| match &arena[def_id].kind {
+                    Def::Struct { methods, .. } => Some(methods.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .find_map(|method_id| match &arena[method_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "touch" => Some(*body),
+                    _ => None,
+                })
+                .expect("method `touch` must be present");
+            (arena, block_id)
+        }
+
+        /// The import map as `register_imports` leaves it: import names to
+        /// indices. Only the keys matter to the scan.
+        fn imports() -> FxHashMap<String, u32> {
+            let mut map = FxHashMap::default();
+            for (idx, name) in ["sort_pair", "probe"].iter().enumerate() {
+                map.insert(
+                    (*name).to_string(),
+                    u32::try_from(idx).expect("test import index fits in u32"),
+                );
+            }
+            map
+        }
+
+        fn escapes(body: &str) -> bool {
+            let (arena, block_id) = touch_body(body);
+            Compiler::self_escapes_to_extern(&arena, block_id, &imports())
+        }
+
+        /// Every argument shape whose root peels to `self` hands the external an
+        /// address inside the receiver, so each must trigger the copy — including
+        /// a scalar projection, which the type-blind scan treats like any other
+        /// (deliberately over-copying rather than needing a second predicate that
+        /// agrees with argument lowering).
+        #[test]
+        fn self_rooted_argument_shapes_escape() {
+            for body in [
+                "        sort_pair(self);\n        return 0;",
+                "        sort_pair((self));\n        return 0;",
+                "        sort_pair(self.a);\n        return 0;",
+                "        sort_pair(self.a[1]);\n        return 0;",
+                "        sort_pair(self.a.b[1].c);\n        return 0;",
+                "        sort_pair(0, self);\n        return 0;",
+            ] {
+                assert!(escapes(body), "must escape:\n{body}");
+            }
+        }
+
+        /// An extern call can sit in any statement or expression position, so the
+        /// scan descends nested blocks and full expression trees. A `const`
+        /// initializer counts: it lowers through the same path as a `let`.
+        #[test]
+        fn extern_call_escapes_from_any_position() {
+            for body in [
+                "        if self.a > 0 { sort_pair(self); }\n        return 0;",
+                "        if probe(self) > 0 { return 1; }\n        return 0;",
+                "        loop self.a > 0 { sort_pair(self); break; }\n        return 0;",
+                "        loop probe(self) > 0 { break; }\n        return 0;",
+                "        let x: i32 = 1 + probe(self);\n        return x;",
+                "        const Q: i32 = probe(self);\n        return Q;",
+                "        return probe(self);",
+                "        assert(probe(self) > 0);\n        return 0;",
+                "        let mut x: i32 = 0;\n        x = probe(self);\n        return x;",
+                "        return helper(probe(self));",
+            ] {
+                assert!(escapes(body), "must escape:\n{body}");
+            }
+        }
+
+        /// The gate must stay narrow: it fires only when a call to a *registered
+        /// import* receives a `self`-rooted argument. A local alias is already
+        /// safe — the `let` copies `self` into the alias's own slot and the
+        /// external is handed that copy's address, not the caller's.
+        #[test]
+        fn unrelated_shapes_do_not_escape() {
+            for body in [
+                "        return self.a;",
+                "        helper(self);\n        return 0;",
+                "        return self.other();",
+                "        let q: Pair = self;\n        sort_pair(q);\n        return 0;",
+                "        sort_pair(other);\n        return 0;",
+                "        let probe: i32 = 0;\n        return probe;",
+            ] {
+                assert!(!escapes(body), "must not escape:\n{body}");
             }
         }
     }

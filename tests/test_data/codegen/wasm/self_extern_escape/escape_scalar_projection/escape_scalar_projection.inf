@@ -1,0 +1,26 @@
+// A *scalar* projection of an immutable `self` forwarded to an `external fn`.
+// `self.a` is passed by value, so nothing here can alias the receiver and the
+// copy this fixture pins is an over-copy — chosen deliberately.
+//
+// Refining the scan by argument type would mean a second predicate that has to
+// agree with how the argument is actually lowered, and a disagreement fails in
+// the unsafe direction: a missing copy is the bug, an extra copy is only slower.
+// This fixture is what stops a later "optimization" from narrowing the scan back
+// into that shape without noticing it reopened the hole.
+
+external fn probe_i32(v: i32) -> i32;
+use { probe_i32 } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        return probe_i32(self.a) * 1000 + self.b;
+    }
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return p.touch() * 100 + p.a * 10 + p.b;
+}

@@ -22,6 +22,7 @@ mod extern_link_tests {
     use inference::wasm_link::{resolve_external_modules, SearchPath};
     use inference::{codegen, link, parse, type_check, wasm_to_v, FxHashMap};
     use inf_wasmparser::{Parser, Payload, TypeRef};
+    use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
 
     /// Compiles `source` to a `.wasm` with the default settings, skipping the
     /// analysis phase — this codegen path does not need it. (The library sources
@@ -266,6 +267,171 @@ mod extern_link_tests {
         assert!(
             link(&[0x00, 0x61, 0x73, 0x6d, 0xff], &[]).is_err(),
             "malformed main bytes must be a link error, not a silent pass-through"
+        );
+    }
+
+    /// A writing external, hand-written in WAT: `sort_pair(ptr)` sorts the two
+    /// `i32`s at `[ptr]` and `[ptr+4]` ascending, swapping through the caller's
+    /// pointer. Taken verbatim from the linker's own execution fixtures.
+    ///
+    /// This has to stay WAT rather than become an Inference library: an
+    /// Inference `fn sort_pair(p: Pair)` would copy `p` on entry and could never
+    /// write through the caller's address, which is the whole mechanism under
+    /// test.
+    const SORTLIB_WAT: &str = r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (memory (;0;) 1)
+          ;; swap(ptr): exchange [ptr] and [ptr+4]
+          (func (;0;) (type 0) (param i32)
+            (local i32 i32)
+            local.get 0
+            i32.load
+            local.set 1
+            local.get 0
+            i32.const 4
+            i32.add
+            i32.load
+            local.set 2
+            local.get 0
+            local.get 2
+            i32.store
+            local.get 0
+            i32.const 4
+            i32.add
+            local.get 1
+            i32.store)
+          ;; sort_pair(ptr): if [ptr] > [ptr+4], swap
+          (func (;1;) (type 0) (param i32)
+            local.get 0
+            i32.load
+            local.get 0
+            i32.const 4
+            i32.add
+            i32.load
+            i32.gt_s
+            if
+              local.get 0
+              call 0
+            end)
+          (export "sort_pair" (func 1)))
+        "#;
+
+    /// Issue #329: an immutable `self` forwarded to a writing external must not
+    /// let that external reach the caller's struct.
+    ///
+    /// The three probes differ only in how the receiver arrives — an immutable
+    /// `self`, a `mut self`, and an ordinary by-value parameter — and each packs
+    /// what the callee saw together with what the caller has afterwards, so a
+    /// single number pins the whole outcome. The bug returned `20050205` for the
+    /// first probe: the caller's `Pair { a: 5, b: 2 }` came back sorted, because
+    /// `touch` was frameless and handed `probe_self`'s own frame pointer to the
+    /// foreign body.
+    ///
+    /// Both halves of each value are load-bearing. Checking only that the caller
+    /// survived would accept a fix that stages a copy at the *call site* instead
+    /// of on entry: the external would then sort a temporary the method never
+    /// reads, `touch` would see its receiver unsorted, and the probe would return
+    /// `50020502` — caller intact, callee semantics quietly changed.
+    ///
+    /// What this pins is caller-side value semantics only. Inside the method the
+    /// external still writes through the callee's own copy, so `touch` observes
+    /// its immutable receiver sorted — the `2005` half of the expected value.
+    /// The named-parameter probe has behaved that way all along (its `25` half),
+    /// which is why it is here: the fix makes the receiver match the parameter,
+    /// not the other way round.
+    #[test]
+    fn immutable_self_forwarded_to_writing_extern_leaves_the_caller_intact() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("self_extern");
+        // The `.wasm` extension is required: `resolve_external_modules` maps the
+        // logical module `sortlib` onto `<dir>/sortlib.wasm`.
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        let main_source = "\
+external fn sort_pair(p: Pair);
+use { sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        sort_pair(self);
+        return self.a * 1000 + self.b;
+    }
+
+    fn touch_mut(mut self) -> i32 {
+        sort_pair(self);
+        return self.a * 1000 + self.b;
+    }
+}
+
+fn touch_param(p: Pair) -> i32 {
+    sort_pair(p);
+    return p.a * 10 + p.b;
+}
+
+pub fn probe_self() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    let inner: i32 = p.touch();
+    return inner * 10000 + p.a * 100 + p.b;
+}
+
+pub fn probe_mut_self() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    let inner: i32 = p.touch_mut();
+    return inner * 10000 + p.a * 100 + p.b;
+}
+
+pub fn probe_named_param() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    let inner: i32 = touch_param(p);
+    return inner * 100 + p.a * 10 + p.b;
+}
+";
+
+        let (unified, _rocq) = compile_and_link(main_source, lib_dir.path(), "self_extern");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &unified)
+            .unwrap_or_else(|e| panic!("merged module rejected: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("merged module failed to instantiate: {e}"));
+
+        let call = |store: &mut Store<()>, name: &str| -> i32 {
+            let probe: TypedFunc<(), i32> = instance
+                .get_typed_func(&mut *store, name)
+                .unwrap_or_else(|e| panic!("merged module must export `{name}`: {e}"));
+            probe
+                .call(&mut *store, ())
+                .unwrap_or_else(|e| panic!("`{name}` failed: {e}"))
+        };
+
+        assert_eq!(
+            call(&mut store, "probe_self"),
+            20_050_502,
+            "an immutable `self` must be copied into the method's own frame before \
+             it reaches a writing external: the callee sees the sorted pair (2005) \
+             and the caller still holds Pair {{ a: 5, b: 2 }} (502). 20050205 is the \
+             #329 bug (caller mutated); 50020502 would mean the copy was staged at \
+             the call site instead of on entry"
+        );
+        assert_eq!(
+            call(&mut store, "probe_mut_self"),
+            20_050_502,
+            "the `mut self` control is unchanged — it has had a frame slot and an \
+             entry copy all along, and the fix must give the immutable receiver the \
+             same treatment rather than alter this one"
+        );
+        assert_eq!(
+            call(&mut store, "probe_named_param"),
+            2552,
+            "the by-value parameter control is unchanged too: a named compound \
+             parameter copies on entry today, so the callee sees the sorted pair \
+             (25) and the caller keeps its own (52)"
         );
     }
 

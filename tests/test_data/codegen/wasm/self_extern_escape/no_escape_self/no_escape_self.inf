@@ -1,0 +1,26 @@
+// The anti-regression fixture: an immutable `self` receiver that never reaches
+// an external, in a module that does register an import. The extern is declared,
+// bound, and called — with an argument that is not rooted at `self` — so the
+// import map the scan consults is non-empty and the negative result is a real
+// decision rather than the vacuous answer an extern-free module would give.
+//
+// This is the shape the gate must not widen into. An immutable receiver that
+// nothing can write through is still read in place: no frame slot, no entry
+// copy, and the same bytes the compiler emitted before the gate existed.
+
+external fn probe_i32(v: i32) -> i32;
+use { probe_i32 } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn sum(self) -> i32 {
+        return self.a * 1000 + self.b;
+    }
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return probe_i32(p.sum()) * 100 + p.a * 10 + p.b;
+}

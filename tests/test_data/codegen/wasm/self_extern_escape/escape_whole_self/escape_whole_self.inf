@@ -1,0 +1,27 @@
+// An immutable `self` receiver forwarded whole to an `external fn` with a
+// compound parameter. A compound extern argument lowers to a raw pointer and
+// linked modules share one linear memory, so the foreign body is handed an
+// address inside the caller's struct. The receiver therefore needs its own
+// frame slot and an entry copy, exactly as a `mut self` receiver gets.
+//
+// The `use` binding is load-bearing, not decoration: an `external fn` with no
+// binding carries no origin, is skipped by import registration, and would leave
+// the escape scan looking at an empty import map.
+
+external fn sort_pair(p: Pair);
+use { sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        sort_pair(self);
+        return self.a * 1000 + self.b;
+    }
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return p.touch() * 100 + p.a * 10 + p.b;
+}

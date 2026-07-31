@@ -1,0 +1,26 @@
+// The escaping call sits in a nested expression position — an operand of `+`
+// inside a `let` initializer, and an argument of a native call — rather than as
+// a statement of its own. An extern call can appear anywhere an expression can,
+// so the scan's expression descent has to be full and recursive.
+
+external fn probe(p: Pair) -> i32;
+use { probe } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        let x: i32 = 1 + probe(self);
+        return double(x) + self.a * 1000 + self.b;
+    }
+}
+
+fn double(v: i32) -> i32 {
+    return v + v;
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return p.touch() * 100 + p.a * 10 + p.b;
+}
