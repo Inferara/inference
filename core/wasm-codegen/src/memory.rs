@@ -1174,12 +1174,22 @@ fn emit_frame_zero_fill(
 /// are identical or disjoint, and every site that reaches this helper is one of
 /// those two:
 ///
-/// - Array and struct parameter copies read the caller's argument and write the
-///   callee's freshly decremented frame — disjoint, or identical when a callee
-///   returns its own parameter through the caller's slot.
-/// - The sret return copy writes the caller-provided destination from the
-///   callee frame — disjoint for the same reason, identical when a method
-///   returns the value it was called on.
+/// - Array and struct parameter copies write the callee's freshly decremented
+///   frame and read the address the caller supplied. A compound parameter is a
+///   pointer the caller was free to obtain from its own frame *or* from a region
+///   it was itself handed by reference, so the source is not necessarily a copy
+///   in the immediate caller. It is nonetheless at or above the caller's stack
+///   pointer, because every live frame lies above it, while the destination was
+///   just carved out below it — so the two are disjoint whatever the source
+///   names.
+/// - The sret return copy writes the caller-provided destination and reads the
+///   returned value's address in the callee. That address is a callee frame slot,
+///   disjoint from the caller's frame for the same reason, or a region reached
+///   through a by-reference parameter. In the latter case both endpoints are
+///   whole named slots the caller's layout carved separately, because A016 and
+///   A017 confine a compound-returning call to a fresh binding's initializer and
+///   the type checker forbids that binding reusing a parameter's name. The
+///   endpoints coincide only when a method returns the value it was called on.
 /// - Body-level compound copies (via [`emit_memcpy_via_stack`]) move between
 ///   whole named slots, individual array elements at bounds-checked stride
 ///   multiples, or layout-disjoint struct fields. A right-hand side that reads
@@ -1187,10 +1197,13 @@ fn emit_frame_zero_fill(
 ///   self-referential reassignment never reads a slot it is concurrently
 ///   writing.
 ///
-/// Inference has value semantics and no references, so two distinct slots can
-/// never partially overlap; the memmove guarantee is not needed. For an identical
-/// source and destination each byte's read and write coincide, which a forward
-/// copy handles.
+/// A parameter passed by reference does alias the caller's region, and two of
+/// them can name the same region or one a sub-range of the other — `f(x, x)`,
+/// `f(s, s.f)`. That never reaches this helper as *partial* overlap: a parameter
+/// is passed by reference only because nothing writes it, so it is never a copy
+/// destination, and reaching a strict sub-range of a region takes a projection,
+/// which appears only as a source here. What remains is identical endpoints, and
+/// for those each byte's read and write coincide, which a forward copy handles.
 ///
 /// # Loop emission
 ///
@@ -1504,11 +1517,12 @@ pub(crate) fn emit_struct_param_copy(
 
 /// Copies a compound value from a source pointer to the sret destination.
 ///
-/// Used in `return arr` inside an sret function: copies the array data from
-/// the callee's frame slot to the caller-provided sret pointer. The two regions
-/// are disjoint (the callee frame sits below the caller's slot), or identical
-/// when a method returns the value it was called on — both of which the forward
-/// copy in [`emit_memcpy_via_locals`] handles.
+/// Used in `return arr` inside an sret function: copies the returned value to
+/// the caller-provided sret pointer. The source is usually a callee frame slot,
+/// which sits below the caller's, but a returned parameter that was passed by
+/// reference points into the caller's memory instead. Either way the two regions
+/// are disjoint or identical — see the overlap section of
+/// [`emit_memcpy_via_locals`], which the forward copy there handles.
 pub(crate) fn emit_sret_copy(
     func: &mut Function,
     sret_local: u32,

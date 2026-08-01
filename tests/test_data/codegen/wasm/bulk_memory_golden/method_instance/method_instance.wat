@@ -242,28 +242,8 @@
     unreachable
   )
   (func $test_on_param (;7;) (type 7) (param $p i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    local.get $p
-    i32.const 8
-    memory.copy
-    local.get $__frame_ptr
-    local.set $p
     local.get $p
     call $Point.get_x
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

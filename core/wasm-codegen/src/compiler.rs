@@ -59,7 +59,7 @@
 
 use crate::errors::CodegenError;
 use crate::target::EmitFeatures;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
@@ -410,6 +410,17 @@ pub(crate) struct Compiler {
     /// it is not mode-gated: the guard emits in both Compile and Proof modes.
     /// Reset per function alongside the rest of the per-function state.
     narrow_div_scratch_local: Option<u32>,
+    /// Names of the compound (array or struct) parameters of the function
+    /// currently being compiled, including a `self` receiver.
+    ///
+    /// Recorded while the parameters are walked, where each parameter's resolved
+    /// type is already in hand, so that assignment lowering can recognize one
+    /// without re-deriving compound-ness. Its only consumer is the tripwire in
+    /// [`Self::lower_assign_statement`]: a compound parameter that has no frame
+    /// slot was proved unwritten by [`Self::param_is_written`], so an assignment
+    /// reaching it means that scan and lowering disagree. Reset per function
+    /// alongside the rest of the per-function state.
+    compound_params: FxHashSet<String>,
     /// Local declarations for the function currently being compiled: the named
     /// locals plus the eagerly reserved frame-pointer, bounds-check and
     /// narrow-division temporaries.
@@ -520,6 +531,7 @@ impl Compiler {
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
             narrow_div_scratch_local: None,
+            compound_params: FxHashSet::default(),
             local_declarations: Vec::new(),
             emit_features: EmitFeatures::default(),
             region_emit: RegionEmit::new(0, EmitFeatures::default()),
@@ -1187,6 +1199,7 @@ impl Compiler {
             local_idx = 1;
         }
 
+        self.compound_params.clear();
         for arg in &args {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
@@ -1201,6 +1214,21 @@ impl Compiler {
                         "parameter `{arg_name}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected duplicate parameter names",
                     );
+                    // A compound parameter is a pointer into linear memory, so the
+                    // module needs a memory section and a `__stack_pointer` global
+                    // whether or not the parameter earns a frame slot. Deriving the
+                    // fact from the frame would tie it to the slot, and a parameter
+                    // passed by reference has none — a module whose only memory
+                    // user was such a parameter would then emit loads with no
+                    // memory to load from.
+                    if Self::param_type_is_compound(
+                        &TypeInfo::from_type_id(arena, *ty).kind,
+                        ctx,
+                        module_path,
+                    ) {
+                        self.compound_params.insert(arg_name);
+                        self.has_memory = true;
+                    }
                     local_idx += 1;
                 }
                 ArgKind::SelfRef { .. } => {
@@ -1216,6 +1244,7 @@ impl Compiler {
                     );
                     local_idx += 1;
                     // self is a struct pointer; method body will use memory loads/stores
+                    self.compound_params.insert("self".to_string());
                     self.has_memory = true;
                 }
                 ArgKind::Ignored { .. } => {
@@ -1388,63 +1417,58 @@ impl Compiler {
             let region = &mut self.region_emit;
             emit_stack_prologue(func, layout, region);
 
-            // Copy-on-entry: for each compound-typed parameter (array, struct) and
-            // for a `self` receiver that was given a frame slot, copy the caller's
-            // data into the callee's frame to enforce value semantics.
+            // Copy-on-entry: every parameter `compute_frame_layout` gave a frame
+            // slot to is copied out of the caller's memory into that slot, so the
+            // callee reads and writes its own data (value semantics). A compound
+            // parameter with no slot is by reference — nothing in the body writes
+            // it and nothing forwards it to an `external fn` — and is read
+            // straight through the caller's pointer.
+            //
+            // Every arm keys on slot presence and nothing else. Slot presence is
+            // the single source of truth for this decision, so an allocated slot
+            // that is never copied into — leaving the parameter still aliasing the
+            // caller's memory — is unrepresentable rather than merely forbidden.
             for arg in &args {
                 match &arg.kind {
-                    ArgKind::Named { name, .. } => {
+                    ArgKind::Named { name, ty, .. } => {
                         let arg_name = arena[*name].name.clone();
-                        let arg_type_info = {
-                            let ty_id = match &arg.kind {
-                                ArgKind::Named { ty, .. } => *ty,
-                                _ => unreachable!(),
-                            };
-                            TypeInfo::from_type_id(arena, ty_id)
-                        };
-                        let param_local = self
-                            .locals_map
-                            .get(&arg_name)
-                            .expect("Compound parameter must be in locals_map")
-                            .0;
+                        let arg_type_info = TypeInfo::from_type_id(arena, *ty);
                         match &arg_type_info.kind {
                             TypeInfoKind::Array(elem_type, _length) => {
-                                let slot = layout
-                                    .array_offsets
-                                    .get(&arg_name)
-                                    .expect("Array parameter must have a frame slot");
-                                emit_array_param_copy(
-                                    func,
-                                    layout,
-                                    slot,
-                                    param_local,
-                                    &elem_type.kind,
-                                    region,
-                                );
+                                if let Some(slot) = layout.array_offsets.get(&arg_name) {
+                                    let param_local = self
+                                        .locals_map
+                                        .get(&arg_name)
+                                        .expect("Compound parameter must be in locals_map")
+                                        .0;
+                                    emit_array_param_copy(
+                                        func,
+                                        layout,
+                                        slot,
+                                        param_local,
+                                        &elem_type.kind,
+                                        region,
+                                    );
+                                }
                             }
-                            // A struct parameter (bare `Custom` name or a
-                            // `::`-qualified path) has a frame slot allocated in
-                            // `compute_frame_layout`; copy the caller's data into
-                            // it so the callee mutates its own copy (value
-                            // semantics). The slot is keyed by the parameter name,
-                            // so both forms share the same copy once the layout
-                            // pass gave the qualified form a slot.
+                            // A struct parameter names its type as a bare `Custom`
+                            // name or a `::`-qualified path; the slot is keyed by
+                            // the parameter name, so both forms share the copy.
                             TypeInfoKind::Custom(_)
                             | TypeInfoKind::Qualified(_)
                             | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                    let param_local = self
+                                        .locals_map
+                                        .get(&arg_name)
+                                        .expect("Compound parameter must be in locals_map")
+                                        .0;
                                     emit_struct_param_copy(func, layout, slot, param_local, region);
                                 }
                             }
                             _ => {}
                         }
                     }
-                    // The receiver is copied exactly when `compute_frame_layout`
-                    // gave it a slot — a `mut self`, or an immutable `self` that
-                    // escapes to an `external fn`. Keying the copy on the slot
-                    // rather than on a second, parallel condition keeps the two
-                    // in lockstep: an allocated slot that is never copied into
-                    // would leave `self` aliasing the caller's memory.
                     ArgKind::SelfRef { .. } => {
                         if let Some(slot) = layout.struct_offsets.get("self") {
                             cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
@@ -1456,7 +1480,7 @@ impl Compiler {
                             emit_struct_param_copy(func, layout, slot, self_local, region);
                         }
                     }
-                    _ => {}
+                    ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
                 }
             }
         }
@@ -1537,6 +1561,7 @@ impl Compiler {
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
+        self.compound_params.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -1812,32 +1837,34 @@ impl Compiler {
         })
     }
 
-    /// Returns `true` if the function body forwards `self` — or a projection of
-    /// it — to an `external fn`.
+    /// Returns `true` if the function body forwards the parameter `param_name` —
+    /// or a projection of it — to an `external fn`.
     ///
     /// A compound `external fn` parameter is lowered to a raw `i32` pointer and
     /// the call site passes the argument's address through unchanged, while a
     /// linked external shares the program's single linear memory. A foreign body
-    /// can therefore store through that pointer. An immutable `self` receiver is
-    /// otherwise passed by reference, so those stores would land in the
-    /// *caller's* memory and mutate a value the caller owns; when this returns
-    /// `true`, [`Self::compute_frame_layout`] gives the receiver its own frame
-    /// slot and the entry copy redirects the foreign stores into it.
+    /// can therefore store through that pointer. A parameter that is otherwise
+    /// passed by reference would have those stores land in the *caller's* memory,
+    /// mutating a value the caller owns; when this returns `true`,
+    /// [`Self::compute_frame_layout`] gives the parameter its own frame slot and
+    /// the entry copy redirects the foreign stores into it.
     ///
-    /// The scan is deliberately type-blind: *any* argument whose root is `self`
-    /// triggers, whether or not that argument is compound. Refining it by type
-    /// would require a second predicate that must agree with `lower_expression`'s
-    /// treatment of the argument, and a disagreement there fails in the unsafe
-    /// direction — a missing copy. A false positive only costs one extra copy.
+    /// The scan is deliberately type-blind: *any* argument whose root is
+    /// `param_name` triggers, whether or not that argument is compound. Refining
+    /// it by type would require a second predicate that must agree with
+    /// `lower_expression`'s treatment of the argument, and a disagreement there
+    /// fails in the unsafe direction — a missing copy. A false positive only
+    /// costs one extra copy.
     ///
     /// Callee resolution mirrors emission: `extern_name_to_idx` is read only by
     /// [`Self::lower_function_call`], which is reachable only for a bare
     /// `Expr::Identifier` callee, and `register_imports` fills the map before any
     /// body is compiled, so it is complete at layout time.
-    fn self_escapes_to_extern(
+    fn param_escapes_to_extern(
         arena: &AstArena,
         block_id: BlockId,
         extern_names: &FxHashMap<String, u32>,
+        param_name: &str,
     ) -> bool {
         Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
             let Expr::FunctionCall { function, args, .. } = &arena[expr_id].kind else {
@@ -1850,27 +1877,59 @@ impl Compiler {
             callee_is_extern
                 && args
                     .iter()
-                    .any(|(_, arg)| Self::expr_root_is_self(arena, *arg))
+                    .any(|(_, arg)| Self::expr_root_is(arena, *arg, param_name))
         })
     }
 
-    /// Reports whether `expr_id` denotes `self` or a projection of it —
-    /// `self`, `self.f`, `self.arr[i]`, `(self)`, and any nesting of those.
+    /// Returns `true` if any assignment in the function body is rooted at the
+    /// parameter `param_name`.
     ///
-    /// These are exactly the argument shapes that lower to an address inside the
-    /// receiver, so a callee writing through that address writes into `self`.
-    /// `Parenthesized` is peeled although the type checker's own root extraction
-    /// does not: in the read position of a call argument `(self)` is legal and
-    /// lowers identically to `self`. Every remaining shape is enumerated rather
-    /// than swept by a wildcard so that a new projection form must be classified
-    /// here instead of silently defaulting to "not `self`" — the direction that
-    /// would drop the copy.
-    fn expr_root_is_self(arena: &AstArena, expr_id: ExprId) -> bool {
+    /// `Stmt::Assign` is the language's only write statement — there is no
+    /// compound-assignment form and no `+=` family — so this is the complete set
+    /// of writes a body can perform on its own frame. It covers writes *through*
+    /// the parameter (`p.x = 9`, `arr[0] = 9`, `g.cells[1].y = 9`) as well as
+    /// whole-binding reassignment (`p = P { .. }`, `p = @`): all of them reduce
+    /// to the same root test. Together with [`Self::param_escapes_to_extern`]
+    /// this decides whether a compound parameter needs a private copy at all.
+    ///
+    /// Root extraction goes through [`Self::expr_root_is`], which additionally
+    /// peels `Expr::Parenthesized` where the type checker's own
+    /// `extract_root_variable_name` does not. That asymmetry is deliberate and
+    /// safe in one direction only: peeling more shapes makes *more* assignments
+    /// count as writes, which keeps a copy the type checker's shorter list would
+    /// have dropped. The reverse — codegen concluding "not written" where the
+    /// type checker concluded "written" — is the unsound direction and cannot
+    /// arise from peeling more.
+    fn param_is_written(arena: &AstArena, block_id: BlockId, param_name: &str) -> bool {
+        let mut written = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if written {
+                return;
+            }
+            if let Stmt::Assign { left, .. } = &arena[stmt_id].kind {
+                written = Self::expr_root_is(arena, *left, param_name);
+            }
+        });
+        written
+    }
+
+    /// Reports whether `expr_id` denotes the binding `name` or a projection of it
+    /// — `p`, `p.f`, `p.arr[i]`, `(p)`, and any nesting of those.
+    ///
+    /// These are exactly the shapes that lower to an address inside the binding's
+    /// region, so a callee writing through such an address — or an assignment
+    /// targeting one — writes into the binding. `Parenthesized` is peeled
+    /// although the type checker's own root extraction does not: `(p)` is legal
+    /// in a read position and lowers identically to `p`. Every remaining shape is
+    /// enumerated rather than swept by a wildcard so that a new projection form
+    /// must be classified here instead of silently defaulting to "not this
+    /// binding" — the direction that would drop a copy.
+    fn expr_root_is(arena: &AstArena, expr_id: ExprId, name: &str) -> bool {
         match &arena[expr_id].kind {
-            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
+            Expr::Identifier(ident_id) => arena[*ident_id].name == name,
             Expr::MemberAccess { expr, .. }
             | Expr::ArrayIndexAccess { array: expr, .. }
-            | Expr::Parenthesized { expr } => Self::expr_root_is_self(arena, *expr),
+            | Expr::Parenthesized { expr } => Self::expr_root_is(arena, *expr, name),
             Expr::Binary { .. }
             | Expr::PrefixUnary { .. }
             | Expr::FunctionCall { .. }
@@ -1886,15 +1945,125 @@ impl Compiler {
         }
     }
 
+    /// Reports whether a parameter of this type occupies a region of linear
+    /// memory and is therefore passed to the callee as a pointer.
+    ///
+    /// `Custom`/`Qualified`/`QualifiedName` name either a struct or an enum, and
+    /// only the struct case is compound: an enum lowers to a bare `i32` tag with
+    /// no memory footprint. Resolution goes through the same shared resolver
+    /// [`Self::compute_frame_layout`]'s struct arm uses, so the two agree by
+    /// construction.
+    fn param_type_is_compound(
+        type_kind: &TypeInfoKind,
+        ctx: &TypedContext,
+        module_path: &[String],
+    ) -> bool {
+        match type_kind {
+            TypeInfoKind::Array(_, _) => true,
+            TypeInfoKind::Custom(_)
+            | TypeInfoKind::Qualified(_)
+            | TypeInfoKind::QualifiedName(_) => {
+                memory::resolve_struct_with_defining_path(type_kind, ctx, module_path).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports whether a compound parameter can be read straight through the
+    /// caller's pointer, needing neither a frame slot nor an entry copy.
+    ///
+    /// A compound parameter arrives as an address into the caller's memory.
+    /// Copying it into the callee's own frame on entry is what gives the language
+    /// its value semantics — but only a parameter something can *write* needs
+    /// that copy, and a callee's region can be written in exactly two ways: an
+    /// assignment rooted at the parameter, and the parameter reaching an
+    /// `external fn` argument, whose foreign body shares the same linear memory
+    /// and may store through the pointer it is handed. A parameter that does
+    /// neither is observationally identical whether it is copied or not, so the
+    /// copy, the slot and — when nothing else in the function needs a frame — the
+    /// whole prologue, epilogue and `__stack_pointer` mutation are dropped.
+    ///
+    /// The write test is a body scan rather than the `mut` marker. Keying on
+    /// `mut` would attach a performance cliff to the annotation whose job is to
+    /// state a guarantee: deleting `mut` markers would then make programs faster
+    /// wherever the parameter is not actually written, which is the opposite of
+    /// what the annotation is for. The scan is also strictly more powerful, since
+    /// it elides `mut` parameters that are never written.
+    ///
+    /// The scan is complete only because the language has no references: no
+    /// address-of, no pointer type, no aliasing local binding (every compound
+    /// local copies its initializer). It must be revisited before any such
+    /// feature lands.
+    fn compound_param_is_by_reference(input: &FrameLayoutInput<'_>, arg: &ArgData) -> bool {
+        let (param_name, named_is_mut) = match &arg.kind {
+            ArgKind::Named { name, ty, is_mut } => {
+                let type_info = TypeInfo::from_type_id(input.arena, *ty);
+                if !Self::param_type_is_compound(&type_info.kind, input.ctx, input.module_path) {
+                    return false;
+                }
+                (input.arena[*name].name.as_str(), Some(*is_mut))
+            }
+            ArgKind::SelfRef { .. } => ("self", None),
+            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return false,
+        };
+
+        let written = Self::param_is_written(input.arena, input.block_id, param_name);
+        // The type checker rejects an assignment rooted at a non-`mut` parameter
+        // (`AssignToImmutable`), so a write found on one here is not a program
+        // that should have reached codegen: this scan and the type checker's root
+        // extraction have drifted apart. It cannot catch the dangerous direction
+        // — a *missed* write is invisible to it — but it pins the half where the
+        // two must agree, which is where a root-extraction drift surfaces first.
+        debug_assert!(
+            !written || named_is_mut != Some(false),
+            "parameter `{param_name}` is not declared `mut` yet an assignment rooted at it was \
+             found; the type checker rejects that program, so codegen's write scan and \
+             `extract_root_variable_name` disagree about assignment roots",
+        );
+        if written {
+            cov_mark::hit!(wasm_codegen_param_written_in_body);
+            return false;
+        }
+
+        // The gate costs a full body walk, so a program that registered no
+        // imports skips it outright: there is nothing for the parameter to escape
+        // to, and the common case pays nothing.
+        if !input.extern_names.is_empty()
+            && Self::param_escapes_to_extern(
+                input.arena,
+                input.block_id,
+                input.extern_names,
+                param_name,
+            )
+        {
+            cov_mark::hit!(wasm_codegen_param_escapes_to_extern);
+            if matches!(arg.kind, ArgKind::SelfRef { is_mut: false }) {
+                cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
+            }
+            return false;
+        }
+
+        cov_mark::hit!(wasm_codegen_param_by_reference);
+        true
+    }
+
     /// Computes the stack frame layout for a function.
+    ///
+    /// Parameter slots are laid out first, from offset 0, then the body's own
+    /// compound bindings, then the self-referential staging region. A compound
+    /// parameter earns a slot exactly when it is *not* by reference — see
+    /// [`Self::compound_param_is_by_reference`], which is evaluated here and
+    /// nowhere else. Slot presence is therefore the single source of truth for
+    /// the entry copy: the copy loop emits a copy iff a slot exists, so the two
+    /// decisions cannot diverge.
     ///
     /// [`FrameLayoutInput::method_struct_name`] should be `Some("TypeName")` when
     /// compiling a method body, so that an `ArgKind::SelfRef` needing its own copy
-    /// can look up the struct layout and allocate a frame slot for it. A `mut self`
-    /// receiver always needs one; an immutable `self` needs one exactly when it
-    /// escapes to an `external fn`, which is what
-    /// [`FrameLayoutInput::extern_names`] — the registered import names — is
-    /// consulted for (see [`Self::self_escapes_to_extern`]).
+    /// can look up the struct layout and allocate a frame slot for it.
+    ///
+    /// A function whose parameters and body bindings all turn out to need no
+    /// memory gets `Ok(None)` and is frameless: no `__frame_ptr`, no prologue, no
+    /// epilogue, and no `__stack_pointer` mutation.
     #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
         input: &FrameLayoutInput<'_>,
@@ -1906,25 +2075,16 @@ impl Compiler {
             args,
             method_struct_name,
             module_path,
-            extern_names,
             ..
         } = *input;
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
-        // The escape scan is a full body walk, so it runs only where its answer
-        // can change the layout: a `mut self` receiver is copied regardless and a
-        // free function has no receiver at all. A program that registered no
-        // imports has nothing for `self` to escape to, so the walk is skipped
-        // outright — the common case pays nothing.
-        let immutable_self_escapes = !extern_names.is_empty()
-            && args
-                .iter()
-                .any(|arg| matches!(arg.kind, ArgKind::SelfRef { is_mut: false }))
-            && Self::self_escapes_to_extern(arena, block_id, extern_names);
-
         for arg in args {
+            if Self::compound_param_is_by_reference(input, arg) {
+                continue;
+            }
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
@@ -1993,14 +2153,12 @@ impl Compiler {
                         _ => {}
                     }
                 }
-                // A `self` receiver gets its own frame slot when the callee must
-                // not write through the caller's pointer: always for `mut self`,
-                // and for an immutable `self` that reaches an `external fn`,
-                // whose foreign body can store through the address it is handed.
-                ArgKind::SelfRef { is_mut } if *is_mut || immutable_self_escapes => {
-                    if !*is_mut {
-                        cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
-                    }
+                // The receiver reaches here only when it is *not* by reference —
+                // it is assigned somewhere in the body, or it reaches an
+                // `external fn` whose foreign body can store through the address
+                // it is handed. Either way the callee must not write through the
+                // caller's pointer, so it gets a slot of its own.
+                ArgKind::SelfRef { .. } => {
                     let struct_name = method_struct_name.expect(
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
@@ -2023,8 +2181,8 @@ impl Compiler {
                         }
                     }
                 }
-                // A non-escaping immutable self, or a non-self arg: no frame slot
-                _ => {}
+                // Scalar parameters and non-parameter argument forms: no frame slot
+                ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
             }
         }
 
@@ -3530,6 +3688,34 @@ impl Compiler {
         self.func().instruction(&Instruction::Call(func_idx));
     }
 
+    /// Aborts if `left` assigns into a compound parameter that
+    /// [`Self::compute_frame_layout`] gave no frame slot.
+    ///
+    /// A compound parameter without a slot is one [`Self::param_is_written`]
+    /// reported as never assigned, so the callee reads it straight through the
+    /// caller's pointer. An assignment reaching it would store into the caller's
+    /// memory — exactly the value-semantics violation the entry copy exists to
+    /// prevent — and the destination gates below key on slot presence, so it
+    /// would silently take the scalar `local.set` branch instead. Failing here
+    /// turns a divergence between that scan and assignment lowering into a
+    /// compiler abort rather than a miscompile.
+    fn assert_assign_target_has_slot(&self, arena: &AstArena, left: ExprId) {
+        for name in &self.compound_params {
+            if !Self::expr_root_is(arena, left, name) {
+                continue;
+            }
+            let has_slot = self.frame_layout.as_ref().is_some_and(|layout| {
+                layout.struct_offsets.contains_key(name) || layout.array_offsets.contains_key(name)
+            });
+            assert!(
+                has_slot,
+                "assignment targets compound parameter `{name}`, which `param_is_written` \
+                 reported as never assigned, so `compute_frame_layout` gave it no frame slot \
+                 and it still points at the caller's memory",
+            );
+        }
+    }
+
     /// Lowers an assignment statement.
     fn lower_assign_statement(
         &mut self,
@@ -3538,6 +3724,7 @@ impl Compiler {
         right: ExprId,
         ctx: &TypedContext,
     ) {
+        self.assert_assign_target_has_slot(arena, left);
         match &arena[left].kind {
             Expr::Identifier(ident_id) => {
                 cov_mark::hit!(wasm_codegen_emit_assign_identifier);
@@ -6555,8 +6742,9 @@ mod tests {
         }
     }
 
-    /// Tests for [`Compiler::self_escapes_to_extern`], the gate that decides
-    /// whether an immutable `self` receiver needs its own frame slot.
+    /// Tests for [`Compiler::param_escapes_to_extern`], the gate that decides
+    /// whether a compound parameter — here the `self` receiver — needs its own
+    /// frame slot.
     ///
     /// The scan reads only the AST and the registered import names, so these
     /// drive it directly on parsed source rather than through code generation:
@@ -6625,7 +6813,7 @@ struct Pair {{
 
         fn escapes(body: &str) -> bool {
             let (arena, block_id) = touch_body(body);
-            Compiler::self_escapes_to_extern(&arena, block_id, &imports())
+            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), "self")
         }
 
         /// Every argument shape whose root peels to `self` hands the external an

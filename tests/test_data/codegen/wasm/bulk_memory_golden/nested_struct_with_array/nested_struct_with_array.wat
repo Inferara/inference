@@ -252,22 +252,6 @@
     unreachable
   )
   (func $deep_param (;4;) (type 4) (param $d i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 32
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 32
-    memory.fill
-    local.get $__frame_ptr
-    local.get $d
-    i32.const 20
-    memory.copy
-    local.get $__frame_ptr
-    local.set $d
     local.get $d
     i32.load
     local.get $d
@@ -275,10 +259,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     return
     unreachable
   )

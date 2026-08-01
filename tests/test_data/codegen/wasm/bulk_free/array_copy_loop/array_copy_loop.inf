@@ -24,8 +24,12 @@ pub fn clobber_20(mut data: [i64; 20], i: i32) -> i64 {
 }
 
 // 20 * 4 = 80 bytes — past the element threshold but under the byte threshold,
-// so the region copy is straight-line rather than looped.
-pub fn sum_ends_i32_20(data: [i32; 20]) -> i32 {
+// so the region copy is straight-line rather than looped. The parameter is
+// written because that is what earns it a private copy at all: one the callee
+// only reads is passed by reference and copies nothing, which would leave this
+// fixture with no straight-line region copy to pin.
+pub fn sum_ends_i32_20(mut data: [i32; 20]) -> i32 {
+    data[1] = 0;
     return data[0] + data[19];
 }
 

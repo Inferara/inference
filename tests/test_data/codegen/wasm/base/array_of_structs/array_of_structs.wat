@@ -402,28 +402,6 @@
     unreachable
   )
   (func $array_of_structs_param (;6;) (type 6) (param $pts i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i64.const 0
-    i64.store
-    local.get $__frame_ptr
-    i64.const 0
-    i64.store offset=8
-    local.get $__frame_ptr
-    local.get $pts
-    i64.load align=1
-    i64.store align=1
-    local.get $__frame_ptr
-    local.get $pts
-    i64.load offset=8 align=1
-    i64.store offset=8 align=1
-    local.get $__frame_ptr
-    local.set $pts
     local.get $pts
     i32.load
     local.get $pts
@@ -433,10 +411,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

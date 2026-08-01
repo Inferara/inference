@@ -11,6 +11,11 @@
 // Nothing in the rest of the family can see that: every other escaping fixture
 // has the receiver as its only frame occupant, so any offset at all works. This
 // one reads both after the external has run, which a collision cannot survive.
+//
+// `extra` is written for the same reason it exists: a compound parameter the
+// callee never writes is passed by reference and gets no slot, which would leave
+// the receiver alone in the frame again and make this fixture a duplicate of
+// `escape_whole_self`.
 
 external fn sort_pair(p: Pair);
 use { sort_pair } from sortlib;
@@ -19,8 +24,9 @@ struct Pair {
     a: i32;
     b: i32;
 
-    fn touch(self, extra: [i32; 4]) -> i32 {
+    fn touch(self, mut extra: [i32; 4]) -> i32 {
         sort_pair(self);
+        extra[1] = 0;
         return self.a * 1000 + self.b * 100 + extra[0] * 10 + extra[3];
     }
 }

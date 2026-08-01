@@ -20,22 +20,6 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $sum_point (;0;) (type 0) (param $p i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    local.get $p
-    i32.const 8
-    memory.copy
-    local.get $__frame_ptr
-    local.set $p
     local.get $p
     i32.load
     local.get $p
@@ -43,10 +27,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -143,30 +123,10 @@
     unreachable
   )
   (func $read_mixed (;4;) (type 4) (param $m i32) (result i64)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    local.get $m
-    i32.const 16
-    memory.copy
-    local.get $__frame_ptr
-    local.set $m
     local.get $m
     i32.const 8
     i32.add
     i64.load
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -201,32 +161,6 @@
     unreachable
   )
   (func $two_struct_params (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    local.get $a
-    i32.const 8
-    memory.copy
-    local.get $__frame_ptr
-    local.set $a
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    local.get $b
-    i32.const 8
-    memory.copy
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    local.set $b
     local.get $a
     i32.load
     local.get $a
@@ -242,10 +176,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

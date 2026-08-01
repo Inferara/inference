@@ -24,54 +24,6 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $sum_ends_17 (;0;) (type 0) (param $data i32) (result i64)
-    (local $__frame_ptr i32) (local i32)
-    global.get 0
-    i32.const 144
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    i32.const 0
-    local.set 2
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      i64.const 0
-      i64.store
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      i64.const 0
-      i64.store offset=8
-      local.get 2
-      i32.const 16
-      i32.add
-      local.tee 2
-      i32.const 144
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    i32.const 0
-    local.set 2
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      local.get $data
-      local.get 2
-      i32.add
-      i64.load align=1
-      i64.store align=1
-      local.get 2
-      i32.const 8
-      i32.add
-      local.tee 2
-      i32.const 136
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    local.get $__frame_ptr
-    local.set $data
     local.get $data
     i64.load
     local.get $data
@@ -79,62 +31,10 @@
     i32.add
     i64.load
     i64.add
-    local.get $__frame_ptr
-    i32.const 144
-    i32.add
-    global.set 0
     return
     unreachable
   )
   (func $sum_ends_20 (;1;) (type 1) (param $data i32) (result i64)
-    (local $__frame_ptr i32) (local i32)
-    global.get 0
-    i32.const 160
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    i32.const 0
-    local.set 2
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      i64.const 0
-      i64.store
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      i64.const 0
-      i64.store offset=8
-      local.get 2
-      i32.const 16
-      i32.add
-      local.tee 2
-      i32.const 160
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    i32.const 0
-    local.set 2
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 2
-      i32.add
-      local.get $data
-      local.get 2
-      i32.add
-      i64.load align=1
-      i64.store align=1
-      local.get 2
-      i32.const 8
-      i32.add
-      local.tee 2
-      i32.const 160
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    local.get $__frame_ptr
-    local.set $data
     local.get $data
     i64.load
     local.get $data
@@ -142,66 +42,15 @@
     i32.add
     i64.load
     i64.add
-    local.get $__frame_ptr
-    i32.const 160
-    i32.add
-    global.set 0
     return
     unreachable
   )
   (func $pick_20 (;2;) (type 2) (param $data i32) (param $i i32) (result i64)
-    (local $__frame_ptr i32) (local i32 i32)
-    global.get 0
-    i32.const 160
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    i32.const 0
-    local.set 4
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 4
-      i32.add
-      i64.const 0
-      i64.store
-      local.get $__frame_ptr
-      local.get 4
-      i32.add
-      i64.const 0
-      i64.store offset=8
-      local.get 4
-      i32.const 16
-      i32.add
-      local.tee 4
-      i32.const 160
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    i32.const 0
-    local.set 4
-    loop ;; label = @1
-      local.get $__frame_ptr
-      local.get 4
-      i32.add
-      local.get $data
-      local.get 4
-      i32.add
-      i64.load align=1
-      i64.store align=1
-      local.get 4
-      i32.const 8
-      i32.add
-      local.tee 4
-      i32.const 160
-      i32.ne
-      br_if 0 (;@1;)
-    end
-    local.get $__frame_ptr
-    local.set $data
+    (local i32)
     local.get $data
     local.get $i
-    local.tee 3
-    local.get 3
+    local.tee 2
+    local.get 2
     i32.const 20
     i32.ge_u
     if ;; label = @1
@@ -211,10 +60,6 @@
     i32.mul
     i32.add
     i64.load
-    local.get $__frame_ptr
-    i32.const 160
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -380,6 +225,11 @@
     i64.store offset=72 align=1
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    i32.const 4
+    i32.add
+    i32.const 0
+    i32.store
     local.get $data
     i32.load
     local.get $data
