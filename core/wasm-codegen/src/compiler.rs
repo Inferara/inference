@@ -460,6 +460,33 @@ enum NestedBlocks {
     },
 }
 
+/// Everything [`Compiler::compute_frame_layout`] needs to know about the
+/// function whose frame it is laying out.
+///
+/// The fields travel together through the layout pass and the per-parameter
+/// decisions it takes, so they are bundled rather than passed as a widening
+/// positional argument list.
+struct FrameLayoutInput<'a> {
+    arena: &'a AstArena,
+    /// The function's body block: the layout pass both collects the body's own
+    /// compound bindings from it and scans it for the facts that decide whether
+    /// a parameter needs a slot.
+    block_id: BlockId,
+    ctx: &'a TypedContext,
+    /// WASM local index reserved for `__frame_ptr`.
+    frame_ptr_local_idx: u32,
+    args: &'a [ArgData],
+    /// `Some("TypeName")` when laying out a method body, so an
+    /// `ArgKind::SelfRef` needing its own copy can resolve the struct layout.
+    method_struct_name: Option<&'a str>,
+    /// Module path of the file the function is defined in, used to resolve type
+    /// names against their defining file.
+    module_path: &'a [String],
+    /// Registered import names, as `register_imports` left them. Only the keys
+    /// are read.
+    extern_names: &'a FxHashMap<String, u32>,
+}
+
 impl Compiler {
     /// Creates a new compiler instance for building a WASM module.
     pub(crate) fn new(module_name: &str) -> Self {
@@ -1237,16 +1264,16 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout = Self::compute_frame_layout(
+        self.frame_layout = Self::compute_frame_layout(&FrameLayoutInput {
             arena,
-            body_id,
+            block_id: body_id,
             ctx,
-            local_idx,
-            &args,
+            frame_ptr_local_idx: local_idx,
+            args: &args,
             method_struct_name,
             module_path,
-            &self.extern_name_to_idx,
-        )?;
+            extern_names: &self.extern_name_to_idx,
+        })?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
         // structured `FnKey` itself, not its lossy `Display` rendering: two
@@ -1636,6 +1663,106 @@ impl Compiler {
         });
     }
 
+    /// Reports whether any expression reachable from `block_id`'s statements
+    /// satisfies `pred`.
+    ///
+    /// This is the shared shape of every body-level expression scan the compiler
+    /// runs: block descent through [`Self::walk_statements`], then each
+    /// statement's own expression positions handed to [`Self::expr_any`]. One
+    /// walk means the facts codegen derives from a body — does it index
+    /// dynamically, does it divide narrow signed values, does a parameter reach
+    /// an `external fn` — are read off exactly the same set of nodes, so no scan
+    /// can miss a shape its siblings see. Whatever extra context a scan needs is
+    /// captured by `pred`'s closure.
+    ///
+    /// A `const` binding's initializer is one of those expression positions: it
+    /// lowers through the same `lower_named_binding_init` → `lower_expression`
+    /// path as a `let`, so an expression there is as real as one anywhere else.
+    ///
+    /// The walk short-circuits: once `pred` answers `true` no further node is
+    /// visited.
+    fn body_has_expr(
+        arena: &AstArena,
+        block_id: BlockId,
+        pred: &mut impl FnMut(&AstArena, ExprId) -> bool,
+    ) -> bool {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_any(arena, *e, pred)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_any(arena, v, pred)),
+                Stmt::If { condition, .. } => Self::expr_any(arena, *condition, pred),
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_any(arena, c, pred)),
+                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
+                    Def::Constant { value, .. } => Self::expr_any(arena, *value, pred),
+                    _ => false,
+                },
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+            };
+        });
+        found
+    }
+
+    /// Reports whether `expr_id` itself or any of its sub-expressions satisfies
+    /// `pred`, in pre-order and short-circuiting on the first `true`.
+    ///
+    /// This is the compiler's single enumeration of expression children: every
+    /// variant carrying sub-expressions names them here, and every leaf is listed
+    /// explicitly rather than swept by a wildcard, so a new `Expr` variant has to
+    /// be classified instead of silently becoming a node no scan can reach.
+    fn expr_any(
+        arena: &AstArena,
+        expr_id: ExprId,
+        pred: &mut impl FnMut(&AstArena, ExprId) -> bool,
+    ) -> bool {
+        if pred(arena, expr_id) {
+            return true;
+        }
+        match &arena[expr_id].kind {
+            Expr::Binary { left, right, .. } => {
+                Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_any(arena, *array, pred) || Self::expr_any(arena, *index, pred)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => Self::expr_any(arena, *expr, pred),
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_any(arena, *function, pred)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_any(arena, *arg, pred))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_any(arena, *value, pred)),
+            Expr::ArrayLiteral { elements } => {
+                elements.iter().any(|&e| Self::expr_any(arena, e, pred))
+            }
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
     /// Returns `true` if the function body contains at least one *dynamic* array
     /// index — an `Expr::ArrayIndexAccess` whose index is not a numeric literal.
     ///
@@ -1646,82 +1773,14 @@ impl Compiler {
     /// constants reserve no scratch and stay byte-identical to an unchecked
     /// build, while a dynamic index — even through an immutable-`self` method
     /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
-    ///
-    /// Block descent is delegated to [`Self::walk_statements`] so that this pass
-    /// visits exactly the same statements as local discovery and frame-slot
-    /// collection; the per-statement closure only inspects each statement's own
-    /// sub-expressions (including `if`/`loop` conditions), descending into them
-    /// so nested forms such as `m[i][j]`, `arr[idx].x`, and indices inside calls
-    /// are not missed. The closure short-circuits once a dynamic index is found.
     fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
-        let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_has_dynamic_array_index(arena, *e)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_has_dynamic_array_index(arena, *left)
-                        || Self::expr_has_dynamic_array_index(arena, *right)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_has_dynamic_array_index(arena, v)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_has_dynamic_array_index(arena, *condition)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c)),
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
-            };
-        });
-        found
-    }
-
-    /// Recursively reports whether `expr_id` (or any sub-expression) is an
-    /// `ArrayIndexAccess` with a non-literal index. Supporting helper for
-    /// [`Self::body_has_dynamic_array_index`].
-    fn expr_has_dynamic_array_index(arena: &AstArena, expr_id: ExprId) -> bool {
-        match &arena[expr_id].kind {
-            Expr::ArrayIndexAccess { array, index } => {
-                !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
-                    || Self::expr_has_dynamic_array_index(arena, *array)
-                    || Self::expr_has_dynamic_array_index(arena, *index)
-            }
-            Expr::Binary { left, right, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *left)
-                    || Self::expr_has_dynamic_array_index(arena, *right)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *expr)
-            }
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *function)
-                    || args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_has_dynamic_array_index(arena, *arg))
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_has_dynamic_array_index(arena, *value)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_has_dynamic_array_index(arena, e)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            matches!(
+                &arena[expr_id].kind,
+                Expr::ArrayIndexAccess { index, .. }
+                    if !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
+            )
+        })
     }
 
     /// Returns `true` if the function body contains at least one narrow (i8/i16)
@@ -1730,101 +1789,27 @@ impl Compiler {
     /// iff this returns `true`. Functions with no such division reserve no
     /// scratch and stay byte-identical to an unguarded build.
     ///
-    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
-    /// the same statements as local discovery and the bounds-index scan. Unlike
-    /// that scan this also descends into a `const` binding's initializer: a
-    /// function-scoped `const Q: i8 = a / b;` lowers through the same
-    /// `lower_named_binding_init` → `lower_expression` path as a `let`, so a
-    /// narrow signed division there emits the guard and must reserve the scratch;
-    /// missing it would panic the guard's `.expect` at emission.
-    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
-        let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *e)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *left)
-                        || Self::expr_has_narrow_signed_div(arena, ctx, *right)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_has_narrow_signed_div(arena, ctx, v)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *condition)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_has_narrow_signed_div(arena, ctx, c)),
-                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
-                    Def::Constant { value, .. } => {
-                        Self::expr_has_narrow_signed_div(arena, ctx, *value)
-                    }
-                    _ => false,
-                },
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
-            };
-        });
-        found
-    }
-
-    /// Recursively reports whether `expr_id` (or any sub-expression) is a narrow
-    /// (i8/i16) signed division. Supporting helper for
-    /// [`Self::body_has_narrow_signed_div`]; mirrors the expression-variant
-    /// coverage of [`Self::expr_has_dynamic_array_index`] so the reservation and
-    /// emission conditions descend through the same nodes.
-    ///
     /// A node is a narrow signed division when it is `Expr::Binary { op: Div, .. }`
     /// whose left operand's type info is `Number(I8 | I16)` — the exact predicate
     /// [`Self::emit_narrow_div_overflow_guard`] gates on (unsigned narrow and
     /// full-width divisions no-op there). Missing type info yields `false`.
-    fn expr_has_narrow_signed_div(arena: &AstArena, ctx: &TypedContext, expr_id: ExprId) -> bool {
-        match &arena[expr_id].kind {
-            Expr::Binary { op, left, right } => {
-                (matches!(op, OperatorKind::Div)
-                    && matches!(
-                        ctx.get_node_typeinfo(NodeId::Expr(*left))
-                            .as_ref()
-                            .map(|ti| &ti.kind),
-                        Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
-                    ))
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *left)
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *right)
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *array)
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *index)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *expr)
-            }
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *function)
-                    || args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_has_narrow_signed_div(arena, ctx, *arg))
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_has_narrow_signed_div(arena, ctx, *value)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_has_narrow_signed_div(arena, ctx, e)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            let Expr::Binary {
+                op: OperatorKind::Div,
+                left,
+                ..
+            } = &arena[expr_id].kind
+            else {
+                return false;
+            };
+            matches!(
+                ctx.get_node_typeinfo(NodeId::Expr(*left))
+                    .as_ref()
+                    .map(|ti| &ti.kind),
+                Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
+            )
+        })
     }
 
     /// Returns `true` if the function body forwards `self` — or a projection of
@@ -1849,106 +1834,24 @@ impl Compiler {
     /// [`Self::lower_function_call`], which is reachable only for a bare
     /// `Expr::Identifier` callee, and `register_imports` fills the map before any
     /// body is compiled, so it is complete at layout time.
-    ///
-    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
-    /// the same statements as local discovery and the other body scans. Like
-    /// [`Self::body_has_narrow_signed_div`] — and unlike
-    /// [`Self::body_has_dynamic_array_index`] — it descends into a `const`
-    /// binding's initializer, which lowers through the same path as a `let` and
-    /// so can hold a real extern call. Expression descent is full and recursive
-    /// because an extern call can sit in any expression position.
     fn self_escapes_to_extern(
         arena: &AstArena,
         block_id: BlockId,
         extern_names: &FxHashMap<String, u32>,
     ) -> bool {
-        let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_escapes_self_to_extern(arena, *e, extern_names)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_escapes_self_to_extern(arena, *left, extern_names)
-                        || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_escapes_self_to_extern(arena, v, extern_names)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_escapes_self_to_extern(arena, *condition, extern_names)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_escapes_self_to_extern(arena, c, extern_names)),
-                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
-                    Def::Constant { value, .. } => {
-                        Self::expr_escapes_self_to_extern(arena, *value, extern_names)
-                    }
-                    _ => false,
-                },
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            let Expr::FunctionCall { function, args, .. } = &arena[expr_id].kind else {
+                return false;
             };
-        });
-        found
-    }
-
-    /// Recursively reports whether `expr_id` (or any sub-expression) calls an
-    /// `external fn` with an argument rooted at `self`. Supporting helper for
-    /// [`Self::self_escapes_to_extern`]; mirrors the expression-variant coverage
-    /// of [`Self::expr_has_dynamic_array_index`] so the gate and the emission it
-    /// guards descend through the same nodes.
-    fn expr_escapes_self_to_extern(
-        arena: &AstArena,
-        expr_id: ExprId,
-        extern_names: &FxHashMap<String, u32>,
-    ) -> bool {
-        match &arena[expr_id].kind {
-            Expr::FunctionCall { function, args, .. } => {
-                let callee_is_extern = matches!(
-                    &arena[*function].kind,
-                    Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
-                );
-                (callee_is_extern
-                    && args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_root_is_self(arena, *arg)))
-                    || Self::expr_escapes_self_to_extern(arena, *function, extern_names)
-                    || args.iter().any(|(_, arg)| {
-                        Self::expr_escapes_self_to_extern(arena, *arg, extern_names)
-                    })
-            }
-            Expr::Binary { left, right, .. } => {
-                Self::expr_escapes_self_to_extern(arena, *left, extern_names)
-                    || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_escapes_self_to_extern(arena, *array, extern_names)
-                    || Self::expr_escapes_self_to_extern(arena, *index, extern_names)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_escapes_self_to_extern(arena, *expr, extern_names)
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_escapes_self_to_extern(arena, *value, extern_names)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_escapes_self_to_extern(arena, e, extern_names)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+            let callee_is_extern = matches!(
+                &arena[*function].kind,
+                Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
+            );
+            callee_is_extern
+                && args
+                    .iter()
+                    .any(|(_, arg)| Self::expr_root_is_self(arena, *arg))
+        })
     }
 
     /// Reports whether `expr_id` denotes `self` or a projection of it —
@@ -1985,23 +1888,27 @@ impl Compiler {
 
     /// Computes the stack frame layout for a function.
     ///
-    /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
-    /// a method body, so that an `ArgKind::SelfRef` needing its own copy can look up
-    /// the struct layout and allocate a frame slot for it. A `mut self` receiver
-    /// always needs one; an immutable `self` needs one exactly when it escapes to an
-    /// `external fn`, which is what `extern_names` — the registered import names — is
+    /// [`FrameLayoutInput::method_struct_name`] should be `Some("TypeName")` when
+    /// compiling a method body, so that an `ArgKind::SelfRef` needing its own copy
+    /// can look up the struct layout and allocate a frame slot for it. A `mut self`
+    /// receiver always needs one; an immutable `self` needs one exactly when it
+    /// escapes to an `external fn`, which is what
+    /// [`FrameLayoutInput::extern_names`] — the registered import names — is
     /// consulted for (see [`Self::self_escapes_to_extern`]).
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
-        arena: &AstArena,
-        block_id: BlockId,
-        ctx: &TypedContext,
-        frame_ptr_local_idx: u32,
-        args: &[inference_ast::nodes::ArgData],
-        method_struct_name: Option<&str>,
-        module_path: &[String],
-        extern_names: &FxHashMap<String, u32>,
+        input: &FrameLayoutInput<'_>,
     ) -> Result<Option<FrameLayout>, CodegenError> {
+        let FrameLayoutInput {
+            arena,
+            block_id,
+            ctx,
+            args,
+            method_struct_name,
+            module_path,
+            extern_names,
+            ..
+        } = *input;
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
@@ -2173,7 +2080,7 @@ impl Compiler {
             total_size,
             array_offsets,
             struct_offsets,
-            frame_ptr_local: frame_ptr_local_idx,
+            frame_ptr_local: input.frame_ptr_local_idx,
             scratch_offset,
         }))
     }
