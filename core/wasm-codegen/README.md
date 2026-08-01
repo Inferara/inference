@@ -99,7 +99,10 @@ Typed AST (TypedContext)
    emitting `call <idx>`. Instance methods receive `self` as an implicit first argument
    (an `i32` pointer). Methods with a `mut self` receiver copy `self` into the callee's
    frame on entry (value semantics — mutations do not reach the caller); methods with an
-   immutable `self` read directly through the pointer. Methods are never exported as WASM
+   immutable `self` read directly through the pointer, except when the body forwards
+   `self` (or a projection of it) to an `external fn`, which copies too — a linked
+   external shares the program's linear memory and can store through the pointer it is
+   handed, which would reach the caller's own memory. Methods are never exported as WASM
    exports regardless of Inference visibility.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
    Non-void functions emit an `unreachable` instruction before the function `end` to

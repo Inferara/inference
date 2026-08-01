@@ -1,0 +1,26 @@
+// A `mut self` receiver that also forwards itself to an `external fn`. A
+// mutable receiver already gets a frame slot and an entry copy, so the escape
+// adds nothing: exactly one copy, and the same bytes as before the gate existed.
+//
+// The two conditions are disjunctive over one slot rather than two independent
+// copies, and that is what this fixture holds in place — a second slot would
+// leave `self` rebound to whichever copy was written last.
+
+external fn sort_pair(p: Pair);
+use { sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(mut self) -> i32 {
+        sort_pair(self);
+        self.a = self.a + 1;
+        return self.a * 1000 + self.b;
+    }
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return p.touch() * 100 + p.a * 10 + p.b;
+}

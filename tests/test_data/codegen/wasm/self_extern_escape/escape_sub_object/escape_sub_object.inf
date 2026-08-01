@@ -1,0 +1,27 @@
+// A sub-object of an immutable `self` forwarded to an `external fn`. The
+// argument is `self.inner`, whose address lies inside the receiver, so a
+// foreign store through it reaches the caller's struct just as a whole-`self`
+// argument would. The scan peels member accesses to their root for this reason.
+
+external fn scramble(p: Inner);
+use { scramble } from sortlib;
+
+struct Inner {
+    x: i32;
+    y: i32;
+}
+
+struct Outer {
+    inner: Inner;
+    tag: i32;
+
+    fn touch(self) -> i32 {
+        scramble(self.inner);
+        return self.inner.x * 1000 + self.tag;
+    }
+}
+
+pub fn run() -> i32 {
+    let o: Outer = Outer { inner: Inner { x: 5, y: 2 }, tag: 7 };
+    return o.touch() * 100 + o.inner.x * 10 + o.inner.y;
+}

@@ -249,7 +249,7 @@ fn estimate_frame_size(ctx: &TypedContext, node: &FnNode) -> u32 {
     align_to(bytes, FRAME_ALIGNMENT)
 }
 
-/// Accumulates the slot bytes for compound parameters and a mutable `self`.
+/// Accumulates the slot bytes for compound parameters and a `self` receiver.
 ///
 /// `module_path` is the function's defining file, used to resolve a bare
 /// parameter type name to its file-qualified struct: a parameter annotation
@@ -269,7 +269,12 @@ fn params_frame_bytes(
                 let type_info = TypeInfo::from_type_id(arena, *ty);
                 bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
             }
-            ArgKind::SelfRef { is_mut: true } => {
+            // Codegen copies the receiver into the callee's frame for a `mut self`
+            // and for an immutable `self` that escapes to an `external fn`, so
+            // either shape can carry a real slot. Every `self` receiver is charged
+            // rather than re-deriving that escape condition in this crate: the
+            // estimate is licensed to be loose, but never to under-count.
+            ArgKind::SelfRef { .. } => {
                 if let Some(name) = struct_name {
                     bytes = bytes.saturating_add(slot_bytes(
                         ctx,

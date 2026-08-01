@@ -1,0 +1,25 @@
+// The escaping call sits inside a nested block rather than at statement level.
+// The copy is unconditional even though the call is not: a frame slot is a
+// layout decision taken before any branch is lowered, and a receiver that
+// escapes on one path escapes. This pins that the scan descends into blocks —
+// a scan that only looked at top-level statements would drop the copy here.
+
+external fn sort_pair(p: Pair);
+use { sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self, c: bool) -> i32 {
+        if c {
+            sort_pair(self);
+        }
+        return self.a * 1000 + self.b;
+    }
+}
+
+pub fn run(c: bool) -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    return p.touch(c) * 100 + p.a * 10 + p.b;
+}
