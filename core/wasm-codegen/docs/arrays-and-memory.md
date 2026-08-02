@@ -11,7 +11,8 @@ to plain loads and stores rather than the bulk-memory proposal's
 instruction set. A build that opts into bulk memory gets the instructions instead. See
 [Region Fill and Copy Lowering](#region-fill-and-copy-lowering).
 
-Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism. Each function that uses arrays:
+Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism. Each function that needs frame memory (a compound local, a written or extern-forwarded
+compound parameter, or scratch space — a read-only compound parameter alone needs none):
 1. Computes a frame layout at compile time
 2. Emits a prologue to allocate the frame on entry
 3. Reads/writes elements via load/store instructions
@@ -34,7 +35,7 @@ The `core/analysis` crate enforces codegen constraints:
 
 Before instruction emission, `compute_frame_layout()` walks the entire function body to:
 
-1. Allocate space for array-typed **parameters** (copy space for callee)
+1. Allocate space for array-typed **parameters** that need a private copy (see below)
 2. Collect array variable declarations (nested arbitrarily in blocks, `if`, `loop`)
 3. Align each array offset to element type's natural alignment (e.g., 4 bytes for i32, 8 bytes for i64)
 4. Compute total frame size, aligned to 16 bytes
@@ -50,7 +51,15 @@ Before instruction emission, `compute_frame_layout()` walks the entire function 
 +----------- (frame pointer)
 ```
 
-**Key insight**: Array-typed parameters get copy space in the callee's frame to enforce **value semantics**. When a function is called with an array argument, the caller passes a pointer; the callee copies the data into its own frame slot so mutations don't affect the caller's data.
+**Key insight**: an array-typed parameter gets copy space in the callee's frame only when
+something can write through it, which is what enforces **value semantics**. The caller always
+passes a pointer. If the callee's body assigns through the parameter, or forwards it to an
+`external fn` whose foreign body may store through the pointer, the callee copies the data into
+its own frame slot so those writes cannot reach the caller's data. If neither is true, the
+parameter is read where it lies and gets no slot at all — the copy would be unobservable, and
+skipping it can leave the function with no frame whatsoever. `compound_param_is_by_reference()`
+makes this decision, and it is evaluated here and nowhere else: the entry-copy loop emits a copy
+exactly when a slot exists, so the two cannot disagree.
 
 ### Phase 2: Instruction Emission
 
@@ -69,8 +78,8 @@ During `lower_statement()` and `lower_expression()`, arrays are lowered to:
   - Lower RHS expression to WASM value
   - Emit store instruction
 
-- **Array parameter copy** (automatic on function entry)
-  - For each array-typed parameter, copy caller's data into callee's frame
+- **Array parameter copy** (on function entry, for parameters that were given a slot)
+  - Copy the caller's data into the callee's frame
   - Optimizes small arrays (≤ 16 elements) as unrolled element copies
   - Larger arrays, and any array with compound (struct) elements, are copied as an
     untyped byte region — see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)
@@ -241,6 +250,14 @@ regions or two addresses that are *identical*, never partially overlapping:
   self-referential reassignment is routed through the frame's scratch region first, so a
   copy never reads a slot it is concurrently writing.
 
+A parameter passed by reference does alias the caller's region, and two of them can name
+the same region or one a sub-range of the other (`f(x, x)`, `f(s, s.f)`). That never
+reaches this helper as *partial* overlap. A parameter is passed by reference precisely
+because nothing writes it, so it is never a copy destination; and naming a strict
+sub-range of a region takes a projection, which appears only as a source here. What is
+left is identical endpoints, where each byte's read and write coincide — which a forward
+copy handles.
+
 Inference has value semantics and no references, so two distinct compound values can
 never partially alias — the case a forward copy would get wrong never arises.
 
@@ -307,20 +324,21 @@ Nested **array-of-structs** literals (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], 
 #### `compute_frame_layout()`
 
 ```rust
-fn compute_frame_layout(
-    arena: &AstArena,
-    block_id: BlockId,
-    ctx: &TypedContext,
-    frame_ptr_local_idx: u32,
-    args: &[inference_ast::nodes::ArgData],
-    method_struct_name: Option<&str>,
-) -> Result<Option<FrameLayout>, CodegenError>
+fn compute_frame_layout(input: &FrameLayoutInput<'_>) -> Result<Option<FrameLayout>, CodegenError>
 ```
 
-Returns `None` if no arrays or structs are present (no frame needed). The `method_struct_name` parameter should be `Some("TypeName")` when compiling a method body, so that a mutable `self` parameter can look up the struct layout and allocate a frame slot for the copy.
+`FrameLayoutInput` carries the arena, the body block, the `TypedContext`, the module path, the
+`__frame_ptr` local index, the argument list, the enclosing struct name when compiling a method
+body, and the extern-name map the escape gate consults.
+
+Returns `None` when nothing needs memory — no frame, and therefore no `__frame_ptr`, no
+prologue, no epilogue and no `__stack_pointer` mutation. That now includes a function whose only
+compound values are parameters passed by reference. The struct name should be `Some("TypeName")`
+when compiling a method body, so a receiver that needs a slot can look up the struct layout.
 
 **Algorithm**:
-1. Iterate parameters: if any are array-typed, allocate copy space
+1. Iterate parameters: allocate copy space for each compound parameter that is not passed by
+   reference
 2. Recursively walk block statements, collecting array variables
 3. Sum byte sizes and align to 16 bytes
 4. Return `FrameLayout` or `None`
@@ -546,19 +564,38 @@ Arrays:  [bool; 3] (3 bytes) + 1 byte padding + [i32; 2] (8 bytes) = 12 bytes
 Aligned: (12 + 15) & ~15 = 16 bytes
 ```
 
-## Copy-on-Entry for Array Parameters
+## Parameter Passing: By Reference or Copy-on-Entry
 
-When an array-typed parameter is passed to a function:
+**Caller**: always passes a pointer (i32) to the array data in linear memory.
 
-**Caller**: Passes a pointer (i32) to the array data in linear memory.
+**Callee**: what it does with that pointer depends on whether anything can write through it.
+`compound_param_is_by_reference()` decides, from the callee's own body:
 
-**Callee**:
-1. Allocates space in its frame (computed by `compute_frame_layout()`)
-2. Copies caller's data element-by-element or via a region copy
-3. Updates the parameter local to point to the copy
+- The parameter is **copied on entry** if the body assigns through it (`arr[0] = 9`, `p.x = 9`,
+  `p = @`, whole-binding reassignment — `Stmt::Assign` is the language's only write statement),
+  or if it reaches an `external fn` argument, whose foreign body shares the same linear memory
+  and may store through the pointer it is handed.
+- Otherwise it is **passed by reference**: no frame slot, no copy, and reads go straight to the
+  caller's memory.
+
+The copy path is:
+1. Allocate space in the frame (computed by `compute_frame_layout()`)
+2. Copy the caller's data element-by-element or via a region copy
+3. Update the parameter local to point to the copy
 4. All subsequent reads/writes operate on the local copy
 
-**Benefit**: Mutations inside the callee don't affect the caller's array (value semantics).
+Step 3 is what makes the rest of the body lowering identical either way: a field or element
+address is computed from the parameter local the same way on both paths, and only the
+local's value differs between them.
+
+**Benefit**: mutations inside the callee don't affect the caller's array (value semantics).
+Where no mutation is possible the copy is unobservable, so eliding it preserves the same
+guarantee — and when nothing else in the function needs memory, it removes the frame,
+the prologue, the epilogue and the `__stack_pointer` mutation as well.
+
+**Note**: the `mut` marker is not consulted. It is a type-checker contract about what the body
+is permitted to do; the copy decision is about what the body actually does. A `mut` parameter
+that is never assigned is passed by reference.
 
 **Optimization**: Arrays with ≤ 16 elements are copied element-by-element with the element's own typed load/store, avoiding the untyped region copy's overhead. Larger arrays, and any array with compound elements, use the region copy described in [Region Fill and Copy Lowering](#region-fill-and-copy-lowering).
 
@@ -975,7 +1012,7 @@ The total byte size (`compound_size`) comes from `CompoundFieldLayout::byte_size
 
 ### Struct Parameter Copy (`emit_struct_param_copy`)
 
-Struct-typed parameters arrive as i32 pointers (the caller's copy). The callee copies the data into its own frame slot with a region copy (`emit_memcpy_via_locals`, see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)), then updates the parameter local to point to the callee's copy:
+Struct-typed parameters arrive as i32 pointers (the caller's copy). When the parameter was given a frame slot — see [Parameter Passing](#parameter-passing-by-reference-or-copy-on-entry) — the callee copies the data into that slot with a region copy (`emit_memcpy_via_locals`, see [Region Fill and Copy Lowering](#region-fill-and-copy-lowering)), then updates the parameter local to point to the callee's copy:
 
 ```wasm
 ;; region copy: destination = frame_ptr + slot_offset, source = $param, size = total_size
@@ -986,7 +1023,7 @@ i32.add
 local.set $param           ;; update param to point to callee's copy
 ```
 
-This enforces value semantics: mutations inside the callee do not affect the caller's struct.
+This enforces value semantics: mutations inside the callee do not affect the caller's struct. A struct parameter with no slot skips all of the above and is read through the caller's pointer.
 
 ### Struct-to-Struct Copy (`lower_struct_copy_var_init`)
 
@@ -1128,13 +1165,13 @@ Coverage marks for testing array- and struct-related code:
 |---|---|---|
 | `wasm_codegen_emit_stack_prologue` | `emit_stack_prologue()` | Frame allocation code emitted |
 | `wasm_codegen_emit_stack_epilogue` | `emit_stack_epilogue()` | Frame deallocation code emitted |
-| `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter copied to frame |
+| `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter that was given a frame slot copied into it |
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
 | `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (all Compile-mode builds) |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
-| `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |
+| `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter that was given a frame slot copied into it |
 | `wasm_codegen_emit_struct_copy` | `lower_struct_copy_var_init()` | Struct-to-struct copy via a region copy |
 | `wasm_codegen_emit_member_access_read` | `lower_member_access()` | Struct field read via load |
 | `wasm_codegen_emit_member_access_write` | `lower_member_access_write()` | Struct field write via store |
@@ -1148,6 +1185,11 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_frame_fill_bulk` | `emit_frame_zero_fill()` | A frame was zero-filled with one `memory.fill` because the build permits bulk memory |
 | `wasm_codegen_memcpy_bulk` | `emit_memcpy_via_locals()` | A region was copied with one `memory.copy` because the build permits bulk memory |
 | `wasm_codegen_memcpy_via_stack_bulk` | `emit_memcpy_via_stack()` | A body-level compound copy consumed its two pushed addresses with one `memory.copy` |
+| `wasm_codegen_emit_sret_copy` | `emit_sret_copy()` | A whole compound value was moved into the caller-provided sret destination |
+| `wasm_codegen_param_by_reference` | `compound_param_is_by_reference()` | A compound parameter is neither written nor forwarded to an extern, so it gets no slot and no copy |
+| `wasm_codegen_param_written_in_body` | `compound_param_is_by_reference()` | An assignment rooted at the parameter was found, so it keeps its slot and copy |
+| `wasm_codegen_param_escapes_to_extern` | `compound_param_is_by_reference()` | The parameter reaches an `external fn` argument, so it keeps its slot and copy |
+| `wasm_codegen_self_escapes_to_extern` | `compound_param_is_by_reference()` | The escaping parameter was an immutable `self` receiver |
 
 ## Examples
 
@@ -1215,7 +1257,7 @@ pub fn get_array() -> i32 {
 )
 ```
 
-### Array Parameter
+### Array Parameter, Read Only
 
 **Inference:**
 ```inference
@@ -1226,15 +1268,55 @@ pub fn sum_array(arr: [i32; 3]) -> i32 {
 
 **Key codegen points**:
 1. Parameter `arr` gets local index 0 (pointer)
-2. `compute_frame_layout()` allocates 16 bytes (3 i32s = 12 bytes, aligned to 16)
-3. Prologue allocates frame, then `emit_array_param_copy()` copies 3 elements
-4. Each `arr[i]` read loads from frame base + offset
-5. Epilogue restores stack pointer
+2. Nothing assigns through `arr` and it reaches no `external fn`, so
+   `compound_param_is_by_reference()` returns `true` and it gets no frame slot
+3. Nothing else in the function needs memory, so `compute_frame_layout()` returns `None` —
+   no `__frame_ptr` local, no prologue, no epilogue, no `__stack_pointer` mutation
+4. Each `arr[i]` read loads from the caller's pointer plus the element offset
+
+**Generated WASM:**
+```wasm
+(func $sum_array (param $arr i32) (result i32)
+  local.get $arr
+  i32.load                 ;; arr[0], read from the caller's memory
+  local.get $arr
+  i32.const 4
+  i32.add
+  i32.load                 ;; arr[1]
+  i32.add
+  local.get $arr
+  i32.const 8
+  i32.add
+  i32.load                 ;; arr[2]
+  i32.add
+  return
+  unreachable              ;; function-end sentinel after the terminal return
+)
+```
+
+### Array Parameter, Written
+
+**Inference:**
+```inference
+pub fn mutate_copy(mut arr: [i32; 3]) -> i32 {
+    arr[0] = 99;
+    return arr[0];
+}
+```
+
+**Key codegen points**:
+1. Parameter `arr` gets local index 0 (pointer)
+2. `arr[0] = 99` is an assignment rooted at `arr`, so the parameter earns a frame slot
+3. `compute_frame_layout()` allocates 16 bytes (3 i32s = 12 bytes, aligned to 16)
+4. Prologue allocates and zero-fills the frame, then `emit_array_param_copy()` copies 3
+   elements and rebinds `$arr` to the frame slot
+5. The write and every later `arr[i]` read address the callee's copy
+6. Epilogue restores the stack pointer
 
 ## Related Resources
 
 - `core/wasm-codegen/src/memory.rs` - Implementation
-- `core/wasm-codegen/src/compiler.rs` - `compute_frame_layout()`, array lowering methods
+- `core/wasm-codegen/src/compiler.rs` - `compute_frame_layout()`, `compound_param_is_by_reference()`, array lowering methods
 - `core/type-checker` - Type validation for array types
 - WASM Memory spec: https://webassembly.org/docs/modules/#memory-section
 - WASM Load/Store spec: https://webassembly.org/docs/semantics/#memory-operators

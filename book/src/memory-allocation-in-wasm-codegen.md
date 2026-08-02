@@ -33,13 +33,13 @@ Linear Memory (1 page = 64KB)
   overflow below 0 = WASM OOB trap
 ```
 
-`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function with arrays is called, `__stack_pointer` is decremented by the frame size. When the function returns, it is restored. The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. Future data sections and heap allocations will be placed above the stack region, starting at STACK_SIZE and growing upward.
+`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function that needs a frame is called, `__stack_pointer` is decremented by the frame size; when the function returns, it is restored. Not every function that touches arrays needs a frame: a function whose only compound values are parameters it provably never writes reads them through the caller's pointers and never touches `__stack_pointer` at all (see [Array Parameter Passing](#array-parameter-passing)). The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. Future data sections and heap allocations will be placed above the stack region, starting at STACK_SIZE and growing upward.
 
 Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays. Existing programs produce identical WASM output — zero regression.
 
 ## Stack Frame Layout
 
-Each function with arrays gets a `FrameLayout` — a per-function data structure computed before code generation. It maps each array variable to an `ArraySlot` describing its byte offset within the frame, element size, and element count.
+Each function that needs frame memory gets a `FrameLayout` — a per-function data structure computed before code generation. It maps each array variable to an `ArraySlot` describing its byte offset within the frame, element size, and element count. Array *variables* always occupy the frame; an array *parameter* occupies it only when the callee may write it (see [Array Parameter Passing](#array-parameter-passing)).
 
 Consider a function with two arrays:
 
@@ -65,7 +65,7 @@ The frame pointer is stored in a synthetic WASM local named `__frame_ptr`. This 
 
 ## Function Prologue and Epilogue
 
-Every function with arrays emits a prologue at entry and an epilogue at every exit point.
+Every function with a frame emits a prologue at entry and an epilogue at every exit point. A function whose layout comes out empty — including one whose only compound values are read-only parameters — emits neither.
 
 ### Prologue
 
@@ -320,25 +320,55 @@ local.get $data           ;; push array base pointer
 call $sum_array
 ```
 
-The callee receives this pointer as a regular `i32` parameter. But the callee does not use the caller's memory directly. Instead, it copies the entire array into its own stack frame on entry — a copy-on-entry pattern that provides value semantics.
+The callee receives this pointer as a regular `i32` parameter. What it does with that pointer depends on whether anything can write through it. A parameter the callee may write is copied into the callee's own stack frame on entry, so the write lands on a private copy and the caller's array is untouched. A parameter that is provably only ever read is used where it is — the callee loads straight from the caller's memory, allocating no frame slot and emitting no copy.
 
-### Copy-on-Entry
+Both lowerings implement the same language rule: an argument's value does not change across a call. The copy is how that rule is enforced where it could otherwise be broken, not the rule itself. Everything in this section applies equally to struct parameters and to method receivers, which are parameters like any other.
 
-The callee's prologue allocates a frame, then copies each element from the caller's pointer into the callee's frame. After the copy, the parameter local is overwritten with the callee's frame address:
+### When a Copy Is Emitted
+
+A compound parameter — an array, or a struct with at least one byte of fields — is copied on entry when either of two things is true of the callee's body.
+
+1. **It is assigned through.** Any assignment whose target is rooted at the parameter counts: `arr[0] = 9`, `p.x = 9`, `g.cells[1].y = 9`, whole-binding reassignment `p = P { .. }`, and the non-deterministic form `p = @`. `Stmt::Assign` is the language's only write statement — there is no compound-assignment form and no `+=` family — so this is the complete set of writes a body can perform on its own parameters.
+
+2. **It reaches an `external fn` argument.** A linked external shares the program's single linear memory and receives a compound argument as a raw pointer, so its body can store through that pointer. Those stores live in a `.wasm` the compiler never type-checked, so it cannot see them. Any parameter that flows to an external argument therefore keeps its copy, and the foreign writes land in the callee's frame rather than in the caller's memory.
+
+A parameter that does neither is passed by reference. Reads are unaffected either way: a field or element address is the base pointer plus an offset computed the same way in both lowerings, and the base pointer is the only thing the two disagree about.
+
+Note what decides this: the body, not the declaration. The `mut` marker is a contract with the type checker — it states whether the function is permitted to assign through the parameter, and a program that assigns through a parameter declared without it is rejected. Whether a copy is emitted is a separate, internal question about what the body actually does, so a `mut` parameter that is never assigned is passed by reference exactly like a non-`mut` one. Deciding on the marker instead would mean that dropping a `mut` a function does not need makes the program faster, putting the annotation's cost in opposition to its purpose. Neither lowering is observable from Inference source, so there is no reason to write a program one way rather than another in order to obtain one of them.
+
+### By-Reference Parameters
+
+`sum_array` reads three elements and writes nothing, so its parameter gets no frame slot. Nothing else in the function needs memory either, so the function gets no frame at all:
 
 ```wat
 (func $sum_array (param $arr i32) (result i32)
+  local.get $arr
+  i32.load                ;; arr[0], loaded from the caller's memory
+  local.get $arr
+  i32.const 4
+  i32.add
+  i32.load                ;; arr[1]
+  i32.add
+  local.get $arr
+  i32.const 8
+  i32.add
+  i32.load                ;; arr[2]
+  i32.add
+  return
+  unreachable             ;; function-end sentinel after the terminal return
+)
+```
+
+There is no `__frame_ptr` local, no zero-initialization, no copy, no epilogue, and — the part that matters most for verification — no read or write of `__stack_pointer`. A leaf reader like this one is a pure function of memory rather than a function that mutates a global, which is a simplification every caller inherits.
+
+### Copy-on-Entry
+
+`mutate_copy` assigns through its parameter, so the parameter earns a frame slot. The prologue allocates and zero-initializes the frame (see [Function Prologue and Epilogue](#function-prologue-and-epilogue)), each element is copied from the caller's pointer into that slot, and the parameter local is then overwritten with the slot's address so the rest of the body is identical whichever lowering was chosen:
+
+```wat
+(func $mutate_copy (param $arr i32) (result i32)
   (local $__frame_ptr i32)
-  ;; --- prologue ---
-  global.get 0
-  i32.const 16
-  i32.sub
-  local.tee $__frame_ptr
-  global.set 0
-  local.get $__frame_ptr
-  i32.const 0
-  i32.const 16
-  memory.fill
+  ;; --- prologue: allocate and zero a 16-byte frame ---
   ;; --- copy element 0 ---
   local.get $__frame_ptr
   i32.const 0
@@ -371,7 +401,7 @@ The callee's prologue allocates a frame, then copies each element from the calle
 )
 ```
 
-After the copy, `$arr` points to the callee's own memory. Any mutations the callee makes to `arr` (if it is declared `mut`) affect only the local copy. The caller's array is untouched.
+After the copy, `$arr` points to the callee's own memory, so the mutation affects only the local copy. The caller's array is untouched.
 
 This can be verified with the `verify_copy_semantics` test:
 
@@ -392,7 +422,7 @@ pub fn verify_copy_semantics() -> i32 {
 
 ### Copy Optimization
 
-For arrays with 16 or fewer elements, the copy is unrolled element by element (as shown above). For arrays with more than 16 elements, a single `memory.copy` instruction replaces the unrolled loop:
+Where a copy is emitted, its shape depends on the array's size. For arrays with 16 or fewer elements, the copy is unrolled element by element (as shown above). For arrays with more than 16 elements, a single `memory.copy` instruction replaces the unrolled loop:
 
 ```wat
 ;; Bulk copy for arr: [i32; 64] (256 bytes)
@@ -406,17 +436,23 @@ memory.copy               ;; bulk copy
 
 The threshold of 16 elements balances code size (unrolled copies are larger but avoid call overhead) against simplicity.
 
+### Receivers and Linked Externals
+
+A method receiver is a parameter, and the rule above is the whole rule for it too. A method that assigns through `self` copies the receiver on entry; a method that only reads it does not, whether the receiver is written `self` or `mut self`.
+
+The external case deserves its own note, because it is the one place where a write is invisible in Inference source. Linking merges every module into one linear memory, and a compound `external fn` parameter is lowered to a raw `i32` pointer with no copy between the call site and the foreign body. The external is free to store through that pointer. A method or function that hands a parameter — or any projection of one, such as `self.field` or `arr[i]` — to an external therefore keeps its copy, so the foreign stores land on the callee's own bytes. This is conservative in the harmless direction: an external that only reads still costs its callers a copy, because the declaration does not yet say which of its parameters it writes. Making that claim explicit and checking it against the merged body is future work; until then, a parameter forwarded to an external is never passed by reference. The linker's side of this arrangement is described in [The WASM Linker](the-wasm-linker.md).
+
 ### Why Value Semantics
 
-The alternative to copy-on-entry is reference semantics — the callee reads and writes the caller's memory directly. Reference semantics would be faster (no copy) but introduces three problems:
+The language guarantee is that an argument's value does not change across a call. The alternative — reference semantics, where a callee reads and writes the caller's memory directly and any function may mutate what it is handed — would avoid every copy, and it introduces three problems that the guarantee exists to prevent:
 
-1. **Breaks the `mut` system**: A function receiving `arr: [i32; 3]` (not `mut`) could still mutate the caller's array through the pointer, violating the type system's guarantee.
+1. **It breaks the `mut` system**: a function receiving `arr: [i32; 3]` (not `mut`) could mutate the caller's array through the pointer, violating what the type system promised. The copy is what keeps that promise wherever a write is possible, and where no write is possible there is nothing to break.
 
-2. **Breaks referential transparency**: If `f(arr)` can modify `arr`, then `f(arr); g(arr)` and `g(arr); f(arr)` may produce different results. Value semantics ensure function calls are independent.
+2. **It breaks referential transparency**: if `f(arr)` can modify `arr`, then `f(arr); g(arr)` and `g(arr); f(arr)` may produce different results. Because a parameter is passed by reference only when the callee provably never writes it, calls stay independent.
 
-3. **Complicates formal verification**: Rocq proofs with value parameters model function calls as substitution — the callee operates on a fresh copy. Mutable references require heap effect reasoning and aliasing analysis, dramatically increasing proof complexity.
+3. **It complicates formal verification**: proofs against mutable references need heap effect reasoning and aliasing analysis. Passing a read-only parameter by pointer introduces neither, since a region no one writes during the call cannot be the subject of either.
 
-Inference optimizes for provability, not performance. The copy cost is acceptable.
+Inference optimizes for provability, not performance — which is why the guarantee is stated in terms of observable values and the copy is treated as one way to obtain it. A copy that no program can distinguish from its absence buys no provability, and eliding it removes instructions, a frame, and a global effect from the proof surface without weakening anything a proof may assume.
 
 ## Arrays in Non-Deterministic Blocks
 
@@ -487,7 +523,7 @@ LLVM uses the same shadow stack pattern with a `__stack_pointer` mutable global.
 
 Rust arrays on WASM use the same LLVM shadow stack with `--stack-first` layout: the stack occupies the bottom of the address space and grows downward toward address 0, while data sections are placed above. `[i32; 3]` is allocated on the shadow stack with a frame pointer pattern identical to Inference's output. Rust passes small arrays by value (copying into the callee's frame) and large aggregates by reference with compiler-generated memcpy.
 
-Inference now matches Rust's stack-first layout. The one remaining difference is the borrow checker: a `&[i32; 3]` reference can be passed without copying because the borrow checker guarantees no aliasing. Inference does not have a borrow checker, so it always copies.
+Inference now matches Rust's stack-first layout. The remaining difference is how each language earns the right to skip a copy. Rust's borrow checker lets the *caller* pass `&[i32; 3]` explicitly, and the reference is part of the signature. Inference has no borrow checker and no reference type; it recovers the same lowering from the callee's body instead, passing a compound parameter by pointer whenever nothing in that body can write through it. The result is a compiler-internal decision rather than a type, so it cannot be requested, spelled, or observed in Inference source.
 
 ### Zig to WASM
 
@@ -513,17 +549,25 @@ When no function uses arrays, these sections are omitted entirely. The output is
 
 Arrays in linear memory map naturally to Rocq's `list` or `Vector.t n` types. The shadow stack's frame-scoped lifetime means each array has a clear birth (prologue) and death (epilogue), avoiding the need for heap allocation reasoning.
 
-The copy-on-entry semantics for parameters are particularly beneficial for verification. In Rocq, a function `f(arr: [i32; 3])` can be modeled as taking a `Vector.t int32 3` argument by value. The proof does not need to reason about aliasing, mutation through shared pointers, or frame conditions on the caller's state. The callee's array is a fresh value, independent of the caller's.
+Parameter passing is particularly beneficial for verification, and the property it supplies is **no mutable aliasing**: every compound region has at most one writer for as long as a call is live.
+
+The two lowerings supply it differently. A parameter the callee may write is copied into a region no other frame can name, so in Rocq `f(arr: [i32; 3])` is modeled as taking a `Vector.t int32 3` by value — a fresh value, independent of the caller's, with no aliasing and no frame condition on the caller's state. A parameter the callee provably never writes is passed by pointer and *does* alias the caller's region, but neither frame stores into that region for the duration of the call, so no proof has to order the two frames' accesses. It is modeled as a read over a region the caller's frame condition already pins — the weaker and cheaper of the two obligations. What must be pinned is exactly what the caller already had to establish: that the region holds the value the caller put there. The callee adds no clause.
+
+The elision also removes an effect rather than just instructions. A function whose parameters and bindings all need no memory has no frame, so it never reads or writes `__stack_pointer`. A leaf reader is then a pure function of memory instead of a function carrying a global-effect clause that every caller inherits transitively.
+
+The one case where the property would not hold on its own is a parameter forwarded to a linked external, whose foreign body can store through the pointer it is handed. Such a parameter is always copied, which puts the foreign writer back inside a region only it can name.
 
 ### Zero-Initialization as a Proof Obligation
 
-The unconditional zero-initialization via `memory.fill` in the prologue establishes a known precondition: every byte in the frame is zero before any user code executes. In Rocq, this can be encoded as:
+The prologue's unconditional whole-frame zero-initialization establishes a known precondition: every byte in the frame is zero before any user code executes. In Rocq, this can be encoded as:
 
 ```
 forall (offset : nat), offset < frame_size -> load_byte (frame_ptr + offset) = 0
 ```
 
 This precondition holds for free — the compiler guarantees it, so the Rocq proof can assume it without additional proof obligation on the programmer.
+
+It survives by-reference parameters unchanged, because it quantifies over the frame that exists. A frame is still zeroed in full: no region within it is skipped, and no side condition about which offsets are live is introduced. A parameter passed by pointer contributes no bytes to the frame, so it is simply outside the quantifier's range — and a function with no frame at all discharges the hypothesis vacuously. Partial or region-selective filling would be a different matter: it would replace this one-line hypothesis with a layout-dependent side condition and make the model depend on what the emitter happens to emit, which is why the fill stays unconditional.
 
 ### Bounds Checking as a Future Proof Obligation
 
@@ -533,7 +577,7 @@ The remaining verification step is Proof mode. Emitting the guard in proof mode 
 
 ## Current Implementation
 
-The memory infrastructure is in `core/wasm-codegen/src/memory.rs` (constants, data structures, store/load helpers, prologue/epilogue emission, parameter copy). Frame layout computation and array lowering methods are in `core/wasm-codegen/src/compiler.rs`.
+The memory infrastructure is in `core/wasm-codegen/src/memory.rs` (constants, data structures, store/load helpers, prologue/epilogue emission, parameter copy). Frame layout computation and array lowering methods are in `core/wasm-codegen/src/compiler.rs`, including the body scan that decides whether a compound parameter is written or forwarded to an external and therefore needs a frame slot at all. That decision is made in one place, when the frame layout is computed: the entry-copy loop emits a copy exactly when a slot exists, so the two cannot disagree.
 
 The implementation uses coverage marks to verify that each code path is exercised by the test suite:
 
@@ -545,5 +589,8 @@ The implementation uses coverage marks to verify that each code path is exercise
 | `wasm_codegen_emit_array_literal` | Element stores for array initialization |
 | `wasm_codegen_emit_array_index_read` | Element load via base+offset |
 | `wasm_codegen_emit_array_index_write` | Element store via base+offset |
-| `wasm_codegen_emit_array_param_copy` | Copy-on-entry for array parameters |
+| `wasm_codegen_emit_array_param_copy` | Copy-on-entry for an array parameter that was given a frame slot |
 | `wasm_codegen_emit_array_uzumaki` | Element-wise uzumaki stores |
+| `wasm_codegen_param_by_reference` | A compound parameter needs no slot and no copy |
+| `wasm_codegen_param_written_in_body` | An assignment rooted at the parameter keeps its copy |
+| `wasm_codegen_param_escapes_to_extern` | The parameter reaches an `external fn` argument and keeps its copy |
