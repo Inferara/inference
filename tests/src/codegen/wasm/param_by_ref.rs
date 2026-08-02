@@ -544,6 +544,12 @@ mod param_by_ref_tests {
     /// Each of the four reads is weighted differently in the result, so a read
     /// that resolved against the containing region instead of the contained one
     /// changes the number rather than coinciding with it.
+    ///
+    /// Both halves of each number are load-bearing. The leading four digits are
+    /// what the callee returned, and the trailing digits are the caller's own
+    /// aggregate read back after control returned — the half that says the two
+    /// pointers, one of which addresses a range inside the other's, left the
+    /// caller's bytes where they were.
     #[test]
     fn alias_whole_and_part_execution_test() {
         let (mut store, instance) = instantiate("alias_whole_and_part");
@@ -551,14 +557,20 @@ mod param_by_ref_tests {
 
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_whole_and_field"),
-            7334,
-            "a struct and its own field, passed together"
+            7_334_734,
+            "a struct and its own field, passed together: the callee reads \
+             7*1000 + 3*100 + 3*10 + 4 = 7334 through the two overlapping \
+             pointers, and afterwards the caller's own `Outer` still reads \
+             {{ head: 7, body: {{ p: 3, q: 4 }} }} (734)"
         );
-        for (index, expected) in [(0i32, 1612), (1, 1634), (2, 1656)] {
+        for (index, expected) in [(0i32, 1_612_161), (1, 1_634_163), (2, 1_656_165)] {
             assert_eq!(
                 call1::<i32, i32>(&mut store, &instance, "call_whole_and_element", index),
                 expected,
-                "an array and its own element {index}, passed together"
+                "an array and its own element {index}, passed together: the callee's \
+                 answer leads, and the trailing three digits are the caller's array \
+                 read back — items[0].a = 1, items[2].b = 6 and the very element it \
+                 handed over as the contained region"
             );
         }
 
@@ -645,16 +657,29 @@ mod param_by_ref_tests {
     /// always a fresh binding and parameter slots are a frame prefix — but that
     /// is an argument about unreachability, which is exactly the kind that stops
     /// being true without anything failing. These execute.
+    ///
+    /// `idp` and `ida` are the sret arm's other source shape. Returning the
+    /// parameter itself moves one whole region rather than storing the
+    /// destination field by field, and its source is a by-reference parameter —
+    /// an address in the caller's memory, not a callee frame slot that sits
+    /// safely below it. Both the struct and the array are present because the
+    /// two sret arms are reached separately.
     #[test]
     fn alias_sret_golden_test() {
-        cov_mark::check_count!(wasm_codegen_param_by_reference, 4);
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 6);
         cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 0);
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 0);
         let wasm = assert_golden("alias_sret");
         assert_frameless(&wasm, "swap_xy");
         assert_frameless(&wasm, "copy_of");
         assert_frameless(&wasm, "rotate");
         assert_frameless(&wasm, "wrap");
+        // The identity functions need no frame either: both ends of the region
+        // copy are addresses the caller supplied, so there is nothing left for a
+        // frame to hold.
+        assert_frameless(&wasm, "idp");
+        assert_frameless(&wasm, "ida");
     }
 
     #[test]
@@ -672,15 +697,35 @@ mod param_by_ref_tests {
         );
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_copy_of"),
-            456,
+            456_456,
             "a plain `let d: P = copy_of(c);` destination beside a by-reference \
-             argument"
+             argument: the copy came out right (the trailing 456) and the source \
+             it was copied from still reads {{ 4, 5, 6 }} afterwards (the leading \
+             456). A field-for-field copy returns the correct value even when its \
+             destination *is* its source, so only the caller's half separates the \
+             two"
         );
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_wrap"),
             3312,
             "the same destination pointer forwarded one level down: the writer and \
              the reader of any overlap would be two different frames"
+        );
+        assert_eq!(
+            call0::<i32>(&mut store, &instance, "call_idp"),
+            789_789,
+            "returning a by-reference struct parameter copies one region out of \
+             the caller's memory into another region of it: the destination came \
+             out {{ 7, 8, 9 }} (the trailing 789), so the copy ran, and the source \
+             still reads {{ 7, 8, 9 }} (the leading 789), so being the source of a \
+             whole-region move left it alone"
+        );
+        assert_eq!(
+            call0::<i32>(&mut store, &instance, "call_ida"),
+            12_341_234,
+            "and the array arm of the same shape: [1, 2, 3, 4] copied whole out of \
+             the caller's memory (the trailing 1234) with the source array intact \
+             behind it (the leading 1234)"
         );
 
         assert_eq!(
@@ -702,7 +747,7 @@ mod param_by_ref_tests {
     /// of them would show up in only some of these fixtures.
     #[test]
     fn proof_mode_elides_the_same_parameters() {
-        cov_mark::check_count!(wasm_codegen_param_by_reference, 25);
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 27);
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 3);
         cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 0);
 
@@ -718,7 +763,7 @@ mod param_by_ref_tests {
                 "alias_receiver",
                 &["Holder.read_with_part", "Holder.native_sub_object"],
             ),
-            ("alias_sret", &["swap_xy", "wrap"]),
+            ("alias_sret", &["swap_xy", "wrap", "idp", "ida"]),
         ] {
             let output = codegen_output_with_mode(&fixture_source(fixture), CompilationMode::Proof);
             for name in frameless {

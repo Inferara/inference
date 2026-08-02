@@ -9,9 +9,22 @@
 // the same destination pointer one level down, so the writer and the reader of
 // the overlap are two different frames.
 //
-// The callers read a field of the *argument* back after the call as well, so a
-// destination that had been aimed at the source would fail on the caller's side
-// too.
+// The callers read the *argument* back after the call as well, so a destination
+// that had been aimed at the source would fail on the caller's side too rather
+// than only through the value it returned. `call_copy_of` reads all three of its
+// fields: a field-for-field copy is the one callee whose return value is
+// indistinguishable from its own source, so nothing but the caller's bytes
+// afterwards can tell a copy apart from a destination that was the source.
+//
+// `idp` and `ida` return the parameter itself. Every other function here builds
+// a struct literal and stores into the destination field by field, so this is
+// the one shape that reaches the whole-region sret copy with a source that is
+// itself a by-reference parameter: one region moved straight out of the caller's
+// memory into another region of it, with no callee frame at either end. The
+// struct and the array are both here because the two sret arms lower
+// separately. Their callers read the source back as well as the destination —
+// the destination says the region copy ran, the source says the argument
+// survived being the thing it was copied from.
 
 struct P {
     x: i32;
@@ -47,6 +60,14 @@ fn wrap(q: P) -> P {
     return rotate(q);
 }
 
+fn idp(p: P) -> P {
+    return p;
+}
+
+fn ida(a: [i32; 4]) -> [i32; 4] {
+    return a;
+}
+
 pub fn call_swap_xy() -> i32 {
     let a: P = P { x: 1, y: 2, z: 3 };
     let b: P = swap_xy(a);
@@ -56,11 +77,25 @@ pub fn call_swap_xy() -> i32 {
 pub fn call_copy_of() -> i32 {
     let c: P = P { x: 4, y: 5, z: 6 };
     let d: P = copy_of(c);
-    return d.x * 100 + d.y * 10 + d.z;
+    return c.x * 100000 + c.y * 10000 + c.z * 1000 + d.x * 100 + d.y * 10 + d.z;
 }
 
 pub fn call_wrap() -> i32 {
     let e: P = P { x: 1, y: 2, z: 3 };
     let w: P = wrap(e);
     return w.x * 100 + w.y * 10 + w.z + e.z * 1000;
+}
+
+pub fn call_idp() -> i32 {
+    let g: P = P { x: 7, y: 8, z: 9 };
+    let h: P = idp(g);
+    return g.x * 100000 + g.y * 10000 + g.z * 1000 + h.x * 100 + h.y * 10 + h.z;
+}
+
+pub fn call_ida() -> i32 {
+    let m: [i32; 4] = [1, 2, 3, 4];
+    let n: [i32; 4] = ida(m);
+    let src: i32 = m[0] * 1000 + m[1] * 100 + m[2] * 10 + m[3];
+    let dst: i32 = n[0] * 1000 + n[1] * 100 + n[2] * 10 + n[3];
+    return src * 10000 + dst;
 }

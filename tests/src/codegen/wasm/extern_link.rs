@@ -320,13 +320,13 @@ mod extern_link_tests {
     /// Issue #329: an immutable `self` forwarded to a writing external must not
     /// let that external reach the caller's struct.
     ///
-    /// The three probes differ only in how the receiver arrives — an immutable
-    /// `self`, a `mut self`, and an ordinary by-value parameter — and each packs
-    /// what the callee saw together with what the caller has afterwards, so a
-    /// single number pins the whole outcome. The bug returned `20050205` for the
-    /// first probe: the caller's `Pair { a: 5, b: 2 }` came back sorted, because
-    /// `touch` was frameless and handed `probe_self`'s own frame pointer to the
-    /// foreign body.
+    /// The first three probes differ only in how the receiver arrives — an
+    /// immutable `self`, a `mut self`, and an ordinary by-value parameter — and
+    /// each packs what the callee saw together with what the caller has
+    /// afterwards, so a single number pins the whole outcome. The bug returned
+    /// `20050205` for the first probe: the caller's `Pair { a: 5, b: 2 }` came
+    /// back sorted, because `touch` was frameless and handed `probe_self`'s own
+    /// frame pointer to the foreign body.
     ///
     /// Both halves of each value are load-bearing. Checking only that the caller
     /// survived would accept a fix that stages a copy at the *call site* instead
@@ -340,8 +340,27 @@ mod extern_link_tests {
     /// The named-parameter probe has behaved that way all along (its `25` half),
     /// which is why it is here: the fix makes the receiver match the parameter,
     /// not the other way round.
+    ///
+    /// The fourth probe runs the opposite decision in the same merged module. A
+    /// compound parameter that never reaches the external is passed by reference
+    /// — no frame slot, no entry copy — so what the callee dereferences is a raw
+    /// address in the caller's frame rather than a region of its own. Linking is
+    /// what makes that worth executing here: the foreign body is folded into this
+    /// module and onto this linear memory, so the linker is precisely the
+    /// component whose addressing assumptions an elided parameter could falsify,
+    /// and no other end-to-end program in the suite runs one. `peek` reads
+    /// through the elided pointer on both sides of a call that hands the same
+    /// struct to the writing external, so its number states three things: the
+    /// address was good before the foreign body ran (`52`), the sort reached only
+    /// the callee's copy (`2005`), and the address was still good afterwards
+    /// (`52`).
     #[test]
     fn immutable_self_forwarded_to_writing_extern_leaves_the_caller_intact() {
+        // Of the four compound parameters in this program only `peek`'s is passed
+        // by reference; the other three reach the external and keep their copies.
+        // Without this the fourth probe would be equally satisfied by a copy, and
+        // the merged module's handling of a raw caller address would go unrun.
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
         let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
         let lib_dir = TempLibDir::new("self_extern");
         // The `.wasm` extension is required: `resolve_external_modules` maps the
@@ -372,6 +391,10 @@ fn touch_param(p: Pair) -> i32 {
     return p.a * 10 + p.b;
 }
 
+fn peek(p: Pair) -> i32 {
+    return p.a * 10 + p.b;
+}
+
 pub fn probe_self() -> i32 {
     let p: Pair = Pair { a: 5, b: 2 };
     let inner: i32 = p.touch();
@@ -388,6 +411,14 @@ pub fn probe_named_param() -> i32 {
     let p: Pair = Pair { a: 5, b: 2 };
     let inner: i32 = touch_param(p);
     return inner * 100 + p.a * 10 + p.b;
+}
+
+pub fn probe_by_reference() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    let before: i32 = peek(p);
+    let inner: i32 = p.touch();
+    let after: i32 = peek(p);
+    return before * 1000000 + inner * 100 + after;
 }
 ";
 
@@ -432,6 +463,18 @@ pub fn probe_named_param() -> i32 {
             "the by-value parameter control is unchanged too: a named compound \
              parameter copies on entry today, so the callee sees the sorted pair \
              (25) and the caller keeps its own (52)"
+        );
+        assert_eq!(
+            call(&mut store, "probe_by_reference"),
+            52_200_552,
+            "a compound parameter that never reaches the external is passed by \
+             reference, and reading through that raw caller address must survive \
+             the merge: `peek` reads Pair {{ a: 5, b: 2 }} before the foreign body \
+             runs (52) and reads the same bytes back after it (the trailing 52), \
+             while `touch` still sees the sort in its own copy (2005). A trailing \
+             25 would mean the foreign store reached the caller after all, and a \
+             leading value other than 52 would mean the elided pointer did not \
+             address the caller's struct in the merged module"
         );
     }
 

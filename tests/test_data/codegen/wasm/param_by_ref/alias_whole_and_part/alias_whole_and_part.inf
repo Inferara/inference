@@ -6,6 +6,14 @@
 // Every field read is weighted differently in the returned value, so a read
 // that resolved against the wrong base changes the result rather than
 // coincidentally matching it.
+//
+// Each caller then reads the containing aggregate back after the call and folds
+// it into the number it returns, because the callee's answer alone says nothing
+// about the caller. Containment is the shape where that matters most: the two
+// pointers the callee holds are not merely close, one region is entirely inside
+// the other, so a store anywhere in the contained range lands in the middle of
+// the containing one. The callee's answer leads the number it returns and the
+// caller's own bytes, read after control came back, trail it.
 
 struct Inner {
     p: i32;
@@ -35,7 +43,8 @@ pub fn call_whole_and_field() -> i32 {
         head: 7,
         body: Inner { p: 3, q: 4 },
     };
-    return whole_and_field(s, s.body);
+    let inner: i32 = whole_and_field(s, s.body);
+    return inner * 1000 + s.head * 100 + s.body.p * 10 + s.body.q;
 }
 
 pub fn call_whole_and_element(i: i32) -> i32 {
@@ -44,5 +53,6 @@ pub fn call_whole_and_element(i: i32) -> i32 {
         Item { a: 3, b: 4 },
         Item { a: 5, b: 6 },
     ];
-    return whole_and_element(items, items[i]);
+    let inner: i32 = whole_and_element(items, items[i]);
+    return inner * 1000 + items[0].a * 100 + items[2].b * 10 + items[i].a;
 }

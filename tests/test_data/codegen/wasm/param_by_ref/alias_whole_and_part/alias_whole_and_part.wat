@@ -64,7 +64,7 @@
     unreachable
   )
   (func $call_whole_and_field (;2;) (type 2) (result i32)
-    (local $s i32) (local $__frame_ptr i32)
+    (local $s i32) (local $inner i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -96,6 +96,29 @@
     i32.const 4
     i32.add
     call $whole_and_field
+    local.set $inner
+    local.get $inner
+    i32.const 1000
+    i32.mul
+    local.get $s
+    i32.load
+    i32.const 100
+    i32.mul
+    i32.add
+    local.get $s
+    i32.const 4
+    i32.add
+    i32.load
+    i32.const 10
+    i32.mul
+    i32.add
+    local.get $s
+    i32.const 4
+    i32.add
+    i32.const 4
+    i32.add
+    i32.load
+    i32.add
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -104,7 +127,7 @@
     unreachable
   )
   (func $call_whole_and_element (;3;) (type 3) (param $i i32) (result i32)
-    (local $items i32) (local $__frame_ptr i32) (local i32)
+    (local $items i32) (local $inner i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -155,8 +178,8 @@
     local.get $items
     local.get $items
     local.get $i
-    local.tee 3
-    local.get 3
+    local.tee 4
+    local.get 4
     i32.const 3
     i32.ge_u
     if ;; label = @1
@@ -166,6 +189,38 @@
     i32.mul
     i32.add
     call $whole_and_element
+    local.set $inner
+    local.get $inner
+    i32.const 1000
+    i32.mul
+    local.get $items
+    i32.load
+    i32.const 100
+    i32.mul
+    i32.add
+    local.get $items
+    i32.const 16
+    i32.add
+    i32.const 4
+    i32.add
+    i32.load
+    i32.const 10
+    i32.mul
+    i32.add
+    local.get $items
+    local.get $i
+    local.tee 4
+    local.get 4
+    i32.const 3
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 8
+    i32.mul
+    i32.add
+    i32.load
+    i32.add
     local.get $__frame_ptr
     i32.const 32
     i32.add
