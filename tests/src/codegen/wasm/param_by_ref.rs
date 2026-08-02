@@ -75,13 +75,17 @@ mod param_by_ref_tests {
 
     /// Compiles a fixture and instantiates it, without the golden comparison.
     fn instantiate(test_name: &str) -> (Store<()>, Instance) {
-        let wasm_bytes = wasm_codegen(&fixture_source(test_name));
+        instantiate_wasm(&wasm_codegen(&fixture_source(test_name)), test_name)
+    }
+
+    /// Instantiates an already-compiled module, named `label` in failures.
+    fn instantiate_wasm(wasm_bytes: &[u8], label: &str) -> (Store<()>, Instance) {
         let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes)
-            .unwrap_or_else(|e| panic!("Failed to create Wasm module for {test_name}: {e}"));
+        let module = Module::new(&engine, wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module for {label}: {e}"));
         let mut store = Store::new(&engine, ());
         let instance = Instance::new(&mut store, &module, &[])
-            .unwrap_or_else(|e| panic!("Failed to instantiate {test_name}: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to instantiate {label}: {e}"));
         (store, instance)
     }
 
@@ -177,6 +181,18 @@ mod param_by_ref_tests {
         let rest = &wat[start..];
         let end = rest.find("\n  )").map_or(rest.len(), |offset| offset + 4);
         rest[..end].to_string()
+    }
+
+    /// Whether the module declares a linear memory of its own.
+    fn has_memory_section(wasm: &[u8]) -> bool {
+        inf_wasmparser::Parser::new(0)
+            .parse_all(wasm)
+            .any(|payload| {
+                matches!(
+                    payload.expect("a validated module parses"),
+                    inf_wasmparser::Payload::MemorySection(_)
+                )
+            })
     }
 
     /// Asserts that `name` has no frame at all: nothing to hold a parameter
@@ -474,6 +490,76 @@ mod param_by_ref_tests {
         assert_frameless(&wasm, "no_forward");
     }
 
+    // What the module keeps when the last frame goes ---
+
+    /// A module whose only memory user is a by-reference parameter must still
+    /// declare the memory that parameter is read out of.
+    ///
+    /// `get_a` reads its parameter through the caller's pointer, so it gets no
+    /// slot and no frame — and this module holds nothing else: no caller, no
+    /// compound local, no `main`. Its one `i32.load` is the only memory access
+    /// in the whole program, so whether a memory section, a `__stack_pointer`
+    /// global and their exports are emitted rests on the parameter alone. A
+    /// compiler that concluded "memory is needed" from the frame layout instead
+    /// would emit, for this module, loads against a memory it never declares —
+    /// no validator accepts that and no host can instantiate it — and would
+    /// drop the `__stack_pointer` export every caller and every harness reads.
+    ///
+    /// The source is inline because every fixture in this file hides the trap:
+    /// each of their callers holds a compound local, so some function allocates
+    /// a frame and the memory comes along behind it no matter where the
+    /// decision is taken. Only a leaf with no caller separates the two.
+    ///
+    /// The counts say the parameter was in fact elided. Were it copied instead,
+    /// the module would carry a frame and prove nothing.
+    #[test]
+    fn a_lone_by_reference_parameter_declares_the_modules_memory() {
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 0);
+
+        let source = "\
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+pub fn get_a(p: Pair) -> i32 {
+    return p.a;
+}
+";
+        let wasm = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm)
+            .unwrap_or_else(|e| panic!("a lone by-reference parameter must still validate: {e}"));
+
+        assert_frameless(&wasm, "get_a");
+        assert!(
+            has_memory_section(&wasm),
+            "nothing in this module allocates a frame, so the parameter is the \
+             only thing that can ask for a memory to load from:\n{}",
+            wasmprinter::print_bytes(&wasm).expect("Failed to print WAT")
+        );
+
+        let (mut store, instance) = instantiate_wasm(&wasm, "get_a");
+        // Looking the global up is the export assertion: a module that lost it
+        // fails here rather than quietly passing the value check below.
+        let initial_sp = stack_pointer(&mut store, &instance);
+        let memory = memory_of(&mut store, &instance);
+        let bytes = write_pattern(&mut store, &memory, 8);
+
+        assert_eq!(
+            call1::<i32, i32>(&mut store, &instance, "get_a", PROBE_ADDR),
+            i32_at(&bytes, 0),
+            "the load must resolve through the module's own memory and return the \
+             caller's first field"
+        );
+        assert_eq!(
+            stack_pointer(&mut store, &instance),
+            initial_sp,
+            "and a frameless function must leave the shadow stack it never \
+             touched exactly where it was"
+        );
+    }
+
     // Aliasing the elision makes reachable ---
 
     /// The same variable passed twice. Without a copy the two parameters are one
@@ -607,6 +693,11 @@ mod param_by_ref_tests {
         assert_param_copied(&wasm, "Holder.bump_with_holder", "self");
     }
 
+    /// Every row here reports both halves: the callee's answer leads, and the
+    /// trailing `53` is the caller's own `Holder` read back after control
+    /// returned — its `tag` beside the `body.u` it handed over. A pointer that
+    /// addressed the wrong region moves the leading digits; one that was written
+    /// through moves the trailing pair.
     #[test]
     fn alias_receiver_execution_test() {
         let (mut store, instance) = instantiate("alias_receiver");
@@ -614,13 +705,17 @@ mod param_by_ref_tests {
 
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_receiver_and_part"),
-            5334,
-            "a receiver and one of its own fields, passed together"
+            533_453,
+            "a receiver and one of its own fields, passed together: the callee \
+             reads 5*1000 + 3*100 + 3*10 + 4 = 5334 through the two overlapping \
+             pointers, and the caller's Holder still reads tag 5, body.u 3"
         );
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_receiver_and_receiver"),
-            5454,
-            "a receiver passed to itself as an argument"
+            545_453,
+            "a receiver passed to itself as an argument: 5*1000 + 4*100 + 5*10 + \
+             4 = 5454 out of the one region both pointers name, and that region \
+             is unchanged afterwards"
         );
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_mut_receiver_and_part"),
@@ -638,9 +733,10 @@ mod param_by_ref_tests {
         );
         assert_eq!(
             call0::<i32>(&mut store, &instance, "call_native_sub_object"),
-            34,
-            "a sub-object of a by-reference receiver is an address two frames up, \
-             and a native callee must read it there"
+            3453,
+            "a sub-object of a by-reference receiver is an address two frames up: \
+             the native callee reads Part {{ u: 3, v: 4 }} there (34) and leaves \
+             the caller's Holder holding tag 5 and body.u 3"
         );
 
         assert_eq!(
@@ -664,12 +760,24 @@ mod param_by_ref_tests {
     /// an address in the caller's memory, not a callee frame slot that sits
     /// safely below it. Both the struct and the array are present because the
     /// two sret arms are reached separately.
+    ///
+    /// Which rows take that whole-region move is counted, because it is the
+    /// only thing that makes them a test of it. The region copy is reached from
+    /// exactly one return form — `return <identifier>` — so the two hits are
+    /// `idp` and `ida`. `swap_xy`, `copy_of` and `rotate` return struct
+    /// literals and store the destination field by field; `wrap` returns a call
+    /// and forwards its own destination pointer down instead of copying
+    /// anything. A two that became a five would mean the field-by-field rows
+    /// had quietly started moving regions, and a two that became a zero would
+    /// mean the row written to exercise a caller-memory source stopped
+    /// exercising it — neither changes a returned value.
     #[test]
     fn alias_sret_golden_test() {
         cov_mark::check_count!(wasm_codegen_param_by_reference, 6);
         cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 0);
         cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 0);
+        cov_mark::check_count!(wasm_codegen_emit_sret_copy, 2);
         let wasm = assert_golden("alias_sret");
         assert_frameless(&wasm, "swap_xy");
         assert_frameless(&wasm, "copy_of");
@@ -745,11 +853,17 @@ mod param_by_ref_tests {
     /// layout pass, but the frame it suppresses is emitted from the prologue,
     /// the epilogue and two separate copy emitters, and a mode check left in any
     /// of them would show up in only some of these fixtures.
+    ///
+    /// The sret-copy count carries over unchanged as well. `alias_sret`'s `idp`
+    /// and `ida` are the only compound returns in the whole family, so the two
+    /// whole-region moves they emit in compile mode are the two this loop must
+    /// still see.
     #[test]
     fn proof_mode_elides_the_same_parameters() {
         cov_mark::check_count!(wasm_codegen_param_by_reference, 27);
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 3);
         cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 0);
+        cov_mark::check_count!(wasm_codegen_emit_sret_copy, 2);
 
         for (fixture, frameless) in [
             ("read_only_params", &["dot", "sum4", "pick4"][..]),

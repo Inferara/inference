@@ -135,6 +135,26 @@ mod extern_link_tests {
         (unified, rocq)
     }
 
+    /// The merged module's `__stack_pointer`.
+    ///
+    /// The merge re-emits the main module's globals and its non-function
+    /// exports under their original indices, so a linked program keeps the
+    /// shadow stack the compiler gave it. Reading it before and after a probe
+    /// states the other half of a write-through test: the probes below assert
+    /// that a foreign body reached only the bytes it was meant to, and this
+    /// asserts that the frames those bytes lived in were unwound — a callee
+    /// that skipped its epilogue, or one whose prologue was emitted without a
+    /// matching restore, walks the pointer down and is invisible in every value
+    /// a short program returns.
+    fn stack_pointer(store: &mut Store<()>, instance: &Instance) -> i32 {
+        instance
+            .get_global(&mut *store, "__stack_pointer")
+            .expect("the merge must preserve the main module's `__stack_pointer` export")
+            .get(&mut *store)
+            .i32()
+            .expect("__stack_pointer is an i32 global")
+    }
+
     #[test]
     fn single_extern_links_to_self_contained_wasm_and_v() {
         // The external library exports `sum`; the main program binds it via
@@ -441,6 +461,8 @@ pub fn probe_by_reference() -> i32 {
                 .unwrap_or_else(|e| panic!("`{name}` failed: {e}"))
         };
 
+        let initial_sp = stack_pointer(&mut store, &instance);
+
         assert_eq!(
             call(&mut store, "probe_self"),
             20_050_502,
@@ -475,6 +497,15 @@ pub fn probe_by_reference() -> i32 {
              25 would mean the foreign store reached the caller after all, and a \
              leading value other than 52 would mean the elided pointer did not \
              address the caller's struct in the merged module"
+        );
+
+        assert_eq!(
+            stack_pointer(&mut store, &instance),
+            initial_sp,
+            "four probes have entered and left frames — two of them holding an \
+             entry copy of a receiver — so the shadow stack must be exactly where \
+             it started; a drift here means some prologue in the merged module \
+             was never matched by its epilogue"
         );
     }
 
@@ -531,6 +562,8 @@ pub fn probe_named_array() -> i32 {
         let instance = Instance::new(&mut store, &module, &[])
             .unwrap_or_else(|e| panic!("merged module failed to instantiate: {e}"));
 
+        let initial_sp = stack_pointer(&mut store, &instance);
+
         let probe: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "probe_named_array")
             .unwrap_or_else(|e| panic!("merged module must export `probe_named_array`: {e}"));
@@ -543,6 +576,13 @@ pub fn probe_named_array() -> i32 {
              by element into the callee's own frame: the callee sees the sorted pair \
              (25) and the caller still holds [5, 2] (52). 2525 would mean the foreign \
              store reached the caller's array"
+        );
+
+        assert_eq!(
+            stack_pointer(&mut store, &instance),
+            initial_sp,
+            "the probe and the copying callee each took a frame, so both must have \
+             given it back"
         );
     }
 

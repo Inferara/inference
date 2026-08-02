@@ -33,7 +33,7 @@
     unreachable
   )
   (func $call_receiver_and_part (;1;) (type 1) (result i32)
-    (local $h i32) (local $__frame_ptr i32)
+    (local $h i32) (local $inner i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -65,6 +65,20 @@
     i32.const 4
     i32.add
     call $Holder.read_with_part
+    local.set $inner
+    local.get $inner
+    i32.const 100
+    i32.mul
+    local.get $h
+    i32.load
+    i32.const 10
+    i32.mul
+    i32.add
+    local.get $h
+    i32.const 4
+    i32.add
+    i32.load
+    i32.add
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -73,7 +87,7 @@
     unreachable
   )
   (func $call_receiver_and_receiver (;2;) (type 2) (result i32)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $inner i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -103,6 +117,20 @@
     local.get $g
     local.get $g
     call $Holder.read_with_holder
+    local.set $inner
+    local.get $inner
+    i32.const 100
+    i32.mul
+    local.get $g
+    i32.load
+    i32.const 10
+    i32.mul
+    i32.add
+    local.get $g
+    i32.const 4
+    i32.add
+    i32.load
+    i32.add
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -217,7 +245,7 @@
     unreachable
   )
   (func $call_native_sub_object (;5;) (type 5) (result i32)
-    (local $m i32) (local $__frame_ptr i32)
+    (local $m i32) (local $inner i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -246,6 +274,20 @@
     local.set $m
     local.get $m
     call $Holder.native_sub_object
+    local.set $inner
+    local.get $inner
+    i32.const 100
+    i32.mul
+    local.get $m
+    i32.load
+    i32.const 10
+    i32.mul
+    i32.add
+    local.get $m
+    i32.const 4
+    i32.add
+    i32.load
+    i32.add
     local.get $__frame_ptr
     i32.const 16
     i32.add

@@ -1530,6 +1530,8 @@ pub(crate) fn emit_sret_copy(
     byte_size: u32,
     region: &mut RegionEmit,
 ) {
+    cov_mark::hit!(wasm_codegen_emit_sret_copy);
+
     emit_memcpy_via_locals(
         func,
         MemAddr {

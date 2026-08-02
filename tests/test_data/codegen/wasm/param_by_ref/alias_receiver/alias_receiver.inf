@@ -10,6 +10,17 @@
 // and the argument must still show the caller's original value — and a
 // sub-object of a by-reference receiver handed to a *native* callee, a pointer
 // that reaches two frames up.
+//
+// Every caller reads its own `Holder` back after the call and folds two of its
+// fields into the number it returns, so each row states the caller's side as
+// well as the callee's. The two halves answer different questions. What the
+// callee returned says the pointers it was handed addressed the right regions;
+// what the caller reads afterwards says nothing wrote through them. A receiver
+// passed by reference *is* the caller's memory, so a stray store — or a copy
+// that was skipped where one was needed — is visible in the trailing digits and
+// nowhere else. `call_native_sub_object` gains the most from it: the address it
+// hands down points two frames up, and the returned value alone would accept a
+// callee that read the right bytes and then scribbled on them.
 
 struct Part {
     u: i32;
@@ -52,7 +63,8 @@ pub fn call_receiver_and_part() -> i32 {
         tag: 5,
         body: Part { u: 3, v: 4 },
     };
-    return h.read_with_part(h.body);
+    let inner: i32 = h.read_with_part(h.body);
+    return inner * 100 + h.tag * 10 + h.body.u;
 }
 
 pub fn call_receiver_and_receiver() -> i32 {
@@ -60,7 +72,8 @@ pub fn call_receiver_and_receiver() -> i32 {
         tag: 5,
         body: Part { u: 3, v: 4 },
     };
-    return g.read_with_holder(g);
+    let inner: i32 = g.read_with_holder(g);
+    return inner * 100 + g.tag * 10 + g.body.u;
 }
 
 pub fn call_mut_receiver_and_part() -> i32 {
@@ -86,5 +99,6 @@ pub fn call_native_sub_object() -> i32 {
         tag: 5,
         body: Part { u: 3, v: 4 },
     };
-    return m.native_sub_object();
+    let inner: i32 = m.native_sub_object();
+    return inner * 100 + m.tag * 10 + m.body.u;
 }
