@@ -9,7 +9,7 @@ repository = { workspace = true }
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
-wasmtime="43.0.0"
+wasmtime="47.0.3"
 
 inference-analysis.workspace = true
 inference-ast.workspace = true
