@@ -377,6 +377,61 @@ pub fn f(i: u32) -> i32 {
         assert_unreachable_trap(&f.call(&mut store, 4).expect_err("OOB must trap"));
     }
 
+    // --- Dynamic index inside a `const` initializer --------------------------
+
+    /// A dynamic index that appears **only** in a function-scoped `const`
+    /// initializer, a statement position no `let` or expression statement
+    /// covers.
+    ///
+    /// The scratch local is reserved from a scan of the body, so a scan that
+    /// skipped `const` initializers would find no dynamic index, reserve
+    /// nothing, and then abort at the guard-emission site ("bounds-check scratch
+    /// local must be reserved") when lowering reached this very expression. A
+    /// `const` initializer lowers through the same path as a `let`, so it must
+    /// be one of the positions the scan looks at.
+    #[test]
+    fn debug_const_initializer_dynamic_index_emits_guard_and_validates() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
+        let source = r#"
+pub fn pick(i: u32) -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    const Q: i32 = arr[i];
+    return Q;
+}
+"#;
+        let wasm = debug_wasm(source);
+        let wat = wat(&wasm);
+        assert!(
+            wat.contains("i32.ge_u"),
+            "a dynamic index in a `const` initializer must emit a guard:\n{wat}"
+        );
+        inf_wasmparser::validate(&wasm)
+            .unwrap_or_else(|e| panic!("guarded `const`-initializer module must validate: {e}"));
+    }
+
+    /// The guard around a `const` initializer's dynamic index is live: in-bounds
+    /// indices return the element and an out-of-bounds one traps.
+    ///
+    /// Kept separate from the count assertion so the single-threaded `cov_mark`
+    /// check brackets a single codegen call.
+    #[test]
+    fn debug_const_initializer_dynamic_index_runs_and_traps() {
+        let source = r#"
+pub fn pick(i: u32) -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    const Q: i32 = arr[i];
+    return Q;
+}
+"#;
+        let (mut store, instance) = instantiate(&debug_wasm(source));
+        let pick: TypedFunc<u32, i32> = instance
+            .get_typed_func(&mut store, "pick")
+            .expect("failed to get pick");
+        assert_eq!(pick.call(&mut store, 0).expect("call failed"), 10);
+        assert_eq!(pick.call(&mut store, 3).expect("call failed"), 40);
+        assert_unreachable_trap(&pick.call(&mut store, 4).expect_err("OOB must trap"));
+    }
+
     // --- Richer shapes are guarded under Release too -------------------------
 
     /// A multi-dimensional (uzumaki) dynamic access `g[i][j]` emits TWO guards

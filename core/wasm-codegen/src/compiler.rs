@@ -415,11 +415,11 @@ pub(crate) struct Compiler {
     ///
     /// Recorded while the parameters are walked, where each parameter's resolved
     /// type is already in hand, so that assignment lowering can recognize one
-    /// without re-deriving compound-ness. Its only consumer is the tripwire in
-    /// [`Self::lower_assign_statement`]: a compound parameter that has no frame
-    /// slot was proved unwritten by [`Self::param_is_written`], so an assignment
-    /// reaching it means that scan and lowering disagree. Reset per function
-    /// alongside the rest of the per-function state.
+    /// without re-deriving compound-ness. Its only consumer is
+    /// [`Self::assert_assign_target_has_slot`]: a compound parameter that has no
+    /// frame slot was proved unwritten by [`Self::param_is_written`], so an
+    /// assignment reaching it means that scan and lowering disagree. Reset per
+    /// function alongside the rest of the per-function state.
     compound_params: FxHashSet<String>,
     /// Local declarations for the function currently being compiled: the named
     /// locals plus the eagerly reserved frame-pointer, bounds-check and
@@ -486,6 +486,10 @@ struct FrameLayoutInput<'a> {
     ctx: &'a TypedContext,
     /// WASM local index reserved for `__frame_ptr`.
     frame_ptr_local_idx: u32,
+    /// The function's declared parameters, in order and *including* the `self`
+    /// receiver as an `ArgKind::SelfRef`. The receiver's presence here is what
+    /// gives it a frame slot when it is not by reference, so a caller that
+    /// stripped it would silently drop the receiver's entry copy.
     args: &'a [ArgData],
     /// `Some("TypeName")` when laying out a method body, so an
     /// `ArgKind::SelfRef` needing its own copy can resolve the struct layout.
@@ -1214,10 +1218,12 @@ impl Compiler {
                         "parameter `{arg_name}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected duplicate parameter names",
                     );
-                    // A compound parameter is a pointer into linear memory, so the
-                    // module needs a memory section and a `__stack_pointer` global
-                    // whether or not the parameter earns a frame slot. Deriving the
-                    // fact from the frame would tie it to the slot, and a parameter
+                    // A parameter that owns a region of linear memory is recorded
+                    // twice over. It joins `compound_params` so that assignment
+                    // lowering can recognize it without re-deriving compound-ness,
+                    // and it forces a memory section and a `__stack_pointer`
+                    // global whether or not it earns a frame slot: deriving that
+                    // from the frame would tie it to the slot, and a parameter
                     // passed by reference has none — a module whose only memory
                     // user was such a parameter would then emit loads with no
                     // memory to load from.
@@ -1225,7 +1231,7 @@ impl Compiler {
                         &TypeInfo::from_type_id(arena, *ty).kind,
                         ctx,
                         module_path,
-                    ) {
+                    )? {
                         self.compound_params.insert(arg_name);
                         self.has_memory = true;
                     }
@@ -1691,14 +1697,23 @@ impl Compiler {
     /// Reports whether any expression reachable from `block_id`'s statements
     /// satisfies `pred`.
     ///
-    /// This is the shared shape of every body-level expression scan the compiler
-    /// runs: block descent through [`Self::walk_statements`], then each
-    /// statement's own expression positions handed to [`Self::expr_any`]. One
-    /// walk means the facts codegen derives from a body — does it index
-    /// dynamically, does it divide narrow signed values, does a parameter reach
-    /// an `external fn` — are read off exactly the same set of nodes, so no scan
-    /// can miss a shape its siblings see. Whatever extra context a scan needs is
-    /// captured by `pred`'s closure.
+    /// This is the shared shape of every body-level scan that asks a yes/no
+    /// question about the *expressions* a body contains: block descent through
+    /// [`Self::walk_statements`], then each statement's own expression positions
+    /// handed to [`Self::expr_any`]. One walk means the facts codegen derives
+    /// that way — does the body index dynamically, does it divide narrow signed
+    /// values, does a parameter reach an `external fn` — are read off exactly the
+    /// same set of nodes, so no such scan can miss a shape its siblings see.
+    /// Whatever extra context a scan needs is captured by `pred`'s closure.
+    ///
+    /// Two body-level scans deliberately sit outside it, because neither is a
+    /// question about an expression. [`Self::param_is_written`] matches on
+    /// *statement* shape (`Stmt::Assign`), and [`Self::scan_self_ref_scratch`]
+    /// matches on statement shape and then accumulates a size rather than
+    /// answering `bool`. Both still descend through the same block classifier,
+    /// [`Self::nested_blocks`] — the first via [`Self::walk_statements`], the
+    /// second driving it directly — so a new block-bearing statement kind is
+    /// still taught to the compiler once.
     ///
     /// A `const` binding's initializer is one of those expression positions: it
     /// lowers through the same `lower_named_binding_init` → `lower_expression`
@@ -1746,7 +1761,10 @@ impl Compiler {
     /// This is the compiler's single enumeration of expression children: every
     /// variant carrying sub-expressions names them here, and every leaf is listed
     /// explicitly rather than swept by a wildcard, so a new `Expr` variant has to
-    /// be classified instead of silently becoming a node no scan can reach.
+    /// be classified instead of silently becoming a node no scan can reach. The
+    /// predicates in [`Self::body_has_expr`]'s family and the alias test in
+    /// [`Self::expr_reads_var`] all run through this one match; nothing else in
+    /// codegen recurses over expression children.
     fn expr_any(
         arena: &AstArena,
         expr_id: ExprId,
@@ -1859,7 +1877,18 @@ impl Compiler {
     /// Callee resolution mirrors emission: `extern_name_to_idx` is read only by
     /// [`Self::lower_function_call`], which is reachable only for a bare
     /// `Expr::Identifier` callee, and `register_imports` fills the map before any
-    /// body is compiled, so it is complete at layout time.
+    /// body is compiled, so it is complete at layout time. Complete in both
+    /// senses: the map is whole-program, built from every file's externs at once,
+    /// so an extern declared *and* called inside a non-entry file disqualifies
+    /// there too.
+    ///
+    /// That a bare identifier is the only callee shape worth checking is not an
+    /// approximation but a consequence of the grammar: an `external fn` cannot be
+    /// `pub`, so no extern is ever nameable from another file, and the qualified
+    /// and cross-file callee shapes that preempt the bare-identifier arm can
+    /// therefore never resolve to one. Should externs ever become exportable,
+    /// this gate silently starts missing them and must be widened with the arm
+    /// that lowers them.
     fn param_escapes_to_extern(
         arena: &AstArena,
         block_id: BlockId,
@@ -1945,27 +1974,44 @@ impl Compiler {
         }
     }
 
-    /// Reports whether a parameter of this type occupies a region of linear
-    /// memory and is therefore passed to the callee as a pointer.
+    /// Reports whether a parameter of this type occupies a *non-empty* region of
+    /// linear memory.
     ///
-    /// `Custom`/`Qualified`/`QualifiedName` name either a struct or an enum, and
-    /// only the struct case is compound: an enum lowers to a bare `i32` tag with
-    /// no memory footprint. Resolution goes through the same shared resolver
-    /// [`Self::compute_frame_layout`]'s struct arm uses, so the two agree by
-    /// construction.
+    /// Two things disqualify a parameter. `Custom`/`Qualified`/`QualifiedName`
+    /// name either a struct or an enum, and only the struct case is compound: an
+    /// enum lowers to a bare `i32` tag with no memory footprint. And a struct
+    /// whose fields lay out to zero bytes owns no region at all, so there is
+    /// nothing to copy, alias, or write through.
+    ///
+    /// Both conditions are decided by the shared resolver and the shared layout
+    /// computation that [`Self::compute_frame_layout`]'s struct arm uses, and
+    /// both are pure functions of the struct definition. The zero-size test is
+    /// the one that has to be restated here rather than inherited: that arm
+    /// allocates a slot only when `total_size > 0`, so without it a field-less
+    /// struct parameter would be called compound while getting no slot —
+    /// [`Self::assert_assign_target_has_slot`] would then read its missing slot
+    /// as a failed write scan and abort a program that compiles, and
+    /// `has_memory` would be set for a parameter with nothing to load.
     fn param_type_is_compound(
         type_kind: &TypeInfoKind,
         ctx: &TypedContext,
         module_path: &[String],
-    ) -> bool {
+    ) -> Result<bool, CodegenError> {
         match type_kind {
-            TypeInfoKind::Array(_, _) => true,
+            TypeInfoKind::Array(_, _) => Ok(true),
             TypeInfoKind::Custom(_)
             | TypeInfoKind::Qualified(_)
             | TypeInfoKind::QualifiedName(_) => {
-                memory::resolve_struct_with_defining_path(type_kind, ctx, module_path).is_some()
+                let Some((struct_info, _defining_path)) =
+                    memory::resolve_struct_with_defining_path(type_kind, ctx, module_path)
+                else {
+                    return Ok(false);
+                };
+                let (total_size, _field_slots) =
+                    compute_struct_field_layout(&struct_info, ctx, module_path)?;
+                Ok(total_size > 0)
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 
@@ -1994,35 +2040,39 @@ impl Compiler {
     /// address-of, no pointer type, no aliasing local binding (every compound
     /// local copies its initializer). It must be revisited before any such
     /// feature lands.
-    fn compound_param_is_by_reference(input: &FrameLayoutInput<'_>, arg: &ArgData) -> bool {
-        let (param_name, named_is_mut) = match &arg.kind {
+    fn compound_param_is_by_reference(
+        input: &FrameLayoutInput<'_>,
+        arg: &ArgData,
+    ) -> Result<bool, CodegenError> {
+        let (param_name, is_mut) = match &arg.kind {
             ArgKind::Named { name, ty, is_mut } => {
                 let type_info = TypeInfo::from_type_id(input.arena, *ty);
-                if !Self::param_type_is_compound(&type_info.kind, input.ctx, input.module_path) {
-                    return false;
+                if !Self::param_type_is_compound(&type_info.kind, input.ctx, input.module_path)? {
+                    return Ok(false);
                 }
-                (input.arena[*name].name.as_str(), Some(*is_mut))
+                (input.arena[*name].name.as_str(), *is_mut)
             }
-            ArgKind::SelfRef { .. } => ("self", None),
-            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return false,
+            ArgKind::SelfRef { is_mut } => ("self", *is_mut),
+            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return Ok(false),
         };
 
         let written = Self::param_is_written(input.arena, input.block_id, param_name);
         // The type checker rejects an assignment rooted at a non-`mut` parameter
-        // (`AssignToImmutable`), so a write found on one here is not a program
-        // that should have reached codegen: this scan and the type checker's root
-        // extraction have drifted apart. It cannot catch the dangerous direction
-        // — a *missed* write is invisible to it — but it pins the half where the
-        // two must agree, which is where a root-extraction drift surfaces first.
+        // or a non-`mut` receiver (`AssignToImmutable`), so a write found on one
+        // here is not a program that should have reached codegen: this scan and
+        // the type checker's root extraction have drifted apart. It cannot catch
+        // the dangerous direction — a *missed* write is invisible to it — but it
+        // pins the half where the two must agree, which is where a
+        // root-extraction drift surfaces first.
         debug_assert!(
-            !written || named_is_mut != Some(false),
+            !written || is_mut,
             "parameter `{param_name}` is not declared `mut` yet an assignment rooted at it was \
              found; the type checker rejects that program, so codegen's write scan and \
              `extract_root_variable_name` disagree about assignment roots",
         );
         if written {
             cov_mark::hit!(wasm_codegen_param_written_in_body);
-            return false;
+            return Ok(false);
         }
 
         // The gate costs a full body walk, so a program that registered no
@@ -2040,11 +2090,11 @@ impl Compiler {
             if matches!(arg.kind, ArgKind::SelfRef { is_mut: false }) {
                 cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
             }
-            return false;
+            return Ok(false);
         }
 
         cov_mark::hit!(wasm_codegen_param_by_reference);
-        true
+        Ok(true)
     }
 
     /// Computes the stack frame layout for a function.
@@ -2082,7 +2132,7 @@ impl Compiler {
         let mut current_offset: u32 = 0;
 
         for arg in args {
-            if Self::compound_param_is_by_reference(input, arg) {
+            if Self::compound_param_is_by_reference(input, arg)? {
                 continue;
             }
             match &arg.kind {
@@ -2114,8 +2164,11 @@ impl Compiler {
                                 "Frame offset overflow: total array allocation exceeds u32::MAX",
                             );
                         }
-                        // A struct parameter is passed by value, so it needs its
-                        // own frame slot to copy the caller's data into on entry.
+                        // A struct parameter reaches here only when it is *not* by
+                        // reference — it is assigned somewhere in the body, or it
+                        // reaches an `external fn` whose foreign body can store
+                        // through the address it is handed — so the callee must
+                        // work on its own copy and needs a slot to hold it.
                         // `Custom` carries a bare name and `Qualified`/`QualifiedName`
                         // a `::`-joined path; both name a struct that must be
                         // resolved relative to the defining file (a same-named
@@ -5285,49 +5338,21 @@ impl Compiler {
     /// a scratch region first rather than storing field-by-field into the
     /// destination's own slot. This predicate detects that self-reference.
     ///
-    /// It is the exhaustive expression walk mirrored from
-    /// `inference_analysis::rules::method_never_accesses_self`, specialized to a
-    /// leaf identifier equal to `dest`. Because member-access and array-index
-    /// bases are themselves `Identifier` nodes, the single leaf check catches a
-    /// bare read (`p`), a field read (`p.x`), and an element read (`p.arr[i]`).
-    /// Inference has no references, pointers, or globals, so a lexical name read
-    /// is the only way an expression can alias `dest`: a call cannot return `dest`
-    /// by reference, and a call argument that reads `dest` is caught by the
-    /// `FunctionCall` recursion.
+    /// It is [`Self::expr_any`] — the compiler's one enumeration of expression
+    /// children — asked for a leaf identifier equal to `dest`. Because
+    /// member-access and array-index bases are themselves `Identifier` nodes, the
+    /// single leaf check catches a bare read (`p`), a field read (`p.x`), and an
+    /// element read (`p.arr[i]`). Inference has no references, pointers, or
+    /// globals, so a lexical name read is the only way an expression can alias
+    /// `dest`: a call cannot return `dest` by reference, and a call argument that
+    /// reads `dest` is caught by the `FunctionCall` recursion.
     fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
-        match &arena[expr_id].kind {
-            Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
-            Expr::Binary { left, right, .. } => {
-                Self::expr_reads_var(arena, *left, dest)
-                    || Self::expr_reads_var(arena, *right, dest)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => Self::expr_reads_var(arena, *expr, dest),
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_reads_var(arena, *function, dest)
-                    || args
-                        .iter()
-                        .any(|(_, arg_expr)| Self::expr_reads_var(arena, *arg_expr, dest))
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_reads_var(arena, *array, dest)
-                    || Self::expr_reads_var(arena, *index, dest)
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, field_expr)| Self::expr_reads_var(arena, *field_expr, dest)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|elem| Self::expr_reads_var(arena, *elem, dest)),
-            Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+        Self::expr_any(arena, expr_id, &mut |arena, expr_id| {
+            let Expr::Identifier(ident_id) = &arena[expr_id].kind else {
+                return false;
+            };
+            arena[*ident_id].name == dest
+        })
     }
 
     /// Lowers an array literal expression.
@@ -6971,6 +6996,70 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             Compiler::param_escapes_to_extern(&arena, block_id, &imports(), param)
         }
 
+        /// The `left` expression of the first assignment in the subject body.
+        fn first_assign_target(arena: &AstArena, block_id: BlockId) -> ExprId {
+            arena[block_id]
+                .stmts
+                .iter()
+                .find_map(|&stmt_id| match &arena[stmt_id].kind {
+                    Stmt::Assign { left, .. } => Some(*left),
+                    _ => None,
+                })
+                .expect("the subject body must contain an assignment")
+        }
+
+        /// A compiler staged as if the write scan and the frame layout had
+        /// disagreed: `g` recorded as a compound parameter, `frame_layout` as
+        /// given.
+        fn staged_with_layout(frame_layout: Option<FrameLayout>) -> Compiler {
+            let mut compiler = Compiler::new("test");
+            compiler.compound_params.insert("g".to_string());
+            compiler.frame_layout = frame_layout;
+            compiler
+        }
+
+        /// The tripwire fires on the divergence it exists to catch: an
+        /// assignment rooted at a compound parameter that has no frame slot.
+        ///
+        /// Slot presence is the entry-copy decision *and* what assignment
+        /// lowering's destination gates key on, so a real write to a slotless
+        /// compound parameter would silently take the scalar branch and store
+        /// into the caller's memory. Excluding a field-less struct from
+        /// `compound_params` removes the one case where a missing slot is not a
+        /// divergence; it must not have removed the guard.
+        #[test]
+        #[should_panic(expected = "assignment targets compound parameter `g`")]
+        fn assignment_to_a_slotless_compound_parameter_aborts() {
+            let (arena, block_id) = subject_body("        g.tag = 1;");
+            let left = first_assign_target(&arena, block_id);
+            staged_with_layout(None).assert_assign_target_has_slot(&arena, left);
+        }
+
+        /// The same assignment passes once the parameter has its slot, so the
+        /// abort above is slot absence and not the walk finding the parameter.
+        #[test]
+        fn assignment_to_a_compound_parameter_with_a_slot_is_accepted() {
+            let (arena, block_id) = subject_body("        g.tag = 1;");
+            let left = first_assign_target(&arena, block_id);
+            let mut struct_offsets = FxHashMap::default();
+            struct_offsets.insert(
+                "g".to_string(),
+                StructSlot {
+                    offset: 0,
+                    total_size: 4,
+                    fields: Vec::new(),
+                },
+            );
+            let layout = FrameLayout {
+                total_size: 16,
+                array_offsets: FxHashMap::default(),
+                struct_offsets,
+                frame_ptr_local: 0,
+                scratch_offset: None,
+            };
+            staged_with_layout(Some(layout)).assert_assign_target_has_slot(&arena, left);
+        }
+
         /// An assignment counts wherever it sits. The scan descends through the
         /// shared block walk, so a bare block, either arm of an `if`, a loop
         /// body and a non-deterministic block are all covered structurally
@@ -7120,10 +7209,27 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             }
         }
 
+        /// Whether the subject program's `external fn` declarations are handed to
+        /// the decision as registered imports.
+        ///
+        /// The escape gate is keyed on the import map, so the same source answers
+        /// differently under the two, and which one a case means is the whole
+        /// point of that case — a bare `true`/`false` at the call site would hide
+        /// it.
+        #[derive(Clone, Copy)]
+        enum Imports {
+            Registered,
+            Unregistered,
+        }
+
         /// Drives [`Compiler::compound_param_is_by_reference`] itself on the
-        /// parameter at `param_index` of `fn_name`, with `extern_names`
-        /// populated only when the program declares imports.
-        fn by_reference(source: &str, fn_name: &str, param_index: usize, externs: bool) -> bool {
+        /// parameter at `param_index` of `fn_name`.
+        fn by_reference(
+            source: &str,
+            fn_name: &str,
+            param_index: usize,
+            imports_state: Imports,
+        ) -> bool {
             let parsed = inference_parser::parse(source);
             assert!(
                 parsed.errors.is_empty(),
@@ -7152,10 +7258,9 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("function `{fn_name}` must be present"));
-            let extern_names = if externs {
-                imports()
-            } else {
-                FxHashMap::default()
+            let extern_names = match imports_state {
+                Imports::Registered => imports(),
+                Imports::Unregistered => FxHashMap::default(),
             };
             let input = FrameLayoutInput {
                 arena,
@@ -7168,12 +7273,16 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
                 extern_names: &extern_names,
             };
             Compiler::compound_param_is_by_reference(&input, &args[param_index])
+                .expect("the subject programs lay out")
         }
 
         const SHAPES: &str = "\
 struct Pair {
     a: i32;
     b: i32;
+}
+
+struct Nothing {
 }
 
 enum Color {
@@ -7195,10 +7304,13 @@ fn reader(p: Pair, v: [i32; 4]) -> i32 {{
 "
             );
             assert!(
-                by_reference(&source, "reader", 0, false),
+                by_reference(&source, "reader", 0, Imports::Unregistered),
                 "struct parameter"
             );
-            assert!(by_reference(&source, "reader", 1, false), "array parameter");
+            assert!(
+                by_reference(&source, "reader", 1, Imports::Unregistered),
+                "array parameter"
+            );
         }
 
         /// A `mut` parameter that is never assigned is by reference too.
@@ -7218,12 +7330,20 @@ fn quiet(mut p: Pair, mut v: [i32; 4]) -> i32 {{
 }}
 "
             );
-            assert!(by_reference(&source, "quiet", 0, false), "struct parameter");
-            assert!(by_reference(&source, "quiet", 1, false), "array parameter");
+            assert!(
+                by_reference(&source, "quiet", 0, Imports::Unregistered),
+                "struct parameter"
+            );
+            assert!(
+                by_reference(&source, "quiet", 1, Imports::Unregistered),
+                "array parameter"
+            );
         }
 
         /// A parameter the body assigns keeps its slot, whichever projection the
-        /// assignment goes through.
+        /// assignment goes through and wherever the assignment sits — including
+        /// inside a non-deterministic block, the arm where a scan that stopped at
+        /// deterministic statements would drop a copy the callee needs.
         #[test]
         fn written_parameters_are_not_by_reference() {
             let source = format!(
@@ -7244,11 +7364,26 @@ fn writes_in_a_nested_block(mut p: Pair, c: i32) -> i32 {{
     }}
     return p.a;
 }}
+
+fn writes_in_a_nondet_block(mut p: Pair) -> i32 {{
+    forall {{
+        p.a = 1;
+    }}
+    return p.a;
+}}
 "
             );
-            assert!(!by_reference(&source, "writes_field", 0, false));
-            assert!(!by_reference(&source, "writes_element", 0, false));
-            assert!(!by_reference(&source, "writes_in_a_nested_block", 0, false));
+            for fn_name in [
+                "writes_field",
+                "writes_element",
+                "writes_in_a_nested_block",
+                "writes_in_a_nondet_block",
+            ] {
+                assert!(
+                    !by_reference(&source, fn_name, 0, Imports::Unregistered),
+                    "`{fn_name}` writes its parameter and must keep its slot"
+                );
+            }
         }
 
         /// A parameter forwarded to a registered import keeps its slot; the same
@@ -7275,11 +7410,11 @@ fn forwards(h: Holder) -> i32 {
 }
 ";
             assert!(
-                !by_reference(source, "forwards", 0, true),
+                !by_reference(source, "forwards", 0, Imports::Registered),
                 "a parameter handed to a registered import keeps its own copy"
             );
             assert!(
-                by_reference(source, "forwards", 0, false),
+                by_reference(source, "forwards", 0, Imports::Unregistered),
                 "with no import registered there is nothing to escape to, and the \
                  same body is by reference"
             );
@@ -7300,12 +7435,58 @@ fn takes_scalars(n: i32, c: Color, p: Pair) -> i32 {{
 }}
 "
             );
-            assert!(!by_reference(&source, "takes_scalars", 0, false), "i32");
-            assert!(!by_reference(&source, "takes_scalars", 1, false), "enum");
             assert!(
-                by_reference(&source, "takes_scalars", 2, false),
+                !by_reference(&source, "takes_scalars", 0, Imports::Unregistered),
+                "i32"
+            );
+            assert!(
+                !by_reference(&source, "takes_scalars", 1, Imports::Unregistered),
+                "enum"
+            );
+            assert!(
+                by_reference(&source, "takes_scalars", 2, Imports::Unregistered),
                 "the struct beside them is still a candidate, so the two negatives \
                  are not the predicate refusing to run"
+            );
+        }
+
+        /// A field-less struct parameter is not a candidate either, written or
+        /// not.
+        ///
+        /// It lays out to zero bytes, and the layout pass allocates a slot only
+        /// for a positive size, so calling it compound would put a parameter in
+        /// `compound_params` that can never have a slot —
+        /// `assert_assign_target_has_slot` would then read the missing slot as a
+        /// failed write scan and abort `fn take(mut e: Nothing) { e = e; }`, a
+        /// program that compiles. The wider representation hole this shape sits
+        /// in is #332; the decision here only has to keep the guard from
+        /// misattributing it.
+        #[test]
+        fn field_less_struct_parameters_are_not_candidates() {
+            let source = format!(
+                "{SHAPES}
+fn ignores(e: Nothing, p: Pair) -> i32 {{
+    return p.a;
+}}
+
+fn assigns(mut e: Nothing, p: Pair) -> i32 {{
+    e = e;
+    return p.a;
+}}
+"
+            );
+            assert!(
+                !by_reference(&source, "ignores", 0, Imports::Unregistered),
+                "a field-less struct owns no region to pass by reference"
+            );
+            assert!(
+                !by_reference(&source, "assigns", 0, Imports::Unregistered),
+                "and assigning it does not make one"
+            );
+            assert!(
+                by_reference(&source, "ignores", 1, Imports::Unregistered),
+                "the struct beside it is still a candidate, so the negatives are \
+                 not the predicate refusing to run"
             );
         }
     }
