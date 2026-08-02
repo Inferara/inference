@@ -1,0 +1,66 @@
+// A compound return is written into a destination the caller supplies, field by
+// field, while the function reads a parameter that is no longer copied. If the
+// destination and the parameter could ever name the same region, a field
+// written early would be read back late as its own new value.
+//
+// `swap_xy` is what makes that visible: it reads `p.y` after having written `x`
+// and `p.x` after having written `y`, so an overlap turns `{1,2,3}` into
+// `{2,2,3}` rather than the `{2,1,3}` a disjoint pair produces. `wrap` forwards
+// the same destination pointer one level down, so the writer and the reader of
+// the overlap are two different frames.
+//
+// The callers read a field of the *argument* back after the call as well, so a
+// destination that had been aimed at the source would fail on the caller's side
+// too.
+
+struct P {
+    x: i32;
+    y: i32;
+    z: i32;
+}
+
+fn swap_xy(p: P) -> P {
+    return P {
+        x: p.y,
+        y: p.x,
+        z: p.z,
+    };
+}
+
+fn copy_of(p: P) -> P {
+    return P {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+    };
+}
+
+fn rotate(q: P) -> P {
+    return P {
+        x: q.z,
+        y: q.x,
+        z: q.y,
+    };
+}
+
+fn wrap(q: P) -> P {
+    return rotate(q);
+}
+
+pub fn call_swap_xy() -> i32 {
+    let a: P = P { x: 1, y: 2, z: 3 };
+    let b: P = swap_xy(a);
+    return b.x * 100 + b.y * 10 + b.z + a.x * 1000;
+}
+
+pub fn call_copy_of() -> i32 {
+    let c: P = P { x: 4, y: 5, z: 6 };
+    let d: P = copy_of(c);
+    return d.x * 100 + d.y * 10 + d.z;
+}
+
+pub fn call_wrap() -> i32 {
+    let e: P = P { x: 1, y: 2, z: 3 };
+    let w: P = wrap(e);
+    return w.x * 100 + w.y * 10 + w.z + e.z * 1000;
+}

@@ -1,0 +1,27 @@
+// `mut` parameters that are never assigned. The marker states the callee is
+// allowed to write; the body says it never does, and the body is what decides.
+//
+// This is the only place the write scan says something the `mut` marker cannot:
+// everywhere else the two must agree, because an assignment rooted at a
+// non-`mut` parameter is already a type error. Both a struct and an array
+// parameter are here — the two copy forms are lowered by different emitters, so
+// one shape cannot stand in for the other.
+
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+pub fn peek_struct(mut p: Pair) -> i32 {
+    return p.a * 10 + p.b;
+}
+
+pub fn peek_array(mut data: [i32; 8], i: i32) -> i32 {
+    return data[i];
+}
+
+pub fn call_peek_struct() -> i32 {
+    let s: Pair = Pair { a: 4, b: 7 };
+    let inner: i32 = peek_struct(s);
+    return inner * 100 + s.a * 10 + s.b;
+}

@@ -6874,4 +6874,839 @@ struct Pair {{
             }
         }
     }
+
+    /// Tests for the two scans behind
+    /// [`Compiler::compound_param_is_by_reference`] as they apply to *named*
+    /// parameters, and for the decision the two combine into.
+    ///
+    /// [`self_escape_scan`] drives the extern gate through a receiver. What
+    /// these add is the write scan, which has no receiver analogue, and the
+    /// composed predicate, whose answer is what decides that a frame slot exists
+    /// at all. A write shape the scan fails to recognize is a copy silently
+    /// dropped from a parameter the callee does write, so the negative cases
+    /// carry the same weight as the positive ones.
+    mod param_by_ref_scan {
+        use super::*;
+
+        const PREAMBLE: &str = "\
+external fn scramble(h: Holder);
+external fn probe(h: Holder) -> i32;
+use { scramble, probe } from lib;
+
+struct Cell {
+    x: i32;
+    y: i32;
+}
+
+struct Holder {
+    tag: i32;
+    cells: [Cell; 2];
+}
+
+fn native(h: Holder) -> i32 {
+    return h.tag;
+}
+
+fn native_scalar(v: i32) -> i32 {
+    return v;
+}
+";
+
+        /// Parses `body` as the body of
+        /// `fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32)` and
+        /// returns the arena and that body's block — the two inputs both scans
+        /// take.
+        ///
+        /// Both compound parameters are declared `mut` so that every write shape
+        /// can be exercised on the same subject; the scans read neither the
+        /// marker nor any type information.
+        fn subject_body(body: &str) -> (AstArena, BlockId) {
+            let source = format!(
+                "{PREAMBLE}
+fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
+{body}
+    return 0;
+}}
+"
+            );
+            let parsed = inference_parser::parse(&source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            let arena = parsed.arena;
+            let block_id = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "subject" => {
+                        Some(*body)
+                    }
+                    _ => None,
+                })
+                .expect("function `subject` must be present");
+            (arena, block_id)
+        }
+
+        /// The import map as `register_imports` leaves it. Only the keys matter.
+        fn imports() -> FxHashMap<String, u32> {
+            let mut map = FxHashMap::default();
+            for (idx, name) in ["scramble", "probe"].iter().enumerate() {
+                map.insert(
+                    (*name).to_string(),
+                    u32::try_from(idx).expect("test import index fits in u32"),
+                );
+            }
+            map
+        }
+
+        fn written(body: &str, param: &str) -> bool {
+            let (arena, block_id) = subject_body(body);
+            Compiler::param_is_written(&arena, block_id, param)
+        }
+
+        fn escapes(body: &str, param: &str) -> bool {
+            let (arena, block_id) = subject_body(body);
+            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), param)
+        }
+
+        /// An assignment counts wherever it sits. The scan descends through the
+        /// shared block walk, so a bare block, either arm of an `if`, a loop
+        /// body and a non-deterministic block are all covered structurally
+        /// rather than one arm at a time.
+        ///
+        /// A scan that read only top-level statements would call a parameter
+        /// written inside `if c { .. }` unwritten, drop its copy, and let the
+        /// assignment store into the caller's memory.
+        #[test]
+        fn assignment_anywhere_in_the_body_is_a_write() {
+            for body in [
+                "        g.tag = 1;",
+                "        { g.tag = 1; }",
+                "        if n > 0 { g.tag = 1; }",
+                "        if n > 0 { n = 1; } else { g.tag = 1; }",
+                "        loop n > 0 { g.tag = 1; break; }",
+                "        forall { g.tag = 1; }",
+                "        exists { g.tag = 1; }",
+                "        if n > 0 { loop n > 0 { g.tag = 1; break; } }",
+            ] {
+                assert!(written(body, "g"), "must count as a write:\n{body}");
+            }
+        }
+
+        /// Writes *through* a parameter count, not just whole-binding
+        /// reassignment. Every projection form reduces to the same root test,
+        /// including the uzumaki form, which is an ordinary assignment
+        /// statement whose right-hand side happens to be `@`.
+        ///
+        /// A predicate that matched only `g = ..` would leave `g.tag = 9` and
+        /// `arr[0] = 9` looking read-only, which is the shape most of the
+        /// corpus's writing parameters actually have.
+        #[test]
+        fn writes_through_projections_are_writes() {
+            for (body, param) in [
+                ("        g = other;", "g"),
+                ("        g.tag = 1;", "g"),
+                ("        g.cells[1].y = 9;", "g"),
+                ("        g.cells[n].y = 9;", "g"),
+                ("        arr[0] = 9;", "arr"),
+                ("        arr[n] = 9;", "arr"),
+                ("        g = @;", "g"),
+                ("        arr[0] = @;", "arr"),
+            ] {
+                assert!(
+                    written(body, param),
+                    "`{param}` must count as written:\n{body}"
+                );
+            }
+        }
+
+        /// A parenthesized root counts too, although the type checker's own root
+        /// extraction stops at the parenthesis and rejects the program outright.
+        ///
+        /// The extra peel is deliberate and safe in one direction only: peeling
+        /// more shapes makes *more* assignments count as writes, so the worst it
+        /// costs is a copy that was not needed. Concluding "not written" where
+        /// the type checker concluded "written" is the direction that drops a
+        /// live copy, and peeling more can never produce it.
+        #[test]
+        fn parenthesized_roots_count_as_written() {
+            for (body, param) in [
+                ("        (g) = other;", "g"),
+                ("        (g).tag = 1;", "g"),
+                ("        (g.cells)[1].y = 9;", "g"),
+                ("        (arr)[0] = 9;", "arr"),
+            ] {
+                assert!(
+                    written(body, param),
+                    "`{param}` must count as written:\n{body}"
+                );
+            }
+        }
+
+        /// The scan must stay narrow: only an assignment whose *root* is the
+        /// parameter counts. A parameter read on the right-hand side, used as an
+        /// index, or copied into a local that is then written, is not written
+        /// itself — and calling it written would cost every reader its copy back.
+        #[test]
+        fn reads_and_unrelated_assignments_are_not_writes() {
+            for (body, param) in [
+                ("        return g.tag;", "g"),
+                ("        n = g.tag;", "g"),
+                ("        other.tag = g.tag;", "g"),
+                ("        arr[g.tag] = 9;", "g"),
+                ("        arr[0] = g.tag;", "g"),
+                ("        let t: Holder = g;\n        t.tag = 9;", "g"),
+                ("        g.tag = 1;", "arr"),
+                ("        g.cells[1].y = arr[0];", "arr"),
+            ] {
+                assert!(
+                    !written(body, param),
+                    "`{param}` must not count as written:\n{body}"
+                );
+            }
+        }
+
+        /// The extern gate reaches a named parameter in every position an
+        /// extern call can occupy, nested blocks included.
+        ///
+        /// A scalar projection triggers it as well. The gate is deliberately
+        /// type-blind: refining it would need a second predicate that agrees
+        /// with how the argument is actually lowered, and a disagreement there
+        /// fails by dropping a copy. A false positive costs one extra copy.
+        #[test]
+        fn extern_arguments_rooted_at_a_named_parameter_escape() {
+            for body in [
+                "        scramble(g);",
+                "        scramble((g));",
+                "        scramble(g.cells[1]);",
+                "        return probe(g.cells[1].y);",
+                "        if n > 0 { scramble(g); }",
+                "        if n > 0 { n = 1; } else { scramble(g); }",
+                "        loop n > 0 { scramble(g); break; }",
+                "        let x: i32 = 1 + probe(g);",
+                "        const Q: i32 = probe(g);",
+                "        n = probe(g);",
+                "        return native_scalar(probe(g));",
+            ] {
+                assert!(escapes(body, "g"), "`g` must escape:\n{body}");
+            }
+        }
+
+        /// Forwarding to a *native* callee does not disqualify anything, whether
+        /// the argument is compound or scalar.
+        ///
+        /// This is what keeps the common `fn length(v: Vec3) { .. dot(v, v) .. }`
+        /// shape by reference. It is sound because the chain always breaks at
+        /// the function that touches the external: a native callee's own
+        /// parameter is disqualified there if *it* forwards, so the foreign
+        /// write lands in that callee's frame. A local copy is not an alias
+        /// either — the binding copies — so laundering through one does not
+        /// reach back to the parameter.
+        #[test]
+        fn native_calls_and_unrelated_roots_do_not_escape() {
+            for (body, param) in [
+                ("        return g.tag;", "g"),
+                ("        return native(g);", "g"),
+                ("        return native_scalar(g.tag);", "g"),
+                ("        return g.tag + native(g);", "g"),
+                ("        scramble(other);", "g"),
+                ("        let t: Holder = g;\n        scramble(t);", "g"),
+                ("        scramble(g);", "arr"),
+                ("        return probe(g);", "arr"),
+            ] {
+                assert!(!escapes(body, param), "`{param}` must not escape:\n{body}");
+            }
+        }
+
+        /// Drives [`Compiler::compound_param_is_by_reference`] itself on the
+        /// parameter at `param_index` of `fn_name`, with `extern_names`
+        /// populated only when the program declares imports.
+        fn by_reference(source: &str, fn_name: &str, param_index: usize, externs: bool) -> bool {
+            let parsed = inference_parser::parse(source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            let outcome = inference_type_checker::check_with_diagnostics(parsed.arena);
+            assert!(
+                outcome.errors.is_empty(),
+                "type errors: {:?}\nsource:\n{source}",
+                outcome
+                    .errors
+                    .iter()
+                    .map(|d| d.error.to_string())
+                    .collect::<Vec<_>>()
+            );
+            let ctx = &outcome.typed_context;
+            let arena = ctx.arena();
+            let (args, block_id) = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function {
+                        name, args, body, ..
+                    } if arena[*name].name == fn_name => Some((args.clone(), *body)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("function `{fn_name}` must be present"));
+            let extern_names = if externs {
+                imports()
+            } else {
+                FxHashMap::default()
+            };
+            let input = FrameLayoutInput {
+                arena,
+                block_id,
+                ctx,
+                frame_ptr_local_idx: 0,
+                args: &args,
+                method_struct_name: None,
+                module_path: &[],
+                extern_names: &extern_names,
+            };
+            Compiler::compound_param_is_by_reference(&input, &args[param_index])
+        }
+
+        const SHAPES: &str = "\
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+enum Color {
+    Red,
+    Green,
+}
+";
+
+        /// The composed decision on a compound parameter nothing writes and
+        /// nothing forwards: by reference, for both the struct and the array
+        /// arm.
+        #[test]
+        fn unwritten_compound_parameters_are_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn reader(p: Pair, v: [i32; 4]) -> i32 {{
+    return p.a + p.b + v[0];
+}}
+"
+            );
+            assert!(
+                by_reference(&source, "reader", 0, false),
+                "struct parameter"
+            );
+            assert!(by_reference(&source, "reader", 1, false), "array parameter");
+        }
+
+        /// A `mut` parameter that is never assigned is by reference too.
+        ///
+        /// This is the entire difference between the write scan and the `mut`
+        /// marker: everywhere else the two must agree, because an assignment
+        /// rooted at a non-`mut` parameter is already a type error. Keying the
+        /// decision on the marker instead would have made deleting `mut` a
+        /// performance change, which is the opposite of what an annotation
+        /// stating a guarantee should be worth.
+        #[test]
+        fn mut_parameters_that_are_never_written_are_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn quiet(mut p: Pair, mut v: [i32; 4]) -> i32 {{
+    return p.a + v[0];
+}}
+"
+            );
+            assert!(by_reference(&source, "quiet", 0, false), "struct parameter");
+            assert!(by_reference(&source, "quiet", 1, false), "array parameter");
+        }
+
+        /// A parameter the body assigns keeps its slot, whichever projection the
+        /// assignment goes through.
+        #[test]
+        fn written_parameters_are_not_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn writes_field(mut p: Pair) -> i32 {{
+    p.a = 9;
+    return p.a;
+}}
+
+fn writes_element(mut v: [i32; 4]) -> i32 {{
+    v[0] = 9;
+    return v[0];
+}}
+
+fn writes_in_a_nested_block(mut p: Pair, c: i32) -> i32 {{
+    if c > 0 {{
+        p.a = 9;
+    }}
+    return p.a;
+}}
+"
+            );
+            assert!(!by_reference(&source, "writes_field", 0, false));
+            assert!(!by_reference(&source, "writes_element", 0, false));
+            assert!(!by_reference(&source, "writes_in_a_nested_block", 0, false));
+        }
+
+        /// A parameter forwarded to a registered import keeps its slot; the same
+        /// program with no imports registered does not.
+        ///
+        /// The second half is what makes the first non-vacuous: the gate is
+        /// keyed on the import map, so a fixture whose `external fn` was never
+        /// bound would exercise the *ungated* path while looking like it
+        /// exercised the gate.
+        #[test]
+        fn parameters_forwarded_to_an_extern_are_not_by_reference() {
+            let source = "\
+external fn scramble(h: Holder);
+use { scramble } from lib;
+
+struct Holder {
+    tag: i32;
+    other: i32;
+}
+
+fn forwards(h: Holder) -> i32 {
+    scramble(h);
+    return h.tag;
+}
+";
+            assert!(
+                !by_reference(source, "forwards", 0, true),
+                "a parameter handed to a registered import keeps its own copy"
+            );
+            assert!(
+                by_reference(source, "forwards", 0, false),
+                "with no import registered there is nothing to escape to, and the \
+                 same body is by reference"
+            );
+        }
+
+        /// Only parameters that occupy a region of memory are candidates.
+        ///
+        /// Scalars are passed by value and have nothing to alias. An enum is the
+        /// case worth pinning: it is spelled like a struct at the parameter, and
+        /// a predicate that classified by syntax rather than by resolving the
+        /// name would treat its `i32` tag as a compound region.
+        #[test]
+        fn scalar_and_enum_parameters_are_not_candidates() {
+            let source = format!(
+                "{SHAPES}
+fn takes_scalars(n: i32, c: Color, p: Pair) -> i32 {{
+    return n + p.a;
+}}
+"
+            );
+            assert!(!by_reference(&source, "takes_scalars", 0, false), "i32");
+            assert!(!by_reference(&source, "takes_scalars", 1, false), "enum");
+            assert!(
+                by_reference(&source, "takes_scalars", 2, false),
+                "the struct beside them is still a candidate, so the two negatives \
+                 are not the predicate refusing to run"
+            );
+        }
+    }
+
+    /// Tests pinning that codegen's assignment-root extraction
+    /// ([`Compiler::expr_root_is`]) recognizes every shape the type checker's
+    /// own root extraction does.
+    ///
+    /// The two are separate code with different jobs — the type checker's
+    /// rejects an assignment to an immutable binding, codegen's decides whether
+    /// a compound parameter needs a private copy — and only one direction of
+    /// drift is dangerous. Codegen concluding "not rooted here" where the type
+    /// checker concluded "rooted here" drops the copy from a parameter the
+    /// callee does write. Drift the other way is already present and deliberate:
+    /// codegen additionally peels parentheses.
+    ///
+    /// Both tests are exhaustive over `Expr` through
+    /// [`one_expression_of_each_variant`], so a new variant has to be
+    /// classified in both matches or neither compiles.
+    mod assignment_root_shapes {
+        use super::*;
+        use inference_ast::nodes::{
+            ExprData, Ident, Location, OperatorKind, SimpleTypeKind, TypeData, TypeNode,
+            UnaryOperatorKind,
+        };
+        use inference_type_checker::errors::TypeCheckError;
+
+        fn expr(arena: &mut AstArena, kind: Expr) -> ExprId {
+            arena.exprs.alloc(ExprData {
+                location: Location::default(),
+                kind,
+            })
+        }
+
+        fn ident(arena: &mut AstArena, name: &str) -> IdentId {
+            arena.idents.alloc(Ident {
+                location: Location::default(),
+                name: name.to_string(),
+            })
+        }
+
+        fn identifier(arena: &mut AstArena, name: &str) -> ExprId {
+            let id = ident(arena, name);
+            expr(arena, Expr::Identifier(id))
+        }
+
+        /// One expression of every `Expr` variant, each built over the binding
+        /// `p` wherever the variant has a sub-expression at all.
+        ///
+        /// Placing `p` inside every variant is what makes the negative answers
+        /// mean something: a shape that is not a projection must report "not
+        /// this binding" even with `p` sitting directly inside it.
+        fn one_expression_of_each_variant(arena: &mut AstArena) -> Vec<ExprId> {
+            let base = identifier(arena, "p");
+            let field = ident(arena, "a");
+            let index = expr(
+                arena,
+                Expr::NumberLiteral {
+                    value: "0".to_string(),
+                },
+            );
+            let type_id = arena.types.alloc(TypeData {
+                location: Location::default(),
+                kind: TypeNode::Simple(SimpleTypeKind::I32),
+            });
+
+            let identifier_expr = identifier(arena, "p");
+            let member = expr(
+                arena,
+                Expr::MemberAccess {
+                    expr: base,
+                    name: field,
+                },
+            );
+            let element = expr(arena, Expr::ArrayIndexAccess { array: base, index });
+            let parenthesized = expr(arena, Expr::Parenthesized { expr: base });
+            let binary = expr(
+                arena,
+                Expr::Binary {
+                    left: base,
+                    right: base,
+                    op: OperatorKind::Add,
+                },
+            );
+            let unary = expr(
+                arena,
+                Expr::PrefixUnary {
+                    expr: base,
+                    op: UnaryOperatorKind::Neg,
+                },
+            );
+            let call = expr(
+                arena,
+                Expr::FunctionCall {
+                    function: base,
+                    type_params: Vec::new(),
+                    args: vec![(None, base)],
+                },
+            );
+            let type_member = expr(
+                arena,
+                Expr::TypeMemberAccess {
+                    expr: base,
+                    name: field,
+                },
+            );
+            let struct_literal = expr(
+                arena,
+                Expr::StructLiteral {
+                    name: field,
+                    fields: vec![(field, base)],
+                },
+            );
+            let array_literal = expr(
+                arena,
+                Expr::ArrayLiteral {
+                    elements: vec![base],
+                },
+            );
+            let number = expr(
+                arena,
+                Expr::NumberLiteral {
+                    value: "1".to_string(),
+                },
+            );
+            let boolean = expr(arena, Expr::BoolLiteral { value: true });
+            let string = expr(
+                arena,
+                Expr::StringLiteral {
+                    value: "p".to_string(),
+                },
+            );
+            let unit = expr(arena, Expr::UnitLiteral);
+            let uzumaki = expr(arena, Expr::Uzumaki);
+            let type_expr = expr(arena, Expr::Type(type_id));
+
+            vec![
+                identifier_expr,
+                member,
+                element,
+                parenthesized,
+                binary,
+                unary,
+                call,
+                type_member,
+                struct_literal,
+                array_literal,
+                number,
+                boolean,
+                string,
+                unit,
+                uzumaki,
+                type_expr,
+            ]
+        }
+
+        /// Whether [`Compiler::expr_root_is`] must peel this shape down to the
+        /// binding underneath it.
+        ///
+        /// Exhaustive over `Expr` on purpose: a new variant fails to compile
+        /// here as well as in `expr_root_is`, so it cannot be classified as a
+        /// projection in the emitter and forgotten in the test that guards it.
+        fn is_projection(kind: &Expr) -> bool {
+            match kind {
+                Expr::Identifier(_)
+                | Expr::MemberAccess { .. }
+                | Expr::ArrayIndexAccess { .. }
+                | Expr::Parenthesized { .. } => true,
+                Expr::Binary { .. }
+                | Expr::PrefixUnary { .. }
+                | Expr::FunctionCall { .. }
+                | Expr::TypeMemberAccess { .. }
+                | Expr::StructLiteral { .. }
+                | Expr::ArrayLiteral { .. }
+                | Expr::NumberLiteral { .. }
+                | Expr::BoolLiteral { .. }
+                | Expr::StringLiteral { .. }
+                | Expr::UnitLiteral
+                | Expr::Uzumaki
+                | Expr::Type(_) => false,
+            }
+        }
+
+        /// Every `Expr` variant is classified as a projection of its base or
+        /// not, and nesting the projection forms keeps peeling to the same root.
+        #[test]
+        fn expr_root_is_classifies_every_expression_shape() {
+            let mut arena = AstArena::default();
+            for expr_id in one_expression_of_each_variant(&mut arena) {
+                let kind = arena[expr_id].kind.clone();
+                assert_eq!(
+                    Compiler::expr_root_is(&arena, expr_id, "p"),
+                    is_projection(&kind),
+                    "unexpected root classification for {kind:?}",
+                );
+            }
+
+            // `p.cells[1].a`, `(p).a` and `(p.cells)[1]` — the nestings a real
+            // assignment target takes — and one rooted at a different binding.
+            let mut arena = AstArena::default();
+            let base = identifier(&mut arena, "p");
+            let other = identifier(&mut arena, "q");
+            let field = ident(&mut arena, "a");
+            let cells = ident(&mut arena, "cells");
+            let index = expr(
+                &mut arena,
+                Expr::NumberLiteral {
+                    value: "1".to_string(),
+                },
+            );
+            let cells_of = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: base,
+                    name: cells,
+                },
+            );
+            let element = expr(
+                &mut arena,
+                Expr::ArrayIndexAccess {
+                    array: cells_of,
+                    index,
+                },
+            );
+            let nested = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: element,
+                    name: field,
+                },
+            );
+            let parens = expr(&mut arena, Expr::Parenthesized { expr: base });
+            let field_of_parens = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: parens,
+                    name: field,
+                },
+            );
+            let parens_of_member = expr(&mut arena, Expr::Parenthesized { expr: cells_of });
+            let element_of_parens = expr(
+                &mut arena,
+                Expr::ArrayIndexAccess {
+                    array: parens_of_member,
+                    index,
+                },
+            );
+            let other_field = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: other,
+                    name: field,
+                },
+            );
+
+            for nesting in [nested, field_of_parens, element_of_parens] {
+                assert!(
+                    Compiler::expr_root_is(&arena, nesting, "p"),
+                    "nested projections must keep peeling to the same root",
+                );
+            }
+            assert!(
+                !Compiler::expr_root_is(&arena, other_field, "p"),
+                "a projection of a different binding is not this one",
+            );
+        }
+
+        /// The type checker's root extraction is read off its behaviour: with
+        /// `p` declared without `mut`, an assignment whose root it resolves to
+        /// `p` is reported as `AssignToImmutable`.
+        fn type_checker_roots_it_at_p(source: &str) -> bool {
+            let parsed = inference_parser::parse(source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            inference_type_checker::check_with_diagnostics(parsed.arena)
+                .errors
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        &diagnostic.error,
+                        TypeCheckError::AssignToImmutable { name, .. } if name == "p"
+                    )
+                })
+        }
+
+        /// Codegen's answer for the same program's assignment target.
+        fn codegen_roots_it_at_p(source: &str) -> bool {
+            let parsed = inference_parser::parse(source);
+            let arena = parsed.arena;
+            let block_id = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "f" => Some(*body),
+                    _ => None,
+                })
+                .expect("function `f` must be present");
+            let mut left = None;
+            Compiler::walk_statements(&arena, block_id, &mut |arena, stmt_id| {
+                if let Stmt::Assign { left: target, .. } = &arena[stmt_id].kind {
+                    left = Some(*target);
+                }
+            });
+            let left = left.expect("the program must contain an assignment");
+            Compiler::expr_root_is(&arena, left, "p")
+        }
+
+        /// A source-level assignment target of this shape, or `None` when the
+        /// shape cannot stand in assignment position.
+        ///
+        /// Exhaustive over `Expr` for the same reason [`is_projection`] is: a
+        /// new variant that *can* be written as an assignment target has to be
+        /// named here, and the implication below then covers it without anyone
+        /// remembering to extend a list.
+        fn assignment_target(kind: &Expr) -> Option<&'static str> {
+            match kind {
+                Expr::Identifier(_) => Some("p"),
+                Expr::MemberAccess { .. } => Some("p.a"),
+                Expr::ArrayIndexAccess { .. } => Some("p.b[0]"),
+                Expr::Parenthesized { .. } => Some("(p).a"),
+                Expr::Binary { .. } => Some("p.a + q.a"),
+                Expr::PrefixUnary { .. } => Some("-p.a"),
+                Expr::FunctionCall { .. } => Some("helper(p)"),
+                Expr::NumberLiteral { .. } => Some("5"),
+                // A type-qualified name, a compound literal, and the remaining
+                // literals are values rather than places: the parser accepts no
+                // assignment whose left side is one of them.
+                Expr::TypeMemberAccess { .. }
+                | Expr::StructLiteral { .. }
+                | Expr::ArrayLiteral { .. }
+                | Expr::BoolLiteral { .. }
+                | Expr::StringLiteral { .. }
+                | Expr::UnitLiteral
+                | Expr::Uzumaki
+                | Expr::Type(_) => None,
+            }
+        }
+
+        /// Every shape the type checker treats as an assignment root is one
+        /// codegen treats as a root too.
+        ///
+        /// The implication is asserted rather than set equality, because the two
+        /// lists are allowed to differ in exactly one direction. The extra
+        /// shapes codegen peels are listed explicitly so that *losing* one is a
+        /// failure as well, and the non-vacuity check keeps a matrix in which
+        /// the type checker suddenly rooted nothing from passing silently.
+        #[test]
+        fn type_checker_assignment_roots_are_also_codegen_roots() {
+            let mut arena = AstArena::default();
+            let mut targets: Vec<&'static str> = one_expression_of_each_variant(&mut arena)
+                .into_iter()
+                .filter_map(|expr_id| assignment_target(&arena[expr_id].kind))
+                .collect();
+            // Nestings and a parenthesized root that the per-variant list, one
+            // shape per variant, cannot carry.
+            targets.extend(["p.b[1]", "(p)", "(p.a)", "(p.b)[0]", "q.a"]);
+
+            let mut rooted_by_type_checker = 0usize;
+            let mut extra_codegen_roots = Vec::new();
+            for target in targets {
+                let source = format!(
+                    "struct S {{ a: i32; b: [i32; 2]; }}
+fn helper(z: S) -> i32 {{ return z.a; }}
+fn f(p: S, q: S) -> i32 {{
+    {target} = 9;
+    return 0;
+}}
+"
+                );
+                let type_checker = type_checker_roots_it_at_p(&source);
+                let codegen = codegen_roots_it_at_p(&source);
+                assert!(
+                    !type_checker || codegen,
+                    "`{target} = 9` is an assignment to `p` for the type checker but \
+                     not for codegen; codegen would call `p` unwritten and drop the \
+                     copy that keeps the caller's memory intact",
+                );
+                if type_checker {
+                    rooted_by_type_checker += 1;
+                } else if codegen {
+                    extra_codegen_roots.push(target);
+                }
+            }
+
+            assert!(
+                rooted_by_type_checker >= 4,
+                "the matrix must contain assignments the type checker does root at \
+                 `p`, or the implication above holds vacuously; only \
+                 {rooted_by_type_checker} did",
+            );
+            extra_codegen_roots.sort_unstable();
+            assert_eq!(
+                extra_codegen_roots,
+                ["(p)", "(p).a", "(p.a)", "(p.b)[0]"],
+                "codegen peels parentheses and the type checker does not; that is the \
+                 safe direction, but which shapes it covers is pinned so losing one \
+                 is a failure rather than a silent narrowing",
+            );
+        }
+    }
 }

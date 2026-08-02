@@ -4,17 +4,23 @@
 // than the per-element typed copy.
 
 // 17 * 8 = 136 bytes — the smallest i64 array that both leaves the per-element
-// path and needs the looped region copy.
-pub fn sum_ends_17(data: [i64; 17]) -> i64 {
+// path and needs the looped region copy. Like every reader below it assigns an
+// element to itself, because only a parameter the callee writes earns a private
+// copy at all — and the copy is what these fixtures exist to pin. Writing an
+// element back with the value it already holds changes no result.
+pub fn sum_ends_17(mut data: [i64; 17]) -> i64 {
+    data[0] = data[0];
     return data[0] + data[16];
 }
 
 // 20 * 8 = 160 bytes.
-pub fn sum_ends_20(data: [i64; 20]) -> i64 {
+pub fn sum_ends_20(mut data: [i64; 20]) -> i64 {
+    data[0] = data[0];
     return data[0] + data[19];
 }
 
-pub fn pick_20(data: [i64; 20], i: i32) -> i64 {
+pub fn pick_20(mut data: [i64; 20], i: i32) -> i64 {
+    data[0] = data[0];
     return data[i];
 }
 

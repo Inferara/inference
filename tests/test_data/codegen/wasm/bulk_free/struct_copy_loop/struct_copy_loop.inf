@@ -3,6 +3,13 @@
 // whole layout in one region — fields, the embedded array, and any padding
 // between them — so reading fields on both sides of the array pins that the
 // copy neither stopped early nor shifted.
+//
+// Each reader assigns one field to itself. A struct parameter the callee never
+// writes is passed by reference and copies nothing, so without those
+// assignments only `block_clobber` would still produce a looped region copy and
+// the two layouts below — an array between two i64 fields, and one between two
+// narrow fields — would be pinned by nothing. Writing a field back with the
+// value it already holds counts as a write and changes no result.
 
 struct Block {
     head: i64;
@@ -16,11 +23,13 @@ struct Frame {
     trail: u8;
 }
 
-pub fn block_ends(b: Block) -> i64 {
+pub fn block_ends(mut b: Block) -> i64 {
+    b.head = b.head;
     return b.head * 1000 + b.tail;
 }
 
-pub fn block_body(b: Block, i: i32) -> i64 {
+pub fn block_body(mut b: Block, i: i32) -> i64 {
+    b.head = b.head;
     return b.body[i];
 }
 
@@ -59,7 +68,8 @@ pub fn block_value_semantics() -> i64 {
 
 // Narrow fields on both sides of the array make the copy's start and end bytes
 // readable, which straddling padding would otherwise hide.
-pub fn frame_edges(f: Frame) -> u8 {
+pub fn frame_edges(mut f: Frame) -> u8 {
+    f.lead = f.lead;
     return f.lead * 10 + f.trail;
 }
 
@@ -72,7 +82,8 @@ pub fn call_frame_edges() -> u8 {
     return frame_edges(w);
 }
 
-pub fn frame_body_ends(f: Frame) -> i64 {
+pub fn frame_body_ends(mut f: Frame) -> i64 {
+    f.lead = f.lead;
     return f.body[0] * 1000 + f.body[8] * 100 + f.body[15];
 }
 

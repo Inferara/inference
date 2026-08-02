@@ -13,28 +13,41 @@
 // the test harness lays a byte pattern down in linear memory and passes its
 // address. That reads the copied bytes back one index at a time, which is what
 // makes a tail that drops or misplaces a byte visible.
+//
+// Each reader assigns one element to itself. That is not decoration: a compound
+// parameter the callee never writes is passed by reference and copies nothing,
+// so without the assignment there would be no tail to pin — five of the six
+// combinations above are emitted nowhere else in the corpus. Writing an element
+// back with the value it already holds still counts as a write, and leaves every
+// byte of the pattern where the probes expect it.
 
-pub fn at_129(data: [u8; 129], i: i32) -> u8 {
+pub fn at_129(mut data: [u8; 129], i: i32) -> u8 {
+    data[0] = data[0];
     return data[i];
 }
 
-pub fn at_130(data: [u8; 130], i: i32) -> u8 {
+pub fn at_130(mut data: [u8; 130], i: i32) -> u8 {
+    data[0] = data[0];
     return data[i];
 }
 
-pub fn at_131(data: [u8; 131], i: i32) -> u8 {
+pub fn at_131(mut data: [u8; 131], i: i32) -> u8 {
+    data[0] = data[0];
     return data[i];
 }
 
-pub fn at_135(data: [u8; 135], i: i32) -> u8 {
+pub fn at_135(mut data: [u8; 135], i: i32) -> u8 {
+    data[0] = data[0];
     return data[i];
 }
 
-pub fn at_u32_33(data: [u32; 33], i: i32) -> u32 {
+pub fn at_u32_33(mut data: [u32; 33], i: i32) -> u32 {
+    data[0] = data[0];
     return data[i];
 }
 
-pub fn at_u16_67(data: [u16; 67], i: i32) -> u16 {
+pub fn at_u16_67(mut data: [u16; 67], i: i32) -> u16 {
+    data[0] = data[0];
     return data[i];
 }
 

@@ -290,10 +290,19 @@ mod bulk_free_tests {
 
     // Array parameter copies without a tail ---
 
+    /// The copy count is asserted, not just the copy forms.
+    ///
+    /// Only a parameter the callee writes is copied into a frame of its own, so
+    /// every function here that this file's assertions read through has to be
+    /// one that writes. Counting the copies is what states that: a fixture whose
+    /// parameters drifted back to read-only would still produce a module whose
+    /// remaining copy exercises the loop, and every probe below would still pass
+    /// while measuring nothing.
     #[test]
     fn array_copy_loop_golden_test() {
         cov_mark::check!(wasm_codegen_memcpy_loop);
         cov_mark::check!(wasm_codegen_memcpy_unrolled);
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 5);
         assert_golden("array_copy_loop");
     }
 
@@ -381,9 +390,14 @@ mod bulk_free_tests {
 
     // Array parameter copies with a tail ---
 
+    /// Seven copies for seven parameters: six tail-width combinations and the
+    /// clobber probe. Five of the six exist nowhere else in the corpus, so a
+    /// count that fell to one would leave the tail lowering pinned by a single
+    /// width while the boundary probe below still passed.
     #[test]
     fn array_copy_tail_golden_test() {
         cov_mark::check!(wasm_codegen_memcpy_loop);
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 7);
         assert_golden("array_copy_tail");
     }
 
@@ -483,9 +497,14 @@ mod bulk_free_tests {
 
     // Struct parameter copies ---
 
+    /// Five copies for the five struct parameters: both layouts read from both
+    /// ends, plus the clobber probe. The two layouts are the point — an array
+    /// between two `i64` fields and one between two narrow fields — and a count
+    /// that fell to one would leave whichever of them survived standing in for
+    /// the other.
     #[test]
     fn struct_copy_loop_golden_test() {
-        cov_mark::check!(wasm_codegen_emit_struct_param_copy);
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 5);
         cov_mark::check!(wasm_codegen_memcpy_loop);
         assert_golden("struct_copy_loop");
     }

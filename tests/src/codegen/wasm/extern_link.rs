@@ -435,6 +435,74 @@ pub fn probe_named_param() -> i32 {
         );
     }
 
+    /// The same write-through guarantee for a named **array** parameter.
+    ///
+    /// The sibling test above covers the struct arm three ways — an immutable
+    /// receiver, a `mut self`, and a by-value `Pair` parameter — and all three
+    /// are copied as one untyped region. An array parameter is copied element by
+    /// element by a different emitter, reached through a different arm of the
+    /// entry-copy loop, so neither of them says anything about it. This is the
+    /// only end-to-end statement that an array parameter handed to a foreign
+    /// body that stores through the pointer still leaves the caller's array
+    /// intact.
+    ///
+    /// The external is the same `sortlib`: a compound parameter reaches it as a
+    /// bare `i32` address whatever its declared shape, so a `[i32; 2]` and a
+    /// `Pair` present it with the identical ABI. The declared type has to match
+    /// at the Inference call site, though, which is why this program declares
+    /// its own `external fn` rather than sharing the one above.
+    ///
+    /// Both halves of the returned number are load-bearing, as in the sibling
+    /// test: `25` says the callee did see the sorted pair, so the copy is made
+    /// on entry and not staged at the call site, and `52` says the caller's own
+    /// array never changed.
+    #[test]
+    fn named_array_param_forwarded_to_writing_extern_leaves_the_caller_intact() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("array_extern");
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        let main_source = "\
+external fn sort_pair(p: [i32; 2]);
+use { sort_pair } from sortlib;
+
+fn touch_array(a: [i32; 2]) -> i32 {
+    sort_pair(a);
+    return a[0] * 10 + a[1];
+}
+
+pub fn probe_named_array() -> i32 {
+    let arr: [i32; 2] = [5, 2];
+    let inner: i32 = touch_array(arr);
+    return inner * 100 + arr[0] * 10 + arr[1];
+}
+";
+
+        let (unified, _rocq) = compile_and_link(main_source, lib_dir.path(), "array_extern");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &unified)
+            .unwrap_or_else(|e| panic!("merged module rejected: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("merged module failed to instantiate: {e}"));
+
+        let probe: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "probe_named_array")
+            .unwrap_or_else(|e| panic!("merged module must export `probe_named_array`: {e}"));
+        assert_eq!(
+            probe
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("`probe_named_array` failed: {e}")),
+            2552,
+            "an array parameter reaching a writing external must be copied element \
+             by element into the callee's own frame: the callee sees the sorted pair \
+             (25) and the caller still holds [5, 2] (52). 2525 would mean the foreign \
+             store reached the caller's array"
+        );
+    }
+
     #[test]
     fn proof_mode_spec_omission_renumbers_the_call_to_the_merged_extern() {
         // C1: a proof-mode program that binds an extern AND declares a spec.

@@ -1,0 +1,48 @@
+// One region strictly contains the other. Passing a struct and one of its own
+// fields, or an array and one of its own elements, hands the callee two
+// pointers where the second lies inside the first — an overlap no copy could
+// produce, because a copy would have moved each into its own disjoint slot.
+//
+// Every field read is weighted differently in the returned value, so a read
+// that resolved against the wrong base changes the result rather than
+// coincidentally matching it.
+
+struct Inner {
+    p: i32;
+    q: i32;
+}
+
+struct Outer {
+    head: i32;
+    body: Inner;
+}
+
+struct Item {
+    a: i32;
+    b: i32;
+}
+
+pub fn whole_and_field(o: Outer, i: Inner) -> i32 {
+    return o.head * 1000 + o.body.p * 100 + i.p * 10 + i.q;
+}
+
+pub fn whole_and_element(all: [Item; 3], one: Item) -> i32 {
+    return all[0].a * 1000 + all[2].b * 100 + one.a * 10 + one.b;
+}
+
+pub fn call_whole_and_field() -> i32 {
+    let s: Outer = Outer {
+        head: 7,
+        body: Inner { p: 3, q: 4 },
+    };
+    return whole_and_field(s, s.body);
+}
+
+pub fn call_whole_and_element(i: i32) -> i32 {
+    let items: [Item; 3] = [
+        Item { a: 1, b: 2 },
+        Item { a: 3, b: 4 },
+        Item { a: 5, b: 6 },
+    ];
+    return whole_and_element(items, items[i]);
+}
