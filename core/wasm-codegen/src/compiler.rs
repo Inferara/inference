@@ -1758,13 +1758,21 @@ impl Compiler {
     /// Reports whether `expr_id` itself or any of its sub-expressions satisfies
     /// `pred`, in pre-order and short-circuiting on the first `true`.
     ///
-    /// This is the compiler's single enumeration of expression children: every
-    /// variant carrying sub-expressions names them here, and every leaf is listed
-    /// explicitly rather than swept by a wildcard, so a new `Expr` variant has to
-    /// be classified instead of silently becoming a node no scan can reach. The
-    /// predicates in [`Self::body_has_expr`]'s family and the alias test in
-    /// [`Self::expr_reads_var`] all run through this one match; nothing else in
-    /// codegen recurses over expression children.
+    /// This is the compiler's single *exhaustive* enumeration of expression
+    /// children: every variant carrying sub-expressions names all of them here,
+    /// and every leaf is listed explicitly rather than swept by a wildcard, so a
+    /// new `Expr` variant has to be classified instead of silently becoming a node
+    /// no scan can reach. The predicates in [`Self::body_has_expr`]'s family and
+    /// the alias test in [`Self::expr_reads_var`] all run through this one match.
+    ///
+    /// Other descents over expression children exist, and each is partial by
+    /// design rather than a second general walk: [`Self::lower_expression`] and
+    /// its helpers follow only the shapes they emit code for,
+    /// [`Self::expr_root_is`] follows a projection to its base and deliberately
+    /// never enters an `ArrayIndexAccess`'s index, [`Self::is_syntactic_zero`]
+    /// stops at a wildcard arm, and the `hassert` translator re-walks the same
+    /// nodes into its own term language. A scan that must not miss a node belongs
+    /// here.
     fn expr_any(
         arena: &AstArena,
         expr_id: ExprId,
@@ -6911,6 +6919,8 @@ struct Pair {{
     /// dropped from a parameter the callee does write, so the negative cases
     /// carry the same weight as the positive ones.
     mod param_by_ref_scan {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
         use super::*;
 
         const PREAMBLE: &str = "\
@@ -7018,6 +7028,19 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             compiler
         }
 
+        /// The text of a caught panic. A formatted `assert!` message arrives as a
+        /// `String`; the other arms keep an unexpected payload from reading as an
+        /// empty message and failing an assertion for the wrong reason.
+        fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+            if let Some(text) = payload.downcast_ref::<String>() {
+                return text.clone();
+            }
+            if let Some(text) = payload.downcast_ref::<&str>() {
+                return (*text).to_string();
+            }
+            "<non-string panic payload>".to_string()
+        }
+
         /// The tripwire fires on the divergence it exists to catch: an
         /// assignment rooted at a compound parameter that has no frame slot.
         ///
@@ -7026,13 +7049,25 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
         /// compound parameter would silently take the scalar branch and store
         /// into the caller's memory. Excluding a field-less struct from
         /// `compound_params` removes the one case where a missing slot is not a
-        /// divergence; it must not have removed the guard.
+        /// divergence; it must not have removed the guard. The abort is caught
+        /// with `catch_unwind` and asserted on by message rather than declared as
+        /// an expected panic, and the panic hook is left alone so no
+        /// process-global state is touched.
         #[test]
-        #[should_panic(expected = "assignment targets compound parameter `g`")]
         fn assignment_to_a_slotless_compound_parameter_aborts() {
             let (arena, block_id) = subject_body("        g.tag = 1;");
             let left = first_assign_target(&arena, block_id);
-            staged_with_layout(None).assert_assign_target_has_slot(&arena, left);
+            let compiler = staged_with_layout(None);
+            let unwound = catch_unwind(AssertUnwindSafe(|| {
+                compiler.assert_assign_target_has_slot(&arena, left);
+            }));
+            let payload =
+                unwound.expect_err("a slotless compound parameter must abort compilation");
+            let text = panic_text(payload.as_ref());
+            assert!(
+                text.contains("assignment targets compound parameter `g`"),
+                "the abort must name the parameter it fired on, got: {text}"
+            );
         }
 
         /// The same assignment passes once the parameter has its slot, so the
