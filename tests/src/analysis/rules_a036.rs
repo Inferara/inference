@@ -1114,10 +1114,14 @@ mod analysis_rules_tests {
     ///
     /// A036's soundness rests on its estimate never *under*-counting codegen's
     /// real frame. The single-file parity corpus in Part B cannot exercise a
-    /// qualified parameter type, which only arises across files. A qualified
-    /// struct parameter is passed by value with its own frame copy, so codegen's
-    /// real frame for the consumer is non-zero; this asserts the analysis estimate
-    /// remains an upper bound of that real frame on a cross-file program.
+    /// qualified parameter type, which only arises across files. This asserts the
+    /// analysis estimate remains an upper bound of that real frame on a
+    /// cross-file program.
+    ///
+    /// `consume` assigns its parameter, which is what keeps the parity check
+    /// non-vacuous: a compound parameter the callee never writes is passed by
+    /// reference and gets no frame copy at all, so a read-only `consume` would
+    /// have a real frame of zero and compare an estimate against nothing.
     #[test]
     fn a036_estimate_is_sound_upper_bound_for_qualified_param_frame() {
         let files: &[(Vec<&str>, &str)] = &[
@@ -1125,7 +1129,7 @@ mod analysis_rules_tests {
                 vec![],
                 r#"
                     use lib::big;
-                    pub fn consume(p: lib::big::Big) -> i32 { return p.tag; }
+                    pub fn consume(mut p: lib::big::Big) -> i32 { p.tag = p.tag + 1; return p.tag; }
                     pub fn main() -> i32 { return 0; }
                 "#,
             ),

@@ -20,40 +20,6 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $sum_array (;0;) (type 0) (param $arr i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.add
-    local.get $arr
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    i32.const 4
-    i32.add
-    local.get $arr
-    i32.const 4
-    i32.add
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    local.get $arr
-    i32.const 8
-    i32.add
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    local.set $arr
     local.get $arr
     i32.load
     local.get $arr
@@ -66,10 +32,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -198,50 +160,6 @@
     unreachable
   )
   (func $two_array_params (;4;) (type 4) (param $a i32) (param $b i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.add
-    local.get $a
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    i32.const 4
-    i32.add
-    local.get $a
-    i32.const 4
-    i32.add
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    local.set $a
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    local.get $b
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    i32.const 12
-    i32.add
-    local.get $b
-    i32.const 4
-    i32.add
-    i32.load
-    i32.store
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    local.set $b
     local.get $a
     i32.load
     local.get $a
@@ -257,10 +175,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )
@@ -312,40 +226,6 @@
     unreachable
   )
   (func $bool_array_param (;6;) (type 6) (param $flags i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.add
-    local.get $flags
-    i32.load8_u
-    i32.store8
-    local.get $__frame_ptr
-    i32.const 1
-    i32.add
-    local.get $flags
-    i32.const 1
-    i32.add
-    i32.load8_u
-    i32.store8
-    local.get $__frame_ptr
-    i32.const 2
-    i32.add
-    local.get $flags
-    i32.const 2
-    i32.add
-    i32.load8_u
-    i32.store8
-    local.get $__frame_ptr
-    local.set $flags
     local.get $flags
     i32.load8_u
     if ;; label = @1
@@ -355,18 +235,10 @@
       i32.load8_u
       if ;; label = @2
         i32.const 1
-        local.get $__frame_ptr
-        i32.const 16
-        i32.add
-        global.set 0
         return
       end
     end
     i32.const 0
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

@@ -260,34 +260,24 @@
   (func $nested_struct_param (;5;) (type 5) (param $o i32) (result i32)
     (local $i i32) (local $__frame_ptr i32)
     global.get 0
-    i32.const 32
+    i32.const 16
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     local.get $__frame_ptr
     i32.const 0
-    i32.const 32
+    i32.const 16
     memory.fill
     local.get $__frame_ptr
-    local.get $o
-    i32.const 12
-    memory.copy
-    local.get $__frame_ptr
-    local.set $o
-    local.get $__frame_ptr
-    i32.const 12
-    i32.add
     local.get $o
     i32.const 8
     memory.copy
     local.get $__frame_ptr
-    i32.const 12
-    i32.add
     local.set $i
     local.get $i
     i32.load
     local.get $__frame_ptr
-    i32.const 32
+    i32.const 16
     i32.add
     global.set 0
     return

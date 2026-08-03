@@ -34,6 +34,7 @@ mod loops;
 mod multi_file;
 mod multi_file_golden;
 mod negative;
+mod param_by_ref;
 mod self_extern_escape;
 mod short_circuit;
 mod validation;

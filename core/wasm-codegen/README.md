@@ -41,7 +41,12 @@ Typed AST (TypedContext)
    compute a stack frame layout by walking the entire function body and collecting array and struct
    declarations and parameter types. This pre-computation determines memory offsets for each compound
    value and allocates a synthetic `__frame_ptr` WASM local. Struct fields are laid out with C-compatible
-   natural alignment (`compute_struct_field_layout`). See [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
+   natural alignment (`compute_struct_field_layout`). A compound parameter earns a slot only when the
+   body can write through it — see `compound_param_is_by_reference`; a parameter that is neither
+   assigned through nor forwarded to an `external fn` is read straight from the caller's pointer. A
+   function whose parameters and bindings all turn out to need no memory gets no frame at all: no
+   `__frame_ptr`, no prologue, no epilogue, and no `__stack_pointer` mutation.
+   See [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
 4. **Local Pre-scan** - Walk the entire function body once to collect all `let` and `const`
    declarations and assign them sequential WASM local indices before any instructions are
    emitted. This step is mandatory because the WebAssembly binary format requires all local
@@ -81,8 +86,9 @@ Typed AST (TypedContext)
    supported: each element occupies `struct_total_size` bytes, addressed by
    `base + index * elem_size`; element field reads/writes use the same dispatch as plain
    struct member access. Function calls push arguments in positional order and emit a
-   `call <func_idx>` instruction. Struct-typed parameters are copied into the callee's
-   frame on entry (value semantics).
+   `call <func_idx>` instruction. A struct-typed parameter is copied into the callee's
+   frame on entry when the body assigns through it or forwards it to an `external fn`
+   (value semantics); otherwise it is read through the caller's pointer.
    Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
    evaluating the right-hand side expression and emitting `local.set` to store the result.
    Array index assignment (`arr[i] = value;`) computes the element address and emits a store
@@ -97,12 +103,13 @@ Typed AST (TypedContext)
    syntax), or an `InstanceMethod` (called via `receiver.method()` syntax). All three
    resolve to a mangled WASM function name that is looked up in `func_name_to_idx` before
    emitting `call <idx>`. Instance methods receive `self` as an implicit first argument
-   (an `i32` pointer). Methods with a `mut self` receiver copy `self` into the callee's
-   frame on entry (value semantics — mutations do not reach the caller); methods with an
-   immutable `self` read directly through the pointer, except when the body forwards
-   `self` (or a projection of it) to an `external fn`, which copies too — a linked
-   external shares the program's linear memory and can store through the pointer it is
-   handed, which would reach the caller's own memory. Methods are never exported as WASM
+   (an `i32` pointer). A receiver is a parameter and obeys the same rule as any other: it
+   is copied into the callee's frame on entry (value semantics — mutations do not reach
+   the caller) when the body assigns through it, or when the body forwards `self` or a
+   projection of it to an `external fn` — a linked external shares the program's linear
+   memory and can store through the pointer it is handed, which would reach the caller's
+   own memory. A receiver that does neither is read directly through the pointer,
+   whether it is written `self` or `mut self`. Methods are never exported as WASM
    exports regardless of Inference visibility.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
    Non-void functions emit an `unreachable` instruction before the function `end` to
@@ -340,7 +347,7 @@ The `codegen` function:
 
 - **Top-level constructs** - Only function definitions are compiled. Top-level `const` declarations do not reach codegen (analysis rule A032 / issue #171); cross-file `const` type-checking works and will be extended when #171 lands
 - **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
-- **Expression types** - Fixed-size arrays with scalar and enum element types are supported, including array-returning functions via the sret calling convention. Enum types are fully supported: variant access (`Color::Red`), enum-typed locals and parameters, enum return values, enum fields inside structs, enums in arrays, equality/inequality comparisons (`==`, `!=`), reassignment, and uzumaki initialization. Arithmetic operations and ordering comparisons on enum values are rejected by the type checker. Structs with scalar, enum, and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Constructing a struct literal whose field is an array of structs (`Grid { cells: [Point { … }, … ] }`) or a multi-dimensional array (`Foo { grid: [[1, 2, 3], [4, 5, 6]] }` for a `[[i32; 3]; 2]` field, including arrays of structs such as `[[Point; 2]; 2]`) lowers element-by-element, with chained reads and writes through the field (`g.cells[i].x`, `g.grid[i][j]`). Multidimensional arrays (`[[i32; 3]; 2]`) are also supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
+- **Expression types** - Fixed-size arrays with scalar and enum element types are supported, including array-returning functions via the sret calling convention. Enum types are fully supported: variant access (`Color::Red`), enum-typed locals and parameters, enum return values, enum fields inside structs, enums in arrays, equality/inequality comparisons (`==`, `!=`), reassignment, and uzumaki initialization. Arithmetic operations and ordering comparisons on enum values are rejected by the type checker. Structs with scalar, enum, and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copied on entry when the body may write them, otherwise passed by reference), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Constructing a struct literal whose field is an array of structs (`Grid { cells: [Point { … }, … ] }`) or a multi-dimensional array (`Foo { grid: [[1, 2, 3], [4, 5, 6]] }` for a `[[i32; 3]; 2]` field, including arrays of structs such as `[[Point; 2]; 2]`) lowers element-by-element, with chained reads and writes through the field (`g.cells[i].x`, `g.grid[i][j]`). Multidimensional arrays (`[[i32; 3]; 2]`) are also supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -364,8 +371,9 @@ Detailed design documents live in `docs/`:
   before the `end` of every non-void function.
 - [docs/arrays-and-memory.md](docs/arrays-and-memory.md) - Stack allocation and shadow
   stack infrastructure for fixed-size arrays and structs, including frame layout computation,
-  prologue/epilogue emission, load/store instruction selection, copy-on-entry semantics for
-  array and struct parameters, struct field layout (`compute_struct_field_layout`),
+  prologue/epilogue emission, load/store instruction selection, when an array or struct
+  parameter is copied on entry versus passed by reference,
+  struct field layout (`compute_struct_field_layout`),
   `CompoundFieldLayout` for nested struct and array fields, member access lowering for scalar
   and compound fields, struct literal lowering with nested dispatch, arrays of structs, struct
   uzumaki with array fields, and the region fill/copy lowering (`RegionEmit`,
@@ -446,9 +454,11 @@ Test data includes:
   also includes `reassign_zeros` which verifies that zero stores are emitted during
   assignment (not elided, because the destination may hold non-zero values); validated and
   executed via wasmtime
-- `array_params.inf` - Array-typed function parameters, copy-on-entry semantics, value
-  semantics verification (callee mutations don't affect caller's array), multi-parameter
-  functions, and bool array parameters; validated and executed via wasmtime
+- `array_params.inf` - Array-typed function parameters: copy-on-entry for the parameter that
+  is written, value semantics verification (callee mutations don't affect caller's array),
+  multi-parameter functions, and bool array parameters; the read-only parameters here are
+  passed by reference, so `mutate_copy`'s is the only parameter with a frame slot; validated
+  and executed via wasmtime
 - `array_nondet.inf` - Arrays inside non-deterministic blocks (forall, exists) and
   non-deterministic array initialization (`@`) inside blocks; validated against `inf_wasmparser`
   (non-det modules skip WAT comparison)
@@ -464,9 +474,10 @@ Test data includes:
   struct literal to an already-initialized variable, verifying that zero stores are not elided
   during assignment (because the destination already holds non-zero data); validated and executed
   via wasmtime
-- `struct_params.inf` - Struct-typed function parameters: copy-on-entry value semantics
-  (callee mutations don't affect caller's struct), mixed-type struct params, multiple struct
-  params; validated and executed via wasmtime
+- `struct_params.inf` - Struct-typed function parameters: copy-on-entry value semantics for
+  the written parameter (callee mutations don't affect caller's struct), mixed-type struct
+  params, multiple struct params; the read-only parameters are passed by reference, so
+  `modify_no_effect`'s is the only parameter with a frame slot; validated and executed via wasmtime
 - `struct_return.inf` - Functions returning struct types via sret convention: return of struct
   literal, return of a variable, chained calls (`return make_point()`), and mixed-type struct
   returns; validated and executed via wasmtime
@@ -572,6 +583,34 @@ Test data includes:
     import index
   - `import_dedup.inf` - Two externs with an identical `(i32) -> i32` signature share one
     type entry; verifies import-against-import type deduplication
+- By-reference parameter fixtures in `tests/test_data/codegen/wasm/param_by_ref/`
+  (tests in `tests/src/codegen/wasm/param_by_ref.rs`). Each fixture pins the *decision*
+  with `check_count!` on `wasm_codegen_param_by_reference` /
+  `wasm_codegen_param_written_in_body` / `wasm_codegen_param_escapes_to_extern`, not only
+  the emitted bytes:
+  - `read_only_params` - The headline shape: struct and array parameters that are read and
+    never written, in functions needing no frame for anything else, so each compiles
+    frameless
+  - `written_param` - The written twin; one assignment restores the slot, the copy and the
+    parameter rebind
+  - `mut_never_written` - `mut` parameters that are never assigned; the half of the domain
+    where the body scan decides something the `mut` marker cannot
+  - `extern_forward` - The escape gate: parameters forwarded to an `external fn` keep their
+    copies while a sibling that is not forwarded does not; covers the struct and array
+    lowerings separately
+  - `alias_same_argument` - The same caller variable passed to two parameters, one written
+    and copied, the other by reference
+  - `alias_whole_and_part` - One parameter's region strictly contains the other's
+  - `alias_receiver` - The receiver channel, which never appears in argument position;
+    immutable and `mut self` receivers aliasing a parameter
+  - `alias_sret` - A compound return writes the caller's destination while a by-reference
+    parameter is read, including a destination pointer forwarded down a call chain
+- Receiver escape fixtures in `tests/test_data/codegen/wasm/self_extern_escape/`: a method
+  that hands `self`, a projection of it, or a scalar drawn from it to an `external fn` —
+  from a nested block, a nested expression, or a sub-object position — allocates the
+  receiver a frame slot and copies on entry; `no_escape_self` is the control that stays
+  frameless, `mut_self_extern` covers the mutable receiver, and `escape_with_param` pins
+  the receiver slot's frame offset against a co-resident written-parameter slot
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

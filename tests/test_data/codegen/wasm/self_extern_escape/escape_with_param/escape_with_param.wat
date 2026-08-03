@@ -144,6 +144,11 @@
     local.set $extra
     local.get $self
     call 0
+    local.get $extra
+    i32.const 4
+    i32.add
+    i32.const 0
+    i32.store
     local.get $self
     i32.load
     i32.const 1000

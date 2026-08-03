@@ -259,6 +259,38 @@ mod tests {
         );
     }
 
+    /// An `external fn` cannot be reached from a file other than the one that
+    /// declares it, in either the absolute-path or the item-import spelling.
+    ///
+    /// This is load-bearing outside the type checker. Codegen's decision about
+    /// whether a compound parameter escapes to a foreign body asks only whether a
+    /// *bare identifier* callee names a registered import, which is complete only
+    /// because no qualified or imported callee can ever resolve to an extern. The
+    /// remaining escape route, `pub external fn`, is a grammar error — the parser
+    /// pins it in `pub_external_fn_terminates_with_diagnostic`. If externs ever
+    /// become exportable, that gate silently starts missing them.
+    #[test]
+    fn cross_file_extern_function_call_rejected() {
+        let extern_lib = "external fn scramble(v: i32) -> i32;";
+        for (label, entry) in [
+            (
+                "absolute path",
+                "use lib; pub fn main() { let r: i32 = lib::scramble(1); }",
+            ),
+            (
+                "item import",
+                "use lib::{scramble}; pub fn main() { let r: i32 = scramble(1); }",
+            ),
+        ] {
+            let files = [(vec![], entry), (vec!["lib"], extern_lib)];
+            let result = try_type_check_multi_file(&files);
+            assert!(
+                result.is_err(),
+                "{label}: an extern must not be callable from another file"
+            );
+        }
+    }
+
     /// A `pub` cross-file function called by absolute path resolves — the public
     /// surface crosses the file boundary once the accessing file imports the
     /// namespace.

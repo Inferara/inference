@@ -279,22 +279,6 @@
     unreachable
   )
   (func $grid_param (;5;) (type 5) (param $g i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i32.const 0
-    i32.const 16
-    memory.fill
-    local.get $__frame_ptr
-    local.get $g
-    i32.const 16
-    memory.copy
-    local.get $__frame_ptr
-    local.set $g
     local.get $g
     i32.load
     local.get $g
@@ -304,10 +288,6 @@
     i32.add
     i32.load
     i32.add
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

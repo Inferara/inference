@@ -269,11 +269,12 @@ fn params_frame_bytes(
                 let type_info = TypeInfo::from_type_id(arena, *ty);
                 bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
             }
-            // Codegen copies the receiver into the callee's frame for a `mut self`
-            // and for an immutable `self` that escapes to an `external fn`, so
-            // either shape can carry a real slot. Every `self` receiver is charged
-            // rather than re-deriving that escape condition in this crate: the
-            // estimate is licensed to be loose, but never to under-count.
+            // Codegen copies the receiver into the callee's frame when the
+            // method body assigns through it or forwards it to an `external
+            // fn`, so either receiver shape can carry a real slot. Every
+            // `self` receiver is charged rather than re-deriving that
+            // condition in this crate: the estimate is licensed to be loose,
+            // but never to under-count.
             ArgKind::SelfRef { .. } => {
                 if let Some(name) = struct_name {
                     bytes = bytes.saturating_add(slot_bytes(

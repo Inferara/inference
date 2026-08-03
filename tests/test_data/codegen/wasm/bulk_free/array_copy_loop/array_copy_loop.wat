@@ -73,6 +73,10 @@
     local.get $__frame_ptr
     local.set $data
     local.get $data
+    local.get $data
+    i64.load
+    i64.store
+    local.get $data
     i64.load
     local.get $data
     i32.const 128
@@ -136,6 +140,10 @@
     local.get $__frame_ptr
     local.set $data
     local.get $data
+    local.get $data
+    i64.load
+    i64.store
+    local.get $data
     i64.load
     local.get $data
     i32.const 152
@@ -198,6 +206,10 @@
     end
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    local.get $data
+    i64.load
+    i64.store
     local.get $data
     local.get $i
     local.tee 3
@@ -380,6 +392,11 @@
     i64.store offset=72 align=1
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    i32.const 4
+    i32.add
+    i32.const 0
+    i32.store
     local.get $data
     i32.load
     local.get $data

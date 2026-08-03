@@ -1,0 +1,41 @@
+// The shape the whole by-reference treatment exists for: a leaf reader over
+// compound parameters. Neither `dot` nor `sum4` assigns anything rooted at a
+// parameter and neither hands one to an external, so both read straight through
+// the caller's pointers. With no parameter slot and no other compound binding,
+// nothing in either function needs a frame at all: no `__frame_ptr`, no
+// prologue, no epilogue, and no write to `__stack_pointer`.
+//
+// The callers are the contrast. Each holds its compounds in its own frame, so
+// the module still has a shadow stack and the two readers' absence from it is a
+// property of those two functions rather than of the module.
+
+struct Vec3 {
+    x: i64;
+    y: i64;
+    z: i64;
+}
+
+pub fn dot(a: Vec3, b: Vec3) -> i64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+pub fn sum4(v: [i64; 4]) -> i64 {
+    return v[0] + v[1] + v[2] + v[3];
+}
+
+// A dynamic index keeps the read from folding, so the value observed comes from
+// the caller's own bytes rather than from a constant the compiler chose.
+pub fn pick4(v: [i64; 4], i: i32) -> i64 {
+    return v[i];
+}
+
+pub fn call_dot() -> i64 {
+    let p: Vec3 = Vec3 { x: 2, y: 3, z: 4 };
+    let q: Vec3 = Vec3 { x: 5, y: 7, z: 11 };
+    return dot(p, q);
+}
+
+pub fn call_sum4() -> i64 {
+    let w: [i64; 4] = [10, 20, 30, 40];
+    return sum4(w);
+}

@@ -71,6 +71,10 @@
     local.get $__frame_ptr
     local.set $data
     local.get $data
+    local.get $data
+    i32.load8_u
+    i32.store8
+    local.get $data
     local.get $i
     local.tee 3
     local.get 3
@@ -143,6 +147,10 @@
     i32.store16 offset=128 align=1
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    local.get $data
+    i32.load8_u
+    i32.store8
     local.get $data
     local.get $i
     local.tee 3
@@ -220,6 +228,10 @@
     i32.store8 offset=130
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    local.get $data
+    i32.load8_u
+    i32.store8
     local.get $data
     local.get $i
     local.tee 3
@@ -302,6 +314,10 @@
     local.get $__frame_ptr
     local.set $data
     local.get $data
+    local.get $data
+    i32.load8_u
+    i32.store8
+    local.get $data
     local.get $i
     local.tee 3
     local.get 3
@@ -374,6 +390,10 @@
     i32.store offset=128 align=1
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    local.get $data
+    i32.load
+    i32.store
     local.get $data
     local.get $i
     local.tee 3
@@ -451,6 +471,10 @@
     i32.store16 offset=132 align=1
     local.get $__frame_ptr
     local.set $data
+    local.get $data
+    local.get $data
+    i32.load16_u
+    i32.store16
     local.get $data
     local.get $i
     local.tee 3

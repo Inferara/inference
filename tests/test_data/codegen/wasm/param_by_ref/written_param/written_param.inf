@@ -1,0 +1,24 @@
+// The twin of `read_only_params`: the same struct, the same call shape, and an
+// assignment rooted at the parameter. That one statement is the whole
+// difference — it earns `v` a frame slot and an entry copy, so the callee's
+// write lands in memory the caller cannot see.
+//
+// `call_bump` reads the caller's field back after the call, which is what makes
+// the copy observable rather than merely counted.
+
+struct Vec3 {
+    x: i64;
+    y: i64;
+    z: i64;
+}
+
+pub fn bump(mut v: Vec3) -> i64 {
+    v.x = v.x + 100;
+    return v.x + v.y + v.z;
+}
+
+pub fn call_bump() -> i64 {
+    let p: Vec3 = Vec3 { x: 1, y: 2, z: 3 };
+    let inner: i64 = bump(p);
+    return inner * 1000 + p.x;
+}

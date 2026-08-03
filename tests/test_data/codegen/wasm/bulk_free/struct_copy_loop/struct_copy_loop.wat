@@ -73,6 +73,10 @@
     local.get $__frame_ptr
     local.set $b
     local.get $b
+    local.get $b
+    i64.load
+    i64.store
+    local.get $b
     i64.load
     i64.const 1000
     i64.mul
@@ -137,6 +141,10 @@
     end
     local.get $__frame_ptr
     local.set $b
+    local.get $b
+    local.get $b
+    i64.load
+    i64.store
     local.get $b
     i32.const 8
     i32.add
@@ -464,6 +472,10 @@
     local.get $__frame_ptr
     local.set $f
     local.get $f
+    local.get $f
+    i32.load8_u
+    i32.store8
+    local.get $f
     i32.load8_u
     i32.const 10
     i32.mul
@@ -589,6 +601,10 @@
     end
     local.get $__frame_ptr
     local.set $f
+    local.get $f
+    local.get $f
+    i32.load8_u
+    i32.store8
     local.get $f
     i32.const 8
     i32.add

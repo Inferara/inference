@@ -1,0 +1,104 @@
+// The receiver channel. A method receiver moves without ever appearing as a
+// call argument, so it is the one hop the argument-position reasoning does not
+// walk — which is why the by-reference treatment covers `self` on the same
+// terms as a named parameter.
+//
+// The five methods put the receiver and an argument on top of one another in
+// every arrangement the language allows: the receiver together with one of its
+// own fields, the receiver together with itself, both of those again under a
+// `mut self` that assigns — so the receiver copies while the argument does not,
+// and the argument must still show the caller's original value — and a
+// sub-object of a by-reference receiver handed to a *native* callee, a pointer
+// that reaches two frames up.
+//
+// Every caller reads its own `Holder` back after the call and folds two of its
+// fields into the number it returns, so each row states the caller's side as
+// well as the callee's. The two halves answer different questions. What the
+// callee returned says the pointers it was handed addressed the right regions;
+// what the caller reads afterwards says nothing wrote through them. A receiver
+// passed by reference *is* the caller's memory, so a stray store — or a copy
+// that was skipped where one was needed — is visible in the trailing digits and
+// nowhere else. `call_native_sub_object` gains the most from it: the address it
+// hands down points two frames up, and the returned value alone would accept a
+// callee that read the right bytes and then scribbled on them.
+
+struct Part {
+    u: i32;
+    v: i32;
+}
+
+fn part_sum(q: Part) -> i32 {
+    return q.u * 10 + q.v;
+}
+
+struct Holder {
+    tag: i32;
+    body: Part;
+
+    fn read_with_part(self, q: Part) -> i32 {
+        return self.tag * 1000 + self.body.u * 100 + q.u * 10 + q.v;
+    }
+
+    fn read_with_holder(self, o: Holder) -> i32 {
+        return self.tag * 1000 + self.body.v * 100 + o.tag * 10 + o.body.v;
+    }
+
+    fn bump_with_part(mut self, q: Part) -> i32 {
+        self.tag = self.tag + 1;
+        return self.tag * 100 + q.u * 10 + q.v;
+    }
+
+    fn bump_with_holder(mut self, o: Holder) -> i32 {
+        self.tag = self.tag + 1;
+        return self.tag * 100 + o.tag * 10 + o.body.v;
+    }
+
+    fn native_sub_object(self) -> i32 {
+        return part_sum(self.body);
+    }
+}
+
+pub fn call_receiver_and_part() -> i32 {
+    let h: Holder = Holder {
+        tag: 5,
+        body: Part { u: 3, v: 4 },
+    };
+    let inner: i32 = h.read_with_part(h.body);
+    return inner * 100 + h.tag * 10 + h.body.u;
+}
+
+pub fn call_receiver_and_receiver() -> i32 {
+    let g: Holder = Holder {
+        tag: 5,
+        body: Part { u: 3, v: 4 },
+    };
+    let inner: i32 = g.read_with_holder(g);
+    return inner * 100 + g.tag * 10 + g.body.u;
+}
+
+pub fn call_mut_receiver_and_part() -> i32 {
+    let k: Holder = Holder {
+        tag: 5,
+        body: Part { u: 3, v: 4 },
+    };
+    let inner: i32 = k.bump_with_part(k.body);
+    return inner * 100 + k.tag * 10 + k.body.u;
+}
+
+pub fn call_mut_receiver_and_receiver() -> i32 {
+    let r: Holder = Holder {
+        tag: 5,
+        body: Part { u: 3, v: 4 },
+    };
+    let inner: i32 = r.bump_with_holder(r);
+    return inner * 100 + r.tag * 10 + r.body.u;
+}
+
+pub fn call_native_sub_object() -> i32 {
+    let m: Holder = Holder {
+        tag: 5,
+        body: Part { u: 3, v: 4 },
+    };
+    let inner: i32 = m.native_sub_object();
+    return inner * 100 + m.tag * 10 + m.body.u;
+}

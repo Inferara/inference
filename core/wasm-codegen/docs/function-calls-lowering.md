@@ -376,8 +376,9 @@ resolved until multi-file compilation is implemented (currently `todo!()` in `co
 |------|-------|---------|
 | `wasm_codegen_emit_function_params` | 7 | 7 parameters across all functions in `fn_params.inf` |
 | `wasm_codegen_emit_function_call` | 5 | 5 call sites in `fn_calls.inf` |
-| `wasm_codegen_emit_self_copy_on_entry` | varies | `self` frame copy emitted for each method whose receiver was given a frame slot (a `mut self`, or an immutable `self` that escapes to an `external fn`) |
+| `wasm_codegen_emit_self_copy_on_entry` | varies | `self` frame copy emitted for each method whose receiver was given a frame slot (a receiver the body assigns through, or one that escapes to an `external fn`) |
 | `wasm_codegen_self_escapes_to_extern` | varies | An immutable `self` receiver reaches an `external fn`, so the layout pass allocates it a frame slot |
+| `wasm_codegen_param_by_reference` | varies | A compound parameter or receiver is neither assigned through nor forwarded to an `external fn`, so it gets no frame slot and no entry copy |
 | `wasm_codegen_emit_import_section` | 1+ | Import section emitted (fires whenever at least one `external fn` is present) |
 | `wasm_codegen_emit_extern_call` | 1+ | Extern call lowered to `call <import_idx>` (fires in `single_import_test`) |
 

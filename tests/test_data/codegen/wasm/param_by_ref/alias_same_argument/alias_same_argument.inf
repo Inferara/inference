@@ -1,0 +1,46 @@
+// Two parameters, one variable. When neither parameter is copied, `a` and `b`
+// are the same address, which is a state the callee could not previously be in.
+//
+// `add_xy` reads both and must see one consistent value through each. `write_b`
+// is the sharp half: one parameter is written and therefore copied while the
+// other is not, and the two are still the same caller variable. The write has to
+// land in the callee's own frame — if it reached the by-reference parameter, or
+// the caller's variable, `a.x` would read back as 99.
+
+struct V {
+    x: i32;
+    y: i32;
+}
+
+pub fn add_xy(a: V, b: V) -> i32 {
+    return a.x * 1000 + a.y * 100 + b.x * 10 + b.y;
+}
+
+pub fn write_b(a: V, mut b: V) -> i32 {
+    b.x = 99;
+    return a.x * 1000 + b.x;
+}
+
+pub fn same_twice() -> i32 {
+    let s: V = V { x: 1, y: 2 };
+    return add_xy(s, s);
+}
+
+pub fn distinct_arguments() -> i32 {
+    let m: V = V { x: 1, y: 2 };
+    let n: V = V { x: 3, y: 4 };
+    return add_xy(m, n);
+}
+
+pub fn write_b_same_variable() -> i32 {
+    let t: V = V { x: 1, y: 2 };
+    let inner: i32 = write_b(t, t);
+    return inner * 100 + t.x;
+}
+
+pub fn write_b_distinct_variables() -> i32 {
+    let u: V = V { x: 1, y: 2 };
+    let w: V = V { x: 3, y: 4 };
+    let inner: i32 = write_b(u, w);
+    return inner * 100 + u.x * 10 + w.x;
+}

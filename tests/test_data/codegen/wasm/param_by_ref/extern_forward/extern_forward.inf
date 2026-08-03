@@ -1,0 +1,41 @@
+// The gate. A compound `external fn` parameter is lowered to a raw pointer and
+// a linked external shares this program's single linear memory, so a foreign
+// body can store through the address it is handed. A parameter that reaches one
+// therefore keeps its own copy no matter how little the body itself does with
+// it.
+//
+// Both lowering arms are here: a struct argument copies as one region, an array
+// argument as element-wise stores, and a gate that reached only one of them
+// would leave the other passing the caller's pointer to the foreign body.
+//
+// Each external is declared *and* bound with a `use`. An unbound `external fn`
+// carries no origin, is skipped by import registration, and leaves the map the
+// gate consults empty — a fixture missing the `use` would golden the ungated
+// bytes and pass. The module imports, so it is compared as bytes rather than
+// executed.
+
+external fn sort_pair(p: Pair);
+external fn sort_arr(a: [i32; 2]);
+use { sort_pair, sort_arr } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+pub fn forward_struct(p: Pair) -> i32 {
+    sort_pair(p);
+    return p.a * 10 + p.b;
+}
+
+pub fn forward_array(a: [i32; 2]) -> i32 {
+    sort_arr(a);
+    return a[0] * 10 + a[1];
+}
+
+// The control: the same module, the same registered imports, and a compound
+// parameter that never reaches one. The decision is "no escape", not "no
+// externs to check against".
+pub fn no_forward(q: Pair) -> i32 {
+    return q.a * 10 + q.b;
+}

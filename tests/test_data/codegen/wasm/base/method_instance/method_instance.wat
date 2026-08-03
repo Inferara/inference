@@ -256,30 +256,8 @@
     unreachable
   )
   (func $test_on_param (;7;) (type 7) (param $p i32) (result i32)
-    (local $__frame_ptr i32)
-    global.get 0
-    i32.const 16
-    i32.sub
-    local.tee $__frame_ptr
-    global.set 0
-    local.get $__frame_ptr
-    i64.const 0
-    i64.store
-    local.get $__frame_ptr
-    i64.const 0
-    i64.store offset=8
-    local.get $__frame_ptr
-    local.get $p
-    i64.load align=1
-    i64.store align=1
-    local.get $__frame_ptr
-    local.set $p
     local.get $p
     call $Point.get_x
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     return
     unreachable
   )

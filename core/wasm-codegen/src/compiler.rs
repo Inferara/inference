@@ -59,7 +59,7 @@
 
 use crate::errors::CodegenError;
 use crate::target::EmitFeatures;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
@@ -410,6 +410,17 @@ pub(crate) struct Compiler {
     /// it is not mode-gated: the guard emits in both Compile and Proof modes.
     /// Reset per function alongside the rest of the per-function state.
     narrow_div_scratch_local: Option<u32>,
+    /// Names of the compound (array or struct) parameters of the function
+    /// currently being compiled, including a `self` receiver.
+    ///
+    /// Recorded while the parameters are walked, where each parameter's resolved
+    /// type is already in hand, so that assignment lowering can recognize one
+    /// without re-deriving compound-ness. Its only consumer is
+    /// [`Self::assert_assign_target_has_slot`]: a compound parameter that has no
+    /// frame slot was proved unwritten by [`Self::param_is_written`], so an
+    /// assignment reaching it means that scan and lowering disagree. Reset per
+    /// function alongside the rest of the per-function state.
+    compound_params: FxHashSet<String>,
     /// Local declarations for the function currently being compiled: the named
     /// locals plus the eagerly reserved frame-pointer, bounds-check and
     /// narrow-division temporaries.
@@ -460,6 +471,37 @@ enum NestedBlocks {
     },
 }
 
+/// Everything [`Compiler::compute_frame_layout`] needs to know about the
+/// function whose frame it is laying out.
+///
+/// The fields travel together through the layout pass and the per-parameter
+/// decisions it takes, so they are bundled rather than passed as a widening
+/// positional argument list.
+struct FrameLayoutInput<'a> {
+    arena: &'a AstArena,
+    /// The function's body block: the layout pass both collects the body's own
+    /// compound bindings from it and scans it for the facts that decide whether
+    /// a parameter needs a slot.
+    block_id: BlockId,
+    ctx: &'a TypedContext,
+    /// WASM local index reserved for `__frame_ptr`.
+    frame_ptr_local_idx: u32,
+    /// The function's declared parameters, in order and *including* the `self`
+    /// receiver as an `ArgKind::SelfRef`. The receiver's presence here is what
+    /// gives it a frame slot when it is not by reference, so a caller that
+    /// stripped it would silently drop the receiver's entry copy.
+    args: &'a [ArgData],
+    /// `Some("TypeName")` when laying out a method body, so an
+    /// `ArgKind::SelfRef` needing its own copy can resolve the struct layout.
+    method_struct_name: Option<&'a str>,
+    /// Module path of the file the function is defined in, used to resolve type
+    /// names against their defining file.
+    module_path: &'a [String],
+    /// Registered import names, as `register_imports` left them. Only the keys
+    /// are read.
+    extern_names: &'a FxHashMap<String, u32>,
+}
+
 impl Compiler {
     /// Creates a new compiler instance for building a WASM module.
     pub(crate) fn new(module_name: &str) -> Self {
@@ -493,6 +535,7 @@ impl Compiler {
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
             narrow_div_scratch_local: None,
+            compound_params: FxHashSet::default(),
             local_declarations: Vec::new(),
             emit_features: EmitFeatures::default(),
             region_emit: RegionEmit::new(0, EmitFeatures::default()),
@@ -1160,6 +1203,7 @@ impl Compiler {
             local_idx = 1;
         }
 
+        self.compound_params.clear();
         for arg in &args {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
@@ -1174,6 +1218,23 @@ impl Compiler {
                         "parameter `{arg_name}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected duplicate parameter names",
                     );
+                    // A parameter that owns a region of linear memory is recorded
+                    // twice over. It joins `compound_params` so that assignment
+                    // lowering can recognize it without re-deriving compound-ness,
+                    // and it forces a memory section and a `__stack_pointer`
+                    // global whether or not it earns a frame slot: deriving that
+                    // from the frame would tie it to the slot, and a parameter
+                    // passed by reference has none — a module whose only memory
+                    // user was such a parameter would then emit loads with no
+                    // memory to load from.
+                    if Self::param_type_is_compound(
+                        &TypeInfo::from_type_id(arena, *ty).kind,
+                        ctx,
+                        module_path,
+                    )? {
+                        self.compound_params.insert(arg_name);
+                        self.has_memory = true;
+                    }
                     local_idx += 1;
                 }
                 ArgKind::SelfRef { .. } => {
@@ -1189,6 +1250,7 @@ impl Compiler {
                     );
                     local_idx += 1;
                     // self is a struct pointer; method body will use memory loads/stores
+                    self.compound_params.insert("self".to_string());
                     self.has_memory = true;
                 }
                 ArgKind::Ignored { .. } => {
@@ -1237,16 +1299,16 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout = Self::compute_frame_layout(
+        self.frame_layout = Self::compute_frame_layout(&FrameLayoutInput {
             arena,
-            body_id,
+            block_id: body_id,
             ctx,
-            local_idx,
-            &args,
+            frame_ptr_local_idx: local_idx,
+            args: &args,
             method_struct_name,
             module_path,
-            &self.extern_name_to_idx,
-        )?;
+            extern_names: &self.extern_name_to_idx,
+        })?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
         // structured `FnKey` itself, not its lossy `Display` rendering: two
@@ -1361,63 +1423,58 @@ impl Compiler {
             let region = &mut self.region_emit;
             emit_stack_prologue(func, layout, region);
 
-            // Copy-on-entry: for each compound-typed parameter (array, struct) and
-            // for a `self` receiver that was given a frame slot, copy the caller's
-            // data into the callee's frame to enforce value semantics.
+            // Copy-on-entry: every parameter `compute_frame_layout` gave a frame
+            // slot to is copied out of the caller's memory into that slot, so the
+            // callee reads and writes its own data (value semantics). A compound
+            // parameter with no slot is by reference — nothing in the body writes
+            // it and nothing forwards it to an `external fn` — and is read
+            // straight through the caller's pointer.
+            //
+            // Every arm keys on slot presence and nothing else. Slot presence is
+            // the single source of truth for this decision, so an allocated slot
+            // that is never copied into — leaving the parameter still aliasing the
+            // caller's memory — is unrepresentable rather than merely forbidden.
             for arg in &args {
                 match &arg.kind {
-                    ArgKind::Named { name, .. } => {
+                    ArgKind::Named { name, ty, .. } => {
                         let arg_name = arena[*name].name.clone();
-                        let arg_type_info = {
-                            let ty_id = match &arg.kind {
-                                ArgKind::Named { ty, .. } => *ty,
-                                _ => unreachable!(),
-                            };
-                            TypeInfo::from_type_id(arena, ty_id)
-                        };
-                        let param_local = self
-                            .locals_map
-                            .get(&arg_name)
-                            .expect("Compound parameter must be in locals_map")
-                            .0;
+                        let arg_type_info = TypeInfo::from_type_id(arena, *ty);
                         match &arg_type_info.kind {
                             TypeInfoKind::Array(elem_type, _length) => {
-                                let slot = layout
-                                    .array_offsets
-                                    .get(&arg_name)
-                                    .expect("Array parameter must have a frame slot");
-                                emit_array_param_copy(
-                                    func,
-                                    layout,
-                                    slot,
-                                    param_local,
-                                    &elem_type.kind,
-                                    region,
-                                );
+                                if let Some(slot) = layout.array_offsets.get(&arg_name) {
+                                    let param_local = self
+                                        .locals_map
+                                        .get(&arg_name)
+                                        .expect("Compound parameter must be in locals_map")
+                                        .0;
+                                    emit_array_param_copy(
+                                        func,
+                                        layout,
+                                        slot,
+                                        param_local,
+                                        &elem_type.kind,
+                                        region,
+                                    );
+                                }
                             }
-                            // A struct parameter (bare `Custom` name or a
-                            // `::`-qualified path) has a frame slot allocated in
-                            // `compute_frame_layout`; copy the caller's data into
-                            // it so the callee mutates its own copy (value
-                            // semantics). The slot is keyed by the parameter name,
-                            // so both forms share the same copy once the layout
-                            // pass gave the qualified form a slot.
+                            // A struct parameter names its type as a bare `Custom`
+                            // name or a `::`-qualified path; the slot is keyed by
+                            // the parameter name, so both forms share the copy.
                             TypeInfoKind::Custom(_)
                             | TypeInfoKind::Qualified(_)
                             | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                    let param_local = self
+                                        .locals_map
+                                        .get(&arg_name)
+                                        .expect("Compound parameter must be in locals_map")
+                                        .0;
                                     emit_struct_param_copy(func, layout, slot, param_local, region);
                                 }
                             }
                             _ => {}
                         }
                     }
-                    // The receiver is copied exactly when `compute_frame_layout`
-                    // gave it a slot — a `mut self`, or an immutable `self` that
-                    // escapes to an `external fn`. Keying the copy on the slot
-                    // rather than on a second, parallel condition keeps the two
-                    // in lockstep: an allocated slot that is never copied into
-                    // would leave `self` aliasing the caller's memory.
                     ArgKind::SelfRef { .. } => {
                         if let Some(slot) = layout.struct_offsets.get("self") {
                             cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
@@ -1429,7 +1486,7 @@ impl Compiler {
                             emit_struct_param_copy(func, layout, slot, self_local, region);
                         }
                     }
-                    _ => {}
+                    ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
                 }
             }
         }
@@ -1510,6 +1567,7 @@ impl Compiler {
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
+        self.compound_params.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -1636,6 +1694,118 @@ impl Compiler {
         });
     }
 
+    /// Reports whether any expression reachable from `block_id`'s statements
+    /// satisfies `pred`.
+    ///
+    /// This is the shared shape of every body-level scan that asks a yes/no
+    /// question about the *expressions* a body contains: block descent through
+    /// [`Self::walk_statements`], then each statement's own expression positions
+    /// handed to [`Self::expr_any`]. One walk means the facts codegen derives
+    /// that way — does the body index dynamically, does it divide narrow signed
+    /// values, does a parameter reach an `external fn` — are read off exactly the
+    /// same set of nodes, so no such scan can miss a shape its siblings see.
+    /// Whatever extra context a scan needs is captured by `pred`'s closure.
+    ///
+    /// Two body-level scans deliberately sit outside it, because neither is a
+    /// question about an expression. [`Self::param_is_written`] matches on
+    /// *statement* shape (`Stmt::Assign`), and [`Self::scan_self_ref_scratch`]
+    /// matches on statement shape and then accumulates a size rather than
+    /// answering `bool`. Both still descend through the same block classifier,
+    /// [`Self::nested_blocks`] — the first via [`Self::walk_statements`], the
+    /// second driving it directly — so a new block-bearing statement kind is
+    /// still taught to the compiler once.
+    ///
+    /// A `const` binding's initializer is one of those expression positions: it
+    /// lowers through the same `lower_named_binding_init` → `lower_expression`
+    /// path as a `let`, so an expression there is as real as one anywhere else.
+    ///
+    /// The walk short-circuits: once `pred` answers `true` no further node is
+    /// visited.
+    fn body_has_expr(
+        arena: &AstArena,
+        block_id: BlockId,
+        pred: &mut impl FnMut(&AstArena, ExprId) -> bool,
+    ) -> bool {
+        let mut found = false;
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            if found {
+                return;
+            }
+            found = match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_any(arena, *e, pred)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_any(arena, v, pred)),
+                Stmt::If { condition, .. } => Self::expr_any(arena, *condition, pred),
+                Stmt::Loop { condition, .. } => condition
+                    .as_ref()
+                    .is_some_and(|&c| Self::expr_any(arena, c, pred)),
+                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
+                    Def::Constant { value, .. } => Self::expr_any(arena, *value, pred),
+                    _ => false,
+                },
+                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+            };
+        });
+        found
+    }
+
+    /// Reports whether `expr_id` itself or any of its sub-expressions satisfies
+    /// `pred`, in pre-order and short-circuiting on the first `true`.
+    ///
+    /// This is the compiler's single enumeration of expression children: every
+    /// variant carrying sub-expressions names them here, and every leaf is listed
+    /// explicitly rather than swept by a wildcard, so a new `Expr` variant has to
+    /// be classified instead of silently becoming a node no scan can reach. The
+    /// predicates in [`Self::body_has_expr`]'s family and the alias test in
+    /// [`Self::expr_reads_var`] all run through this one match; nothing else in
+    /// codegen recurses over expression children.
+    fn expr_any(
+        arena: &AstArena,
+        expr_id: ExprId,
+        pred: &mut impl FnMut(&AstArena, ExprId) -> bool,
+    ) -> bool {
+        if pred(arena, expr_id) {
+            return true;
+        }
+        match &arena[expr_id].kind {
+            Expr::Binary { left, right, .. } => {
+                Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_any(arena, *array, pred) || Self::expr_any(arena, *index, pred)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => Self::expr_any(arena, *expr, pred),
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_any(arena, *function, pred)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_any(arena, *arg, pred))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_any(arena, *value, pred)),
+            Expr::ArrayLiteral { elements } => {
+                elements.iter().any(|&e| Self::expr_any(arena, e, pred))
+            }
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
+    }
+
     /// Returns `true` if the function body contains at least one *dynamic* array
     /// index — an `Expr::ArrayIndexAccess` whose index is not a numeric literal.
     ///
@@ -1646,82 +1816,14 @@ impl Compiler {
     /// constants reserve no scratch and stay byte-identical to an unchecked
     /// build, while a dynamic index — even through an immutable-`self` method
     /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
-    ///
-    /// Block descent is delegated to [`Self::walk_statements`] so that this pass
-    /// visits exactly the same statements as local discovery and frame-slot
-    /// collection; the per-statement closure only inspects each statement's own
-    /// sub-expressions (including `if`/`loop` conditions), descending into them
-    /// so nested forms such as `m[i][j]`, `arr[idx].x`, and indices inside calls
-    /// are not missed. The closure short-circuits once a dynamic index is found.
     fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
-        let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_has_dynamic_array_index(arena, *e)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_has_dynamic_array_index(arena, *left)
-                        || Self::expr_has_dynamic_array_index(arena, *right)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_has_dynamic_array_index(arena, v)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_has_dynamic_array_index(arena, *condition)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c)),
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
-            };
-        });
-        found
-    }
-
-    /// Recursively reports whether `expr_id` (or any sub-expression) is an
-    /// `ArrayIndexAccess` with a non-literal index. Supporting helper for
-    /// [`Self::body_has_dynamic_array_index`].
-    fn expr_has_dynamic_array_index(arena: &AstArena, expr_id: ExprId) -> bool {
-        match &arena[expr_id].kind {
-            Expr::ArrayIndexAccess { array, index } => {
-                !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
-                    || Self::expr_has_dynamic_array_index(arena, *array)
-                    || Self::expr_has_dynamic_array_index(arena, *index)
-            }
-            Expr::Binary { left, right, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *left)
-                    || Self::expr_has_dynamic_array_index(arena, *right)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *expr)
-            }
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_has_dynamic_array_index(arena, *function)
-                    || args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_has_dynamic_array_index(arena, *arg))
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_has_dynamic_array_index(arena, *value)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_has_dynamic_array_index(arena, e)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            matches!(
+                &arena[expr_id].kind,
+                Expr::ArrayIndexAccess { index, .. }
+                    if !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
+            )
+        })
     }
 
     /// Returns `true` if the function body contains at least one narrow (i8/i16)
@@ -1730,244 +1832,133 @@ impl Compiler {
     /// iff this returns `true`. Functions with no such division reserve no
     /// scratch and stay byte-identical to an unguarded build.
     ///
-    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
-    /// the same statements as local discovery and the bounds-index scan. Unlike
-    /// that scan this also descends into a `const` binding's initializer: a
-    /// function-scoped `const Q: i8 = a / b;` lowers through the same
-    /// `lower_named_binding_init` → `lower_expression` path as a `let`, so a
-    /// narrow signed division there emits the guard and must reserve the scratch;
-    /// missing it would panic the guard's `.expect` at emission.
-    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
-        let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *e)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *left)
-                        || Self::expr_has_narrow_signed_div(arena, ctx, *right)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_has_narrow_signed_div(arena, ctx, v)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_has_narrow_signed_div(arena, ctx, *condition)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_has_narrow_signed_div(arena, ctx, c)),
-                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
-                    Def::Constant { value, .. } => {
-                        Self::expr_has_narrow_signed_div(arena, ctx, *value)
-                    }
-                    _ => false,
-                },
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
-            };
-        });
-        found
-    }
-
-    /// Recursively reports whether `expr_id` (or any sub-expression) is a narrow
-    /// (i8/i16) signed division. Supporting helper for
-    /// [`Self::body_has_narrow_signed_div`]; mirrors the expression-variant
-    /// coverage of [`Self::expr_has_dynamic_array_index`] so the reservation and
-    /// emission conditions descend through the same nodes.
-    ///
     /// A node is a narrow signed division when it is `Expr::Binary { op: Div, .. }`
     /// whose left operand's type info is `Number(I8 | I16)` — the exact predicate
     /// [`Self::emit_narrow_div_overflow_guard`] gates on (unsigned narrow and
     /// full-width divisions no-op there). Missing type info yields `false`.
-    fn expr_has_narrow_signed_div(arena: &AstArena, ctx: &TypedContext, expr_id: ExprId) -> bool {
-        match &arena[expr_id].kind {
-            Expr::Binary { op, left, right } => {
-                (matches!(op, OperatorKind::Div)
-                    && matches!(
-                        ctx.get_node_typeinfo(NodeId::Expr(*left))
-                            .as_ref()
-                            .map(|ti| &ti.kind),
-                        Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
-                    ))
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *left)
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *right)
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *array)
-                    || Self::expr_has_narrow_signed_div(arena, ctx, *index)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *expr)
-            }
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_has_narrow_signed_div(arena, ctx, *function)
-                    || args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_has_narrow_signed_div(arena, ctx, *arg))
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_has_narrow_signed_div(arena, ctx, *value)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_has_narrow_signed_div(arena, ctx, e)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+    fn body_has_narrow_signed_div(arena: &AstArena, block_id: BlockId, ctx: &TypedContext) -> bool {
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            let Expr::Binary {
+                op: OperatorKind::Div,
+                left,
+                ..
+            } = &arena[expr_id].kind
+            else {
+                return false;
+            };
+            matches!(
+                ctx.get_node_typeinfo(NodeId::Expr(*left))
+                    .as_ref()
+                    .map(|ti| &ti.kind),
+                Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
+            )
+        })
     }
 
-    /// Returns `true` if the function body forwards `self` — or a projection of
-    /// it — to an `external fn`.
+    /// Returns `true` if the function body forwards the parameter `param_name` —
+    /// or a projection of it — to an `external fn`.
     ///
     /// A compound `external fn` parameter is lowered to a raw `i32` pointer and
     /// the call site passes the argument's address through unchanged, while a
     /// linked external shares the program's single linear memory. A foreign body
-    /// can therefore store through that pointer. An immutable `self` receiver is
-    /// otherwise passed by reference, so those stores would land in the
-    /// *caller's* memory and mutate a value the caller owns; when this returns
-    /// `true`, [`Self::compute_frame_layout`] gives the receiver its own frame
-    /// slot and the entry copy redirects the foreign stores into it.
+    /// can therefore store through that pointer. A parameter that is otherwise
+    /// passed by reference would have those stores land in the *caller's* memory,
+    /// mutating a value the caller owns; when this returns `true`,
+    /// [`Self::compute_frame_layout`] gives the parameter its own frame slot and
+    /// the entry copy redirects the foreign stores into it.
     ///
-    /// The scan is deliberately type-blind: *any* argument whose root is `self`
-    /// triggers, whether or not that argument is compound. Refining it by type
-    /// would require a second predicate that must agree with `lower_expression`'s
-    /// treatment of the argument, and a disagreement there fails in the unsafe
-    /// direction — a missing copy. A false positive only costs one extra copy.
+    /// The scan is deliberately type-blind: *any* argument whose root is
+    /// `param_name` triggers, whether or not that argument is compound. Refining
+    /// it by type would require a second predicate that must agree with
+    /// `lower_expression`'s treatment of the argument, and a disagreement there
+    /// fails in the unsafe direction — a missing copy. A false positive only
+    /// costs one extra copy.
     ///
     /// Callee resolution mirrors emission: `extern_name_to_idx` is read only by
     /// [`Self::lower_function_call`], which is reachable only for a bare
     /// `Expr::Identifier` callee, and `register_imports` fills the map before any
-    /// body is compiled, so it is complete at layout time.
+    /// body is compiled, so it is complete at layout time. Complete in both
+    /// senses: the map is whole-program, built from every file's externs at once,
+    /// so an extern declared *and* called inside a non-entry file disqualifies
+    /// there too.
     ///
-    /// Block descent is delegated to [`Self::walk_statements`], visiting exactly
-    /// the same statements as local discovery and the other body scans. Like
-    /// [`Self::body_has_narrow_signed_div`] — and unlike
-    /// [`Self::body_has_dynamic_array_index`] — it descends into a `const`
-    /// binding's initializer, which lowers through the same path as a `let` and
-    /// so can hold a real extern call. Expression descent is full and recursive
-    /// because an extern call can sit in any expression position.
-    fn self_escapes_to_extern(
+    /// That a bare identifier is the only callee shape worth checking is not an
+    /// approximation but a consequence of the grammar: an `external fn` cannot be
+    /// `pub`, so no extern is ever nameable from another file, and the qualified
+    /// and cross-file callee shapes that preempt the bare-identifier arm can
+    /// therefore never resolve to one. Should externs ever become exportable,
+    /// this gate silently starts missing them and must be widened with the arm
+    /// that lowers them.
+    fn param_escapes_to_extern(
         arena: &AstArena,
         block_id: BlockId,
         extern_names: &FxHashMap<String, u32>,
+        param_name: &str,
     ) -> bool {
-        let mut found = false;
+        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+            let Expr::FunctionCall { function, args, .. } = &arena[expr_id].kind else {
+                return false;
+            };
+            let callee_is_extern = matches!(
+                &arena[*function].kind,
+                Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
+            );
+            callee_is_extern
+                && args
+                    .iter()
+                    .any(|(_, arg)| Self::expr_root_is(arena, *arg, param_name))
+        })
+    }
+
+    /// Returns `true` if any assignment in the function body is rooted at the
+    /// parameter `param_name`.
+    ///
+    /// `Stmt::Assign` is the language's only write statement — there is no
+    /// compound-assignment form and no `+=` family — so this is the complete set
+    /// of writes a body can perform on its own frame. It covers writes *through*
+    /// the parameter (`p.x = 9`, `arr[0] = 9`, `g.cells[1].y = 9`) as well as
+    /// whole-binding reassignment (`p = P { .. }`, `p = @`): all of them reduce
+    /// to the same root test. Together with [`Self::param_escapes_to_extern`]
+    /// this decides whether a compound parameter needs a private copy at all.
+    ///
+    /// Root extraction goes through [`Self::expr_root_is`], which additionally
+    /// peels `Expr::Parenthesized` where the type checker's own
+    /// `extract_root_variable_name` does not. That asymmetry is deliberate and
+    /// safe in one direction only: peeling more shapes makes *more* assignments
+    /// count as writes, which keeps a copy the type checker's shorter list would
+    /// have dropped. The reverse — codegen concluding "not written" where the
+    /// type checker concluded "written" — is the unsound direction and cannot
+    /// arise from peeling more.
+    fn param_is_written(arena: &AstArena, block_id: BlockId, param_name: &str) -> bool {
+        let mut written = false;
         Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
+            if written {
                 return;
             }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_escapes_self_to_extern(arena, *e, extern_names)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_escapes_self_to_extern(arena, *left, extern_names)
-                        || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_escapes_self_to_extern(arena, v, extern_names)),
-                Stmt::If { condition, .. } => {
-                    Self::expr_escapes_self_to_extern(arena, *condition, extern_names)
-                }
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_escapes_self_to_extern(arena, c, extern_names)),
-                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
-                    Def::Constant { value, .. } => {
-                        Self::expr_escapes_self_to_extern(arena, *value, extern_names)
-                    }
-                    _ => false,
-                },
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
-            };
+            if let Stmt::Assign { left, .. } = &arena[stmt_id].kind {
+                written = Self::expr_root_is(arena, *left, param_name);
+            }
         });
-        found
+        written
     }
 
-    /// Recursively reports whether `expr_id` (or any sub-expression) calls an
-    /// `external fn` with an argument rooted at `self`. Supporting helper for
-    /// [`Self::self_escapes_to_extern`]; mirrors the expression-variant coverage
-    /// of [`Self::expr_has_dynamic_array_index`] so the gate and the emission it
-    /// guards descend through the same nodes.
-    fn expr_escapes_self_to_extern(
-        arena: &AstArena,
-        expr_id: ExprId,
-        extern_names: &FxHashMap<String, u32>,
-    ) -> bool {
-        match &arena[expr_id].kind {
-            Expr::FunctionCall { function, args, .. } => {
-                let callee_is_extern = matches!(
-                    &arena[*function].kind,
-                    Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
-                );
-                (callee_is_extern
-                    && args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_root_is_self(arena, *arg)))
-                    || Self::expr_escapes_self_to_extern(arena, *function, extern_names)
-                    || args.iter().any(|(_, arg)| {
-                        Self::expr_escapes_self_to_extern(arena, *arg, extern_names)
-                    })
-            }
-            Expr::Binary { left, right, .. } => {
-                Self::expr_escapes_self_to_extern(arena, *left, extern_names)
-                    || Self::expr_escapes_self_to_extern(arena, *right, extern_names)
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_escapes_self_to_extern(arena, *array, extern_names)
-                    || Self::expr_escapes_self_to_extern(arena, *index, extern_names)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_escapes_self_to_extern(arena, *expr, extern_names)
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_escapes_self_to_extern(arena, *value, extern_names)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|&e| Self::expr_escapes_self_to_extern(arena, e, extern_names)),
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
-    }
-
-    /// Reports whether `expr_id` denotes `self` or a projection of it —
-    /// `self`, `self.f`, `self.arr[i]`, `(self)`, and any nesting of those.
+    /// Reports whether `expr_id` denotes the binding `name` or a projection of it
+    /// — `p`, `p.f`, `p.arr[i]`, `(p)`, and any nesting of those.
     ///
-    /// These are exactly the argument shapes that lower to an address inside the
-    /// receiver, so a callee writing through that address writes into `self`.
-    /// `Parenthesized` is peeled although the type checker's own root extraction
-    /// does not: in the read position of a call argument `(self)` is legal and
-    /// lowers identically to `self`. Every remaining shape is enumerated rather
-    /// than swept by a wildcard so that a new projection form must be classified
-    /// here instead of silently defaulting to "not `self`" — the direction that
-    /// would drop the copy.
-    fn expr_root_is_self(arena: &AstArena, expr_id: ExprId) -> bool {
+    /// These are exactly the shapes that lower to an address inside the binding's
+    /// region, so a callee writing through such an address — or an assignment
+    /// targeting one — writes into the binding. `Parenthesized` is peeled
+    /// although the type checker's own root extraction does not: `(p)` is legal
+    /// in a read position and lowers identically to `p`. Every remaining shape is
+    /// enumerated rather than swept by a wildcard so that a new projection form
+    /// must be classified here instead of silently defaulting to "not this
+    /// binding" — the direction that would drop a copy.
+    fn expr_root_is(arena: &AstArena, expr_id: ExprId, name: &str) -> bool {
         match &arena[expr_id].kind {
-            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
+            Expr::Identifier(ident_id) => arena[*ident_id].name == name,
             Expr::MemberAccess { expr, .. }
             | Expr::ArrayIndexAccess { array: expr, .. }
-            | Expr::Parenthesized { expr } => Self::expr_root_is_self(arena, *expr),
+            | Expr::Parenthesized { expr } => Self::expr_root_is(arena, *expr, name),
             Expr::Binary { .. }
             | Expr::PrefixUnary { .. }
             | Expr::FunctionCall { .. }
@@ -1983,41 +1974,167 @@ impl Compiler {
         }
     }
 
+    /// Reports whether a parameter of this type occupies a *non-empty* region of
+    /// linear memory.
+    ///
+    /// Two things disqualify a parameter. `Custom`/`Qualified`/`QualifiedName`
+    /// name either a struct or an enum, and only the struct case is compound: an
+    /// enum lowers to a bare `i32` tag with no memory footprint. And a struct
+    /// whose fields lay out to zero bytes owns no region at all, so there is
+    /// nothing to copy, alias, or write through.
+    ///
+    /// Both conditions are decided by the shared resolver and the shared layout
+    /// computation that [`Self::compute_frame_layout`]'s struct arm uses, and
+    /// both are pure functions of the struct definition. The zero-size test is
+    /// the one that has to be restated here rather than inherited: that arm
+    /// allocates a slot only when `total_size > 0`, so without it a field-less
+    /// struct parameter would be called compound while getting no slot —
+    /// [`Self::assert_assign_target_has_slot`] would then read its missing slot
+    /// as a failed write scan and abort a program that compiles, and
+    /// `has_memory` would be set for a parameter with nothing to load.
+    fn param_type_is_compound(
+        type_kind: &TypeInfoKind,
+        ctx: &TypedContext,
+        module_path: &[String],
+    ) -> Result<bool, CodegenError> {
+        match type_kind {
+            TypeInfoKind::Array(_, _) => Ok(true),
+            TypeInfoKind::Custom(_)
+            | TypeInfoKind::Qualified(_)
+            | TypeInfoKind::QualifiedName(_) => {
+                let Some((struct_info, _defining_path)) =
+                    memory::resolve_struct_with_defining_path(type_kind, ctx, module_path)
+                else {
+                    return Ok(false);
+                };
+                let (total_size, _field_slots) =
+                    compute_struct_field_layout(&struct_info, ctx, module_path)?;
+                Ok(total_size > 0)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Reports whether a compound parameter can be read straight through the
+    /// caller's pointer, needing neither a frame slot nor an entry copy.
+    ///
+    /// A compound parameter arrives as an address into the caller's memory.
+    /// Copying it into the callee's own frame on entry is what gives the language
+    /// its value semantics — but only a parameter something can *write* needs
+    /// that copy, and a callee's region can be written in exactly two ways: an
+    /// assignment rooted at the parameter, and the parameter reaching an
+    /// `external fn` argument, whose foreign body shares the same linear memory
+    /// and may store through the pointer it is handed. A parameter that does
+    /// neither is observationally identical whether it is copied or not, so the
+    /// copy, the slot and — when nothing else in the function needs a frame — the
+    /// whole prologue, epilogue and `__stack_pointer` mutation are dropped.
+    ///
+    /// The write test is a body scan rather than the `mut` marker. Keying on
+    /// `mut` would attach a performance cliff to the annotation whose job is to
+    /// state a guarantee: deleting `mut` markers would then make programs faster
+    /// wherever the parameter is not actually written, which is the opposite of
+    /// what the annotation is for. The scan is also strictly more powerful, since
+    /// it elides `mut` parameters that are never written.
+    ///
+    /// The scan is complete only because the language has no references: no
+    /// address-of, no pointer type, no aliasing local binding (every compound
+    /// local copies its initializer). It must be revisited before any such
+    /// feature lands.
+    fn compound_param_is_by_reference(
+        input: &FrameLayoutInput<'_>,
+        arg: &ArgData,
+    ) -> Result<bool, CodegenError> {
+        let (param_name, is_mut) = match &arg.kind {
+            ArgKind::Named { name, ty, is_mut } => {
+                let type_info = TypeInfo::from_type_id(input.arena, *ty);
+                if !Self::param_type_is_compound(&type_info.kind, input.ctx, input.module_path)? {
+                    return Ok(false);
+                }
+                (input.arena[*name].name.as_str(), *is_mut)
+            }
+            ArgKind::SelfRef { is_mut } => ("self", *is_mut),
+            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return Ok(false),
+        };
+
+        let written = Self::param_is_written(input.arena, input.block_id, param_name);
+        // The type checker rejects an assignment rooted at a non-`mut` parameter
+        // or a non-`mut` receiver (`AssignToImmutable`), so a write found on one
+        // here is not a program that should have reached codegen: this scan and
+        // the type checker's root extraction have drifted apart. It cannot catch
+        // the dangerous direction — a *missed* write is invisible to it — but it
+        // pins the half where the two must agree, which is where a
+        // root-extraction drift surfaces first.
+        debug_assert!(
+            !written || is_mut,
+            "parameter `{param_name}` is not declared `mut` yet an assignment rooted at it was \
+             found; the type checker rejects that program, so codegen's write scan and \
+             `extract_root_variable_name` disagree about assignment roots",
+        );
+        if written {
+            cov_mark::hit!(wasm_codegen_param_written_in_body);
+            return Ok(false);
+        }
+
+        // The gate costs a full body walk, so a program that registered no
+        // imports skips it outright: there is nothing for the parameter to escape
+        // to, and the common case pays nothing.
+        if !input.extern_names.is_empty()
+            && Self::param_escapes_to_extern(
+                input.arena,
+                input.block_id,
+                input.extern_names,
+                param_name,
+            )
+        {
+            cov_mark::hit!(wasm_codegen_param_escapes_to_extern);
+            if matches!(arg.kind, ArgKind::SelfRef { is_mut: false }) {
+                cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
+            }
+            return Ok(false);
+        }
+
+        cov_mark::hit!(wasm_codegen_param_by_reference);
+        Ok(true)
+    }
+
     /// Computes the stack frame layout for a function.
     ///
-    /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
-    /// a method body, so that an `ArgKind::SelfRef` needing its own copy can look up
-    /// the struct layout and allocate a frame slot for it. A `mut self` receiver
-    /// always needs one; an immutable `self` needs one exactly when it escapes to an
-    /// `external fn`, which is what `extern_names` — the registered import names — is
-    /// consulted for (see [`Self::self_escapes_to_extern`]).
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    /// Parameter slots are laid out first, from offset 0, then the body's own
+    /// compound bindings, then the self-referential staging region. A compound
+    /// parameter earns a slot exactly when it is *not* by reference — see
+    /// [`Self::compound_param_is_by_reference`], which is evaluated here and
+    /// nowhere else. Slot presence is therefore the single source of truth for
+    /// the entry copy: the copy loop emits a copy iff a slot exists, so the two
+    /// decisions cannot diverge.
+    ///
+    /// [`FrameLayoutInput::method_struct_name`] should be `Some("TypeName")` when
+    /// compiling a method body, so that an `ArgKind::SelfRef` needing its own copy
+    /// can look up the struct layout and allocate a frame slot for it.
+    ///
+    /// A function whose parameters and body bindings all turn out to need no
+    /// memory gets `Ok(None)` and is frameless: no `__frame_ptr`, no prologue, no
+    /// epilogue, and no `__stack_pointer` mutation.
+    #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
-        arena: &AstArena,
-        block_id: BlockId,
-        ctx: &TypedContext,
-        frame_ptr_local_idx: u32,
-        args: &[inference_ast::nodes::ArgData],
-        method_struct_name: Option<&str>,
-        module_path: &[String],
-        extern_names: &FxHashMap<String, u32>,
+        input: &FrameLayoutInput<'_>,
     ) -> Result<Option<FrameLayout>, CodegenError> {
+        let FrameLayoutInput {
+            arena,
+            block_id,
+            ctx,
+            args,
+            method_struct_name,
+            module_path,
+            ..
+        } = *input;
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
-        // The escape scan is a full body walk, so it runs only where its answer
-        // can change the layout: a `mut self` receiver is copied regardless and a
-        // free function has no receiver at all. A program that registered no
-        // imports has nothing for `self` to escape to, so the walk is skipped
-        // outright — the common case pays nothing.
-        let immutable_self_escapes = !extern_names.is_empty()
-            && args
-                .iter()
-                .any(|arg| matches!(arg.kind, ArgKind::SelfRef { is_mut: false }))
-            && Self::self_escapes_to_extern(arena, block_id, extern_names);
-
         for arg in args {
+            if Self::compound_param_is_by_reference(input, arg)? {
+                continue;
+            }
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
@@ -2047,8 +2164,11 @@ impl Compiler {
                                 "Frame offset overflow: total array allocation exceeds u32::MAX",
                             );
                         }
-                        // A struct parameter is passed by value, so it needs its
-                        // own frame slot to copy the caller's data into on entry.
+                        // A struct parameter reaches here only when it is *not* by
+                        // reference — it is assigned somewhere in the body, or it
+                        // reaches an `external fn` whose foreign body can store
+                        // through the address it is handed — so the callee must
+                        // work on its own copy and needs a slot to hold it.
                         // `Custom` carries a bare name and `Qualified`/`QualifiedName`
                         // a `::`-joined path; both name a struct that must be
                         // resolved relative to the defining file (a same-named
@@ -2086,14 +2206,12 @@ impl Compiler {
                         _ => {}
                     }
                 }
-                // A `self` receiver gets its own frame slot when the callee must
-                // not write through the caller's pointer: always for `mut self`,
-                // and for an immutable `self` that reaches an `external fn`,
-                // whose foreign body can store through the address it is handed.
-                ArgKind::SelfRef { is_mut } if *is_mut || immutable_self_escapes => {
-                    if !*is_mut {
-                        cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
-                    }
+                // The receiver reaches here only when it is *not* by reference —
+                // it is assigned somewhere in the body, or it reaches an
+                // `external fn` whose foreign body can store through the address
+                // it is handed. Either way the callee must not write through the
+                // caller's pointer, so it gets a slot of its own.
+                ArgKind::SelfRef { .. } => {
                     let struct_name = method_struct_name.expect(
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
@@ -2116,8 +2234,8 @@ impl Compiler {
                         }
                     }
                 }
-                // A non-escaping immutable self, or a non-self arg: no frame slot
-                _ => {}
+                // Scalar parameters and non-parameter argument forms: no frame slot
+                ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
             }
         }
 
@@ -2173,7 +2291,7 @@ impl Compiler {
             total_size,
             array_offsets,
             struct_offsets,
-            frame_ptr_local: frame_ptr_local_idx,
+            frame_ptr_local: input.frame_ptr_local_idx,
             scratch_offset,
         }))
     }
@@ -3623,6 +3741,34 @@ impl Compiler {
         self.func().instruction(&Instruction::Call(func_idx));
     }
 
+    /// Aborts if `left` assigns into a compound parameter that
+    /// [`Self::compute_frame_layout`] gave no frame slot.
+    ///
+    /// A compound parameter without a slot is one [`Self::param_is_written`]
+    /// reported as never assigned, so the callee reads it straight through the
+    /// caller's pointer. An assignment reaching it would store into the caller's
+    /// memory — exactly the value-semantics violation the entry copy exists to
+    /// prevent — and the destination gates below key on slot presence, so it
+    /// would silently take the scalar `local.set` branch instead. Failing here
+    /// turns a divergence between that scan and assignment lowering into a
+    /// compiler abort rather than a miscompile.
+    fn assert_assign_target_has_slot(&self, arena: &AstArena, left: ExprId) {
+        for name in &self.compound_params {
+            if !Self::expr_root_is(arena, left, name) {
+                continue;
+            }
+            let has_slot = self.frame_layout.as_ref().is_some_and(|layout| {
+                layout.struct_offsets.contains_key(name) || layout.array_offsets.contains_key(name)
+            });
+            assert!(
+                has_slot,
+                "assignment targets compound parameter `{name}`, which `param_is_written` \
+                 reported as never assigned, so `compute_frame_layout` gave it no frame slot \
+                 and it still points at the caller's memory",
+            );
+        }
+    }
+
     /// Lowers an assignment statement.
     fn lower_assign_statement(
         &mut self,
@@ -3631,6 +3777,7 @@ impl Compiler {
         right: ExprId,
         ctx: &TypedContext,
     ) {
+        self.assert_assign_target_has_slot(arena, left);
         match &arena[left].kind {
             Expr::Identifier(ident_id) => {
                 cov_mark::hit!(wasm_codegen_emit_assign_identifier);
@@ -5191,49 +5338,21 @@ impl Compiler {
     /// a scratch region first rather than storing field-by-field into the
     /// destination's own slot. This predicate detects that self-reference.
     ///
-    /// It is the exhaustive expression walk mirrored from
-    /// `inference_analysis::rules::method_never_accesses_self`, specialized to a
-    /// leaf identifier equal to `dest`. Because member-access and array-index
-    /// bases are themselves `Identifier` nodes, the single leaf check catches a
-    /// bare read (`p`), a field read (`p.x`), and an element read (`p.arr[i]`).
-    /// Inference has no references, pointers, or globals, so a lexical name read
-    /// is the only way an expression can alias `dest`: a call cannot return `dest`
-    /// by reference, and a call argument that reads `dest` is caught by the
-    /// `FunctionCall` recursion.
+    /// It is [`Self::expr_any`] — the compiler's one enumeration of expression
+    /// children — asked for a leaf identifier equal to `dest`. Because
+    /// member-access and array-index bases are themselves `Identifier` nodes, the
+    /// single leaf check catches a bare read (`p`), a field read (`p.x`), and an
+    /// element read (`p.arr[i]`). Inference has no references, pointers, or
+    /// globals, so a lexical name read is the only way an expression can alias
+    /// `dest`: a call cannot return `dest` by reference, and a call argument that
+    /// reads `dest` is caught by the `FunctionCall` recursion.
     fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
-        match &arena[expr_id].kind {
-            Expr::Identifier(ident_id) => arena[*ident_id].name == dest,
-            Expr::Binary { left, right, .. } => {
-                Self::expr_reads_var(arena, *left, dest)
-                    || Self::expr_reads_var(arena, *right, dest)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => Self::expr_reads_var(arena, *expr, dest),
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_reads_var(arena, *function, dest)
-                    || args
-                        .iter()
-                        .any(|(_, arg_expr)| Self::expr_reads_var(arena, *arg_expr, dest))
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_reads_var(arena, *array, dest)
-                    || Self::expr_reads_var(arena, *index, dest)
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, field_expr)| Self::expr_reads_var(arena, *field_expr, dest)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|elem| Self::expr_reads_var(arena, *elem, dest)),
-            Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+        Self::expr_any(arena, expr_id, &mut |arena, expr_id| {
+            let Expr::Identifier(ident_id) = &arena[expr_id].kind else {
+                return false;
+            };
+            arena[*ident_id].name == dest
+        })
     }
 
     /// Lowers an array literal expression.
@@ -6648,8 +6767,9 @@ mod tests {
         }
     }
 
-    /// Tests for [`Compiler::self_escapes_to_extern`], the gate that decides
-    /// whether an immutable `self` receiver needs its own frame slot.
+    /// Tests for [`Compiler::param_escapes_to_extern`], the gate that decides
+    /// whether a compound parameter — here the `self` receiver — needs its own
+    /// frame slot.
     ///
     /// The scan reads only the AST and the registered import names, so these
     /// drive it directly on parsed source rather than through code generation:
@@ -6718,7 +6838,7 @@ struct Pair {{
 
         fn escapes(body: &str) -> bool {
             let (arena, block_id) = touch_body(body);
-            Compiler::self_escapes_to_extern(&arena, block_id, &imports())
+            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), "self")
         }
 
         /// Every argument shape whose root peels to `self` hands the external an
@@ -6777,6 +6897,997 @@ struct Pair {{
             ] {
                 assert!(!escapes(body), "must not escape:\n{body}");
             }
+        }
+    }
+
+    /// Tests for the two scans behind
+    /// [`Compiler::compound_param_is_by_reference`] as they apply to *named*
+    /// parameters, and for the decision the two combine into.
+    ///
+    /// [`self_escape_scan`] drives the extern gate through a receiver. What
+    /// these add is the write scan, which has no receiver analogue, and the
+    /// composed predicate, whose answer is what decides that a frame slot exists
+    /// at all. A write shape the scan fails to recognize is a copy silently
+    /// dropped from a parameter the callee does write, so the negative cases
+    /// carry the same weight as the positive ones.
+    mod param_by_ref_scan {
+        use super::*;
+
+        const PREAMBLE: &str = "\
+external fn scramble(h: Holder);
+external fn probe(h: Holder) -> i32;
+use { scramble, probe } from lib;
+
+struct Cell {
+    x: i32;
+    y: i32;
+}
+
+struct Holder {
+    tag: i32;
+    cells: [Cell; 2];
+}
+
+fn native(h: Holder) -> i32 {
+    return h.tag;
+}
+
+fn native_scalar(v: i32) -> i32 {
+    return v;
+}
+";
+
+        /// Parses `body` as the body of
+        /// `fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32)` and
+        /// returns the arena and that body's block — the two inputs both scans
+        /// take.
+        ///
+        /// Both compound parameters are declared `mut` so that every write shape
+        /// can be exercised on the same subject; the scans read neither the
+        /// marker nor any type information.
+        fn subject_body(body: &str) -> (AstArena, BlockId) {
+            let source = format!(
+                "{PREAMBLE}
+fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
+{body}
+    return 0;
+}}
+"
+            );
+            let parsed = inference_parser::parse(&source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            let arena = parsed.arena;
+            let block_id = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "subject" => {
+                        Some(*body)
+                    }
+                    _ => None,
+                })
+                .expect("function `subject` must be present");
+            (arena, block_id)
+        }
+
+        /// The import map as `register_imports` leaves it. Only the keys matter.
+        fn imports() -> FxHashMap<String, u32> {
+            let mut map = FxHashMap::default();
+            for (idx, name) in ["scramble", "probe"].iter().enumerate() {
+                map.insert(
+                    (*name).to_string(),
+                    u32::try_from(idx).expect("test import index fits in u32"),
+                );
+            }
+            map
+        }
+
+        fn written(body: &str, param: &str) -> bool {
+            let (arena, block_id) = subject_body(body);
+            Compiler::param_is_written(&arena, block_id, param)
+        }
+
+        fn escapes(body: &str, param: &str) -> bool {
+            let (arena, block_id) = subject_body(body);
+            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), param)
+        }
+
+        /// The `left` expression of the first assignment in the subject body.
+        fn first_assign_target(arena: &AstArena, block_id: BlockId) -> ExprId {
+            arena[block_id]
+                .stmts
+                .iter()
+                .find_map(|&stmt_id| match &arena[stmt_id].kind {
+                    Stmt::Assign { left, .. } => Some(*left),
+                    _ => None,
+                })
+                .expect("the subject body must contain an assignment")
+        }
+
+        /// A compiler staged as if the write scan and the frame layout had
+        /// disagreed: `g` recorded as a compound parameter, `frame_layout` as
+        /// given.
+        fn staged_with_layout(frame_layout: Option<FrameLayout>) -> Compiler {
+            let mut compiler = Compiler::new("test");
+            compiler.compound_params.insert("g".to_string());
+            compiler.frame_layout = frame_layout;
+            compiler
+        }
+
+        /// The tripwire fires on the divergence it exists to catch: an
+        /// assignment rooted at a compound parameter that has no frame slot.
+        ///
+        /// Slot presence is the entry-copy decision *and* what assignment
+        /// lowering's destination gates key on, so a real write to a slotless
+        /// compound parameter would silently take the scalar branch and store
+        /// into the caller's memory. Excluding a field-less struct from
+        /// `compound_params` removes the one case where a missing slot is not a
+        /// divergence; it must not have removed the guard.
+        #[test]
+        #[should_panic(expected = "assignment targets compound parameter `g`")]
+        fn assignment_to_a_slotless_compound_parameter_aborts() {
+            let (arena, block_id) = subject_body("        g.tag = 1;");
+            let left = first_assign_target(&arena, block_id);
+            staged_with_layout(None).assert_assign_target_has_slot(&arena, left);
+        }
+
+        /// The same assignment passes once the parameter has its slot, so the
+        /// abort above is slot absence and not the walk finding the parameter.
+        #[test]
+        fn assignment_to_a_compound_parameter_with_a_slot_is_accepted() {
+            let (arena, block_id) = subject_body("        g.tag = 1;");
+            let left = first_assign_target(&arena, block_id);
+            let mut struct_offsets = FxHashMap::default();
+            struct_offsets.insert(
+                "g".to_string(),
+                StructSlot {
+                    offset: 0,
+                    total_size: 4,
+                    fields: Vec::new(),
+                },
+            );
+            let layout = FrameLayout {
+                total_size: 16,
+                array_offsets: FxHashMap::default(),
+                struct_offsets,
+                frame_ptr_local: 0,
+                scratch_offset: None,
+            };
+            staged_with_layout(Some(layout)).assert_assign_target_has_slot(&arena, left);
+        }
+
+        /// An assignment counts wherever it sits. The scan descends through the
+        /// shared block walk, so a bare block, either arm of an `if`, a loop
+        /// body and a non-deterministic block are all covered structurally
+        /// rather than one arm at a time.
+        ///
+        /// A scan that read only top-level statements would call a parameter
+        /// written inside `if c { .. }` unwritten, drop its copy, and let the
+        /// assignment store into the caller's memory.
+        #[test]
+        fn assignment_anywhere_in_the_body_is_a_write() {
+            for body in [
+                "        g.tag = 1;",
+                "        { g.tag = 1; }",
+                "        if n > 0 { g.tag = 1; }",
+                "        if n > 0 { n = 1; } else { g.tag = 1; }",
+                "        loop n > 0 { g.tag = 1; break; }",
+                "        forall { g.tag = 1; }",
+                "        exists { g.tag = 1; }",
+                "        if n > 0 { loop n > 0 { g.tag = 1; break; } }",
+            ] {
+                assert!(written(body, "g"), "must count as a write:\n{body}");
+            }
+        }
+
+        /// Writes *through* a parameter count, not just whole-binding
+        /// reassignment. Every projection form reduces to the same root test,
+        /// including the uzumaki form, which is an ordinary assignment
+        /// statement whose right-hand side happens to be `@`.
+        ///
+        /// A predicate that matched only `g = ..` would leave `g.tag = 9` and
+        /// `arr[0] = 9` looking read-only, which is the shape most of the
+        /// corpus's writing parameters actually have.
+        #[test]
+        fn writes_through_projections_are_writes() {
+            for (body, param) in [
+                ("        g = other;", "g"),
+                ("        g.tag = 1;", "g"),
+                ("        g.cells[1].y = 9;", "g"),
+                ("        g.cells[n].y = 9;", "g"),
+                ("        arr[0] = 9;", "arr"),
+                ("        arr[n] = 9;", "arr"),
+                ("        g = @;", "g"),
+                ("        arr[0] = @;", "arr"),
+            ] {
+                assert!(
+                    written(body, param),
+                    "`{param}` must count as written:\n{body}"
+                );
+            }
+        }
+
+        /// A parenthesized root counts too, although the type checker's own root
+        /// extraction stops at the parenthesis and rejects the program outright.
+        ///
+        /// The extra peel is deliberate and safe in one direction only: peeling
+        /// more shapes makes *more* assignments count as writes, so the worst it
+        /// costs is a copy that was not needed. Concluding "not written" where
+        /// the type checker concluded "written" is the direction that drops a
+        /// live copy, and peeling more can never produce it.
+        #[test]
+        fn parenthesized_roots_count_as_written() {
+            for (body, param) in [
+                ("        (g) = other;", "g"),
+                ("        (g).tag = 1;", "g"),
+                ("        (g.cells)[1].y = 9;", "g"),
+                ("        (arr)[0] = 9;", "arr"),
+            ] {
+                assert!(
+                    written(body, param),
+                    "`{param}` must count as written:\n{body}"
+                );
+            }
+        }
+
+        /// The scan must stay narrow: only an assignment whose *root* is the
+        /// parameter counts. A parameter read on the right-hand side, used as an
+        /// index, or copied into a local that is then written, is not written
+        /// itself — and calling it written would cost every reader its copy back.
+        #[test]
+        fn reads_and_unrelated_assignments_are_not_writes() {
+            for (body, param) in [
+                ("        return g.tag;", "g"),
+                ("        n = g.tag;", "g"),
+                ("        other.tag = g.tag;", "g"),
+                ("        arr[g.tag] = 9;", "g"),
+                ("        arr[0] = g.tag;", "g"),
+                ("        let t: Holder = g;\n        t.tag = 9;", "g"),
+                ("        g.tag = 1;", "arr"),
+                ("        g.cells[1].y = arr[0];", "arr"),
+            ] {
+                assert!(
+                    !written(body, param),
+                    "`{param}` must not count as written:\n{body}"
+                );
+            }
+        }
+
+        /// The extern gate reaches a named parameter in every position an
+        /// extern call can occupy, nested blocks included.
+        ///
+        /// A scalar projection triggers it as well. The gate is deliberately
+        /// type-blind: refining it would need a second predicate that agrees
+        /// with how the argument is actually lowered, and a disagreement there
+        /// fails by dropping a copy. A false positive costs one extra copy.
+        #[test]
+        fn extern_arguments_rooted_at_a_named_parameter_escape() {
+            for body in [
+                "        scramble(g);",
+                "        scramble((g));",
+                "        scramble(g.cells[1]);",
+                "        return probe(g.cells[1].y);",
+                "        if n > 0 { scramble(g); }",
+                "        if n > 0 { n = 1; } else { scramble(g); }",
+                "        loop n > 0 { scramble(g); break; }",
+                "        let x: i32 = 1 + probe(g);",
+                "        const Q: i32 = probe(g);",
+                "        n = probe(g);",
+                "        return native_scalar(probe(g));",
+            ] {
+                assert!(escapes(body, "g"), "`g` must escape:\n{body}");
+            }
+        }
+
+        /// Forwarding to a *native* callee does not disqualify anything, whether
+        /// the argument is compound or scalar.
+        ///
+        /// This is what keeps the common `fn length(v: Vec3) { .. dot(v, v) .. }`
+        /// shape by reference. It is sound because the chain always breaks at
+        /// the function that touches the external: a native callee's own
+        /// parameter is disqualified there if *it* forwards, so the foreign
+        /// write lands in that callee's frame. A local copy is not an alias
+        /// either — the binding copies — so laundering through one does not
+        /// reach back to the parameter.
+        #[test]
+        fn native_calls_and_unrelated_roots_do_not_escape() {
+            for (body, param) in [
+                ("        return g.tag;", "g"),
+                ("        return native(g);", "g"),
+                ("        return native_scalar(g.tag);", "g"),
+                ("        return g.tag + native(g);", "g"),
+                ("        scramble(other);", "g"),
+                ("        let t: Holder = g;\n        scramble(t);", "g"),
+                ("        scramble(g);", "arr"),
+                ("        return probe(g);", "arr"),
+            ] {
+                assert!(!escapes(body, param), "`{param}` must not escape:\n{body}");
+            }
+        }
+
+        /// Whether the subject program's `external fn` declarations are handed to
+        /// the decision as registered imports.
+        ///
+        /// The escape gate is keyed on the import map, so the same source answers
+        /// differently under the two, and which one a case means is the whole
+        /// point of that case — a bare `true`/`false` at the call site would hide
+        /// it.
+        #[derive(Clone, Copy)]
+        enum Imports {
+            Registered,
+            Unregistered,
+        }
+
+        /// Drives [`Compiler::compound_param_is_by_reference`] itself on the
+        /// parameter at `param_index` of `fn_name`.
+        fn by_reference(
+            source: &str,
+            fn_name: &str,
+            param_index: usize,
+            imports_state: Imports,
+        ) -> bool {
+            let parsed = inference_parser::parse(source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            let outcome = inference_type_checker::check_with_diagnostics(parsed.arena);
+            assert!(
+                outcome.errors.is_empty(),
+                "type errors: {:?}\nsource:\n{source}",
+                outcome
+                    .errors
+                    .iter()
+                    .map(|d| d.error.to_string())
+                    .collect::<Vec<_>>()
+            );
+            let ctx = &outcome.typed_context;
+            let arena = ctx.arena();
+            let (args, block_id) = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function {
+                        name, args, body, ..
+                    } if arena[*name].name == fn_name => Some((args.clone(), *body)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("function `{fn_name}` must be present"));
+            let extern_names = match imports_state {
+                Imports::Registered => imports(),
+                Imports::Unregistered => FxHashMap::default(),
+            };
+            let input = FrameLayoutInput {
+                arena,
+                block_id,
+                ctx,
+                frame_ptr_local_idx: 0,
+                args: &args,
+                method_struct_name: None,
+                module_path: &[],
+                extern_names: &extern_names,
+            };
+            Compiler::compound_param_is_by_reference(&input, &args[param_index])
+                .expect("the subject programs lay out")
+        }
+
+        const SHAPES: &str = "\
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+struct Nothing {
+}
+
+enum Color {
+    Red,
+    Green,
+}
+";
+
+        /// The composed decision on a compound parameter nothing writes and
+        /// nothing forwards: by reference, for both the struct and the array
+        /// arm.
+        #[test]
+        fn unwritten_compound_parameters_are_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn reader(p: Pair, v: [i32; 4]) -> i32 {{
+    return p.a + p.b + v[0];
+}}
+"
+            );
+            assert!(
+                by_reference(&source, "reader", 0, Imports::Unregistered),
+                "struct parameter"
+            );
+            assert!(
+                by_reference(&source, "reader", 1, Imports::Unregistered),
+                "array parameter"
+            );
+        }
+
+        /// A `mut` parameter that is never assigned is by reference too.
+        ///
+        /// This is the entire difference between the write scan and the `mut`
+        /// marker: everywhere else the two must agree, because an assignment
+        /// rooted at a non-`mut` parameter is already a type error. Keying the
+        /// decision on the marker instead would have made deleting `mut` a
+        /// performance change, which is the opposite of what an annotation
+        /// stating a guarantee should be worth.
+        #[test]
+        fn mut_parameters_that_are_never_written_are_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn quiet(mut p: Pair, mut v: [i32; 4]) -> i32 {{
+    return p.a + v[0];
+}}
+"
+            );
+            assert!(
+                by_reference(&source, "quiet", 0, Imports::Unregistered),
+                "struct parameter"
+            );
+            assert!(
+                by_reference(&source, "quiet", 1, Imports::Unregistered),
+                "array parameter"
+            );
+        }
+
+        /// A parameter the body assigns keeps its slot, whichever projection the
+        /// assignment goes through and wherever the assignment sits — including
+        /// inside a non-deterministic block, the arm where a scan that stopped at
+        /// deterministic statements would drop a copy the callee needs.
+        #[test]
+        fn written_parameters_are_not_by_reference() {
+            let source = format!(
+                "{SHAPES}
+fn writes_field(mut p: Pair) -> i32 {{
+    p.a = 9;
+    return p.a;
+}}
+
+fn writes_element(mut v: [i32; 4]) -> i32 {{
+    v[0] = 9;
+    return v[0];
+}}
+
+fn writes_in_a_nested_block(mut p: Pair, c: i32) -> i32 {{
+    if c > 0 {{
+        p.a = 9;
+    }}
+    return p.a;
+}}
+
+fn writes_in_a_nondet_block(mut p: Pair) -> i32 {{
+    forall {{
+        p.a = 1;
+    }}
+    return p.a;
+}}
+"
+            );
+            for fn_name in [
+                "writes_field",
+                "writes_element",
+                "writes_in_a_nested_block",
+                "writes_in_a_nondet_block",
+            ] {
+                assert!(
+                    !by_reference(&source, fn_name, 0, Imports::Unregistered),
+                    "`{fn_name}` writes its parameter and must keep its slot"
+                );
+            }
+        }
+
+        /// A parameter forwarded to a registered import keeps its slot; the same
+        /// program with no imports registered does not.
+        ///
+        /// The second half is what makes the first non-vacuous: the gate is
+        /// keyed on the import map, so a fixture whose `external fn` was never
+        /// bound would exercise the *ungated* path while looking like it
+        /// exercised the gate.
+        #[test]
+        fn parameters_forwarded_to_an_extern_are_not_by_reference() {
+            let source = "\
+external fn scramble(h: Holder);
+use { scramble } from lib;
+
+struct Holder {
+    tag: i32;
+    other: i32;
+}
+
+fn forwards(h: Holder) -> i32 {
+    scramble(h);
+    return h.tag;
+}
+";
+            assert!(
+                !by_reference(source, "forwards", 0, Imports::Registered),
+                "a parameter handed to a registered import keeps its own copy"
+            );
+            assert!(
+                by_reference(source, "forwards", 0, Imports::Unregistered),
+                "with no import registered there is nothing to escape to, and the \
+                 same body is by reference"
+            );
+        }
+
+        /// Only parameters that occupy a region of memory are candidates.
+        ///
+        /// Scalars are passed by value and have nothing to alias. An enum is the
+        /// case worth pinning: it is spelled like a struct at the parameter, and
+        /// a predicate that classified by syntax rather than by resolving the
+        /// name would treat its `i32` tag as a compound region.
+        #[test]
+        fn scalar_and_enum_parameters_are_not_candidates() {
+            let source = format!(
+                "{SHAPES}
+fn takes_scalars(n: i32, c: Color, p: Pair) -> i32 {{
+    return n + p.a;
+}}
+"
+            );
+            assert!(
+                !by_reference(&source, "takes_scalars", 0, Imports::Unregistered),
+                "i32"
+            );
+            assert!(
+                !by_reference(&source, "takes_scalars", 1, Imports::Unregistered),
+                "enum"
+            );
+            assert!(
+                by_reference(&source, "takes_scalars", 2, Imports::Unregistered),
+                "the struct beside them is still a candidate, so the two negatives \
+                 are not the predicate refusing to run"
+            );
+        }
+
+        /// A field-less struct parameter is not a candidate either, written or
+        /// not.
+        ///
+        /// It lays out to zero bytes, and the layout pass allocates a slot only
+        /// for a positive size, so calling it compound would put a parameter in
+        /// `compound_params` that can never have a slot —
+        /// `assert_assign_target_has_slot` would then read the missing slot as a
+        /// failed write scan and abort `fn take(mut e: Nothing) { e = e; }`, a
+        /// program that compiles. The wider representation hole this shape sits
+        /// in is #332; the decision here only has to keep the guard from
+        /// misattributing it.
+        #[test]
+        fn field_less_struct_parameters_are_not_candidates() {
+            let source = format!(
+                "{SHAPES}
+fn ignores(e: Nothing, p: Pair) -> i32 {{
+    return p.a;
+}}
+
+fn assigns(mut e: Nothing, p: Pair) -> i32 {{
+    e = e;
+    return p.a;
+}}
+"
+            );
+            assert!(
+                !by_reference(&source, "ignores", 0, Imports::Unregistered),
+                "a field-less struct owns no region to pass by reference"
+            );
+            assert!(
+                !by_reference(&source, "assigns", 0, Imports::Unregistered),
+                "and assigning it does not make one"
+            );
+            assert!(
+                by_reference(&source, "ignores", 1, Imports::Unregistered),
+                "the struct beside it is still a candidate, so the negatives are \
+                 not the predicate refusing to run"
+            );
+        }
+    }
+
+    /// Tests pinning that codegen's assignment-root extraction
+    /// ([`Compiler::expr_root_is`]) recognizes every shape the type checker's
+    /// own root extraction does.
+    ///
+    /// The two are separate code with different jobs — the type checker's
+    /// rejects an assignment to an immutable binding, codegen's decides whether
+    /// a compound parameter needs a private copy — and only one direction of
+    /// drift is dangerous. Codegen concluding "not rooted here" where the type
+    /// checker concluded "rooted here" drops the copy from a parameter the
+    /// callee does write. Drift the other way is already present and deliberate:
+    /// codegen additionally peels parentheses.
+    ///
+    /// Both tests are exhaustive over `Expr` through
+    /// [`one_expression_of_each_variant`], so a new variant has to be
+    /// classified in both matches or neither compiles.
+    mod assignment_root_shapes {
+        use super::*;
+        use inference_ast::nodes::{
+            ExprData, Ident, Location, OperatorKind, SimpleTypeKind, TypeData, TypeNode,
+            UnaryOperatorKind,
+        };
+        use inference_type_checker::errors::TypeCheckError;
+
+        fn expr(arena: &mut AstArena, kind: Expr) -> ExprId {
+            arena.exprs.alloc(ExprData {
+                location: Location::default(),
+                kind,
+            })
+        }
+
+        fn ident(arena: &mut AstArena, name: &str) -> IdentId {
+            arena.idents.alloc(Ident {
+                location: Location::default(),
+                name: name.to_string(),
+            })
+        }
+
+        fn identifier(arena: &mut AstArena, name: &str) -> ExprId {
+            let id = ident(arena, name);
+            expr(arena, Expr::Identifier(id))
+        }
+
+        /// One expression of every `Expr` variant, each built over the binding
+        /// `p` wherever the variant has a sub-expression at all.
+        ///
+        /// Placing `p` inside every variant is what makes the negative answers
+        /// mean something: a shape that is not a projection must report "not
+        /// this binding" even with `p` sitting directly inside it.
+        fn one_expression_of_each_variant(arena: &mut AstArena) -> Vec<ExprId> {
+            let base = identifier(arena, "p");
+            let field = ident(arena, "a");
+            let index = expr(
+                arena,
+                Expr::NumberLiteral {
+                    value: "0".to_string(),
+                },
+            );
+            let type_id = arena.types.alloc(TypeData {
+                location: Location::default(),
+                kind: TypeNode::Simple(SimpleTypeKind::I32),
+            });
+
+            let identifier_expr = identifier(arena, "p");
+            let member = expr(
+                arena,
+                Expr::MemberAccess {
+                    expr: base,
+                    name: field,
+                },
+            );
+            let element = expr(arena, Expr::ArrayIndexAccess { array: base, index });
+            let parenthesized = expr(arena, Expr::Parenthesized { expr: base });
+            let binary = expr(
+                arena,
+                Expr::Binary {
+                    left: base,
+                    right: base,
+                    op: OperatorKind::Add,
+                },
+            );
+            let unary = expr(
+                arena,
+                Expr::PrefixUnary {
+                    expr: base,
+                    op: UnaryOperatorKind::Neg,
+                },
+            );
+            let call = expr(
+                arena,
+                Expr::FunctionCall {
+                    function: base,
+                    type_params: Vec::new(),
+                    args: vec![(None, base)],
+                },
+            );
+            let type_member = expr(
+                arena,
+                Expr::TypeMemberAccess {
+                    expr: base,
+                    name: field,
+                },
+            );
+            let struct_literal = expr(
+                arena,
+                Expr::StructLiteral {
+                    name: field,
+                    fields: vec![(field, base)],
+                },
+            );
+            let array_literal = expr(
+                arena,
+                Expr::ArrayLiteral {
+                    elements: vec![base],
+                },
+            );
+            let number = expr(
+                arena,
+                Expr::NumberLiteral {
+                    value: "1".to_string(),
+                },
+            );
+            let boolean = expr(arena, Expr::BoolLiteral { value: true });
+            let string = expr(
+                arena,
+                Expr::StringLiteral {
+                    value: "p".to_string(),
+                },
+            );
+            let unit = expr(arena, Expr::UnitLiteral);
+            let uzumaki = expr(arena, Expr::Uzumaki);
+            let type_expr = expr(arena, Expr::Type(type_id));
+
+            vec![
+                identifier_expr,
+                member,
+                element,
+                parenthesized,
+                binary,
+                unary,
+                call,
+                type_member,
+                struct_literal,
+                array_literal,
+                number,
+                boolean,
+                string,
+                unit,
+                uzumaki,
+                type_expr,
+            ]
+        }
+
+        /// Whether [`Compiler::expr_root_is`] must peel this shape down to the
+        /// binding underneath it.
+        ///
+        /// Exhaustive over `Expr` on purpose: a new variant fails to compile
+        /// here as well as in `expr_root_is`, so it cannot be classified as a
+        /// projection in the emitter and forgotten in the test that guards it.
+        fn is_projection(kind: &Expr) -> bool {
+            match kind {
+                Expr::Identifier(_)
+                | Expr::MemberAccess { .. }
+                | Expr::ArrayIndexAccess { .. }
+                | Expr::Parenthesized { .. } => true,
+                Expr::Binary { .. }
+                | Expr::PrefixUnary { .. }
+                | Expr::FunctionCall { .. }
+                | Expr::TypeMemberAccess { .. }
+                | Expr::StructLiteral { .. }
+                | Expr::ArrayLiteral { .. }
+                | Expr::NumberLiteral { .. }
+                | Expr::BoolLiteral { .. }
+                | Expr::StringLiteral { .. }
+                | Expr::UnitLiteral
+                | Expr::Uzumaki
+                | Expr::Type(_) => false,
+            }
+        }
+
+        /// Every `Expr` variant is classified as a projection of its base or
+        /// not, and nesting the projection forms keeps peeling to the same root.
+        #[test]
+        fn expr_root_is_classifies_every_expression_shape() {
+            let mut arena = AstArena::default();
+            for expr_id in one_expression_of_each_variant(&mut arena) {
+                let kind = arena[expr_id].kind.clone();
+                assert_eq!(
+                    Compiler::expr_root_is(&arena, expr_id, "p"),
+                    is_projection(&kind),
+                    "unexpected root classification for {kind:?}",
+                );
+            }
+
+            // `p.cells[1].a`, `(p).a` and `(p.cells)[1]` — the nestings a real
+            // assignment target takes — and one rooted at a different binding.
+            let mut arena = AstArena::default();
+            let base = identifier(&mut arena, "p");
+            let other = identifier(&mut arena, "q");
+            let field = ident(&mut arena, "a");
+            let cells = ident(&mut arena, "cells");
+            let index = expr(
+                &mut arena,
+                Expr::NumberLiteral {
+                    value: "1".to_string(),
+                },
+            );
+            let cells_of = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: base,
+                    name: cells,
+                },
+            );
+            let element = expr(
+                &mut arena,
+                Expr::ArrayIndexAccess {
+                    array: cells_of,
+                    index,
+                },
+            );
+            let nested = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: element,
+                    name: field,
+                },
+            );
+            let parens = expr(&mut arena, Expr::Parenthesized { expr: base });
+            let field_of_parens = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: parens,
+                    name: field,
+                },
+            );
+            let parens_of_member = expr(&mut arena, Expr::Parenthesized { expr: cells_of });
+            let element_of_parens = expr(
+                &mut arena,
+                Expr::ArrayIndexAccess {
+                    array: parens_of_member,
+                    index,
+                },
+            );
+            let other_field = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: other,
+                    name: field,
+                },
+            );
+
+            for nesting in [nested, field_of_parens, element_of_parens] {
+                assert!(
+                    Compiler::expr_root_is(&arena, nesting, "p"),
+                    "nested projections must keep peeling to the same root",
+                );
+            }
+            assert!(
+                !Compiler::expr_root_is(&arena, other_field, "p"),
+                "a projection of a different binding is not this one",
+            );
+        }
+
+        /// The type checker's root extraction is read off its behaviour: with
+        /// `p` declared without `mut`, an assignment whose root it resolves to
+        /// `p` is reported as `AssignToImmutable`.
+        fn type_checker_roots_it_at_p(source: &str) -> bool {
+            let parsed = inference_parser::parse(source);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}\nsource:\n{source}",
+                parsed.errors
+            );
+            inference_type_checker::check_with_diagnostics(parsed.arena)
+                .errors
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        &diagnostic.error,
+                        TypeCheckError::AssignToImmutable { name, .. } if name == "p"
+                    )
+                })
+        }
+
+        /// Codegen's answer for the same program's assignment target.
+        fn codegen_roots_it_at_p(source: &str) -> bool {
+            let parsed = inference_parser::parse(source);
+            let arena = parsed.arena;
+            let block_id = arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "f" => Some(*body),
+                    _ => None,
+                })
+                .expect("function `f` must be present");
+            let mut left = None;
+            Compiler::walk_statements(&arena, block_id, &mut |arena, stmt_id| {
+                if let Stmt::Assign { left: target, .. } = &arena[stmt_id].kind {
+                    left = Some(*target);
+                }
+            });
+            let left = left.expect("the program must contain an assignment");
+            Compiler::expr_root_is(&arena, left, "p")
+        }
+
+        /// A source-level assignment target of this shape, or `None` when the
+        /// shape cannot stand in assignment position.
+        ///
+        /// Exhaustive over `Expr` for the same reason [`is_projection`] is: a
+        /// new variant that *can* be written as an assignment target has to be
+        /// named here, and the implication below then covers it without anyone
+        /// remembering to extend a list.
+        fn assignment_target(kind: &Expr) -> Option<&'static str> {
+            match kind {
+                Expr::Identifier(_) => Some("p"),
+                Expr::MemberAccess { .. } => Some("p.a"),
+                Expr::ArrayIndexAccess { .. } => Some("p.b[0]"),
+                Expr::Parenthesized { .. } => Some("(p).a"),
+                Expr::Binary { .. } => Some("p.a + q.a"),
+                Expr::PrefixUnary { .. } => Some("-p.a"),
+                Expr::FunctionCall { .. } => Some("helper(p)"),
+                Expr::NumberLiteral { .. } => Some("5"),
+                // A type-qualified name, a compound literal, and the remaining
+                // literals are values rather than places: the parser accepts no
+                // assignment whose left side is one of them.
+                Expr::TypeMemberAccess { .. }
+                | Expr::StructLiteral { .. }
+                | Expr::ArrayLiteral { .. }
+                | Expr::BoolLiteral { .. }
+                | Expr::StringLiteral { .. }
+                | Expr::UnitLiteral
+                | Expr::Uzumaki
+                | Expr::Type(_) => None,
+            }
+        }
+
+        /// Every shape the type checker treats as an assignment root is one
+        /// codegen treats as a root too.
+        ///
+        /// The implication is asserted rather than set equality, because the two
+        /// lists are allowed to differ in exactly one direction. The extra
+        /// shapes codegen peels are listed explicitly so that *losing* one is a
+        /// failure as well, and the non-vacuity check keeps a matrix in which
+        /// the type checker suddenly rooted nothing from passing silently.
+        #[test]
+        fn type_checker_assignment_roots_are_also_codegen_roots() {
+            let mut arena = AstArena::default();
+            let mut targets: Vec<&'static str> = one_expression_of_each_variant(&mut arena)
+                .into_iter()
+                .filter_map(|expr_id| assignment_target(&arena[expr_id].kind))
+                .collect();
+            // Nestings and a parenthesized root that the per-variant list, one
+            // shape per variant, cannot carry.
+            targets.extend(["p.b[1]", "(p)", "(p.a)", "(p.b)[0]", "q.a"]);
+
+            let mut rooted_by_type_checker = 0usize;
+            let mut extra_codegen_roots = Vec::new();
+            for target in targets {
+                let source = format!(
+                    "struct S {{ a: i32; b: [i32; 2]; }}
+fn helper(z: S) -> i32 {{ return z.a; }}
+fn f(p: S, q: S) -> i32 {{
+    {target} = 9;
+    return 0;
+}}
+"
+                );
+                let type_checker = type_checker_roots_it_at_p(&source);
+                let codegen = codegen_roots_it_at_p(&source);
+                assert!(
+                    !type_checker || codegen,
+                    "`{target} = 9` is an assignment to `p` for the type checker but \
+                     not for codegen; codegen would call `p` unwritten and drop the \
+                     copy that keeps the caller's memory intact",
+                );
+                if type_checker {
+                    rooted_by_type_checker += 1;
+                } else if codegen {
+                    extra_codegen_roots.push(target);
+                }
+            }
+
+            assert!(
+                rooted_by_type_checker >= 4,
+                "the matrix must contain assignments the type checker does root at \
+                 `p`, or the implication above holds vacuously; only \
+                 {rooted_by_type_checker} did",
+            );
+            extra_codegen_roots.sort_unstable();
+            assert_eq!(
+                extra_codegen_roots,
+                ["(p)", "(p).a", "(p.a)", "(p.b)[0]"],
+                "codegen peels parentheses and the type checker does not; that is the \
+                 safe direction, but which shapes it covers is pinned so losing one \
+                 is a failure rather than a silent narrowing",
+            );
         }
     }
 }

@@ -2240,10 +2240,10 @@ mod base_codegen_tests {
 
     #[test]
     fn array_params_test() {
-        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 1);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 9);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 5);
         let test_name = "array_params";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -3800,11 +3800,11 @@ mod base_codegen_tests {
 
     #[test]
     fn struct_params_test() {
-        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 1);
         cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
         cov_mark::check_count!(wasm_codegen_emit_member_access_read, 9);
         cov_mark::check_count!(wasm_codegen_emit_member_access_write, 1);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 5);
         let test_name = "struct_params";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
