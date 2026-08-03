@@ -705,6 +705,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Bump the test suite's `wasmtime` execution-harness dependency from 43.0.0 to 47.0.3, picking up the fix for [RUSTSEC-2026-0222](https://rustsec.org/advisories/RUSTSEC-2026-0222.html); wasmtime only executes compiled modules in tests, so no compiler output changes ([#335])
 - Fix three golden-regeneration helpers that were stale against A042: `regenerate_const_in_forall_wasm`, `regenerate_struct_array_field_nondet_wasm`, and `regenerate_multidim_array_uzumaki_wasm` ran the analysis pass (`wasm_codegen`) while the golden tests they serve compile with `wasm_codegen_no_analysis`, so once A042 started rejecting non-det constructs outside `spec` the helpers crashed and those goldens could not be regenerated. Each helper now mirrors its test's pipeline. Eight sibling helpers with the same staleness (`if_nondet`, five `binops_*`, two `loops` non-det fixtures) are untouched — their goldens did not change here — and remain follow-up debt
 - Add `tests/src/robustness/deep_syntax.rs`, a generated-source module covering deep and
   deeply chained input across seven shapes — flat operator chain, right-nested parentheses,
@@ -1295,3 +1296,4 @@ Initial tagged release.
 [#322]: https://github.com/Inferara/inference/issues/322
 [#329]: https://github.com/Inferara/inference/issues/329
 [#333]: https://github.com/Inferara/inference/issues/333
+[#335]: https://github.com/Inferara/inference/pull/335

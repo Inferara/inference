@@ -3795,8 +3795,14 @@ impl TypeChecker {
             // import (`use lib::arith::{add};`); `definition_scope_id` is the
             // callee's defining file either way, so codegen file-qualifies the
             // WASM name correctly even when it differs from the calling file.
-            // Externs carry no local body, so leave them to bare-name import
-            // resolution in codegen.
+            // Externs carry no local body, so an extern call resolves by bare
+            // name against codegen's import map. That bare-identifier shape is
+            // also what `Compiler::param_escapes_to_extern` keys on when it
+            // decides whether a compound parameter must keep its private entry
+            // copy because the callee may write through the pointer. Leaving
+            // externs unrecorded keeps "an extern call carries no target" a
+            // contract codegen can rely on, rather than a value it would have
+            // to know to ignore.
             if !s.is_extern() {
                 let module_path = self
                     .symbol_table
