@@ -41,6 +41,10 @@ const INFS_METADATA_SCHEMA_VERSION: u32 = 1;
 /// Mirror of `resolver::verbose` — kept local so `paths.rs` does not depend on
 /// resolver internals. Behavior is identical on purpose: both surfaces treat
 /// `INFS_VERBOSE=1`/`INFS_VERBOSE=yes` as enabled, and empty/`"0"` as disabled.
+///
+/// Tests never write this variable — a write races every concurrent read of the
+/// environment in the process — and take
+/// [`ToolchainPaths::read_infs_metadata_with_verbosity`] instead.
 fn infs_verbose() -> bool {
     std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0")
 }
@@ -409,10 +413,17 @@ impl ToolchainPaths {
     /// on a best-effort basis.
     #[must_use = "returns metadata without side effects (besides optional verbose logging)"]
     pub fn read_infs_metadata(&self) -> Option<InfsMetadata> {
+        self.read_infs_metadata_with_verbosity(infs_verbose())
+    }
+
+    /// The body of [`Self::read_infs_metadata`], with the `INFS_VERBOSE` read
+    /// lifted into `verbose` so tests drive the schema-drift warning without
+    /// writing to the process environment.
+    fn read_infs_metadata_with_verbosity(&self, verbose: bool) -> Option<InfsMetadata> {
         let path = self.infs_metadata_path();
         let content = std::fs::read_to_string(&path).ok()?;
         let metadata: InfsMetadata = serde_json::from_str(&content).ok()?;
-        if metadata.schema_version != INFS_METADATA_SCHEMA_VERSION && infs_verbose() {
+        if metadata.schema_version != INFS_METADATA_SCHEMA_VERSION && verbose {
             eprintln!(
                 "infs: infs.json has schema_version {}, expected {}; \
                  running with best-effort compatibility",
@@ -758,7 +769,6 @@ fn create_link(source: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     /// Creates a `ToolchainPaths` rooted at a freshly created, unique temporary
     /// directory.
@@ -948,13 +958,7 @@ mod tests {
         assert_eq!(metadata.schema_version, INFS_METADATA_SCHEMA_VERSION);
     }
 
-    /// Serialized because the stored `schema_version` deliberately differs from
-    /// the compiled-in one, which drives `read_infs_metadata` into the branch
-    /// that reads `INFS_VERBOSE`. Reading an environment variable while another
-    /// test mutates it is undefined behavior, so this test must not overlap the
-    /// `INFS_VERBOSE` mutators below.
     #[test]
-    #[serial_test::serial]
     fn ensure_infs_metadata_does_not_overwrite_existing() {
         let (_temp, paths) = temp_paths();
 
@@ -1194,14 +1198,12 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn read_infs_metadata_warns_on_schema_version_mismatch() {
-        // The warning is emitted to stderr as a side-effect under INFS_VERBOSE.
-        // Capturing stderr in-process requires a test-only dependency that
-        // isn't wired in (e.g. `gag`). Pragmatic fallback per the L7 plan:
-        // assert the Ok path — metadata still returned — and leave stderr
-        // inspection to manual verification. The mismatch branch executes
-        // under this test, so any panic/unwrap inside it would surface.
+        // The warning is emitted to stderr as a side-effect. Capturing stderr
+        // in-process requires a test-only dependency that isn't wired in (e.g.
+        // `gag`), so this asserts the Ok path — metadata still returned — and
+        // leaves stderr inspection to manual verification. The mismatch branch
+        // executes here, so any panic/unwrap inside it would surface.
         let (_temp, paths) = temp_paths();
 
         let bogus = InfsMetadata {
@@ -1212,43 +1214,22 @@ mod tests {
         };
         paths.write_infs_metadata(&bogus).unwrap();
 
-        // SAFETY: serialized test; restored in the cleanup block.
-        unsafe {
-            env::set_var("INFS_VERBOSE", "1");
-        }
-
-        let result = paths.read_infs_metadata();
-
-        // SAFETY: restore regardless of assertion outcome.
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-
-        let meta = result.expect("metadata should still be returned on mismatch");
+        let meta = paths
+            .read_infs_metadata_with_verbosity(true)
+            .expect("metadata should still be returned on mismatch");
         assert_eq!(meta.schema_version, 999);
         assert_eq!(meta.version, "0.0.1-test");
     }
 
     #[test]
-    #[serial_test::serial]
     fn read_infs_metadata_no_warning_when_version_matches() {
         let (_temp, paths) = temp_paths();
 
         paths.ensure_infs_metadata().unwrap();
 
-        // SAFETY: serialized test; restored below.
-        unsafe {
-            env::set_var("INFS_VERBOSE", "1");
-        }
-
-        let result = paths.read_infs_metadata();
-
-        // SAFETY: restore regardless of outcome.
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-
-        let meta = result.expect("metadata should be returned for a fresh install");
+        let meta = paths
+            .read_infs_metadata_with_verbosity(true)
+            .expect("metadata should be returned for a fresh install");
         assert_eq!(meta.schema_version, INFS_METADATA_SCHEMA_VERSION);
     }
 
