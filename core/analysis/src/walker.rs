@@ -223,12 +223,14 @@ fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
 ///
 /// All four type carriers are resolved, because a rule reading raw signature
 /// annotations meets each of them: a resolved `Struct` carries its canonical,
-/// file-qualified key and is looked up by that key first, so a same-named struct
-/// in another file is not picked up by its bare name; `Custom` is an unresolved
-/// (or alias) name whose only handle is the bare name, resolved against the
-/// referencing file; and a `::`-qualified annotation carries an unresolved path
-/// resolved against that same file. Enums, scalars, and names that resolve to
-/// nothing yield `None`.
+/// file-qualified key and is looked up by that key alone — the key a resolved
+/// carrier holds is by construction one the struct is registered under, so key
+/// lookup is complete, and falling back to the bare name could only add a path
+/// to a same-named struct in *another* file, which is exactly what the key
+/// exists to distinguish; `Custom` is an unresolved (or alias) name whose only
+/// handle is the bare name, resolved against the referencing file; and a
+/// `::`-qualified annotation carries an unresolved path resolved against that
+/// same file. Enums, scalars, and names that resolve to nothing yield `None`.
 ///
 /// The returned name is the struct's bare name, which is how the source spells
 /// it — never the canonical key, which is file-qualified and would read as noise
@@ -239,13 +241,14 @@ pub(crate) fn fieldless_struct_name(
     module_path: &[String],
 ) -> Option<String> {
     let info = match kind {
-        TypeInfoKind::Struct(bare, key) => ctx
-            .lookup_struct(key)
-            .or_else(|| ctx.lookup_struct_in(bare, module_path)),
+        TypeInfoKind::Struct(_, key) => ctx.lookup_struct(key),
         TypeInfoKind::Custom(name) => ctx.lookup_struct_in(name, module_path),
         TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => ctx
             .resolve_struct_by_qualified_path(
-                &path.split("::").map(ToString::to_string).collect::<Vec<_>>(),
+                &path
+                    .split("::")
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
                 module_path,
             )
             .map(|(info, _key)| info),
@@ -647,7 +650,10 @@ mod tests {
 
     #[test]
     fn fieldless_struct_name_returns_none_for_scalars_bool_and_enum() {
-        let ctx = ctx_with_types(&[("E", &[])], &[("Color", &["Red", "Green"]), ("Never", &[])]);
+        let ctx = ctx_with_types(
+            &[("E", &[])],
+            &[("Color", &["Red", "Green"]), ("Never", &[])],
+        );
         for number_type in [
             NumberType::I8,
             NumberType::U8,

@@ -459,6 +459,22 @@ mod analysis_rules_tests {
         );
     }
 
+    /// A bare-type parameter (`fn g(E)`) is the third form a parameter can take
+    /// alongside `e: E` and `_: E`: it names no binding but still declares a
+    /// type, so it is checked the same way.
+    #[test]
+    fn a045_bare_type_parameter_typed_fieldless_rejected() {
+        let source = r#"
+            struct E { }
+            fn g(E) -> i32 { return 0; }
+            pub fn main() -> i32 { return 0; }
+        "#;
+        assert!(
+            a045_positions(source).contains(&"the type of a parameter"),
+            "a bare-type parameter must fire A045"
+        );
+    }
+
     #[test]
     fn a045_array_of_fieldless_parameter_rejected() {
         let source = "struct E { } pub fn f(a: [E; 3]) -> i32 { return 0; }";
@@ -824,6 +840,22 @@ mod analysis_rules_tests {
         assert!(
             a045_positions(source).contains(&"the type of a parameter"),
             "an `external fn` parameter must fire A045"
+        );
+        assert!(!compiles(source), "the declaration must no longer compile");
+    }
+
+    /// The bare-type parameter form is how an `external fn` usually spells its
+    /// signature, since an imported function's parameters need no local names.
+    #[test]
+    fn a045_external_fn_bare_type_parameter_rejected() {
+        let source = r#"
+            struct E { }
+            external fn ext(E) -> i32;
+            pub fn f() -> i32 { return 0; }
+        "#;
+        assert!(
+            a045_positions(source).contains(&"the type of a parameter"),
+            "an `external fn` bare-type parameter must fire A045"
         );
         assert!(!compiles(source), "the declaration must no longer compile");
     }
