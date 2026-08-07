@@ -317,14 +317,14 @@ mod tests {
     #[serial_test::serial]
     fn error_message_contains_installation_instructions() {
         let original_path = env::var("PATH").unwrap_or_default();
+        // An empty managed root, so no toolchain can resolve from it.
+        let inference_home = assert_fs::TempDir::new().unwrap();
 
         // SAFETY: This test runs in isolation and we restore the env vars at the end.
         unsafe {
             env::set_var("PATH", "");
             env::remove_var(INFC_PATH_ENV);
-
-            let temp_dir = env::temp_dir().join("infs_test_resolver");
-            env::set_var("INFERENCE_HOME", &temp_dir);
+            env::set_var("INFERENCE_HOME", inference_home.path());
         }
 
         // Also suppress the workspace-sibling priority so the error path fires

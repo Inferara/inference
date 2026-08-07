@@ -242,8 +242,8 @@ mod tests {
 
     #[test]
     fn detect_conflicts_returns_empty_for_nonexistent_binaries() {
-        let temp_dir = env::temp_dir().join("infs_conflict_test_empty");
-        let conflicts = detect_path_conflicts(&temp_dir);
+        let temp_dir = assert_fs::TempDir::new().unwrap();
+        let conflicts = detect_path_conflicts(temp_dir.path());
         assert!(conflicts.is_empty());
     }
 

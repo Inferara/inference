@@ -760,79 +760,88 @@ mod tests {
     use super::*;
     use std::env;
 
+    /// Creates a `ToolchainPaths` rooted at a freshly created, unique temporary
+    /// directory.
+    ///
+    /// The returned `TempDir` owns that directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. Every call yields a
+    /// distinct path, so neither parallel test threads nor concurrent test
+    /// processes can observe each other's files.
+    fn temp_paths() -> (assert_fs::TempDir, ToolchainPaths) {
+        let temp = assert_fs::TempDir::new().expect("Should create temp dir");
+        let paths = ToolchainPaths::with_root(temp.path().to_path_buf());
+        (temp, paths)
+    }
+
     #[test]
     fn paths_with_infs_home_env() {
         // Use with_root directly to avoid race conditions with env vars
-        let temp_dir = env::temp_dir().join("infs_test_home");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
+        let root = temp.path();
 
-        assert_eq!(paths.root, temp_dir);
-        assert_eq!(paths.toolchains, temp_dir.join("toolchains"));
-        assert_eq!(paths.bin, temp_dir.join("bin"));
-        assert_eq!(paths.downloads, temp_dir.join("downloads"));
+        assert_eq!(paths.root, root);
+        assert_eq!(paths.toolchains, root.join("toolchains"));
+        assert_eq!(paths.bin, root.join("bin"));
+        assert_eq!(paths.downloads, root.join("downloads"));
     }
 
     #[test]
     fn toolchain_dir_constructs_correct_path() {
-        let temp_dir = env::temp_dir().join("infs_test_toolchain_dir");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
         assert_eq!(
             paths.toolchain_dir("0.1.0"),
-            temp_dir.join("toolchains").join("0.1.0")
+            temp.path().join("toolchains").join("0.1.0")
         );
     }
 
     #[test]
     fn default_file_path_is_correct() {
-        let temp_dir = env::temp_dir().join("infs_test_default_file");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
-        assert_eq!(paths.default_file(), temp_dir.join("default"));
+        assert_eq!(paths.default_file(), temp.path().join("default"));
     }
 
     #[test]
     fn tools_dir_constructs_correct_path() {
-        let temp_dir = env::temp_dir().join("infs_test_tools_dir");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
-        assert_eq!(paths.tools_dir(), temp_dir.join("tools"));
+        assert_eq!(paths.tools_dir(), temp.path().join("tools"));
     }
 
     #[test]
     fn binaryen_dir_constructs_correct_path() {
-        let temp_dir = env::temp_dir().join("infs_test_binaryen_dir");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
         assert_eq!(
             paths.binaryen_dir("version_130"),
-            temp_dir.join("tools").join("binaryen").join("version_130")
+            temp.path()
+                .join("tools")
+                .join("binaryen")
+                .join("version_130")
         );
     }
 
     #[test]
     fn download_path_constructs_correctly() {
-        let temp_dir = env::temp_dir().join("infs_test_download");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
         assert_eq!(
             paths.download_path("toolchain.zip"),
-            temp_dir.join("downloads").join("toolchain.zip")
+            temp.path().join("downloads").join("toolchain.zip")
         );
     }
 
     #[test]
     fn is_version_installed_returns_false_for_nonexistent() {
-        let temp_dir = env::temp_dir().join("infs_test_installed");
-        let paths = ToolchainPaths::with_root(temp_dir);
+        let (_temp, paths) = temp_paths();
 
         assert!(!paths.is_version_installed("0.1.0"));
     }
 
     #[test]
     fn list_installed_versions_returns_empty_when_no_toolchains() {
-        let temp_dir = env::temp_dir().join("infs_test_list_empty");
-        let paths = ToolchainPaths::with_root(temp_dir);
+        let (_temp, paths) = temp_paths();
 
         let versions = paths
             .list_installed_versions()
@@ -842,12 +851,11 @@ mod tests {
 
     #[test]
     fn metadata_path_constructs_correctly() {
-        let temp_dir = env::temp_dir().join("infs_test_metadata_path");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
         assert_eq!(
             paths.metadata_path("0.1.0"),
-            temp_dir
+            temp.path()
                 .join("toolchains")
                 .join("0.1.0")
                 .join(".metadata.json")
@@ -892,10 +900,9 @@ mod tests {
 
     #[test]
     fn infs_metadata_path_constructs_correctly() {
-        let temp_dir = env::temp_dir().join("infs_test_infs_metadata_path");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
-        assert_eq!(paths.infs_metadata_path(), temp_dir.join("infs.json"));
+        assert_eq!(paths.infs_metadata_path(), temp.path().join("infs.json"));
     }
 
     #[test]
@@ -928,10 +935,7 @@ mod tests {
 
     #[test]
     fn ensure_infs_metadata_creates_file_if_missing() {
-        let temp_dir = env::temp_dir().join("infs_test_ensure_meta");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
-
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let (_temp, paths) = temp_paths();
 
         assert!(!paths.infs_metadata_path().exists());
         paths.ensure_infs_metadata().unwrap();
@@ -942,16 +946,17 @@ mod tests {
         assert!(!metadata.version.is_empty());
         assert!(metadata.created_at.contains('T'));
         assert_eq!(metadata.schema_version, INFS_METADATA_SCHEMA_VERSION);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// Serialized because the stored `schema_version` deliberately differs from
+    /// the compiled-in one, which drives `read_infs_metadata` into the branch
+    /// that reads `INFS_VERBOSE`. Reading an environment variable while another
+    /// test mutates it is undefined behavior, so this test must not overlap the
+    /// `INFS_VERBOSE` mutators below.
     #[test]
+    #[serial_test::serial]
     fn ensure_infs_metadata_does_not_overwrite_existing() {
-        let temp_dir = env::temp_dir().join("infs_test_ensure_meta_nooverwrite");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
-
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let (_temp, paths) = temp_paths();
 
         let original = InfsMetadata {
             version: "0.0.1-test".to_string(),
@@ -967,8 +972,6 @@ mod tests {
         assert_eq!(read_metadata.version, "0.0.1-test");
         assert_eq!(read_metadata.created_at, "2020-01-01T00:00:00Z");
         assert_eq!(read_metadata.schema_version, 999);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
@@ -986,20 +989,17 @@ mod tests {
 
     #[test]
     fn binary_path_returns_toolchain_root_path() {
-        let temp_dir = env::temp_dir().join("infs_test_binary_path");
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
         let path = paths.binary_path("0.1.0", "infc");
         assert_eq!(
             path,
-            temp_dir.join("toolchains").join("0.1.0").join("infc")
+            temp.path().join("toolchains").join("0.1.0").join("infc")
         );
     }
 
     #[test]
     fn update_symlinks_creates_symlink_for_managed_binary() {
-        let temp_dir = env::temp_dir().join("infs_test_update_symlinks");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let toolchain_dir = paths.toolchain_dir("0.1.0");
         std::fs::create_dir_all(&toolchain_dir).unwrap();
@@ -1021,8 +1021,6 @@ mod tests {
 
         let symlink = paths.symlink_path(&binary_name);
         assert!(symlink.exists(), "Symlink should exist after update_symlinks");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// Writes a fake executable binary at `path`, marking it executable on Unix
@@ -1050,9 +1048,7 @@ mod tests {
 
     #[test]
     fn update_symlinks_links_optional_binary_when_present() {
-        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_opt_present");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let toolchain_dir = paths.toolchain_dir("0.2.0");
         std::fs::create_dir_all(&toolchain_dir).unwrap();
@@ -1073,15 +1069,11 @@ mod tests {
             paths.validate_symlinks().is_empty(),
             "both symlinks should resolve to real binaries"
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn update_symlinks_skips_optional_binary_when_absent() {
-        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_opt_absent");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let toolchain_dir = paths.toolchain_dir("0.1.0");
         std::fs::create_dir_all(&toolchain_dir).unwrap();
@@ -1099,15 +1091,11 @@ mod tests {
             paths.symlink_path(&lsp).symlink_metadata().is_err(),
             "no inference-lsp symlink should be created when the toolchain lacks it"
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn update_symlinks_removes_stale_optional_symlink_on_switch() {
-        let temp_dir = env::temp_dir().join("infs_test_update_symlinks_switch");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
         std::fs::create_dir_all(&paths.bin).unwrap();
 
         let (infc, lsp) = managed_binary_file_names();
@@ -1137,15 +1125,11 @@ mod tests {
             paths.symlink_path(&lsp).symlink_metadata().is_err(),
             "stale inference-lsp symlink must be removed when switching to a version without it"
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn remove_symlinks_removes_managed_binary_symlink() {
-        let temp_dir = env::temp_dir().join("infs_test_remove_symlinks");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let toolchain_dir = paths.toolchain_dir("0.1.0");
         std::fs::create_dir_all(&toolchain_dir).unwrap();
@@ -1172,15 +1156,11 @@ mod tests {
             !symlink.exists(),
             "Symlink should not exist after remove_symlinks"
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn remove_symlinks_removes_optional_binary_symlink() {
-        let temp_dir = env::temp_dir().join("infs_test_remove_symlinks_optional");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let toolchain_dir = paths.toolchain_dir("0.2.0");
         std::fs::create_dir_all(&toolchain_dir).unwrap();
@@ -1201,22 +1181,16 @@ mod tests {
             paths.symlink_path(&lsp).symlink_metadata().is_err(),
             "inference-lsp symlink should be removed"
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn validate_symlinks_returns_empty_when_no_broken_links() {
-        let temp_dir = env::temp_dir().join("infs_test_validate_no_broken");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         std::fs::create_dir_all(&paths.bin).unwrap();
 
         let broken = paths.validate_symlinks();
         assert!(broken.is_empty());
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
@@ -1228,10 +1202,7 @@ mod tests {
         // assert the Ok path — metadata still returned — and leave stderr
         // inspection to manual verification. The mismatch branch executes
         // under this test, so any panic/unwrap inside it would surface.
-        let temp_dir = env::temp_dir().join("infs_test_read_meta_mismatch");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         let bogus = InfsMetadata {
             version: "0.0.1-test".to_string(),
@@ -1256,17 +1227,12 @@ mod tests {
         let meta = result.expect("metadata should still be returned on mismatch");
         assert_eq!(meta.schema_version, 999);
         assert_eq!(meta.version, "0.0.1-test");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     #[serial_test::serial]
     fn read_infs_metadata_no_warning_when_version_matches() {
-        let temp_dir = env::temp_dir().join("infs_test_read_meta_match");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         paths.ensure_infs_metadata().unwrap();
 
@@ -1284,41 +1250,29 @@ mod tests {
 
         let meta = result.expect("metadata should be returned for a fresh install");
         assert_eq!(meta.schema_version, INFS_METADATA_SCHEMA_VERSION);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn read_infs_metadata_returns_none_when_file_missing() {
-        let temp_dir = env::temp_dir().join("infs_test_read_meta_missing");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = temp_paths();
 
         assert!(paths.read_infs_metadata().is_none());
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn validate_symlinks_detects_broken_symlink() {
-        let temp_dir = env::temp_dir().join("infs_test_validate_broken");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (temp, paths) = temp_paths();
 
         std::fs::create_dir_all(&paths.bin).unwrap();
 
         let binary_name = ToolchainPaths::MANAGED_BINARY;
         let symlink_target = paths.symlink_path(binary_name);
-        let nonexistent = temp_dir.join("nonexistent_binary");
+        let nonexistent = temp.path().join("nonexistent_binary");
         std::os::unix::fs::symlink(&nonexistent, &symlink_target).unwrap();
 
         let broken = paths.validate_symlinks();
         assert_eq!(broken.len(), 1);
         assert_eq!(broken[0], binary_name);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
-
 }

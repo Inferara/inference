@@ -330,7 +330,6 @@ fn format_manual_path_instruction(bin_path: &Path) -> String {
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn shell_from_path_bash() {
@@ -458,10 +457,8 @@ mod tests {
 
     #[test]
     fn is_path_configured_detects_marker() {
-        let temp_dir = env::temp_dir().join("infs_shell_test");
-        std::fs::create_dir_all(&temp_dir).ok();
-
-        let profile_path = temp_dir.join(".bashrc_test");
+        let temp_dir = assert_fs::TempDir::new().unwrap();
+        let profile_path = temp_dir.path().join(".bashrc_test");
 
         std::fs::write(&profile_path, "# Some existing config\n").unwrap();
         assert!(!is_path_configured(&profile_path).unwrap());
@@ -472,16 +469,12 @@ mod tests {
         )
         .unwrap();
         assert!(is_path_configured(&profile_path).unwrap());
-
-        std::fs::remove_file(&profile_path).ok();
     }
 
     #[test]
     fn append_to_file_creates_and_appends() {
-        let temp_dir = env::temp_dir().join("infs_shell_test_append");
-        std::fs::create_dir_all(&temp_dir).ok();
-
-        let file_path = temp_dir.join("test_append");
+        let temp_dir = assert_fs::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test_append");
 
         std::fs::write(&file_path, "initial content\n").unwrap();
         append_to_file(&file_path, "appended content\n").unwrap();
@@ -489,7 +482,5 @@ mod tests {
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("initial content"));
         assert!(content.contains("appended content"));
-
-        std::fs::remove_file(&file_path).ok();
     }
 }

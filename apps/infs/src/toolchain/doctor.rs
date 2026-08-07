@@ -539,15 +539,11 @@ mod tests {
 
     #[test]
     fn no_default_toolchain_message_with_no_versions() {
-        let temp_dir = std::env::temp_dir().join("infs_test_doctor_no_default");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = fresh_paths();
         std::fs::create_dir_all(&paths.toolchains).unwrap();
 
         let msg = no_default_toolchain_message(&paths);
         assert!(msg.contains("infs install"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
@@ -578,16 +574,12 @@ mod tests {
 
     #[test]
     fn no_default_toolchain_message_with_installed_versions() {
-        let temp_dir = std::env::temp_dir().join("infs_test_doctor_no_default_installed");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let (_temp, paths) = fresh_paths();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
 
         let msg = no_default_toolchain_message(&paths);
         assert!(msg.contains("infs default"));
         assert!(msg.contains("0.1.0"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     /// The bundled `inference-lsp` binary name for the running platform.
@@ -596,14 +588,16 @@ mod tests {
         format!("inference-lsp{ext}")
     }
 
-    /// Builds a `ToolchainPaths` rooted at a fresh, empty temp directory named
-    /// after the calling test, so parallel tests never collide.
-    fn fresh_paths(tag: &str) -> (std::path::PathBuf, ToolchainPaths) {
-        let temp_dir = std::env::temp_dir().join(format!("infs_test_doctor_{tag}"));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let paths = ToolchainPaths::with_root(temp_dir.clone());
-        (temp_dir, paths)
+    /// Builds a `ToolchainPaths` rooted at a fresh, empty temporary directory.
+    ///
+    /// The returned `TempDir` owns that directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. Every call yields a
+    /// distinct path, so neither parallel test threads nor concurrent test
+    /// processes can observe each other's files.
+    fn fresh_paths() -> (assert_fs::TempDir, ToolchainPaths) {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let paths = ToolchainPaths::with_root(temp.path().to_path_buf());
+        (temp, paths)
     }
 
     /// Installs the optional binary into `toolchains/<version>/` and sets it as
@@ -637,19 +631,17 @@ mod tests {
 
     #[test]
     fn optional_binary_check_ok_when_no_default_toolchain() {
-        let (temp_dir, paths) = fresh_paths("lsp_no_default");
+        let (_temp, paths) = fresh_paths();
 
         let check = optional_binary_check("inference-lsp", &paths, &lsp_binary_name(), None);
         assert_eq!(check.status, DoctorCheckStatus::Ok);
         assert_eq!(check.message, "No toolchain installed");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn optional_binary_check_ok_when_bundled_and_linked() {
-        let (temp_dir, paths) = fresh_paths("lsp_linked");
+        let (_temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         install_bundled(&paths, "0.2.0", &binary);
 
@@ -664,13 +656,11 @@ mod tests {
         assert_eq!(check.status, DoctorCheckStatus::Ok);
         assert!(check.message.starts_with("Linked at"));
         assert!(!check.message.contains("also on PATH"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn optional_binary_check_warns_when_bundled_but_link_missing() {
-        let (temp_dir, paths) = fresh_paths("lsp_link_missing");
+        let (_temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         install_bundled(&paths, "0.2.0", &binary);
 
@@ -684,23 +674,18 @@ mod tests {
             "remediation hint must name the healing command: {}",
             check.message
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn optional_binary_check_warns_when_bundled_but_link_broken() {
-        let (temp_dir, paths) = fresh_paths("lsp_link_broken");
+        let (temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         install_bundled(&paths, "0.2.0", &binary);
 
         std::fs::create_dir_all(&paths.bin).unwrap();
-        std::os::unix::fs::symlink(
-            temp_dir.join("gone_binary"),
-            paths.symlink_path(&binary),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(temp.path().join("gone_binary"), paths.symlink_path(&binary))
+            .unwrap();
 
         let check = optional_binary_check("inference-lsp", &paths, &binary, None);
         assert_eq!(check.status, DoctorCheckStatus::Warning);
@@ -710,13 +695,11 @@ mod tests {
             "remediation hint must name the healing command: {}",
             check.message
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn optional_binary_check_warns_when_toolchain_predates_bundling() {
-        let (temp_dir, paths) = fresh_paths("lsp_predates");
+        let (_temp, paths) = fresh_paths();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
 
@@ -724,8 +707,6 @@ mod tests {
         assert_eq!(check.status, DoctorCheckStatus::Warning);
         assert!(check.message.contains("does not include inference-lsp"));
         assert!(check.message.contains("0.1.0"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
@@ -733,12 +714,12 @@ mod tests {
     fn optional_binary_check_predates_bundling_ignores_symlink_state() {
         // A stale valid symlink from an earlier bundled toolchain must not
         // mask the fact that the *current* default lacks the binary.
-        let (temp_dir, paths) = fresh_paths("lsp_predates_stale_link");
+        let (temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
 
-        let stale_target = temp_dir.join("stale_lsp");
+        let stale_target = temp.path().join("stale_lsp");
         std::fs::write(&stale_target, b"stale").unwrap();
         std::fs::create_dir_all(&paths.bin).unwrap();
         std::os::unix::fs::symlink(&stale_target, paths.symlink_path(&binary)).unwrap();
@@ -746,13 +727,11 @@ mod tests {
         let check = optional_binary_check("inference-lsp", &paths, &binary, None);
         assert_eq!(check.status, DoctorCheckStatus::Warning);
         assert!(check.message.contains("does not include inference-lsp"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn optional_binary_check_notes_external_path_copy() {
-        let (temp_dir, paths) = fresh_paths("lsp_external_copy");
+        let (_temp, paths) = fresh_paths();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
 
@@ -760,8 +739,6 @@ mod tests {
         let check = optional_binary_check("inference-lsp", &paths, &lsp_binary_name(), Some(hit));
         assert_eq!(check.status, DoctorCheckStatus::Warning);
         assert!(check.message.contains("a copy is available on PATH at /opt/tools/inference-lsp"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
@@ -769,7 +746,7 @@ mod tests {
         // The extension prepends <INFERENCE_HOME>/bin to PATH, so a PATH hit
         // that resolves to infs's own symlink is not a separate copy and must
         // not be reported as one.
-        let (temp_dir, paths) = fresh_paths("lsp_managed_excluded");
+        let (_temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
         paths.set_default_version("0.1.0").unwrap();
@@ -783,14 +760,12 @@ mod tests {
             "managed symlink must be excluded from the PATH-copy note: {}",
             check.message
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn optional_binary_check_ok_notes_external_path_copy() {
-        let (temp_dir, paths) = fresh_paths("lsp_linked_external");
+        let (_temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         install_bundled(&paths, "0.2.0", &binary);
 
@@ -806,8 +781,6 @@ mod tests {
         assert_eq!(check.status, DoctorCheckStatus::Ok);
         assert!(check.message.starts_with("Linked at"));
         assert!(check.message.contains("also on PATH at /usr/local/bin/inference-lsp"));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(unix)]
@@ -815,7 +788,7 @@ mod tests {
     fn optional_binary_check_ok_excludes_managed_symlink_from_path_note() {
         // Healthy install: the PATH hit *is* the managed symlink. The OK line
         // must not imply a duplicate copy exists.
-        let (temp_dir, paths) = fresh_paths("lsp_linked_managed_excluded");
+        let (_temp, paths) = fresh_paths();
         let binary = lsp_binary_name();
         install_bundled(&paths, "0.2.0", &binary);
 
@@ -830,7 +803,5 @@ mod tests {
             "managed symlink must be excluded from the PATH-copy note: {}",
             check.message
         );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
