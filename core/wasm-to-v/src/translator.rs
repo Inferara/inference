@@ -170,6 +170,7 @@ use inference_hassert::HSpecMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errors::WasmToVError;
+use crate::gallina::z_literal;
 use crate::hassert_print;
 
 const LCB: &str = "{|\n";
@@ -1674,8 +1675,10 @@ fn translate_basic_operator(
             }
             "BI_memory_grow".to_string()
         }
-        Operator::I32Const { value } => format!("BI_const_num (Vi32 {value})"),
-        Operator::I64Const { value } => format!("BI_const_num (Vi64 {value})"),
+        Operator::I32Const { value } => {
+            format!("BI_const_num (Vi32 {})", z_literal(i64::from(*value)))
+        }
+        Operator::I64Const { value } => format!("BI_const_num (Vi64 {})", z_literal(*value)),
         Operator::I32Eqz => "BI_testop T_i32 TO_eqz".to_string(),
         Operator::I32Eq => "BI_relop T_i32 (Relop_i ROI_eq)".to_string(),
         Operator::I32Ne => "BI_relop T_i32 (Relop_i ROI_ne)".to_string(),

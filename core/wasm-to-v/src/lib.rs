@@ -194,6 +194,7 @@
 //! - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard
 
 pub mod errors;
+mod gallina;
 mod hassert_print;
 pub mod rocq_names;
 pub mod translator;
