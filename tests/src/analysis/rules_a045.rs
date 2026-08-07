@@ -423,6 +423,115 @@ mod analysis_rules_tests {
     }
 
     // ---------------------------------------------------------------------
+    // Fires: module-scope `const`
+    // ---------------------------------------------------------------------
+
+    /// A module-scope `const` offends at both of the positions its function-local
+    /// twin does: the annotation and the initializer literal.
+    ///
+    /// A032 rejects *every* top-level `const` today as not yet implemented, which
+    /// is the only reason this shape cannot reach codegen. That is a gate on an
+    /// unimplemented feature, not part of A045's closure — were A045 to lean on
+    /// it, lifting A032 would reopen a direct route to the struct-literal lowering
+    /// abort this rule exists to close.
+    #[test]
+    fn a045_top_level_const_typed_fieldless_rejected() {
+        let source = r#"
+            struct E { }
+            const X: E = E { };
+            pub fn main() -> i32 { return 0; }
+        "#;
+        assert_eq!(
+            a045_positions(source),
+            vec!["the declared type of a variable", "a struct literal"],
+            "a module-scope `const` must be reported at its annotation and its literal"
+        );
+    }
+
+    /// Pins that A045 reports the shape in its own right rather than resting on
+    /// A032's temporary rejection of top-level `const`.
+    #[test]
+    fn a045_and_a032_both_fire_for_a_fieldless_top_level_const() {
+        let source = r#"
+            struct E { }
+            const X: E = E { };
+            pub fn main() -> i32 { return 0; }
+        "#;
+        let errors = analyze(source).expect_err("expected analysis errors but got Ok");
+        assert!(
+            errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::TopLevelConstNotSupported { .. })),
+            "A032 must still reject the top-level `const`"
+        );
+        assert!(
+            errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::FieldLessStructValue { .. })),
+            "A045 must fire alongside A032, not instead of it"
+        );
+    }
+
+    #[test]
+    fn a045_top_level_const_typed_array_of_fieldless_rejected() {
+        let source = r#"
+            struct E { }
+            const A: [E; 2] = [E { }, E { }];
+            pub fn main() -> i32 { return 0; }
+        "#;
+        assert!(
+            a045_positions(source).contains(&"the declared type of a variable"),
+            "`[E; 2]` is zero-sized because its element type is"
+        );
+    }
+
+    /// The `const` arm must key on the struct being field-less, not on the
+    /// declaration being top-level: A032 rejects this one, A045 must not.
+    #[test]
+    fn a045_top_level_const_of_struct_with_fields_accepted() {
+        let source = r#"
+            struct P { x: i32; }
+            const P0: P = P { x: 1 };
+            pub fn main() -> i32 { return 0; }
+        "#;
+        assert_eq!(
+            count_a045(source),
+            0,
+            "a struct with a field is never zero-sized"
+        );
+        let errors = analyze(source).expect_err("A032 still rejects the top-level `const`");
+        assert!(
+            errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::TopLevelConstNotSupported { .. })),
+            "the top-level `const` must still be rejected, by A032 alone"
+        );
+    }
+
+    /// The definition pass recurses through `Def::Spec`, so a `const` declared
+    /// inside one is reported at its annotation. Only at its annotation: the type
+    /// checker types top-level `const` initializers only, so a spec-scope one
+    /// carries no recorded type for the literal check to read. The annotation is
+    /// the load-bearing half — every `const` of the type is caught there — so the
+    /// closure holds regardless.
+    #[test]
+    fn a045_spec_scope_const_typed_fieldless_rejected_at_its_annotation() {
+        let source = r#"
+            struct E { }
+            pub fn main() -> i32 { return 0; }
+            spec S { const C: E = E { }; fn c() -> i32 { return 0; } }
+        "#;
+        assert_eq!(
+            a045_positions(source),
+            vec!["the declared type of a variable"],
+            "a spec-scope `const` must be reported at its annotation"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // Fires: parameters
     // ---------------------------------------------------------------------
 
@@ -1008,6 +1117,17 @@ mod analysis_rules_tests {
         !a045_multi_diags(files).is_empty()
     }
 
+    /// The multi-file twin of [`a045_positions`].
+    fn a045_multi_positions(files: &[(Vec<&str>, &str)]) -> Vec<&'static str> {
+        a045_multi_diags(files)
+            .iter()
+            .filter_map(|d| match d {
+                AnalysisDiagnostic::FieldLessStructValue { position, .. } => Some(*position),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a045_fieldless_struct_defined_in_another_file_literal_rejected() {
         let files: &[(Vec<&str>, &str)] = &[
@@ -1085,16 +1205,38 @@ mod analysis_rules_tests {
             ),
             (vec!["lib"], "pub struct E { }"),
         ];
-        let positions: Vec<&str> = a045_multi_diags(files)
-            .iter()
-            .filter_map(|d| match d {
-                AnalysisDiagnostic::FieldLessStructValue { position, .. } => Some(*position),
-                _ => None,
-            })
-            .collect();
+        let positions = a045_multi_positions(files);
         assert!(
             positions.contains(&"the declared type of a variable"),
             "a `::`-qualified binding annotation must be rejected in its own right, got: {positions:?}"
+        );
+    }
+
+    /// A module-scope `const` whose annotation is a `::`-qualified path into
+    /// another file. The qualified carrier reaches the rule unresolved and is
+    /// resolved against the referencing file, while the initializer literal
+    /// arrives already resolved to the imported struct's canonical key.
+    #[test]
+    fn a045_top_level_const_typed_cross_file_fieldless_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib;
+                    const X: lib::E = lib::E { };
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (vec!["lib"], "pub struct E { }"),
+        ];
+        let positions = a045_multi_positions(files);
+        assert!(
+            positions.contains(&"the declared type of a variable"),
+            "a cross-file `const` annotation must be rejected, got: {positions:?}"
+        );
+        assert!(
+            positions.contains(&"a struct literal"),
+            "the cross-file `const` initializer literal must be rejected, got: {positions:?}"
         );
     }
 

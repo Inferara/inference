@@ -10,9 +10,10 @@
 //! position where one can be introduced or consumed:
 //!
 //! - a struct-literal expression of such a type, in every expression position;
-//! - a `let` binding or function-local `const` of such a type (this is also what
-//!   covers a non-deterministic draw, since a compound `@` is only reachable as a
-//!   `let` initializer — A008/A023/A038/A039/A040 reject the other positions);
+//! - a `let` binding, or a `const` declaration at either function or module
+//!   scope, of such a type (the `let` case is also what covers a
+//!   non-deterministic draw, since a compound `@` is only reachable as a `let`
+//!   initializer — A008/A023/A038/A039/A040 reject the other positions);
 //! - a function, method, or `external fn` parameter, including `_: E`;
 //! - a function, method, or `external fn` return type;
 //! - a struct field;
@@ -39,6 +40,12 @@
 //! type, all of which are rejected here. Anchoring on declarations and literals is
 //! what keeps the report to one diagnostic per offending declaration rather than
 //! one per use.
+//!
+//! A module-scope `const` is checked in its own right rather than left to A032,
+//! which rejects *every* top-level `const` as not yet implemented (#171). A032 is
+//! a temporary gate on an unimplemented feature; resting the closure on it would
+//! make this rule silently incomplete the day that feature lands. Both fire on
+//! such a declaration today — the crate has no cross-rule suppression.
 //!
 //! ## What stays legal
 //!
@@ -68,16 +75,18 @@
 //!
 //! ## Documented non-scope
 //!
-//! - Generics: a type parameter never resolves to a struct, so `fn id<T>(x: T) -> T`
-//!   instantiated at a field-less struct is not caught at the signature. The
-//!   closure still holds — producing the argument needs a literal and receiving the
-//!   result needs a binding, both of which are caught.
+//! - Generics: a type parameter never resolves to a struct, so a generic
+//!   signature (`fn id T'(x: T) -> T`) is outside the predicate. Nothing is missed
+//!   by that today: the compiler does not monomorphize — codegen rejects a generic
+//!   type outright — so no instantiation at a field-less struct exists to check.
+//!   Implementing generic instantiation would introduce value positions this rule
+//!   does not yet see, and must revisit it.
 //! - Local type aliases: `type X = E;` is not flagged. Aliases are non-transparent
 //!   in Inference (`let a: X` does not resolve to the aliased type), so an alias is
 //!   a dead end rather than a route to a value.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{DefId, IdentId, NodeId, StmtId, TypeId};
+use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{ArgData, ArgKind, Def, Expr, Field, Location, Stmt};
 use inference_type_checker::type_info::TypeInfo;
 use inference_type_checker::typed_context::TypedContext;
@@ -87,7 +96,7 @@ use crate::walker;
 
 /// A struct-literal expression, in any expression position.
 const STRUCT_LITERAL: &str = "a struct literal";
-/// A `let` binding or a function-local `const` declaration.
+/// A `let` binding, or a `const` declaration at function or module scope.
 const VARIABLE_TYPE: &str = "the declared type of a variable";
 /// A function, method, or `external fn` parameter (the receiver has its own).
 const PARAMETER_TYPE: &str = "the type of a parameter";
@@ -119,7 +128,8 @@ crate::rule! {
 }
 
 /// Checks the declaration surface of a file: function, method, and `external fn`
-/// signatures, struct fields, and `self` receivers, recursing through `spec`.
+/// signatures, struct fields, `self` receivers, and module-scope `const`
+/// declarations, recursing through `spec`.
 fn check_defs(
     ctx: &TypedContext,
     arena: &AstArena,
@@ -150,8 +160,25 @@ fn check_defs(
                     }
                 }
             }
+            // A module-scope `const` is the twin of the function-local one the
+            // body walk checks: the annotation is a value position and the
+            // initializer may build a literal. It is checked here rather than
+            // left to A032's blanket rejection of top-level `const`, which is a
+            // gate on an unimplemented feature and not part of this closure.
+            Def::Constant { ty, value, .. } => {
+                check_annotation(
+                    ctx,
+                    arena,
+                    module_path,
+                    *ty,
+                    VARIABLE_TYPE,
+                    arena[def_id].location,
+                    errors,
+                );
+                check_struct_literals(ctx, module_path, *value, errors);
+            }
             Def::Spec { defs, .. } => check_defs(ctx, arena, module_path, defs, errors),
-            Def::Enum { .. } | Def::Constant { .. } | Def::TypeAlias { .. } => {}
+            Def::Enum { .. } | Def::TypeAlias { .. } => {}
         }
     }
 }
@@ -285,21 +312,33 @@ fn check_stmt(
         );
     }
     walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
-        walker::walk_expr(arena, expr_id, &mut |sub_id| {
-            if matches!(&arena[sub_id].kind, Expr::StructLiteral { .. })
-                && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(sub_id))
-                && let Some(fieldless) =
-                    walker::fieldless_struct_name(ctx, &type_info.kind, module_path)
-            {
-                push(
-                    errors,
-                    module_path,
-                    fieldless,
-                    STRUCT_LITERAL,
-                    arena[sub_id].location,
-                );
-            }
-        });
+        check_struct_literals(ctx, module_path, expr_id, errors);
+    });
+}
+
+/// Reports every field-less struct literal reachable from `expr_id`, including
+/// `expr_id` itself.
+fn check_struct_literals(
+    ctx: &TypedContext,
+    module_path: &[String],
+    expr_id: ExprId,
+    errors: &mut Vec<LabeledDiagnostic>,
+) {
+    let arena = ctx.arena();
+    walker::walk_expr(arena, expr_id, &mut |sub_id| {
+        if matches!(&arena[sub_id].kind, Expr::StructLiteral { .. })
+            && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(sub_id))
+            && let Some(fieldless) =
+                walker::fieldless_struct_name(ctx, &type_info.kind, module_path)
+        {
+            push(
+                errors,
+                module_path,
+                fieldless,
+                STRUCT_LITERAL,
+                arena[sub_id].location,
+            );
+        }
     });
 }
 
