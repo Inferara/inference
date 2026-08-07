@@ -1066,6 +1066,38 @@ mod analysis_rules_tests {
         );
     }
 
+    /// A `::`-qualified annotation reached through a binding rather than a
+    /// signature. The binding position is reported in its own right, alongside
+    /// the initializing literal. Unlike a signature annotation, which the rule
+    /// reads raw, a binding's type arrives already resolved by the type checker,
+    /// so this pins the binding path across a module boundary rather than the
+    /// qualified carrier itself (which
+    /// `a045_qualified_path_to_cross_file_fieldless_rejected` covers).
+    #[test]
+    fn a045_let_binding_from_qualified_annotation_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib;
+                    pub fn main() -> i32 { let e: lib::E = lib::E { }; return 0; }
+                "#,
+            ),
+            (vec!["lib"], "pub struct E { }"),
+        ];
+        let positions: Vec<&str> = a045_multi_diags(files)
+            .iter()
+            .filter_map(|d| match d {
+                AnalysisDiagnostic::FieldLessStructValue { position, .. } => Some(*position),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            positions.contains(&"the declared type of a variable"),
+            "a `::`-qualified binding annotation must be rejected in its own right, got: {positions:?}"
+        );
+    }
+
     #[test]
     fn a045_struct_field_typed_cross_file_fieldless_rejected() {
         let files: &[(Vec<&str>, &str)] = &[
