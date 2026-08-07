@@ -266,8 +266,8 @@ impl FuncRemap {
 ///
 /// ## Module Metadata
 /// - `mod_name`: Rocq module identifier (from parameter or custom name section)
-/// - `func_names_map`: Maps function index → name (from custom name section)
-/// - `func_locals_name_map`: Maps function index → (local index → name) (from custom name section)
+/// - `func_names_map`: Maps absolute function index → name (from custom name section)
+/// - `func_locals_name_map`: Maps absolute function index → (local index → name) (from custom name section)
 /// - `start_function`: Optional module entry point function index
 ///
 /// ## WASM Sections
@@ -279,7 +279,8 @@ impl FuncRemap {
 /// - `data`: Memory initialization segments
 /// - `elements`: Table initialization segments
 /// - `function_types`: Function type signatures (as recursion groups)
-/// - `function_type_indexes`: Maps function index → type index
+/// - `function_type_indexes`: Maps defined-function position (code-section
+///   order, imports excluded) → type index
 /// - `function_bodies`: Function code with locals and instructions
 ///
 /// ## Translation State (private)
@@ -864,7 +865,7 @@ impl WasmParseData<'_> {
             let local_name_map = self
                 .func_locals_name_map
                 .as_ref()
-                .and_then(|func_locals_name_map| func_locals_name_map.get(&modfunc_type).cloned());
+                .and_then(|func_locals_name_map| func_locals_name_map.get(&abs_index).cloned());
             let ctx = OperatorContext { local_name_map };
             let modfunc_body =
                 translate_expr(&mut function_body.get_operators_reader()?, ctx, remap)?;
