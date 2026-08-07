@@ -252,6 +252,15 @@ pub enum AnalysisDiagnostic {
         max: u32,
         location: Location,
     },
+
+    #[error(
+        "`{name}` is a struct with no fields, so it has no value representation and cannot be used as {position}; a field-less struct occupies zero bytes — there is no memory region to hold, copy, or reason about one of its values, so code generation has nothing to lower and a proof has nothing to describe; declaring a field-less struct stays legal — give `{name}` at least one field if you need values of it, or keep it as a pure namespace and declare its functions without `self`, calling them as `{name}::function_name()`"
+    )]
+    FieldLessStructValue {
+        name: String,
+        position: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -299,7 +308,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::DuplicateLocalName { location, .. }
             | AnalysisDiagnostic::NonDetOutsideSpec { location, .. }
             | AnalysisDiagnostic::ReservedExportName { location, .. }
-            | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. } => location,
+            | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. }
+            | AnalysisDiagnostic::FieldLessStructValue { location, .. } => location,
         }
     }
 
@@ -351,6 +361,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::NonDetOutsideSpec { .. } => "A042",
             AnalysisDiagnostic::ReservedExportName { .. } => "A043",
             AnalysisDiagnostic::ShiftCountOutOfRange { .. } => "A044",
+            AnalysisDiagnostic::FieldLessStructValue { .. } => "A045",
         }
     }
 }
@@ -1411,6 +1422,77 @@ mod tests {
             "A044 diagnostic must state the valid count range, got: {text}"
         );
         assert_eq!(err.rule_id(), "A044");
+    }
+
+    /// The A045 message must carry the whole teaching contract: what is wrong,
+    /// why (both the memory mechanism and the verification consequence), that
+    /// declarations are not banned, and the two fixes.
+    #[test]
+    fn display_fieldless_struct_value() {
+        let err = AnalysisDiagnostic::FieldLessStructValue {
+            name: "E".to_string(),
+            position: "a struct literal",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("`E` is a struct with no fields"),
+            "A045 diagnostic must name the offending struct, got: {text}"
+        );
+        assert!(
+            text.contains("no value representation"),
+            "A045 diagnostic must state what is wrong, got: {text}"
+        );
+        assert!(
+            text.contains("zero bytes"),
+            "A045 diagnostic must explain the mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("a proof has nothing to describe"),
+            "A045 diagnostic must state the verification consequence, got: {text}"
+        );
+        assert!(
+            text.contains("declaring a field-less struct stays legal"),
+            "A045 diagnostic must say declarations are not banned, got: {text}"
+        );
+        assert!(
+            text.contains("at least one field"),
+            "A045 diagnostic must suggest giving the struct a field, got: {text}"
+        );
+        assert!(
+            text.contains("without `self`"),
+            "A045 diagnostic must suggest the namespace fix, got: {text}"
+        );
+        assert!(
+            text.contains("`E::function_name()`"),
+            "A045 diagnostic must show how a namespace function is called, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A045");
+    }
+
+    /// One variant serves every position, so each position string must render
+    /// into the same sentence.
+    #[test]
+    fn display_fieldless_struct_value_names_each_position() {
+        for position in [
+            "a struct literal",
+            "the declared type of a variable",
+            "the type of a parameter",
+            "the return type of a function",
+            "the type of a struct field",
+            "the type of a `self` receiver",
+        ] {
+            let err = AnalysisDiagnostic::FieldLessStructValue {
+                name: "E".to_string(),
+                position,
+                location: test_location(),
+            };
+            assert!(
+                err.to_string()
+                    .contains(&format!("cannot be used as {position};")),
+                "A045 diagnostic must name the `{position}` position"
+            );
+        }
     }
 
     #[test]
