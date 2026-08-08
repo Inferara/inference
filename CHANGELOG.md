@@ -336,6 +336,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- infs: project-mode `build` now forwards both the manifest's `[wasm-dependencies]` and the CLI's `-L`/`--wasm-lib-dir` to `infc`, and project-mode `run` forwards the manifest's (it has no `-L` flag of its own), so a project binding `use { … } from <module>` links — and in proof mode emits its `.v` — without the `INFERENCE_WASM_LIB_PATH` workaround ([#361])
 - wasm-to-v: `(*name*)` comments on `BI_local_get`/`BI_local_set`/`BI_local_tee` now resolve the local-name map by function index instead of type index, fixing misattributed names in linked or externally produced modules ([#336])
 - A dynamic array index appearing only inside a function-scoped `const` initializer no longer aborts the compiler (`bounds-check scratch local must be reserved` panic); it now compiles and is guarded like any other index ([#220])
 - Exported functions now normalize narrow scalar parameters (`bool`, `i8`, `u8`, `i16`, `u16`) at entry — low-bits/sign-extension per the C convention, `bool` by truthiness — so arbitrary host bit patterns cannot leak into the body
@@ -550,6 +551,7 @@ Initial tagged release.
 [#333]: https://github.com/Inferara/inference/issues/333
 [#335]: https://github.com/Inferara/inference/pull/335
 [#336]: https://github.com/Inferara/inference/issues/336
+[#361]: https://github.com/Inferara/inference/issues/361
 [#346]: https://github.com/Inferara/inference/issues/346
 [#345]: https://github.com/Inferara/inference/issues/345
 [#344]: https://github.com/Inferara/inference/issues/344

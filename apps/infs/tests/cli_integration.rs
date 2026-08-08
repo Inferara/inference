@@ -297,6 +297,38 @@ fn help_shows_available_commands() {
         .stdout(predicate::str::contains("--headless"));
 }
 
+/// `infs build --help` documents the external-lib-dir flag, including the
+/// relative-directory semantics: a relative `-L` always means what it meant at
+/// the shell, in project mode as much as in single-file mode. That sentence is
+/// the user-visible contract behind the invocation-directory anchoring in
+/// `run_project_build`, so it is pinned here — rendering the help is also the
+/// only invocation that materializes the flag's help text at all.
+///
+/// clap re-wraps help text to the terminal width, so the assertions run against
+/// a whitespace-normalized copy of the output rather than the raw bytes.
+#[test]
+fn build_help_documents_the_external_lib_dir_flag() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.arg("build").arg("--help");
+
+    let assert = cmd.assert().success();
+    let normalized = stdout_of(&assert)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for expected in [
+        "--wasm-lib-dir",
+        "-L",
+        "Directory to search for external `.wasm` modules",
+        "A relative dir always means what it meant at the shell",
+    ] {
+        assert!(
+            normalized.contains(expected),
+            "`infs build --help` must document {expected:?}; normalized output was:\n{normalized}"
+        );
+    }
+}
+
 // Headless Mode Tests
 
 /// Verifies that headless mode without a command shows informational output.
@@ -2014,6 +2046,445 @@ fn project_build_rejects_an_unknown_manifest_key() {
 
     cmd.assert().failure().stderr(
         predicate::str::contains("wasm_features").and(predicate::str::contains("wasm-features")),
+    );
+}
+
+// Project-mode `[wasm-dependencies]` and `-L` Forwarding Tests
+//
+// `infc` resolves `use { … } from <module>` from `--wasm-dep`, `-L` and
+// `INFERENCE_WASM_LIB_PATH` alone, so a project build that forwards none of them
+// cannot link an external at all — and in proof mode cannot emit its `.v`. These
+// pin both ends: the wire spelling each project route puts on the command line,
+// and the end-to-end link through a real `infc` with no environment variable in
+// play.
+
+/// `src/main.inf` that binds an external: the declaration, the `use` that binds
+/// it to the logical module `arith`, and a `main` whose value only the linked
+/// function can produce. Unlinkable unless the dependency reaches `infc`.
+const PROJECT_MAIN_EXTERN_SRC: &str = "external fn sum(a: i32, b: i32) -> i32;\n\
+     use { sum } from arith;\n\n\
+     pub fn main() -> i32 {\n    return sum(40, 2);\n}\n";
+
+/// The library [`PROJECT_MAIN_EXTERN_SRC`] binds against, compiled on its own
+/// and vendored into the dependent project as `libs/arith.wasm`.
+const ARITH_LIB_SRC: &str = "pub fn sum(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n";
+
+/// The manifest table declaring that dependency. The declared path is written in
+/// the manifest's own platform-independent spelling; `infs` resolves it against
+/// the project root before forwarding it.
+const ARITH_DEPENDENCY_TABLE: &str =
+    "[wasm-dependencies]\narith = { path = \"libs/arith.wasm\" }\n";
+
+/// Writes an executable `infc` stub under `dir` that reports a mismatched commit
+/// and the current ABI, and appends the argv of every non-probe invocation —
+/// everything but the `--commit-hash` and `--abi-version` handshake calls, one
+/// entry per line — to `log`. Returns the stub's path.
+///
+/// The mismatched commit is what makes the stub useful: every real-`infc` test
+/// here takes the `commit_matched` short-circuit, so none of them observes what
+/// actually lands on the command line. The stub cannot compile, so no artifact
+/// appears; with no `[build.wasm-opt]` table the post-build step is a no-op and a
+/// `build` through it still succeeds.
+///
+/// Unix-only: relies on an executable shell script.
+#[cfg(unix)]
+fn write_argv_logging_infc_stub(
+    dir: &assert_fs::TempDir,
+    log: &std::path::Path,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stub = dir.child("infc_stub");
+    stub.write_str(&format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '{}.{}\\n'; exit 0 ;;\n\
+           *) printf '%s\\n' \"$@\" >> '{}'; exit 0 ;;\n\
+         esac\n",
+        inference_compiler_interface::COMPILER_ABI_MAJOR,
+        inference_compiler_interface::COMPILER_ABI_MINOR,
+        log.display()
+    ))
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+    stub.path().to_path_buf()
+}
+
+/// The argv entry immediately following each occurrence of `flag`, in order of
+/// appearance.
+///
+/// Adjacency is the property under test, and this expresses it exactly: a fused
+/// `--flag=value` token never matches `flag` and yields no entry at all, while a
+/// value split across entries leaves only its first word here — an expectation on
+/// the result fails for either spelling. A flag in final position (its value
+/// dropped) yields `None` rather than vanishing.
+#[cfg(unix)]
+fn argv_values_after<'a>(argv: &[&'a str], flag: &str) -> Vec<Option<&'a str>> {
+    argv.iter()
+        .enumerate()
+        .filter(|(_, entry)| **entry == flag)
+        .map(|(index, _)| argv.get(index + 1).copied())
+        .collect()
+}
+
+/// The raw newline-separated argv a stub logged.
+///
+/// Returned as one owned `String` rather than the split entries because the
+/// entries borrow from it: a caller keeps this alive and splits it in place, so
+/// the `&str` slices it feeds to [`argv_values_after`] outlive the call.
+#[cfg(unix)]
+fn logged_argv(log: &std::path::Path) -> String {
+    std::fs::read_to_string(log).expect("the stub must log its argv")
+}
+
+/// Compiles [`ARITH_LIB_SRC`] with the real `infc` in a temp directory of its own
+/// and returns the emitted module bytes.
+///
+/// The dependency is a genuine compiler artifact rather than a checked-in blob:
+/// what these tests link must be what `infc` emits today, or a change to the
+/// module shape would leave them linking a stale fixture.
+fn build_arith_library(infc_path: &std::path::Path) -> Vec<u8> {
+    let lib = assert_fs::TempDir::new().unwrap();
+    lib.child("arith.inf").write_str(ARITH_LIB_SRC).unwrap();
+
+    let mut cmd = Command::new(infc_path);
+    cmd.current_dir(lib.path()).arg("arith.inf");
+    cmd.assert().success();
+
+    std::fs::read(lib.child("out").child("arith.wasm").path())
+        .expect("infc must produce out/arith.wasm for the library")
+}
+
+/// Scaffolds a project that binds the `arith` external: the manifest declares the
+/// dependency, `src/main.inf` binds `sum`, and `libs/arith.wasm` holds `library`.
+fn scaffold_project_with_arith_dependency(dir: &assert_fs::TempDir, library: &[u8]) {
+    scaffold_project_with_manifest(dir, "demo", PROJECT_MAIN_EXTERN_SRC, ARITH_DEPENDENCY_TABLE);
+    dir.child("libs")
+        .child("arith.wasm")
+        .write_binary(library)
+        .unwrap();
+}
+
+/// The wire spelling of external-module forwarding on the project `build` route.
+///
+/// Three properties at once, none of them observable through a real `infc`: both
+/// spellings of the lib-dir flag reach `infc` as `--wasm-lib-dir` plus an
+/// adjacent value, in the order given; the manifest dependency is forwarded
+/// exactly once; and its value is the declared path resolved against the project
+/// *root*, absolute — the resolution the manifest promises, independent of any
+/// working directory.
+#[cfg(unix)]
+#[test]
+fn project_build_forwards_lib_dirs_and_manifest_dep_to_infc() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_EXTERN_SRC,
+        ARITH_DEPENDENCY_TABLE,
+    );
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    // Two real directories, passed through the two spellings of the same flag.
+    let first = temp.child("vendor-a");
+    first.create_dir_all().unwrap();
+    let second = temp.child("vendor-b");
+    second.create_dir_all().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-L")
+        .arg(first.path())
+        .arg("--wasm-lib-dir")
+        .arg(second.path());
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+
+    assert_eq!(
+        argv_values_after(&argv, "--wasm-lib-dir"),
+        vec![
+            Some(first.path().to_str().unwrap()),
+            Some(second.path().to_str().unwrap()),
+        ],
+        "both lib-dir spellings must reach infc as `--wasm-lib-dir`, in the \
+         order given, got argv: {argv:?}"
+    );
+
+    let expected_dep = format!(
+        "arith={}",
+        temp.path()
+            .canonicalize()
+            .unwrap()
+            .join("libs")
+            .join("arith.wasm")
+            .display()
+    );
+    assert_eq!(
+        argv_values_after(&argv, "--wasm-dep"),
+        vec![Some(expected_dep.as_str())],
+        "the manifest dependency must be forwarded exactly once, as \
+         `<name>=<path resolved against the project root>`, got argv: {argv:?}"
+    );
+}
+
+/// A *relative* lib dir keeps the meaning it had at the shell.
+///
+/// The project route spawns `infc` with its working directory set to the project
+/// root, so a lib dir forwarded verbatim would be re-read against the root rather
+/// than against the directory the user typed it in. Here `-L ../libs` is passed
+/// from `<root>/src`, where it names `<root>/libs`; re-anchored to the root it
+/// would name `<root>/../libs` — outside the project, and a same-named `.wasm`
+/// sitting there would link silently in place of the intended one. The absolute
+/// dir alongside it pins the other half: joining must leave it untouched.
+///
+/// The expectation is built from the *canonicalized* subdirectory because
+/// `std::env::current_dir()` in the child reports the symlink-resolved path,
+/// which on macOS differs from the temp path this test holds.
+#[cfg(unix)]
+#[test]
+fn project_build_anchors_a_relative_lib_dir_to_the_invocation_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_EXTERN_SRC,
+        ARITH_DEPENDENCY_TABLE,
+    );
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    // `<root>/libs` is what `../libs` names from `<root>/src`; the root-anchored
+    // reading, `<root>/../libs`, is the temp directory's parent.
+    temp.child("libs").create_dir_all().unwrap();
+    let absolute = temp.child("vendor");
+    absolute.create_dir_all().unwrap();
+
+    let invocation_dir = temp.child("src");
+    let relative = std::path::Path::new("..").join("libs");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(invocation_dir.path())
+        .arg("build")
+        .arg("-L")
+        .arg(&relative)
+        .arg("-L")
+        .arg(absolute.path());
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+
+    let anchored = invocation_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(&relative)
+        .display()
+        .to_string();
+    assert_eq!(
+        argv_values_after(&argv, "--wasm-lib-dir"),
+        vec![
+            Some(anchored.as_str()),
+            Some(absolute.path().to_str().unwrap()),
+        ],
+        "a relative lib dir must reach infc anchored at the invocation \
+         directory (`{anchored}`), and an absolute one unchanged, got argv: \
+         {argv:?}"
+    );
+}
+
+/// Every declared dependency is forwarded, not just the first, and in the
+/// manifest resolution's name order — so two manifests differing only in the
+/// order they list the same dependencies produce the same `infc` invocation.
+/// Declared here in reverse of the expected order, which a straight iteration
+/// over the declarations would preserve.
+#[cfg(unix)]
+#[test]
+fn project_build_forwards_every_manifest_dependency_in_name_order() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_EXTERN_SRC,
+        "[wasm-dependencies]\n\
+         zeta = { path = \"libs/zeta.wasm\" }\n\
+         alpha = { path = \"libs/alpha.wasm\" }\n",
+    );
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+
+    let root = temp.path().canonicalize().unwrap();
+    let alpha = format!("alpha={}", root.join("libs").join("alpha.wasm").display());
+    let zeta = format!("zeta={}", root.join("libs").join("zeta.wasm").display());
+    assert_eq!(
+        argv_values_after(&argv, "--wasm-dep"),
+        vec![Some(alpha.as_str()), Some(zeta.as_str())],
+        "every declaration must be forwarded, in name order, got argv: {argv:?}"
+    );
+}
+
+/// Neutrality: a project that declares no dependency and passes no lib dir gets
+/// neither flag on the command line. The forwarding is inert for the projects
+/// that do not bind externals, which is nearly all of them.
+#[cfg(unix)]
+#[test]
+fn project_build_without_dependencies_forwards_no_external_flags() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert!(
+        argv_values_after(&argv, "--wasm-dep").is_empty()
+            && argv_values_after(&argv, "--wasm-lib-dir").is_empty(),
+        "a project with no externals must get neither flag, got argv: {argv:?}"
+    );
+}
+
+/// The same wire spelling on the project `run` route, which has no lib-dir flag
+/// of its own: the manifest is its only source of externals, so a route that
+/// dropped it would leave every project binding `use { … } from <module>`
+/// unrunnable.
+///
+/// wasmtime is checked before the build, hence the gate. The stub compiles
+/// nothing, so `out/main.wasm` never appears and the command fails *after* the
+/// build step — that exact failure is what proves the build ran at all.
+#[cfg(unix)]
+#[test]
+fn project_run_forwards_manifest_dep_to_infc() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_EXTERN_SRC,
+        ARITH_DEPENDENCY_TABLE,
+    );
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("run");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("WASM file not found"));
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+
+    let expected_dep = format!(
+        "arith={}",
+        temp.path()
+            .canonicalize()
+            .unwrap()
+            .join("libs")
+            .join("arith.wasm")
+            .display()
+    );
+    assert_eq!(
+        argv_values_after(&argv, "--wasm-dep"),
+        vec![Some(expected_dep.as_str())],
+        "project `run` must forward the manifest dependency, got argv: {argv:?}"
+    );
+    assert!(
+        argv_values_after(&argv, "--wasm-lib-dir").is_empty(),
+        "`run` has no lib-dir flag to forward, got argv: {argv:?}"
+    );
+}
+
+/// The end-to-end acceptance: a project whose sources bind an external links in
+/// proof mode and emits both artifacts, with no environment workaround.
+///
+/// `INFERENCE_WASM_LIB_PATH` is explicitly removed — it is `infc`'s last-resort
+/// search tier and the very workaround this replaces, so an inherited value would
+/// let a passing run prove nothing about the manifest. The `.v` is the load-bearing
+/// half: external resolution runs before code generation, so a proof build that
+/// cannot resolve produces no translation at all.
+#[test]
+fn project_proof_build_links_a_manifest_dependency_without_env() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let library = build_arith_library(&infc_path);
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_arith_dependency(&temp, &library);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env_remove("INFERENCE_WASM_LIB_PATH")
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--mode")
+        .arg("proof");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module"));
+
+    let wasm = std::fs::read(temp.child("proofs").child("main.wasm").path())
+        .expect("a linked proof build must write proofs/main.wasm");
+    assert!(!wasm.is_empty(), "the linked .wasm must not be empty");
+
+    let translation = std::fs::read_to_string(temp.child("proofs").child("main.v").path())
+        .expect("a linked proof build must write proofs/main.v");
+    assert!(!translation.is_empty(), "the linked .v must not be empty");
+}
+
+/// The linked external actually executes: project `run` on the same project
+/// prints `sum(40, 2)`. Resolution reaching `infc` is necessary but not
+/// sufficient — this pins that what `run` executes is a module with the
+/// dependency's code merged in, not one left with an unresolved import.
+#[test]
+fn project_run_executes_a_linked_manifest_dependency() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let library = build_arith_library(&infc_path);
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_arith_dependency(&temp, &library);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env_remove("INFERENCE_WASM_LIB_PATH")
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert!(
+        stdout.contains("42"),
+        "wasmtime must print the linked call's result (40 + 2), got:\n{stdout}"
     );
 }
 

@@ -109,6 +109,7 @@ infs build example.inf --analyze
 | `-v` | Generate Rocq (.v) translation file |
 | `--mode proof` | Proof mode: preserve non-det specs; implies `-v` inside `infc` |
 | `--mode compile` | Compile mode: strip specs for executable WASM |
+| `-L <dir>` / `--wasm-lib-dir <dir>` | Directory to search for external `.wasm` modules referenced by `use { … } from <module>;`; repeatable. In project mode a relative dir is anchored to the directory you invoked `infs` from, not the project root |
 | `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
 
 When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
@@ -123,9 +124,10 @@ When `infs build` runs in project mode, it reads fields from `Inference.toml` to
 | `[build] mode = "compile"` (default) | Forwards nothing; `infc` defaults to compile mode |
 | `[verification] output-dir` | Honored only in effective-proof mode; relocates both `.wasm` and `.v` |
 | `[build] wasm-features` | Opt-in post-MVP WebAssembly proposals (currently `"bulk-memory"`); forwarded as `--wasm-features`, echoed as a `wasm-features:` line, and applied in both compile and proof mode. Empty (the default) means pure WebAssembly 1.0 |
+| `[wasm-dependencies]` | Each entry is forwarded as `--wasm-dep <name>=<path>`, with the declared path resolved against the project root; honored by both project `build` and project `run`, and never capability-gated |
 | `[build.wasm-opt]` | Opt-in post-build optimization of `out/main.wasm` via Binaryen `wasm-opt`, resolved from `WASM_OPT_PATH` → PATH → an infs-managed install; absent table is a no-op |
 
-Some of these are also honored in **single-file** mode, by walking up to the nearest `Inference.toml`. `[build] wasm-features` is honored by both `infs build <path>` and `infs run <path>` — deliberately, since those two and project `infs build` all write `out/main.wasm` for the same project and must not disagree about its instruction set. `[wasm-dependencies]` is honored by single-file `build` only; that single-file `run` does not resolve it is a pre-existing gap, tracked separately. `[build] wasm-features` requires an `infc` with ABI 1.2 or newer; an older compiler cannot honor the request, so it is refused with remediation instead of being handed the flag.
+Some of these are also honored in **single-file** mode, by walking up to the nearest `Inference.toml`. `[build] wasm-features` is honored by both `infs build <path>` and `infs run <path>` — deliberately, since those two and project `infs build` all write `out/main.wasm` for the same project and must not disagree about its instruction set. `[wasm-dependencies]` is honored by single-file `build` and by both project-mode paths (`infs build` and `infs run`); single-file `run` is the one path that does not resolve it, a pre-existing gap tracked as [#367](https://github.com/Inferara/inference/issues/367). `[build] wasm-features` requires an `infc` with ABI 1.2 or newer; an older compiler cannot honor the request, so it is refused with remediation instead of being handed the flag.
 
 Every table with a fixed set of fields rejects keys it does not recognize, so a misspelled manifest key is an error naming the offending key and the accepted ones, not a setting that silently does nothing.
 
