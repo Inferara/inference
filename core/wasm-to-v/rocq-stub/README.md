@@ -45,7 +45,7 @@ Two logical namespaces, mapped by `_CoqProject`:
 
 | File | Provides | Mirrors |
 | --- | --- | --- |
-| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers) | Vanilla WasmCert |
+| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers), and `byte_scope` with an opaque `encode` plus the same 244 two-digit uppercase hex notations over it (used by every emitted `moddata_init`) | wasm-verifier's `coq-wasm` dependency, `theories/bytes.v` — matching the twelve values its hand-written block skips (`#12` .. `#19`, `#1C` .. `#1F`), and without the module-level `Open Scope byte_scope.` it leaves open for importers, so an emitted module has to open the scope its own byte notations need |
 | `wasm/numerics.v` | `i32`/`i64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) | Vanilla WasmCert |
 | `wasm/datatypes.v` | Value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive, and the module/section records | Vanilla WasmCert |
 | `wasm/host.v` | The `host` typeclass every emitted theorem is stated under (`Class host := {}`) | Vanilla WasmCert |
