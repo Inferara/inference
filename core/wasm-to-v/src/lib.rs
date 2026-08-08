@@ -426,6 +426,97 @@ mod tests {
             "both surviving executable functions must be emitted; got:\n{output}",
         );
     }
+
+    /// Every index immediate reaches the `.v` with an explicit `%N` scope.
+    ///
+    /// The proof contract types all of these operands as `N`, and Rocq's
+    /// numeral notation is type-directed, so a bare numeral elaborates
+    /// correctly *as long as* the expected type is inferable at that position.
+    /// That makes a bare operand silently fine today and silently wrong the
+    /// moment a contract or notation change loses the inference — a failure
+    /// that would land on the paid prover worker, not here. Pinning the
+    /// spelling holds every arm to the same explicit form.
+    ///
+    /// None of the constructs below are emitted by Inference codegen —
+    /// `br_table`, `call_indirect`, `memory.init`, `data.drop` and element
+    /// segments reach this translator only from foreign or statically-linked
+    /// `.wasm`. No fixture in the `coqc` corpus covers them, so this
+    /// handcrafted module has to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn index_immediates_carry_an_explicit_n_scope() {
+        // `br_table 0 1 0` yields the two explicit targets 0 and 1 (the default
+        // is a separate immediate this translator does not render), so the
+        // emitted list pins the `%N` scope on more than one element. The
+        // passive data segment reaches `memory.init`/`data.drop`, and the
+        // active element segment reaches the `ME_functions` index list.
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (table (;0;) 1 1 funcref)
+              (memory (;0;) 1)
+              (data (;0;) "x")
+              (elem (;0;) (i32.const 0) func 0)
+              (func (;0;) (type 0) (param i32) (result i32)
+                i32.const 0
+                i32.const 0
+                i32.const 1
+                memory.init 0
+                data.drop 0
+                block
+                  block
+                    local.get 0
+                    br_table 0 1 0
+                  end
+                  local.get 0
+                  br_if 0
+                  br 0
+                end
+                local.get 0
+                i32.const 0
+                call_indirect (type 0)))
+            "#,
+        )
+        .expect("index-immediate fixture assembles");
+
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translate succeeds");
+
+        for needle in [
+            "BI_br 0%N",
+            "BI_br_if 0%N",
+            "BI_br_table (0%N :: 1%N :: nil)",
+            "BI_call_indirect 0%N 0%N",
+            "BI_memory_init 0%N",
+            "BI_data_drop 0%N",
+            "ME_functions 0%N",
+        ] {
+            assert!(
+                output.contains(needle),
+                "index immediate must be emitted as `{needle}`; got:\n{output}",
+            );
+        }
+
+        for bare in [
+            "BI_br 0 ",
+            "BI_br_table (0 ::",
+            "BI_call_indirect 0 0",
+            "BI_memory_init 0 ",
+            "BI_data_drop 0 ",
+            "ME_functions 0:",
+        ] {
+            assert!(
+                !output.contains(bare),
+                "`{bare}` leaves the numeral's scope to inference; got:\n{output}",
+            );
+        }
+    }
 }
 
 /// Robustness tests for the external `.wasm` static-linking path through
