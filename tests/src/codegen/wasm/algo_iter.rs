@@ -165,6 +165,13 @@ mod algo_iter_tests {
         call!("is_prime_bool", i32, 97_i32, 1_i32);
     }
 
+    /// The Inference, rustc, and zig builds of the same algorithms agree on every
+    /// observable result; the test skips when either external compiler is absent.
+    ///
+    /// Both external compilers emit into a per-run `TempDir`, named through the
+    /// operating system's exclusive-create loop, so concurrent test processes never
+    /// share the directory zig builds in nor read a module another one is still
+    /// rewriting; its drop guard removes the directory even when an assertion fails.
     #[test]
     fn algo_iter_cross_compiler_test() {
         use crate::utils::{get_test_data_path, wasm_codegen};
@@ -183,7 +190,8 @@ mod algo_iter_tests {
 
         // Compile Rust source
         let rust_source = test_dir.join("algo_iter.rs");
-        let rust_out_dir = std::path::PathBuf::from("/tmp/algo_iter_rustc");
+        let scratch = tempfile::TempDir::new().expect("create scratch dir");
+        let rust_out_dir = scratch.path().join("rustc");
         std::fs::create_dir_all(&rust_out_dir)
             .unwrap_or_else(|e| panic!("Failed to create {}: {e}", rust_out_dir.display()));
         let rust_wasm_path = rust_out_dir.join("algo_iter.wasm");
@@ -217,7 +225,7 @@ mod algo_iter_tests {
 
         // Compile Zig source
         let zig_source = test_dir.join("algo_iter.zig");
-        let zig_out_dir = std::path::PathBuf::from("/tmp/algo_iter_zig");
+        let zig_out_dir = scratch.path().join("zig");
         std::fs::create_dir_all(&zig_out_dir)
             .unwrap_or_else(|e| panic!("Failed to create {}: {e}", zig_out_dir.display()));
         let zig_result = Command::new("zig")

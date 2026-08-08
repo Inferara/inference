@@ -377,15 +377,18 @@ mod tests {
         assert_eq!(by_spec.get("Empty"), Some(&Vec::<u32>::new()));
     }
 
+    /// `write_wasm_to` puts exactly the bytes `wasm()` reports on disk. The
+    /// scratch file lives inside a `TempDir` so that concurrent test processes
+    /// never write to and delete the same path; the directory's drop guard
+    /// removes it even when an assertion fails.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn write_wasm_to_creates_file() {
         let output = sample_output();
-        let dir = std::env::temp_dir();
-        let path = dir.join("test_codegen_output_wasm.wasm");
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let path = dir.path().join("codegen_output.wasm");
         output.write_wasm_to(&path).expect("Failed to write WASM");
         let contents = std::fs::read(&path).expect("Failed to read WASM");
         assert_eq!(contents, output.wasm());
-        std::fs::remove_file(&path).ok();
     }
 }
