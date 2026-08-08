@@ -17,8 +17,9 @@
 //! `Inference.toml` and honors `[build] wasm-features`, so running one file of a
 //! project cannot execute a module at a different WebAssembly instruction level
 //! than `infs build` would produce for it. `[wasm-dependencies]` is not resolved
-//! on this path (single-file `build` does resolve it); that asymmetry predates
-//! this and is tracked separately.
+//! on this path — the only path where it is not (single-file `build` and both
+//! project paths do resolve it); that asymmetry predates this and is tracked
+//! separately (#367).
 //!
 //! ```bash
 //! infs run                                    # project mode: build + invoke main
@@ -42,6 +43,11 @@
 //!   behavior except when the enclosing manifest requests `wasm-features`, where
 //!   a capability probe is the only way to refuse a request the compiler cannot
 //!   honor.
+//! - **Resolves `[wasm-dependencies]`**, also via the shared helper: the project
+//!   it runs is the one `infs build` would produce, externals included. A
+//!   project binding `use { … } from <module>` is otherwise unrunnable, since
+//!   `infc` resolves externals from forwarded flags only. `run` has no
+//!   `-L`/`--wasm-lib-dir` flag, so the manifest is its only source.
 //! - **Always builds in compile mode**, regardless of the manifest's
 //!   `[build] mode`. `run` executes the WASM, and proof-mode WASM embeds the
 //!   custom non-deterministic opcodes (the `0xfc` family) that wasmtime cannot
@@ -160,8 +166,8 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// `infs build <path>` honors it: one project must not emit modules at two
 /// different WebAssembly instruction levels depending on how the build was
 /// invoked, and this path overwrites the very artifact `infs build` produces.
-/// `[wasm-dependencies]` is *not* resolved here — that gap predates this and is
-/// tracked separately.
+/// `[wasm-dependencies]` is *not* resolved here — the last path where it is not,
+/// a gap that predates this and is tracked separately (#367).
 ///
 /// ## Errors
 ///
@@ -243,9 +249,12 @@ fn execute_project(args: &RunArgs) -> Result<()> {
     // custom non-deterministic opcodes (0xfc family) that wasmtime cannot
     // execute. Hence `mode = None` and `out_dir = None` here — manifest
     // mode/output-dir resolution lives only in `build`'s project path. The
-    // `[build.wasm-opt]` optimization still applies (unless `--no-wasm-opt`) so
-    // `run` executes exactly what `build` would ship.
-    run_project_build(&ctx, false, None, None, args.no_wasm_opt)?;
+    // empty `wasm_lib_dirs` is not a suppression: `run` simply has no
+    // `-L` flag, and the manifest's `[wasm-dependencies]` still reaches `infc`
+    // through the shared helper. The `[build.wasm-opt]` optimization still
+    // applies (unless `--no-wasm-opt`) so `run` executes exactly what `build`
+    // would ship.
+    run_project_build(&ctx, false, None, None, &[], args.no_wasm_opt)?;
 
     let wasm_path = project_wasm_path(&ctx);
     if !wasm_path.exists() {

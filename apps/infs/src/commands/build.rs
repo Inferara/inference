@@ -59,6 +59,11 @@
 //! - **`--out-dir` is forwarded only to an `infc` that supports it**;
 //!   pairing a non-default `output-dir` with an older `infc` hard-errors with
 //!   remediation rather than failing opaquely in the subprocess.
+//! - **`[wasm-dependencies]`** is forwarded as one `--wasm-dep <name>=<path>`
+//!   per declaration (paths resolved against the project root), alongside every
+//!   `-L`/`--wasm-lib-dir` the user passed. `infc` resolves `use { … } from
+//!   <module>` from those two sources only, so without them a project binding
+//!   externals cannot link — in proof mode, cannot emit its `.v` at all.
 //!
 //! ## Manifest settings honored in single-file mode
 //!
@@ -72,8 +77,9 @@
 //! [`crate::commands::run`] for the third). A file outside any project takes the
 //! defaults and never errors.
 //!
-//! `[wasm-dependencies]` is resolved by single-file *build* only; that single-file
-//! `run` does not resolve it predates this and is tracked separately.
+//! `[wasm-dependencies]` is resolved on every path but one: single-file `build`
+//! (here) and both project paths forward it. That single-file `run` does not
+//! resolve it predates this and is tracked separately (#367).
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -133,7 +139,11 @@ pub struct BuildArgs {
     pub mode: Option<BuildMode>,
 
     /// Directory to search for external `.wasm` modules referenced by
-    /// `use { … } from <module>;`. Repeatable; forwarded verbatim to `infc`.
+    /// `use { … } from <module>;`. Repeatable; forwarded as `--wasm-lib-dir` in
+    /// both single-file and project mode. A relative dir always means what it
+    /// meant at the shell: single-file `infc` inherits the invocation directory,
+    /// and the project path anchors the dir to that directory before forwarding,
+    /// because it moves `infc` to the project root.
     #[clap(short = 'L', long = "wasm-lib-dir", value_name = "DIR")]
     pub wasm_lib_dirs: Vec<PathBuf>,
 
@@ -245,6 +255,11 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
 /// Formats one resolved manifest dependency as the `<name>=<path>` argument
 /// forwarded to `infc --wasm-dep`.
 ///
+/// Shared by the single-file path here and the project path in
+/// [`crate::commands::project_build`]: the two must spell a dependency the same
+/// way, or one project would bind its externals differently depending on how the
+/// build was invoked.
+///
 /// `name` is already validated against the logical-name grammar in
 /// [`crate::project::manifest::validate_wasm_dependency_key`], so it never
 /// contains `=`. The receiver splits on the FIRST `=`, which is therefore always
@@ -262,7 +277,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
 /// ## Errors
 ///
 /// Returns an error when `path` is not valid UTF-8.
-fn format_wasm_dep_arg(name: &str, path: &Path) -> Result<String> {
+pub(crate) fn format_wasm_dep_arg(name: &str, path: &Path) -> Result<String> {
     let Some(path) = path.to_str() else {
         bail!(
             "wasm dependency `{name}` resolves to a path that is not valid UTF-8 ({}); \
@@ -365,6 +380,7 @@ fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
         args.generate_v_output,
         effective_mode,
         out_dir.as_deref(),
+        &args.wasm_lib_dirs,
         args.no_wasm_opt,
     )
 }

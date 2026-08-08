@@ -181,7 +181,7 @@ Flags:
 |------|-------------|
 | `-v` | Generate Rocq `.v` translation in addition to `.wasm` |
 | `--mode {compile,proof}` | Override compilation mode |
-| `-L <DIR>` / `--wasm-lib-dir <DIR>` | Add a directory to search for external `.wasm` modules; repeatable |
+| `-L <DIR>` / `--wasm-lib-dir <DIR>` | Add a directory to search for external `.wasm` modules; repeatable. A relative directory is read against the directory you invoked `infs` from, in both modes |
 
 **Mode resolution** (precedence, highest first):
 
@@ -314,11 +314,14 @@ infs build
     +-- spawn infc
             CWD = <project root>
             arg: src/main.inf
-            arg: --mode proof           (if effective proof mode)
             arg: -v                     (if .v requested)
+            arg: --mode proof           (if effective proof mode)
             arg: --out-dir <dir>        (if effective proof mode + ABI ≥ 1.1)
-            arg: --wasm-dep name=path   (one per [wasm-dependencies] entry)
-            arg: -L <dir>               (repeated for each --wasm-lib-dir)
+            arg: --wasm-lib-dir <dir>   (one per -L/--wasm-lib-dir; a relative
+                                         dir is anchored to the invocation
+                                         directory, since infc runs at the root)
+            arg: --wasm-dep name=path   (one per [wasm-dependencies] entry; the
+                                         declared path resolved against the root)
 ```
 
 **`infc` flags** confirmed against `core/cli/src/parser.rs`:

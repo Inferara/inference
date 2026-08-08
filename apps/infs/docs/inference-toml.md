@@ -87,10 +87,12 @@ ABI gate as project mode. This is deliberate rather than incidental: `infs build
 `out/main.wasm` for the same project, so if they disagreed about the instruction
 set, the artifact you ship would depend on which command last touched it.
 
-That `infs run <path>` does not resolve `[wasm-dependencies]` is a pre-existing
-gap, not a consequence of the above; it is tracked separately. A file that imports
-an external module therefore needs `infs build` (or `-L`) rather than single-file
-`run`.
+`[wasm-dependencies]` is otherwise resolved everywhere: project `infs build` and
+project `infs run` both forward every declared entry to `infc`. That `infs run
+<path>` does not is a pre-existing gap, not a consequence of the above; it is
+tracked as [#367](https://github.com/Inferara/inference/issues/367). A file that
+imports an external module therefore needs project mode, `infs build <path>`, or
+`-L` rather than single-file `run`.
 
 Everything else in the manifest is project-mode configuration: `[build] mode`,
 `[verification] output-dir`, and `[build.wasm-opt]` are not consulted in

@@ -26,26 +26,29 @@
 //! The compatibility handshake ([`probe_compiler_compatibility`]) also lives
 //! here: it is part of "running a project build", and keeping it beside the
 //! single spawning site keeps the coupling tight. Every caller wants the probed
-//! capability, not just the pass/fail — the additive flags `infs` forwards
-//! (`--out-dir`, `--wasm-features`) are each gated on it.
+//! capability, not just the pass/fail — the additive flags `infs` gates
+//! (`--out-dir`, `--wasm-features`) are each checked against it.
 //!
 //! ## Which settings are parameters and which are read off the context
 //!
-//! [`run_project_build`] takes `mode` and `out_dir` as parameters but reads
-//! `[build] wasm-features` straight off `ctx`. The rule: a setting a CLI flag can
-//! override, or that a caller must be able to suppress, is threaded so the
-//! caller stays the single place that resolves it (`run` deliberately passes
-//! `mode = None` to force compile mode). A setting only the manifest can express,
-//! with no flag and nothing to suppress, is read from `ctx` — threading it would
-//! let two callers disagree about a property of the project itself. An
-//! instruction-set request is the latter: `build` and `run` emitting different
-//! instruction levels for one project is a bug, not a configuration.
+//! [`run_project_build`] takes `mode`, `out_dir`, and `wasm_lib_dirs` as
+//! parameters but reads `[build] wasm-features` and `[wasm-dependencies]`
+//! straight off `ctx`. The rule: a setting a CLI flag can override, or that a
+//! caller must be able to suppress, is threaded so the caller stays the single
+//! place that resolves it (`run` deliberately passes `mode = None` to force
+//! compile mode, and has no `-L` flag of its own to pass on). A setting only the
+//! manifest can express, with no flag and nothing to suppress, is read from
+//! `ctx` — threading it would let two callers disagree about a property of the
+//! project itself. An instruction-set request is the latter, as is the set of
+//! external modules the project links against: `build` and `run` emitting
+//! different instruction levels — or resolving one project's `use { … } from
+//! <module>` against different `.wasm` files — is a bug, not a configuration.
 
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::commands::build::BuildMode;
+use crate::commands::build::{BuildMode, format_wasm_dep_arg};
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
 use crate::project::manifest::MANIFEST_FILE_NAME;
@@ -82,6 +85,25 @@ use inference_compiler_interface::{
 /// `infs run` always passes `out_dir = None` (and `mode = None`), so project
 /// `run` always builds an executable in `out/`.
 ///
+/// External-module resolution reaches `infc` as two flag families, so a project
+/// whose sources bind `use { … } from <module>` can link: each `wasm_lib_dirs`
+/// entry becomes `--wasm-lib-dir <dir>`, and each `[wasm-dependencies]` entry
+/// becomes `--wasm-dep <name>=<path>` with the declared path resolved against
+/// the project root. Neither is capability-gated, matching the single-file path:
+/// both flags arrived with external-module support itself rather than at a
+/// distinguishable ABI minor, so the handshake has nothing to check — an `infc`
+/// old enough to lack them could not compile a `use { … } from <module>` binding
+/// at all.
+///
+/// A lib dir is anchored to the *invocation* directory before it is forwarded,
+/// precisely because this helper re-anchors the child process to the project
+/// root: `-L ../libs` typed in `<root>/src` names `<root>/src/../libs`, and
+/// forwarding it verbatim would have `infc` read it as `<root>/../libs` instead
+/// — failing to link, or silently linking a same-named module that happens to
+/// sit at the root-anchored path. Joining onto the invocation directory leaves
+/// an absolute dir unchanged. Single-file mode needs no such treatment: `infc`
+/// inherits the working directory there, so a relative dir keeps its meaning.
+///
 /// The manifest's `[build] wasm-features` is read straight off `ctx` rather than
 /// passed in, so `build` and `run` cannot disagree about the instruction level of
 /// the module they produce, and it applies in both compile and proof mode — a
@@ -103,6 +125,9 @@ use inference_compiler_interface::{
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - the manifest requests `wasm-features` the resolved `infc` cannot honor
+/// - a `[wasm-dependencies]` key is not a well-formed logical module name
+/// - a resolved `[wasm-dependencies]` path is not valid UTF-8
+/// - lib dirs were passed and the current working directory cannot be determined
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 /// - post-build optimization is active and fails (missing/invalid artifact,
 ///   `wasm-opt` resolution, or the optimization itself)
@@ -111,6 +136,7 @@ pub(crate) fn run_project_build(
     generate_v_output: bool,
     mode: Option<BuildMode>,
     out_dir: Option<&Path>,
+    wasm_lib_dirs: &[PathBuf],
     no_wasm_opt: bool,
 ) -> Result<()> {
     if !ctx.entry_point.is_file() {
@@ -149,6 +175,19 @@ pub(crate) fn run_project_build(
             );
         }
         cmd.arg("--out-dir").arg(dir);
+    }
+
+    if !wasm_lib_dirs.is_empty() {
+        let cwd =
+            std::env::current_dir().context("Failed to determine the current working directory")?;
+        for dir in wasm_lib_dirs {
+            cmd.arg("--wasm-lib-dir").arg(cwd.join(dir));
+        }
+    }
+
+    for (name, path) in ctx.manifest.resolved_wasm_dependencies(&ctx.root)? {
+        cmd.arg("--wasm-dep")
+            .arg(format_wasm_dep_arg(&name, &path)?);
     }
 
     let features = ctx.manifest.build.resolved_wasm_features()?;
@@ -442,7 +481,7 @@ mod project_tests {
             entry_point: root.join("src").join("main.inf"),
         };
 
-        let err = run_project_build(&ctx, false, None, None, false).unwrap_err();
+        let err = run_project_build(&ctx, false, None, None, &[], false).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
@@ -466,7 +505,7 @@ mod project_tests {
             entry_point: entry,
         };
 
-        let err = run_project_build(&ctx, false, None, None, false).unwrap_err();
+        let err = run_project_build(&ctx, false, None, None, &[], false).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
