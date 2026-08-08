@@ -47,10 +47,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-index-
       
+      # `target/llvm-cov-target` is deliberately excluded: `cargo llvm-cov
+      # report` unions coverage regions from every binary it finds there, so a
+      # cached binary built from an earlier commit maps its stale line table
+      # onto the current sources and invents phantom (un)covered lines.
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
-          path: target
+          path: |
+            target
+            !target/llvm-cov-target
           key: ${{ runner.os }}-cargo-build-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-coverage-
@@ -58,6 +64,26 @@ jobs:
       
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      # The infs integration suite self-skips its run-path tests when `wasmtime`
+      # is not in PATH, and its end-to-end compiler tests when
+      # `target/debug/infc` is absent — cargo-llvm-cov builds into its own
+      # target directory, so the compiler must be built here explicitly.
+      # Provisioning both lets the coverage run exercise the full suite instead
+      # of silently dropping those paths from the report.
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+
+      - name: Build infc for tests that spawn the real compiler
+        env:
+          RUSTFLAGS: ""
+        run: cargo build -p inference-cli
+
+      # A cache restored via the fallback keys may predate the exclusion above
+      # and still carry stale coverage artifacts; start every run from a clean
+      # slate regardless of what the cache brought in.
+      - name: Clean stale coverage artifacts
+        run: cargo llvm-cov clean --workspace
 
       - name: Run tests with coverage for core crates
         run: |

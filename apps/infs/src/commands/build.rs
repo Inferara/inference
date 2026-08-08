@@ -447,6 +447,48 @@ fn resolve_out_dir(
 }
 
 #[cfg(test)]
+mod cli_surface_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// A minimal parser wrapping [`BuildArgs`], standing in for the real CLI so
+    /// the flag surface can be exercised without spawning the binary.
+    #[derive(Parser)]
+    struct BuildCli {
+        #[command(flatten)]
+        args: BuildArgs,
+    }
+
+    /// Both spellings of the lib-dir flag parse, repeat, mix, and preserve the
+    /// order given. The order is contractual, not cosmetic: `infc` searches the
+    /// directories in the order received and the first hit wins, so a parse
+    /// that reordered them would change which `.wasm` a module resolves to.
+    #[test]
+    fn lib_dir_flag_accepts_both_spellings_and_preserves_order() {
+        let cli = BuildCli::try_parse_from([
+            "build",
+            "-L",
+            "first",
+            "--wasm-lib-dir",
+            "second",
+            "-L",
+            "third",
+            "main.inf",
+        ])
+        .expect("both spellings of the lib-dir flag must parse");
+        assert_eq!(
+            cli.args.wasm_lib_dirs,
+            [
+                PathBuf::from("first"),
+                PathBuf::from("second"),
+                PathBuf::from("third")
+            ]
+        );
+        assert_eq!(cli.args.path.as_deref(), Some(Path::new("main.inf")));
+    }
+}
+
+#[cfg(test)]
 mod manifest_dep_tests {
     use super::*;
     use assert_fs::prelude::*;

@@ -297,6 +297,38 @@ fn help_shows_available_commands() {
         .stdout(predicate::str::contains("--headless"));
 }
 
+/// `infs build --help` documents the external-lib-dir flag, including the
+/// relative-directory semantics: a relative `-L` always means what it meant at
+/// the shell, in project mode as much as in single-file mode. That sentence is
+/// the user-visible contract behind the invocation-directory anchoring in
+/// `run_project_build`, so it is pinned here — rendering the help is also the
+/// only invocation that materializes the flag's help text at all.
+///
+/// clap re-wraps help text to the terminal width, so the assertions run against
+/// a whitespace-normalized copy of the output rather than the raw bytes.
+#[test]
+fn build_help_documents_the_external_lib_dir_flag() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.arg("build").arg("--help");
+
+    let assert = cmd.assert().success();
+    let normalized = stdout_of(&assert)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for expected in [
+        "--wasm-lib-dir",
+        "-L",
+        "Directory to search for external `.wasm` modules",
+        "A relative dir always means what it meant at the shell",
+    ] {
+        assert!(
+            normalized.contains(expected),
+            "`infs build --help` must document {expected:?}; normalized output was:\n{normalized}"
+        );
+    }
+}
+
 // Headless Mode Tests
 
 /// Verifies that headless mode without a command shows informational output.
