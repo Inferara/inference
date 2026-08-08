@@ -205,43 +205,20 @@ mod gate {
         Err(log)
     }
 
-    #[test]
-    fn corpus_type_checks_against_vendored_stub() {
-        // 1. Generate every corpus module in-process.
-        let generated: Vec<(&str, String)> = CORPUS
-            .iter()
-            .map(|&(file, name)| (file, admit_open_proofs(&generate_v(file, name))))
-            .collect();
-
-        // 2. Always-on guard: the corpus must keep exercising the proof surface,
-        //    independent of whether `coqc` is present on this machine.
-        let all: String = generated.iter().map(|(_, v)| v.as_str()).collect();
-        for needle in REQUIRED_CONSTRUCTS {
-            assert!(
-                all.contains(needle),
-                "corpus no longer emits `{needle}`; the coqc gate would stop \
-                 covering it — add or fix a fixture in tests/test_data/inf/"
-            );
-        }
-
-        // 3. The coqc compile is gated: real in CI, skipped locally when absent.
-        let Some(coqc) = find_coqc() else {
-            eprintln!(
-                "skipped: coqc not found (set COQC or put coqc on PATH). \
-                 Corpus generated and proof-surface coverage verified; \
-                 type-checking against the vendored stub was not run."
-            );
-            return;
-        };
-
-        // 4. Compile the vendored stub once into a private temp dir (coqc writes
-        //    `.vo` next to sources, so copy out of the read-only repo tree). On a
-        //    coqc failure the dir is deliberately kept so the rejected `.v` and
-        //    compiled stub are available for a manual `coqc` repro; a successful
-        //    run removes it, and the pre-clean below handles a stale same-PID
-        //    leftover.
-        let work =
-            std::env::temp_dir().join(format!("inference_rocq_typecheck_{}", std::process::id()));
+    /// Copies the vendored stub into a private work directory and compiles both
+    /// namespaces in `_CoqProject` dependency order, returning that directory.
+    ///
+    /// `coqc` writes `.vo` files next to their sources, so the read-only repo
+    /// tree cannot be compiled in place; `label` additionally keeps two gates
+    /// running concurrently in this binary out of each other's directory. On a
+    /// failure the directory is deliberately kept so the rejected `.v` and the
+    /// compiled stub are available for a manual `coqc` repro; a successful gate
+    /// removes it, and the pre-clean below handles a stale leftover.
+    fn compile_stub(coqc: &str, label: &str) -> PathBuf {
+        let work = std::env::temp_dir().join(format!(
+            "inference_rocq_typecheck_{}_{label}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(work.join("wasm")).expect("create work/wasm dir");
         std::fs::create_dir_all(work.join("wasm_verifier")).expect("create work/wasm_verifier dir");
@@ -268,7 +245,7 @@ mod gate {
         }
         for (dir, module) in stub_modules {
             let file = work.join(dir).join(format!("{module}.v"));
-            if let Err(log) = coqc_compile(&coqc, &work, &file) {
+            if let Err(log) = coqc_compile(coqc, &work, &file) {
                 panic!(
                     "vendored stub failed to compile ({dir}/{module}.v):\n{log}\n\
                      work dir kept for inspection: {}",
@@ -276,8 +253,55 @@ mod gate {
                 );
             }
         }
+        work
+    }
 
-        // 5. Type-check every generated module against the compiled stub.
+    #[test]
+    fn corpus_type_checks_against_vendored_stub() {
+        // 1. Generate every corpus module in-process.
+        let generated: Vec<(&str, String)> = CORPUS
+            .iter()
+            .map(|&(file, name)| (file, admit_open_proofs(&generate_v(file, name))))
+            .collect();
+
+        // 2. Always-on guard: the corpus must keep exercising the proof surface,
+        //    independent of whether `coqc` is present on this machine.
+        let all: String = generated.iter().map(|(_, v)| v.as_str()).collect();
+        for needle in REQUIRED_CONSTRUCTS {
+            assert!(
+                all.contains(needle),
+                "corpus no longer emits `{needle}`; the coqc gate would stop \
+                 covering it — add or fix a fixture in tests/test_data/inf/"
+            );
+        }
+
+        // 3. The `byte_scope` preamble line is conditional on a data segment,
+        //    and Inference codegen emits none, so no corpus module carries one.
+        //    Pinning its absence keeps the preamble free of anything a module
+        //    does not use, and keeps every committed `.v` byte-identical to the
+        //    output it had before byte literals gained a scope requirement.
+        for (file, v) in &generated {
+            assert!(
+                !v.contains("Open Scope byte_scope."),
+                "`{file}` carries no data segment, so its preamble must not \
+                 open `byte_scope`; got:\n{v}"
+            );
+        }
+
+        // 4. The coqc compile is gated: real in CI, skipped locally when absent.
+        let Some(coqc) = find_coqc() else {
+            eprintln!(
+                "skipped: coqc not found (set COQC or put coqc on PATH). \
+                 Corpus generated and proof-surface coverage verified; \
+                 type-checking against the vendored stub was not run."
+            );
+            return;
+        };
+
+        // 5. Compile the vendored stub once into a private temp dir.
+        let work = compile_stub(&coqc, "corpus");
+
+        // 6. Type-check every generated module against the compiled stub.
         for (file, v) in &generated {
             let v_path = work.join(format!("{}.v", file.trim_end_matches(".inf")));
             std::fs::write(&v_path, v).unwrap_or_else(|e| panic!("write {file}: {e}"));
@@ -291,6 +315,137 @@ mod gate {
             }
         }
 
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A handcrafted foreign module carrying the element, data, and `br_table`
+    /// shapes Inference codegen never produces.
+    ///
+    /// Element segments (in all three modes and both item forms), data segments,
+    /// and `br_table` reach the translator only from foreign or statically-linked
+    /// `.wasm`, so no `.inf` fixture can drive them into the corpus gate above.
+    /// That is how three terms the proof contract has no constructor for stayed
+    /// emitted, and how the `byte_scope` notations a data byte is written with
+    /// stayed unmodelled on the *stub* side (#346). Byte spelling is the one
+    /// place where the stub can fail in both directions — declaring too few
+    /// notations rejects a module the backend accepts, declaring too many
+    /// accepts one it rejects — so this fixture's data bytes cover the gap in
+    /// the contract's own notation block as well as the range extremes. This
+    /// gate assembles the constructs directly as WASM and runs the same public
+    /// `wasm_to_v` entry the corpus uses.
+    ///
+    /// `br_table`'s default label deserves its own arm: it is a separate
+    /// immediate that the explicit-target list never contains, and a table whose
+    /// list is empty (`br_table 0`) is valid WASM carrying nothing else.
+    #[test]
+    fn foreign_segments_type_check_against_vendored_stub() {
+        const MODULE: &str = "foreign_segments";
+        // Two `br_table`s (explicit targets with a distinct default, and a
+        // default-only table), all three element modes across both item forms
+        // (bare function indexes and `ref.func` initializer expressions), and
+        // active and passive data segments. The passive segment spans both byte
+        // spellings and the whole byte range: the two extremes, so a spelling
+        // that only works for the printable middle fails here, and `0x12`/`0x1f`
+        // from the twelve-value gap the contract declares no hex notation for,
+        // so a uniform hex spelling fails here too.
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (table (;0;) 4 4 funcref)
+              (memory (;0;) 1)
+              (elem (;0;) (i32.const 0) func 0 1)
+              (elem (;1;) declare func 1)
+              (elem (;2;) funcref (item ref.func 0))
+              (data (;0;) (i32.const 0) "hi")
+              (data (;1;) "\00\12\1f\ff")
+              (func (;0;) (type 0) (param i32) (result i32)
+                block
+                  block
+                    local.get 0
+                    br_table 0 1 1
+                  end
+                  block
+                    local.get 0
+                    br_table 0
+                  end
+                end
+                local.get 0)
+              (func (;1;) (type 0) (param i32) (result i32)
+                local.get 0))
+            "#,
+        )
+        .expect("foreign-segment fixture assembles");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let empty_hspecs = inference::HSpecMap::default();
+        let v = inference::wasm_to_v(MODULE, &bytes, &empty, &empty_hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for the foreign fixture: {e}"));
+
+        // Teeth without `coqc`: the exact terms the contract accepts.
+        for needle in [
+            "BI_br_table (0%N :: 1%N :: nil) 1%N",
+            "BI_br_table nil 0%N",
+            "ME_active 0%N",
+            "ME_declarative",
+            "ME_passive",
+            "(BI_ref_func 0%N :: nil)",
+            "(BI_ref_func 1%N :: nil)",
+            "moddata_init := #68 :: #69 :: nil",
+            "moddata_init := #00 :: (encode 18%Z) :: (encode 31%Z) :: #FF :: nil",
+            "MD_active 0%N",
+            "MD_passive",
+            // The byte notations parse only inside `byte_scope`, so a module
+            // carrying data segments opens it; `coqc` below is what proves the
+            // line is load-bearing rather than decorative.
+            "Open Scope byte_scope.\n",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the foreign module must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        // Spellings the contract cannot elaborate: an element mode written into
+        // the field that holds initializer expressions, `BI_br_table` applied
+        // to fewer arguments than it takes, and the two hex byte notations from
+        // the gap in the contract's notation block. The gap notations are the
+        // regression this fixture's `\12`/`\1f` bytes exist for: they look like
+        // every other byte spelling and parse nowhere.
+        for retired in [
+            "ME_functions",
+            "ME_declared",
+            "BI_br_table ::",
+            "#12",
+            "#1F",
+        ] {
+            assert!(
+                !v.contains(retired),
+                "`{retired}` is not a term the proof contract accepts; got:\n{v}"
+            );
+        }
+
+        let Some(coqc) = find_coqc() else {
+            eprintln!(
+                "skipped: coqc not found (set COQC or put coqc on PATH). \
+                 Foreign module generated and its emitted shapes verified; \
+                 type-checking against the vendored stub was not run."
+            );
+            return;
+        };
+
+        let work = compile_stub(&coqc, "foreign");
+        let v_path = work.join(format!("{MODULE}.v"));
+        std::fs::write(&v_path, admit_open_proofs(&v))
+            .unwrap_or_else(|e| panic!("write {MODULE}.v: {e}"));
+        if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
+            panic!(
+                "coqc rejected the foreign module's `.v` against the vendored \
+                 Wasm stub:\n{log}\n\
+                 work dir kept for inspection: {}",
+                work.display()
+            );
+        }
         let _ = std::fs::remove_dir_all(&work);
     }
 

@@ -49,6 +49,22 @@ From Wasm Require Import bytes numerics datatypes host.
 From WasmVerifier Require Import Assertions Verifier.
 ```
 
+One further preamble line is conditional: a module carrying at least one
+data segment also emits
+
+```coq
+Open Scope byte_scope.
+```
+
+because most data bytes are spelled with a `byte_scope` notation (see
+below) and those parse only while that scope is open. Whether an `Import`
+chain leaves the scope open is a detail of the library rather than of
+this contract, so a module that can spell a byte notation states the
+requirement itself. The line is keyed on a data segment being present
+rather than on the bytes inside it: opening a scope nothing happens to
+use is inert. A module with no data segment names no byte at all and
+emits no such line.
+
 Within that context, the translator depends on:
 
 - A `module` record with the per-section fields every emitted module
@@ -57,6 +73,29 @@ Within that context, the translator depends on:
   `mod_exports`. A `module_func` record (`modfunc_type`,
   `modfunc_locals`, `modfunc_body`). Field types match vanilla
   WasmCert-Coq v2.2.0.
+- Element and data segments in the shapes wasm-verifier's `coq-wasm`
+  dependency defines. `module_element` splits contents from placement:
+  `modelem_init` is a list of *initializer expressions* (each a
+  `list basic_instruction`), and the placement is the separate
+  `modelem_mode` field (`ME_passive` | `ME_declarative` |
+  `ME_active tableidx expr`). The binary format's shorthand of bare
+  function indexes has no constructor of its own — it is desugared as the
+  WASM specification defines it, one `BI_ref_func i` expression per
+  index. `module_data`'s `moddata_init` is a `list byte`, where `byte` is
+  CompCert's `Integers.byte` built from a `Z` by the exported
+  `encode : Z -> byte`. That library abbreviates `encode` with two-digit
+  **uppercase** hex notations in `byte_scope`, but its notation block is
+  hand-written and covers 244 of the 256 values — `#12` .. `#19` and
+  `#1C` .. `#1F` have no notation. A byte is emitted in its notation
+  where one exists, and as the `encode` application that notation would
+  have abbreviated (`(encode 18%Z)`) for the twelve that have none. The
+  notations parse only while `byte_scope` is open, which is what the
+  conditional preamble line above supplies; the applications need no
+  scope.
+- `BI_br_table : list N -> N -> basic_instruction` — the explicit label
+  vector **and** the default label. The default is a separate immediate
+  in the binary format and never appears in the vector, and a table whose
+  vector is empty (`br_table 0`) is valid WASM that still carries one.
 - A `host` typeclass (`Context `{ho: host}`). Every emitted theorem is
   wrapped in a `Section Host. Context `{ho: host}. ... End Host.` pair,
   even `ValidModule`'s, which does not itself depend on the host context —
@@ -253,7 +292,7 @@ forms:
 
 - `instantiated(abs)` — the renumbered index into the emitted module's
   function space (imports, then surviving locals). Used for `BI_call`
-  operands, export/element/start descriptors.
+  and `BI_ref_func` operands, export/element/start descriptors.
 - `mod_funcs_index(abs)` — `instantiated(abs)` minus the import count,
   the `mod_funcs`-relative index `T_app`/`HA_app_ok` need.
 
@@ -269,7 +308,8 @@ references function N, which is an omitted spec function"), and
 | `mod_types` (positional type indices) | **Unchanged** — kept complete. The type section itself is untouched, so a surviving function's `modfunc_type` needs no adjustment even though its own type index may now be unused by any function |
 | `BI_call` operands | `translate_basic_operator`'s `Operator::Call` arm, via `remap.instantiated` |
 | Export descriptors (`MED_func`) | `translate_module_export_desc`, via `remap.instantiated` |
-| Element segments (function-index lists) | `translate_element`, via `remap.instantiated` |
+| Element segments (function-index items) | `translate_element`, via `remap.instantiated`, before each index is wrapped in its `BI_ref_func` initializer expression |
+| `BI_ref_func` operands | `translate_basic_operator`'s `Operator::RefFunc` arm, via `remap.instantiated`. An element segment's other item form spells its reference as this instruction directly, and a body may too, so both forms land on the same renumbered index |
 | `mod_start` | via `remap.instantiated` |
 | `T_app` / `HA_app_ok` targets | via `remap.mod_funcs_index` (see [T_app resolution discipline](#t_app-resolution-discipline)) |
 
