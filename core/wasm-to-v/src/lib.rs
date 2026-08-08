@@ -877,6 +877,126 @@ mod link_robustness {
             "a non-function import must not shift the defined function's index:\n{output}",
         );
     }
+
+    /// Slices the emitted `.v` from one `Definition <name> : module_func :=`
+    /// header up to the next `Definition`, so an assertion about one function's
+    /// body cannot be satisfied by a neighbour's text.
+    fn definition_body<'a>(output: &'a str, name: &str) -> &'a str {
+        let header = format!("Definition {name} : module_func :=");
+        let start = output
+            .find(&header)
+            .unwrap_or_else(|| panic!("`{header}` must be emitted:\n{output}"));
+        let body = &output[start + header.len()..];
+        match body.find("Definition ") {
+            Some(end) => &body[..end],
+            None => body,
+        }
+    }
+
+    /// The name section keys local names on the *function* index, so the
+    /// `(*name*)` comments on `BI_local_get` / `BI_local_set` / `BI_local_tee`
+    /// must be resolved with that index — not with the function's *type* index,
+    /// which diverges the moment two functions share one type-section entry.
+    ///
+    /// `$a` and `$c` have the same signature, so the WAT assembler interns one
+    /// type entry for both: `$c` is function index 2 but type index 0. Resolving
+    /// by type index hands `$c` the local names of `$a`, labelling one
+    /// function's body with another's parameter name. `$c` exercises all three
+    /// name-bearing operators, since each carries the comment on its own arm.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn local_names_resolve_by_function_index_not_type_index() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (func $a (param $alpha i32) (result i32) local.get $alpha)
+              (func $b (param $beta i64) (result i64) local.get $beta)
+              (func $c (param $gamma i32) (result i32)
+                (local $delta i32)
+                local.get $gamma
+                local.set $delta
+                local.get $delta
+                local.tee $delta))
+            "#,
+        )
+        .expect("type-sharing fixture WAT assembles");
+
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("a module sharing one type across two functions translates");
+
+        assert!(
+            definition_body(&output, "a").contains("BI_local_get 0%N (*alpha*)"),
+            "function index 0 must carry its own local name:\n{output}",
+        );
+        assert!(
+            definition_body(&output, "b").contains("BI_local_get 0%N (*beta*)"),
+            "function index 1 must carry its own local name:\n{output}",
+        );
+
+        let c = definition_body(&output, "c");
+        for expected in [
+            "BI_local_get 0%N (*gamma*)",
+            "BI_local_set 1%N (*delta*)",
+            "BI_local_get 1%N (*delta*)",
+            "BI_local_tee 1%N (*delta*)",
+        ] {
+            assert!(
+                c.contains(expected),
+                "function index 2 must carry its own local names even though it shares \
+                 function 0's type index; missing `{expected}`:\n{output}",
+            );
+        }
+        assert!(
+            !c.contains("(*alpha*)"),
+            "function index 2 must not inherit function 0's local names:\n{output}",
+        );
+    }
+
+    /// The name section numbers imported functions first, whereas the function
+    /// section's type indices do not, so a single function import is enough to
+    /// make the two numberings disagree for every defined body. Resolving by
+    /// type index then hands `$second` the names of `$first` and leaves
+    /// `$first` with the import's (absent) names.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn local_names_resolve_by_absolute_index_under_a_function_import() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (import "env" "host" (func (param i32) (result i32)))
+              (func $first (param $x i32) (result i32) local.get $x)
+              (func $second (param $y i64) (result i64) local.get $y))
+            "#,
+        )
+        .expect("import fixture WAT assembles");
+
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("an import-bearing module with named locals translates");
+
+        assert!(
+            definition_body(&output, "first").contains("BI_local_get 0%N (*x*)"),
+            "absolute index 1 must keep the local names the name section gives it:\n{output}",
+        );
+        let second = definition_body(&output, "second");
+        assert!(
+            second.contains("BI_local_get 0%N (*y*)"),
+            "absolute index 2 must carry its own local name:\n{output}",
+        );
+        assert!(
+            !second.contains("(*x*)"),
+            "absolute index 2 must not inherit the preceding function's local names:\n{output}",
+        );
+    }
 }
 
 /// Fail-closed rejection of every construct outside the wasm-verifier proof
