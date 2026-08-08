@@ -275,7 +275,20 @@ mod gate {
             );
         }
 
-        // 3. The coqc compile is gated: real in CI, skipped locally when absent.
+        // 3. The `byte_scope` preamble line is conditional on a data segment,
+        //    and Inference codegen emits none, so no corpus module carries one.
+        //    Pinning its absence keeps the preamble free of anything a module
+        //    does not use, and keeps every committed `.v` byte-identical to the
+        //    output it had before byte literals gained a scope requirement.
+        for (file, v) in &generated {
+            assert!(
+                !v.contains("Open Scope byte_scope."),
+                "`{file}` carries no data segment, so its preamble must not \
+                 open `byte_scope`; got:\n{v}"
+            );
+        }
+
+        // 4. The coqc compile is gated: real in CI, skipped locally when absent.
         let Some(coqc) = find_coqc() else {
             eprintln!(
                 "skipped: coqc not found (set COQC or put coqc on PATH). \
@@ -285,10 +298,10 @@ mod gate {
             return;
         };
 
-        // 4. Compile the vendored stub once into a private temp dir.
+        // 5. Compile the vendored stub once into a private temp dir.
         let work = compile_stub(&coqc, "corpus");
 
-        // 5. Type-check every generated module against the compiled stub.
+        // 6. Type-check every generated module against the compiled stub.
         for (file, v) in &generated {
             let v_path = work.join(format!("{}.v", file.trim_end_matches(".inf")));
             std::fs::write(&v_path, v).unwrap_or_else(|e| panic!("write {file}: {e}"));
@@ -310,10 +323,16 @@ mod gate {
     ///
     /// Element segments (in all three modes and both item forms), data segments,
     /// and `br_table` reach the translator only from foreign or statically-linked
-    /// `.wasm`, so no `.inf` fixture can drive them into the corpus gate above —
-    /// which is how four terms the contract has no constructor or notation for
-    /// stayed emitted (#346). This gate assembles the constructs directly as WASM
-    /// and runs the same public `wasm_to_v` entry the corpus uses.
+    /// `.wasm`, so no `.inf` fixture can drive them into the corpus gate above.
+    /// That is how three terms the proof contract has no constructor for stayed
+    /// emitted, and how the `byte_scope` notations a data byte is written with
+    /// stayed unmodelled on the *stub* side (#346). Byte spelling is the one
+    /// place where the stub can fail in both directions — declaring too few
+    /// notations rejects a module the backend accepts, declaring too many
+    /// accepts one it rejects — so this fixture's data bytes cover the gap in
+    /// the contract's own notation block as well as the range extremes. This
+    /// gate assembles the constructs directly as WASM and runs the same public
+    /// `wasm_to_v` entry the corpus uses.
     ///
     /// `br_table`'s default label deserves its own arm: it is a separate
     /// immediate that the explicit-target list never contains, and a table whose
@@ -324,9 +343,11 @@ mod gate {
         // Two `br_table`s (explicit targets with a distinct default, and a
         // default-only table), all three element modes across both item forms
         // (bare function indexes and `ref.func` initializer expressions), and
-        // active and passive data segments. The passive segment's bytes are the
-        // two extremes of the byte range, so a spelling that only works for the
-        // printable middle fails here.
+        // active and passive data segments. The passive segment spans both byte
+        // spellings and the whole byte range: the two extremes, so a spelling
+        // that only works for the printable middle fails here, and `0x12`/`0x1f`
+        // from the twelve-value gap the contract declares no hex notation for,
+        // so a uniform hex spelling fails here too.
         let bytes = wat::parse_str(
             r#"
             (module
@@ -337,7 +358,7 @@ mod gate {
               (elem (;1;) declare func 1)
               (elem (;2;) funcref (item ref.func 0))
               (data (;0;) (i32.const 0) "hi")
-              (data (;1;) "\00\ff")
+              (data (;1;) "\00\12\1f\ff")
               (func (;0;) (type 0) (param i32) (result i32)
                 block
                   block
@@ -370,10 +391,14 @@ mod gate {
             "ME_passive",
             "(BI_ref_func 0%N :: nil)",
             "(BI_ref_func 1%N :: nil)",
-            "moddata_init := x68 :: x69 :: nil",
-            "moddata_init := x00 :: xff :: nil",
+            "moddata_init := #68 :: #69 :: nil",
+            "moddata_init := #00 :: (encode 18%Z) :: (encode 31%Z) :: #FF :: nil",
             "MD_active 0%N",
             "MD_passive",
+            // The byte notations parse only inside `byte_scope`, so a module
+            // carrying data segments opens it; `coqc` below is what proves the
+            // line is load-bearing rather than decorative.
+            "Open Scope byte_scope.\n",
         ] {
             assert!(
                 v.contains(needle),
@@ -382,15 +407,17 @@ mod gate {
         }
 
         // Spellings the contract cannot elaborate: an element mode written into
-        // the field that holds initializer expressions, a `byte` notation no
-        // library defines, and `BI_br_table` applied to fewer arguments than it
-        // takes.
+        // the field that holds initializer expressions, `BI_br_table` applied
+        // to fewer arguments than it takes, and the two hex byte notations from
+        // the gap in the contract's notation block. The gap notations are the
+        // regression this fixture's `\12`/`\1f` bytes exist for: they look like
+        // every other byte spelling and parse nowhere.
         for retired in [
             "ME_functions",
             "ME_declared",
-            "#68",
-            "#00",
             "BI_br_table ::",
+            "#12",
+            "#1F",
         ] {
             assert!(
                 !v.contains(retired),

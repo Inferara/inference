@@ -500,14 +500,17 @@ mod tests {
         // the `%N` scope on both operands of the label list and on the default;
         // `br_table 0` carries a default and nothing else. The passive data
         // segment reaches `memory.init`/`data.drop`, and the active element
-        // segment's function index reaches its `ref.func` initializer.
+        // segment's function index reaches its `ref.func` initializer. Its two
+        // bytes straddle the byte spellings: `0x78` has a notation in the
+        // contract's `byte_scope`, `0x12` is one of the twelve values that has
+        // none.
         let bytes = wat::parse_str(
             r#"
             (module
               (type (;0;) (func (param i32) (result i32)))
               (table (;0;) 1 1 funcref)
               (memory (;0;) 1)
-              (data (;0;) "x")
+              (data (;0;) "x\12")
               (elem (;0;) (i32.const 0) func 0)
               (func (;0;) (type 0) (param i32) (result i32)
                 i32.const 0
@@ -573,26 +576,41 @@ mod tests {
             );
         }
 
-        // Spellings the proof contract has no constructor or notation for, each
-        // of them emitted here before and type-checked nowhere: `ME_functions`
-        // is an element mode written into the field that holds initializer
-        // expressions, `#78` uses a `byte` notation no library defines, and a
-        // `BI_br_table` carrying no label list at all is a partial application
-        // rather than an instruction (#346). The retired `ME_declared` needs a
-        // `declare` segment to be observable at all, which this fixture has
-        // none of; its retirement is pinned in the tests crate's
-        // `foreign_segments_type_check_against_vendored_stub`.
-        for retired in ["ME_functions", "#78", "BI_br_table ::"] {
+        // Spellings the proof contract has no constructor for, both of them
+        // emitted here before and type-checked nowhere: `ME_functions` is an
+        // element mode written into the field that holds initializer
+        // expressions, and a `BI_br_table` carrying no label list at all is a
+        // partial application rather than an instruction. The retired
+        // `ME_declared` needs a `declare` segment to be observable at all,
+        // which this fixture has none of; its retirement is pinned in the tests
+        // crate's `foreign_segments_type_check_against_vendored_stub`.
+        for retired in ["ME_functions", "BI_br_table ::"] {
             assert!(
                 !output.contains(retired),
                 "`{retired}` is not a term the proof contract accepts; got:\n{output}",
             );
         }
 
+        // A data byte is spelled with one of `byte_scope`'s two-digit uppercase
+        // hex notations where the contract declares one, and as the `encode`
+        // application that notation abbreviates for the twelve values it does
+        // not. The scope is opened by the preamble of any module carrying a
+        // data segment — the notation does not parse otherwise.
         assert!(
-            output.contains("x78 :: nil"),
-            "a data byte must reach the `.v` as the standard library `byte` \
-             constructor for its value; got:\n{output}",
+            output.contains("#78 :: (encode 18%Z) :: nil"),
+            "a data byte must reach the `.v` in its `byte_scope` notation, or \
+             as an `encode` application where the contract declares none; \
+             got:\n{output}",
+        );
+        assert!(
+            !output.contains("#12"),
+            "`#12` is a notation the proof contract does not declare, so the \
+             uniform hex spelling must not be used for it; got:\n{output}",
+        );
+        assert!(
+            output.contains("Open Scope byte_scope.\n"),
+            "a module carrying a data segment must open the scope its byte \
+             literals are written in; got:\n{output}",
         );
     }
 }

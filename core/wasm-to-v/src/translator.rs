@@ -456,6 +456,18 @@ impl WasmParseData<'_> {
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import bytes numerics datatypes host.\n");
         res.push_str("From WasmVerifier Require Import Assertions Verifier.\n");
+        // A data segment's bytes are mostly written in the hex notations the
+        // `Wasm.bytes` module declares in `byte_scope`, and those parse only
+        // while that scope is open. Whether an `Import` chain leaves it open is
+        // a detail of the library, not of this contract, so a module that can
+        // spell a byte notation states its own requirement. The line is keyed
+        // on the presence of a data segment rather than on the bytes in it:
+        // opening a scope nothing happens to use is inert, while deciding per
+        // byte would make the preamble depend on segment contents. A module
+        // with no data segment names no byte at all, and emits no such line.
+        if !self.data.is_empty() {
+            res.push_str("Open Scope byte_scope.\n");
+        }
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
@@ -2531,18 +2543,37 @@ fn translate_basic_operator(
     Ok(operator.to_string())
 }
 
+/// Spells one byte as a term of the proof backend's `byte` type.
+///
+/// In the backend's `coq-wasm` dependency a `byte` is CompCert's
+/// `Integers.byte`, built from a `Z` by the exported `encode`, and abbreviated
+/// by two-digit uppercase hex notations in `byte_scope`. That notation block is
+/// hand-written and covers 244 of the 256 values: `#12` .. `#19` and `#1C` ..
+/// `#1F` are absent, and spelling one of those would emit syntax the backend
+/// cannot parse even though the notation looks uniform. Those twelve values are
+/// therefore written as the `encode` application the notation would have
+/// abbreviated, which needs no scope and elaborates for every value.
+///
+/// The notation is preferred where it exists because it keeps a data segment
+/// legible as the hex dump it came from.
+fn byte_literal(byte: u8) -> String {
+    if matches!(byte, 0x12..=0x19 | 0x1C..=0x1F) {
+        format!("(encode {byte}%Z)")
+    } else {
+        format!("#{byte:02X}")
+    }
+}
+
 /// Renders one data segment as a `module_data` record.
 ///
-/// `moddata_init` is a `list byte`, and the contract's `byte` is the standard
-/// library's, whose constructors are named `x00` .. `xff` in lowercase hex.
-/// Each source byte is therefore emitted as that constructor name — there is no
-/// numeral notation for `byte`, so no other spelling elaborates.
+/// `moddata_init` is a `list byte`, whose elements are spelled by
+/// [`byte_literal`].
 fn translate_data(data: &Data, remap: &FuncRemap) -> anyhow::Result<String> {
     let mut res = String::new();
     let moddata_mode = translate_module_datamode(data, remap)?;
     let mut moddata_init = String::new();
-    for byte in data.data {
-        moddata_init.push_str(format!("x{byte:02x}").as_str());
+    for &byte in data.data {
+        moddata_init.push_str(byte_literal(byte).as_str());
         moddata_init.push_str(" :: ");
     }
     moddata_init.push_str("nil");
