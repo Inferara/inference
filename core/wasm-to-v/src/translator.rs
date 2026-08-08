@@ -40,8 +40,9 @@
 //! ## Index Immediates
 //!
 //! The proof contract types every index immediate as `N` — branch depths, function,
-//! type, table, memory, global, local and data-segment indexes, and the element lists
-//! of `BI_br_table` and `ME_functions`. Each is emitted with an explicit `%N` scope.
+//! type, table, memory, global, local and data-segment indexes, `BI_br_table`'s label
+//! list and default, and the function indexes an element segment initializes a table
+//! with. Each is emitted with an explicit `%N` scope.
 //!
 //! Rocq's numeral notation is type-directed, so a bare numeral elaborates correctly
 //! wherever the expected type is already known, and a bare spelling is accepted today.
@@ -1340,7 +1341,15 @@ fn translate_memarg(memarg: &inf_wasmparser::MemArg) -> anyhow::Result<String> {
     Ok(format!("Ma {memarg_offset}%N {memarg_align}%N"))
 }
 
-//Record module_element
+/// Renders one element segment as a `module_element` record.
+///
+/// The contract's `modelem_init` is a list of *initializer expressions*, and
+/// the segment's mode is a separate `modelem_mode` field. WASM's binary format
+/// also admits a shorthand in which a segment carries bare function indexes
+/// instead of expressions; that shorthand is desugared here exactly as the WASM
+/// specification defines it — index `i` becomes the one-instruction expression
+/// `ref.func i` — so both item forms produce the same record shape, and both
+/// carry their function index through the same remap.
 fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<String> {
     let mut res = String::new();
     // let id = get_id();
@@ -1360,7 +1369,7 @@ fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<Str
             format!("ME_active {tableidx}%N ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
-        ElementKind::Declared => "ME_declared".to_string(),
+        ElementKind::Declared => "ME_declarative".to_string(),
     };
     let modelem_type: String;
     let modelem_init = match &element.items {
@@ -1380,17 +1389,18 @@ fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<Str
             format!("{expr_list}nil")
         }
         ElementItems::Functions(elements) => {
-            // Each element is a function index into the instantiated space;
-            // renumber it past every omitted spec function.
+            // Each item is a function index into the instantiated space;
+            // renumber it past every omitted spec function before wrapping it
+            // in its `ref.func` initializer expression.
             modelem_type = "T_funcref".to_string();
-            let mut indexes = String::new();
+            let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, index) = result?;
-                indexes.push_str(format!("{}%N", remap.instantiated(index)?).as_str());
-                indexes.push_str("::");
+                let target = remap.instantiated(index)?;
+                expr_list.push_str(format!("(BI_ref_func {target}%N :: nil)").as_str());
+                expr_list.push_str(" ::\n");
             }
-            indexes.push_str("nil");
-            format!("ME_functions {indexes}")
+            format!("{expr_list}nil")
         }
     };
     res.push_str("{|\n");
@@ -1530,17 +1540,23 @@ fn translate_basic_operator(
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}%N"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}%N"),
         Operator::BrTable { targets } => {
+            // `targets()` yields the explicit label vector only; the default
+            // label is a separate immediate and a separate `BI_br_table`
+            // operand. A table with no explicit targets (`br_table 0`) is
+            // valid WASM, and still carries its default. Labels are relative
+            // branch depths, not function indexes, so none is renumbered.
+            let default = targets.default();
             if targets.is_empty() {
-                "BI_br_table".to_string()
+                format!("BI_br_table nil {default}%N")
             } else {
                 let mut labelidx = String::new();
                 for target in targets.targets() {
-                    let id = target.unwrap();
+                    let id = target?;
                     labelidx.push_str(format!("{id}%N").as_str());
                     labelidx.push_str(" :: ");
                 }
                 labelidx.push_str("nil");
-                format!("BI_br_table ({labelidx})")
+                format!("BI_br_table ({labelidx}) {default}%N")
             }
         }
         Operator::Return => "BI_return".to_string(),
@@ -1926,7 +1942,14 @@ fn translate_basic_operator(
             }));
         }
         Operator::RefIsNull => "BI_ref_is_null".to_string(),
-        Operator::RefFunc { function_index } => format!("BI_ref_func {function_index}%N"),
+        Operator::RefFunc { function_index } => {
+            // A `ref.func` operand indexes the instantiated function space, the
+            // same space `BI_call` and the desugared element items index, so it
+            // is renumbered past every omitted spec function and is fail-closed
+            // on a reference to one.
+            let target = remap.instantiated(*function_index)?;
+            format!("BI_ref_func {target}%N")
+        }
         Operator::TableFill { table } => format!("BI_table_fill {table}%N"),
         Operator::TableGet { table } => format!("BI_table_get {table}%N"),
         Operator::TableSet { table } => format!("BI_table_set {table}%N"),
@@ -2508,13 +2531,18 @@ fn translate_basic_operator(
     Ok(operator.to_string())
 }
 
-//Record module_data
+/// Renders one data segment as a `module_data` record.
+///
+/// `moddata_init` is a `list byte`, and the contract's `byte` is the standard
+/// library's, whose constructors are named `x00` .. `xff` in lowercase hex.
+/// Each source byte is therefore emitted as that constructor name — there is no
+/// numeral notation for `byte`, so no other spelling elaborates.
 fn translate_data(data: &Data, remap: &FuncRemap) -> anyhow::Result<String> {
     let mut res = String::new();
     let moddata_mode = translate_module_datamode(data, remap)?;
     let mut moddata_init = String::new();
     for byte in data.data {
-        moddata_init.push_str(format!("#{byte:02X}").as_str());
+        moddata_init.push_str(format!("x{byte:02x}").as_str());
         moddata_init.push_str(" :: ");
     }
     moddata_init.push_str("nil");

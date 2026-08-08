@@ -427,15 +427,66 @@ mod tests {
         );
     }
 
-    /// Every index immediate reaches the `.v` with an explicit `%N` scope.
+    /// The same renumbering across both element item forms. A segment carries
+    /// either bare function indexes or initializer expressions, and once the
+    /// shorthand is desugared both reach the `.v` as `BI_ref_func` — so both
+    /// operands index the same instantiated function space and both have to be
+    /// renumbered. Here `func 1` is the omitted spec function, so each segment's
+    /// reference to `func 2` must read `BI_ref_func 1%N`; a form that skipped
+    /// the remap would leave a dangling index that no `coqc` gate can catch.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn omitting_a_spec_function_renumbers_both_element_item_forms() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (table (;0;) 2 2 funcref)
+              (elem (;0;) (i32.const 0) func 2)
+              (elem (;1;) funcref (item ref.func 2))
+              (func (;0;) (result i32) i32.const 0)
+              (func (;1;) (result i32) i32.const 0)
+              (func (;2;) (result i32) i32.const 7))
+            "#,
+        )
+        .expect("element remap fixture assembles");
+
+        // Mark `func 1` as the spec function (omitted). No obligations.
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("Between".to_string(), vec![1]);
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &map,
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translate succeeds");
+
+        assert_eq!(
+            output.matches("BI_ref_func 1%N").count(),
+            2,
+            "both element item forms must renumber their reference to func 2 past \
+             the omitted spec function at index 1; got:\n{output}",
+        );
+        assert!(
+            !output.contains("BI_ref_func 2%N"),
+            "no element item may keep its pre-omission function index; got:\n{output}",
+        );
+    }
+
+    /// Every index immediate reaches the `.v` with an explicit `%N` scope, and
+    /// every term reaching it is one the proof contract can elaborate.
     ///
-    /// The proof contract types all of these operands as `N`, and Rocq's
-    /// numeral notation is type-directed, so a bare numeral elaborates
-    /// correctly *as long as* the expected type is inferable at that position.
-    /// That makes a bare operand silently fine today and silently wrong the
-    /// moment a contract or notation change loses the inference — a failure
-    /// that would land on the paid prover worker, not here. Pinning the
-    /// spelling holds every arm to the same explicit form.
+    /// The contract types all of these operands as `N`, and Rocq's numeral
+    /// notation is type-directed, so a bare numeral elaborates correctly *as
+    /// long as* the expected type is inferable at that position. That makes a
+    /// bare operand silently fine today and silently wrong the moment a
+    /// contract or notation change loses the inference — a failure that would
+    /// land on the paid prover worker, not here. Pinning the spelling holds
+    /// every arm to the same explicit form.
+    ///
+    /// The same fixture pins the constructor and notation spellings around
+    /// those operands, because a scope is only worth pinning on a term the
+    /// contract has a constructor for at all.
     ///
     /// None of the constructs below are emitted by Inference codegen —
     /// `br_table`, `call_indirect`, `memory.init`, `data.drop` and element
@@ -444,12 +495,12 @@ mod tests {
     /// handcrafted module has to.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn index_immediates_carry_an_explicit_n_scope() {
-        // `br_table 0 1 0` yields the two explicit targets 0 and 1 (the default
-        // is a separate immediate this translator does not render), so the
-        // emitted list pins the `%N` scope on more than one element. The
-        // passive data segment reaches `memory.init`/`data.drop`, and the
-        // active element segment reaches the `ME_functions` index list.
+    fn index_immediates_and_segment_spellings_match_the_contract() {
+        // `br_table 0 1 0` yields two explicit targets plus a default, pinning
+        // the `%N` scope on both operands of the label list and on the default;
+        // `br_table 0` carries a default and nothing else. The passive data
+        // segment reaches `memory.init`/`data.drop`, and the active element
+        // segment's function index reaches its `ref.func` initializer.
         let bytes = wat::parse_str(
             r#"
             (module
@@ -468,6 +519,10 @@ mod tests {
                   block
                     local.get 0
                     br_table 0 1 0
+                  end
+                  block
+                    local.get 0
+                    br_table 0
                   end
                   local.get 0
                   br_if 0
@@ -491,11 +546,12 @@ mod tests {
         for needle in [
             "BI_br 0%N",
             "BI_br_if 0%N",
-            "BI_br_table (0%N :: 1%N :: nil)",
+            "BI_br_table (0%N :: 1%N :: nil) 0%N",
+            "BI_br_table nil 0%N",
             "BI_call_indirect 0%N 0%N",
             "BI_memory_init 0%N",
             "BI_data_drop 0%N",
-            "ME_functions 0%N",
+            "(BI_ref_func 0%N :: nil)",
         ] {
             assert!(
                 output.contains(needle),
@@ -509,13 +565,35 @@ mod tests {
             "BI_call_indirect 0 0",
             "BI_memory_init 0 ",
             "BI_data_drop 0 ",
-            "ME_functions 0:",
+            "BI_ref_func 0 ",
         ] {
             assert!(
                 !output.contains(bare),
                 "`{bare}` leaves the numeral's scope to inference; got:\n{output}",
             );
         }
+
+        // Spellings the proof contract has no constructor or notation for, each
+        // of them emitted here before and type-checked nowhere: `ME_functions`
+        // is an element mode written into the field that holds initializer
+        // expressions, `#78` uses a `byte` notation no library defines, and a
+        // `BI_br_table` carrying no label list at all is a partial application
+        // rather than an instruction (#346). The retired `ME_declared` needs a
+        // `declare` segment to be observable at all, which this fixture has
+        // none of; its retirement is pinned in the tests crate's
+        // `foreign_segments_type_check_against_vendored_stub`.
+        for retired in ["ME_functions", "#78", "BI_br_table ::"] {
+            assert!(
+                !output.contains(retired),
+                "`{retired}` is not a term the proof contract accepts; got:\n{output}",
+            );
+        }
+
+        assert!(
+            output.contains("x78 :: nil"),
+            "a data byte must reach the `.v` as the standard library `byte` \
+             constructor for its value; got:\n{output}",
+        );
     }
 }
 

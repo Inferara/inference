@@ -205,6 +205,57 @@ mod gate {
         Err(log)
     }
 
+    /// Copies the vendored stub into a private work directory and compiles both
+    /// namespaces in `_CoqProject` dependency order, returning that directory.
+    ///
+    /// `coqc` writes `.vo` files next to their sources, so the read-only repo
+    /// tree cannot be compiled in place; `label` additionally keeps two gates
+    /// running concurrently in this binary out of each other's directory. On a
+    /// failure the directory is deliberately kept so the rejected `.v` and the
+    /// compiled stub are available for a manual `coqc` repro; a successful gate
+    /// removes it, and the pre-clean below handles a stale leftover.
+    fn compile_stub(coqc: &str, label: &str) -> PathBuf {
+        let work = std::env::temp_dir().join(format!(
+            "inference_rocq_typecheck_{}_{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join("wasm")).expect("create work/wasm dir");
+        std::fs::create_dir_all(work.join("wasm_verifier")).expect("create work/wasm_verifier dir");
+        let src_stub = stub_dir();
+        // The stub is a two-namespace tree: `wasm/` (`Wasm.*`, the WASM datatypes)
+        // and `wasm_verifier/` (`WasmVerifier.*`, the assertion language and the
+        // proof-obligation predicates). Copy both, then compile each `.v` in
+        // dependency order (`Wasm` first, since `WasmVerifier` imports it).
+        let stub_modules: &[(&str, &str)] = &[
+            ("wasm", "bytes"),
+            ("wasm", "numerics"),
+            ("wasm", "datatypes"),
+            ("wasm", "host"),
+            ("wasm_verifier", "Assertions"),
+            ("wasm_verifier", "Verifier"),
+        ];
+        for (dir, module) in stub_modules {
+            let rel = format!("{dir}/{module}.v");
+            std::fs::copy(
+                src_stub.join(dir).join(format!("{module}.v")),
+                work.join(&rel),
+            )
+            .unwrap_or_else(|e| panic!("copy stub {rel}: {e}"));
+        }
+        for (dir, module) in stub_modules {
+            let file = work.join(dir).join(format!("{module}.v"));
+            if let Err(log) = coqc_compile(coqc, &work, &file) {
+                panic!(
+                    "vendored stub failed to compile ({dir}/{module}.v):\n{log}\n\
+                     work dir kept for inspection: {}",
+                    work.display()
+                );
+            }
+        }
+        work
+    }
+
     #[test]
     fn corpus_type_checks_against_vendored_stub() {
         // 1. Generate every corpus module in-process.
@@ -234,48 +285,8 @@ mod gate {
             return;
         };
 
-        // 4. Compile the vendored stub once into a private temp dir (coqc writes
-        //    `.vo` next to sources, so copy out of the read-only repo tree). On a
-        //    coqc failure the dir is deliberately kept so the rejected `.v` and
-        //    compiled stub are available for a manual `coqc` repro; a successful
-        //    run removes it, and the pre-clean below handles a stale same-PID
-        //    leftover.
-        let work =
-            std::env::temp_dir().join(format!("inference_rocq_typecheck_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(work.join("wasm")).expect("create work/wasm dir");
-        std::fs::create_dir_all(work.join("wasm_verifier")).expect("create work/wasm_verifier dir");
-        let src_stub = stub_dir();
-        // The stub is a two-namespace tree: `wasm/` (`Wasm.*`, the WASM datatypes)
-        // and `wasm_verifier/` (`WasmVerifier.*`, the assertion language and the
-        // proof-obligation predicates). Copy both, then compile each `.v` in
-        // dependency order (`Wasm` first, since `WasmVerifier` imports it).
-        let stub_modules: &[(&str, &str)] = &[
-            ("wasm", "bytes"),
-            ("wasm", "numerics"),
-            ("wasm", "datatypes"),
-            ("wasm", "host"),
-            ("wasm_verifier", "Assertions"),
-            ("wasm_verifier", "Verifier"),
-        ];
-        for (dir, module) in stub_modules {
-            let rel = format!("{dir}/{module}.v");
-            std::fs::copy(
-                src_stub.join(dir).join(format!("{module}.v")),
-                work.join(&rel),
-            )
-            .unwrap_or_else(|e| panic!("copy stub {rel}: {e}"));
-        }
-        for (dir, module) in stub_modules {
-            let file = work.join(dir).join(format!("{module}.v"));
-            if let Err(log) = coqc_compile(&coqc, &work, &file) {
-                panic!(
-                    "vendored stub failed to compile ({dir}/{module}.v):\n{log}\n\
-                     work dir kept for inspection: {}",
-                    work.display()
-                );
-            }
-        }
+        // 4. Compile the vendored stub once into a private temp dir.
+        let work = compile_stub(&coqc, "corpus");
 
         // 5. Type-check every generated module against the compiled stub.
         for (file, v) in &generated {
@@ -291,6 +302,123 @@ mod gate {
             }
         }
 
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A handcrafted foreign module carrying the element, data, and `br_table`
+    /// shapes Inference codegen never produces.
+    ///
+    /// Element segments (in all three modes and both item forms), data segments,
+    /// and `br_table` reach the translator only from foreign or statically-linked
+    /// `.wasm`, so no `.inf` fixture can drive them into the corpus gate above —
+    /// which is how four terms the contract has no constructor or notation for
+    /// stayed emitted (#346). This gate assembles the constructs directly as WASM
+    /// and runs the same public `wasm_to_v` entry the corpus uses.
+    ///
+    /// `br_table`'s default label deserves its own arm: it is a separate
+    /// immediate that the explicit-target list never contains, and a table whose
+    /// list is empty (`br_table 0`) is valid WASM carrying nothing else.
+    #[test]
+    fn foreign_segments_type_check_against_vendored_stub() {
+        const MODULE: &str = "foreign_segments";
+        // Two `br_table`s (explicit targets with a distinct default, and a
+        // default-only table), all three element modes across both item forms
+        // (bare function indexes and `ref.func` initializer expressions), and
+        // active and passive data segments. The passive segment's bytes are the
+        // two extremes of the byte range, so a spelling that only works for the
+        // printable middle fails here.
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (table (;0;) 4 4 funcref)
+              (memory (;0;) 1)
+              (elem (;0;) (i32.const 0) func 0 1)
+              (elem (;1;) declare func 1)
+              (elem (;2;) funcref (item ref.func 0))
+              (data (;0;) (i32.const 0) "hi")
+              (data (;1;) "\00\ff")
+              (func (;0;) (type 0) (param i32) (result i32)
+                block
+                  block
+                    local.get 0
+                    br_table 0 1 1
+                  end
+                  block
+                    local.get 0
+                    br_table 0
+                  end
+                end
+                local.get 0)
+              (func (;1;) (type 0) (param i32) (result i32)
+                local.get 0))
+            "#,
+        )
+        .expect("foreign-segment fixture assembles");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let empty_hspecs = inference::HSpecMap::default();
+        let v = inference::wasm_to_v(MODULE, &bytes, &empty, &empty_hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for the foreign fixture: {e}"));
+
+        // Teeth without `coqc`: the exact terms the contract accepts.
+        for needle in [
+            "BI_br_table (0%N :: 1%N :: nil) 1%N",
+            "BI_br_table nil 0%N",
+            "ME_active 0%N",
+            "ME_declarative",
+            "ME_passive",
+            "(BI_ref_func 0%N :: nil)",
+            "(BI_ref_func 1%N :: nil)",
+            "moddata_init := x68 :: x69 :: nil",
+            "moddata_init := x00 :: xff :: nil",
+            "MD_active 0%N",
+            "MD_passive",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the foreign module must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        // Spellings the contract cannot elaborate: an element mode written into
+        // the field that holds initializer expressions, a `byte` notation no
+        // library defines, and `BI_br_table` applied to fewer arguments than it
+        // takes.
+        for retired in [
+            "ME_functions",
+            "ME_declared",
+            "#68",
+            "#00",
+            "BI_br_table ::",
+        ] {
+            assert!(
+                !v.contains(retired),
+                "`{retired}` is not a term the proof contract accepts; got:\n{v}"
+            );
+        }
+
+        let Some(coqc) = find_coqc() else {
+            eprintln!(
+                "skipped: coqc not found (set COQC or put coqc on PATH). \
+                 Foreign module generated and its emitted shapes verified; \
+                 type-checking against the vendored stub was not run."
+            );
+            return;
+        };
+
+        let work = compile_stub(&coqc, "foreign");
+        let v_path = work.join(format!("{MODULE}.v"));
+        std::fs::write(&v_path, admit_open_proofs(&v))
+            .unwrap_or_else(|e| panic!("write {MODULE}.v: {e}"));
+        if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
+            panic!(
+                "coqc rejected the foreign module's `.v` against the vendored \
+                 Wasm stub:\n{log}\n\
+                 work dir kept for inspection: {}",
+                work.display()
+            );
+        }
         let _ = std::fs::remove_dir_all(&work);
     }
 

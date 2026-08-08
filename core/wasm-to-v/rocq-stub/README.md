@@ -45,7 +45,7 @@ Two logical namespaces, mapped by `_CoqProject`:
 
 | File | Provides | Mirrors |
 | --- | --- | --- |
-| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers) | Vanilla WasmCert |
+| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers), and the byte literals `x00` .. `xff` mirroring the standard library `Byte.byte` constructors (used by every emitted `moddata_init`) | Vanilla WasmCert |
 | `wasm/numerics.v` | `i32`/`i64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) | Vanilla WasmCert |
 | `wasm/datatypes.v` | Value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive, and the module/section records | Vanilla WasmCert |
 | `wasm/host.v` | The `host` typeclass every emitted theorem is stated under (`Class host := {}`) | Vanilla WasmCert |

@@ -151,7 +151,7 @@ Inductive basic_instruction : Type :=
 | BI_if : block_type -> list basic_instruction -> list basic_instruction -> basic_instruction
 | BI_br : N -> basic_instruction
 | BI_br_if : N -> basic_instruction
-| BI_br_table : list N -> basic_instruction
+| BI_br_table : list N -> N -> basic_instruction
 | BI_call : N -> basic_instruction
 | BI_call_indirect : N -> N -> basic_instruction
 | BI_ref_func : N -> basic_instruction
@@ -239,9 +239,8 @@ Record module_glob : Type := {
 
 Inductive module_elemmode : Type :=
 | ME_passive : module_elemmode
-| ME_declared : module_elemmode
-| ME_active : N -> list basic_instruction -> module_elemmode
-| ME_functions : list N -> module_elemmode.
+| ME_declarative : module_elemmode
+| ME_active : N -> list basic_instruction -> module_elemmode.
 
 Record module_element : Type := {
   modelem_type : reference_type;
