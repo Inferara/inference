@@ -26,7 +26,9 @@
 //!
 //! - A009: Enum definition with no variants
 //! - A010: Method declares `self` but never accesses it
-//! - A011: Struct definition with no fields and no methods
+//! - A011: Struct definition with no fields and no methods. A field-less struct
+//!   that declares methods is deliberately not warned: that is the supported
+//!   method-namespace idiom, and A045 governs its values.
 //!
 //! ### Dead Code (A020)
 //!
@@ -113,6 +115,20 @@
 //!   produce a duplicate export name (invalid wasm) or hijack the standard
 //!   `memory` export with a Function. The check is unconditional so the ABI
 //!   surface does not depend on whether the program happens to use memory.
+//!
+//! ### Field-less Struct Values (A045)
+//!
+//! - A045: A struct with no fields occupies zero bytes, so it has no value
+//!   representation: there is no memory region to hold, copy, or reason about one
+//!   of its values. Such a type is rejected as a struct literal, as the declared
+//!   type of a `let`/`const`, as a parameter, as a return type, as a struct field,
+//!   and as a `self` receiver — with arrays of it looked through at any depth.
+//!   Rejecting it as a *field* type collapses the transitive case (a struct all of
+//!   whose fields are zero-sized is itself zero-sized) into the base case, so no
+//!   value of a zero-sized type exists in an accepted program. *Declaring* a
+//!   field-less struct stays legal: a field-less struct with associated functions
+//!   is the supported method-namespace idiom (`E::helper()`), which needs no
+//!   values. See [`rules::fieldless_struct_value`].
 //!
 //! ## Pipeline Position
 //!
@@ -236,6 +252,7 @@ mod tests {
             AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: "forall" },
             AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
             AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
+            AnalysisDiagnostic::FieldLessStructValue { name: "E".to_string(), position: "a struct literal", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

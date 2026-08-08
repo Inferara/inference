@@ -210,6 +210,56 @@ fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
     })
 }
 
+/// Returns the bare name of the field-less struct a type is, or is an array of
+/// at any nesting depth — `None` for every other type.
+///
+/// This is A045's whole predicate. A struct with no fields occupies zero bytes,
+/// and an array is zero-sized exactly when its element type is (array lengths are
+/// required to be positive), so looking through [`TypeInfoKind::Array`] at every
+/// depth and testing `fields.is_empty()` on the leaf covers both. No transitive
+/// size computation is needed: A045 also rejects a field-less struct as the type
+/// of a struct *field*, so in any accepted program a struct is zero-sized if and
+/// only if it has no fields.
+///
+/// All four type carriers are resolved, because a rule reading raw signature
+/// annotations meets each of them: a resolved `Struct` carries its canonical,
+/// file-qualified key and is looked up by that key alone — the key a resolved
+/// carrier holds is by construction one the struct is registered under, so key
+/// lookup is complete, and falling back to the bare name could only add a path
+/// to a same-named struct in *another* file, which is exactly what the key
+/// exists to distinguish; `Custom` is an unresolved (or alias) name whose only
+/// handle is the bare name, resolved against the referencing file; and a
+/// `::`-qualified annotation carries an unresolved path resolved against that
+/// same file. Enums, scalars, and names that resolve to nothing yield `None`.
+///
+/// The returned name is the struct's bare name, which is how the source spells
+/// it — never the canonical key, which is file-qualified and would read as noise
+/// in a diagnostic.
+pub(crate) fn fieldless_struct_name(
+    ctx: &TypedContext,
+    kind: &TypeInfoKind,
+    module_path: &[String],
+) -> Option<String> {
+    let info = match kind {
+        TypeInfoKind::Struct(_, key) => ctx.lookup_struct(key),
+        TypeInfoKind::Custom(name) => ctx.lookup_struct_in(name, module_path),
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => ctx
+            .resolve_struct_by_qualified_path(
+                &path
+                    .split("::")
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                module_path,
+            )
+            .map(|(info, _key)| info),
+        TypeInfoKind::Array(elem, _) => {
+            return fieldless_struct_name(ctx, &elem.kind, module_path);
+        }
+        _ => None,
+    }?;
+    info.fields.is_empty().then_some(info.name)
+}
+
 /// Classifies the `Custom`-named type carried by an uzumaki (`@`) node as
 /// struct-like (`true`) or enum-like (`false`), for the "needs a named frame
 /// slot" rules (A038/A039/A040).
@@ -451,6 +501,7 @@ mod tests {
     use inference_ast::arena::AstArena;
     use inference_ast::ids::*;
     use inference_ast::nodes::*;
+    use inference_type_checker::type_info::{NumberType, TypeInfo};
 
     fn dummy_location() -> Location {
         Location::default()
@@ -496,6 +547,161 @@ mod tests {
                 body: body_id,
             },
         })
+    }
+
+    /// The entry file's (empty) module path: `register_test_struct` keys a
+    /// struct by its bare name, which is its canonical key in a single file.
+    const NO_PATH: &[String] = &[];
+
+    /// Builds a `TypedContext` with the given structs and enums registered,
+    /// mirroring the `register_test_struct` pattern used by other rule tests.
+    fn ctx_with_types(
+        structs: &[(&str, &[(&str, TypeInfoKind)])],
+        enums: &[(&str, &[&str])],
+    ) -> TypedContext {
+        let mut ctx = TypedContext::default();
+        for (name, fields) in structs {
+            let field_specs: Vec<_> = fields
+                .iter()
+                .map(|(field_name, kind)| {
+                    (
+                        (*field_name).to_string(),
+                        TypeInfo {
+                            kind: kind.clone(),
+                            type_params: vec![],
+                        },
+                    )
+                })
+                .collect();
+            ctx.register_test_struct(name, &field_specs).unwrap();
+        }
+        for (name, variants) in enums {
+            ctx.register_test_enum(name, variants).unwrap();
+        }
+        ctx
+    }
+
+    fn array_of(kind: TypeInfoKind, length: u32) -> TypeInfoKind {
+        TypeInfoKind::Array(
+            Box::new(TypeInfo {
+                kind,
+                type_params: vec![],
+            }),
+            length,
+        )
+    }
+
+    #[test]
+    fn fieldless_struct_name_detects_struct_with_no_fields() {
+        let ctx = ctx_with_types(&[("E", &[])], &[]);
+        assert_eq!(
+            fieldless_struct_name(&ctx, &TypeInfoKind::Custom("E".to_string()), NO_PATH),
+            Some("E".to_string()),
+            "a bare name resolving to a field-less struct must be detected"
+        );
+        assert_eq!(
+            fieldless_struct_name(
+                &ctx,
+                &TypeInfoKind::Struct("E".to_string(), "E".to_string()),
+                NO_PATH
+            ),
+            Some("E".to_string()),
+            "a resolved struct type carrying a canonical key must be detected"
+        );
+    }
+
+    #[test]
+    fn fieldless_struct_name_ignores_struct_with_fields() {
+        let ctx = ctx_with_types(
+            &[("P", &[("x", TypeInfoKind::Number(NumberType::I32))])],
+            &[],
+        );
+        assert_eq!(
+            fieldless_struct_name(&ctx, &TypeInfoKind::Custom("P".to_string()), NO_PATH),
+            None,
+            "a struct with one field is not zero-sized"
+        );
+    }
+
+    #[test]
+    fn fieldless_struct_name_sees_through_array_nesting() {
+        let ctx = ctx_with_types(&[("E", &[])], &[]);
+        let e = || TypeInfoKind::Custom("E".to_string());
+        assert_eq!(
+            fieldless_struct_name(&ctx, &array_of(e(), 3), NO_PATH),
+            Some("E".to_string()),
+            "`[E; 3]` is zero-sized because its element type is"
+        );
+        assert_eq!(
+            fieldless_struct_name(&ctx, &array_of(array_of(e(), 2), 3), NO_PATH),
+            Some("E".to_string()),
+            "the predicate must recurse past one array layer"
+        );
+        assert_eq!(
+            fieldless_struct_name(
+                &ctx,
+                &array_of(TypeInfoKind::Number(NumberType::I32), 3),
+                NO_PATH
+            ),
+            None,
+            "an array of a scalar is never zero-sized"
+        );
+    }
+
+    #[test]
+    fn fieldless_struct_name_returns_none_for_scalars_bool_and_enum() {
+        let ctx = ctx_with_types(
+            &[("E", &[])],
+            &[("Color", &["Red", "Green"]), ("Never", &[])],
+        );
+        for number_type in [
+            NumberType::I8,
+            NumberType::U8,
+            NumberType::I16,
+            NumberType::U16,
+            NumberType::I32,
+            NumberType::U32,
+            NumberType::I64,
+            NumberType::U64,
+        ] {
+            assert_eq!(
+                fieldless_struct_name(&ctx, &TypeInfoKind::Number(number_type), NO_PATH),
+                None,
+                "{number_type:?} is a scalar, never zero-sized"
+            );
+        }
+        assert_eq!(
+            fieldless_struct_name(&ctx, &TypeInfoKind::Bool, NO_PATH),
+            None
+        );
+        // An enum lowers to a 4-byte tag regardless of variant count, so even a
+        // variantless one is not zero-sized — through either carrier.
+        for kind in [
+            TypeInfoKind::Custom("Color".to_string()),
+            TypeInfoKind::Custom("Never".to_string()),
+            TypeInfoKind::Enum("Never".to_string(), "Never".to_string()),
+        ] {
+            assert_eq!(
+                fieldless_struct_name(&ctx, &kind, NO_PATH),
+                None,
+                "an enum is never zero-sized, got a hit for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fieldless_struct_name_returns_none_for_unresolved_custom_name() {
+        let ctx = ctx_with_types(&[("E", &[])], &[]);
+        assert_eq!(
+            fieldless_struct_name(&ctx, &TypeInfoKind::Custom("Nope".to_string()), NO_PATH),
+            None,
+            "an unresolved name must yield None rather than panicking"
+        );
+        assert_eq!(
+            fieldless_struct_name(&ctx, &TypeInfoKind::Generic("T".to_string()), NO_PATH),
+            None,
+            "a generic type parameter never names a struct"
+        );
     }
 
     #[test]

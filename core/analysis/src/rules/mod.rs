@@ -14,6 +14,7 @@ pub mod duplicate_local_name;
 pub mod empty_enum_definition;
 pub mod empty_struct_definition;
 pub mod extern_function_call;
+pub mod fieldless_struct_value;
 pub mod infinite_loop_without_break;
 pub mod literal_out_of_range;
 pub mod method_call_chain_compound;
@@ -56,6 +57,7 @@ use duplicate_local_name::DuplicateLocalName;
 use empty_enum_definition::EmptyEnumDefinition;
 use empty_struct_definition::EmptyStructDefinition;
 use extern_function_call::ExternFunctionCall;
+use fieldless_struct_value::FieldLessStructValue;
 use infinite_loop_without_break::InfiniteLoopWithoutBreak;
 use literal_out_of_range::LiteralOutOfRange;
 use method_call_chain_compound::MethodCallChainCompound;
@@ -132,5 +134,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &NonDetOutsideSpec,
         &ReservedExportName,
         &ShiftCountOutOfRange,
+        &FieldLessStructValue,
     ]
 }
