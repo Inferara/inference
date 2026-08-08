@@ -37,6 +37,20 @@
 //! - **Debuggability**: Preserve names from WASM custom sections
 //! - **Simplicity**: Easy to understand and maintain translation logic
 //!
+//! ## Index Immediates
+//!
+//! The proof contract types every index immediate as `N` — branch depths, function,
+//! type, table, memory, global, local and data-segment indexes, and the element lists
+//! of `BI_br_table` and `ME_functions`. Each is emitted with an explicit `%N` scope.
+//!
+//! Rocq's numeral notation is type-directed, so a bare numeral elaborates correctly
+//! wherever the expected type is already known, and a bare spelling is accepted today.
+//! That inference is the only thing making it correct, though, so a bare operand is
+//! silently fine until a contract or notation change loses the inference — at which
+//! point it breaks at the prover rather than in-repo. Writing the scope at every site
+//! makes the emitted term independent of the surrounding notation scope, and keeps
+//! structurally identical operands from being spelled two different ways.
+//!
 //! ## Expression Translation
 //!
 //! WASM's stack-based instruction model is converted to structured Rocq expression lists.
@@ -1372,7 +1386,7 @@ fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<Str
             let mut indexes = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, index) = result?;
-                indexes.push_str(format!("{}", remap.instantiated(index)?).as_str());
+                indexes.push_str(format!("{}%N", remap.instantiated(index)?).as_str());
                 indexes.push_str("::");
             }
             indexes.push_str("nil");
@@ -1468,6 +1482,10 @@ fn unsupported_family(label: &str) -> anyhow::Error {
 }
 
 //Inductive basic_instruction
+/// Translates one WASM operator into its Rocq `basic_instruction` term.
+///
+/// Index immediates carry an explicit `%N` scope; see the module-level
+/// "Index Immediates" section for why.
 fn translate_basic_operator(
     operator: &Operator,
     ctx: &OperatorContext,
@@ -1509,7 +1527,7 @@ fn translate_basic_operator(
         }
         Operator::Else => String::new(),
         Operator::End => String::new(),
-        Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
+        Operator::Br { relative_depth } => format!("BI_br {relative_depth}%N"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}%N"),
         Operator::BrTable { targets } => {
             if targets.is_empty() {
@@ -1518,7 +1536,7 @@ fn translate_basic_operator(
                 let mut labelidx = String::new();
                 for target in targets.targets() {
                     let id = target.unwrap();
-                    labelidx.push_str(format!("{id}").as_str());
+                    labelidx.push_str(format!("{id}%N").as_str());
                     labelidx.push_str(" :: ");
                 }
                 labelidx.push_str("nil");
@@ -1537,7 +1555,7 @@ fn translate_basic_operator(
         Operator::CallIndirect {
             type_index,
             table_index,
-        } => format!("BI_call_indirect {type_index} {table_index}"),
+        } => format!("BI_call_indirect {type_index}%N {table_index}%N"),
         Operator::Drop => "BI_drop".to_string(),
         Operator::Select => "BI_select None".to_string(),
         Operator::LocalGet { local_index } => {
@@ -1883,8 +1901,8 @@ fn translate_basic_operator(
         Operator::RefI31 | Operator::I31GetS | Operator::I31GetU | Operator::RefI31Shared => {
             return Err(unsupported_family("i31 references (ref.i31 / i31.get_s)"));
         }
-        Operator::MemoryInit { data_index, mem: _ } => format!("BI_memory_init {data_index}"),
-        Operator::DataDrop { data_index } => format!("BI_data_drop {data_index}"),
+        Operator::MemoryInit { data_index, mem: _ } => format!("BI_memory_init {data_index}%N"),
+        Operator::DataDrop { data_index } => format!("BI_data_drop {data_index}%N"),
         Operator::MemoryCopy {
             dst_mem: _,
             src_mem: _,

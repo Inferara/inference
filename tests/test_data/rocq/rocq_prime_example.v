@@ -63,7 +63,7 @@ Definition is_prime : module_func := {|
         BI_const_num (Vi32 1) ::
         BI_binop T_i32 (Binop_i BOI_add) ::
         BI_local_set 2%N ::
-        BI_br 0 ::
+        BI_br 0%N ::
         nil) ::
       nil) ::
     BI_local_get 1%N (*result*) ::
