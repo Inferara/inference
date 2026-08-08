@@ -141,6 +141,13 @@ mod algo_array_tests {
         call!("dot_product_i64", i64, (), 700000000000_i64);
     }
 
+    /// The Inference, rustc, and zig builds of the same algorithms agree on every
+    /// observable result; the test skips when either external compiler is absent.
+    ///
+    /// Both external compilers emit into a per-run `TempDir`, named through the
+    /// operating system's exclusive-create loop, so concurrent test processes never
+    /// read a module another one is still rewriting; its drop guard removes the
+    /// directory even when an assertion fails.
     #[test]
     fn algo_array_cross_compiler_test() {
         use std::process::Command;
@@ -159,7 +166,8 @@ mod algo_array_tests {
             .join("wasm")
             .join("algo_array");
         let rust_source = test_data_dir.join("algo_array.rs");
-        let rust_out_dir = std::path::PathBuf::from("/tmp/algo_array_rustc");
+        let scratch = tempfile::TempDir::new().expect("create scratch dir");
+        let rust_out_dir = scratch.path().join("rustc");
         std::fs::create_dir_all(&rust_out_dir)
             .unwrap_or_else(|e| panic!("Failed to create temp dir: {e}"));
         let rust_wasm_path = rust_out_dir.join("algo_array.wasm");
@@ -197,7 +205,7 @@ mod algo_array_tests {
 
         // --- Compile Zig source ---
         let zig_source = test_data_dir.join("algo_array.zig");
-        let zig_out_dir = std::path::PathBuf::from("/tmp/algo_array_zig");
+        let zig_out_dir = scratch.path().join("zig");
         std::fs::create_dir_all(&zig_out_dir)
             .unwrap_or_else(|e| panic!("Failed to create temp dir: {e}"));
         let zig_wasm_path = zig_out_dir.join("algo_array.wasm");
