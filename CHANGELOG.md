@@ -605,6 +605,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Rocq Translation
 
+- Negative integer constants now reach the emitted `.v` parenthesized — `BI_const_num (Vi32 (-1))`, not `BI_const_num (Vi32 -1)`. Gallina's `-` is an infix operator, so the old spelling parsed as the subtraction `Vi32 - 1` and `coqc` rejected the whole module ("The term `Vi32` has type `Z -> value_num` while it is expected to have type `nat`"), making proof mode unusable for any program containing a negative constant anywhere — an offset, a threshold, an error code. Every signed width is affected, since `i8`/`i16`/`i32` all lower to `i32.const` and `i64` to `i64.const`; so is source that writes no minus sign at all, because a `u32`/`u64` literal above the signed maximum is stored as a negative constant of that width. The `hassert` obligation printer already parenthesized its constants, so obligation terms are unchanged, as is every non-negative constant — no existing `.v` golden moves ([#314])
 - WASM module-name subsection now reflects the CLI-supplied input file stem instead of the hardcoded `"output"`. The Rocq translator reads this back, so the emitted `Definition <mod>__<Spec>_specs` and `Theorem valid_<mod>` identifiers now use the source filename. Multi-module workflows that previously collided on a single `output` identifier now produce distinct ones
 - Empty per-spec lists emit `(@nil hassert)` — not `[]%N`, and no longer `list N` at all — so the generated `Definition` type-checks regardless of whether a scope is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` or `(@nil N)` literally must update ([issue#21], [issue#22])
 - Rewrite WASM-to-V translator for WasmCertCoq theory syntax ([#23])
@@ -705,6 +706,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- New `coqc`-gated corpus fixture `tests/test_data/inf/spec_negative_consts.inf` carries a negative constant through every position one can reach a WASM constant instruction from: a function-local `const`, an expression-position literal at each of `i8`/`i16`/`i32`/`i64`, both signed minima, both unsigned all-ones patterns (negatives with no minus sign in the source), and two obligation terms. The corpus previously held no negative constant at all — top-level `const` declarations do not reach codegen (A032, #171) — which is why the gate never caught the ill-typed emission. Alongside it, `negative_constants_are_parenthesized` scans every generated module in the corpus for the unparenthesized spelling, so the rule binds each emitter that renders a Rocq term rather than only the arm the fixture happens to reach ([#314])
 - Bump the test suite's `wasmtime` execution-harness dependency from 43.0.0 to 47.0.3, picking up the fix for [RUSTSEC-2026-0222](https://rustsec.org/advisories/RUSTSEC-2026-0222.html); wasmtime only executes compiled modules in tests, so no compiler output changes ([#335])
 - Fix three golden-regeneration helpers that were stale against A042: `regenerate_const_in_forall_wasm`, `regenerate_struct_array_field_nondet_wasm`, and `regenerate_multidim_array_uzumaki_wasm` ran the analysis pass (`wasm_codegen`) while the golden tests they serve compile with `wasm_codegen_no_analysis`, so once A042 started rejecting non-det constructs outside `spec` the helpers crashed and those goldens could not be regenerated. Each helper now mirrors its test's pipeline. Eight sibling helpers with the same staleness (`if_nondet`, five `binops_*`, two `loops` non-det fixtures) are untouched — their goldens did not change here — and remain follow-up debt
 - Add `tests/src/robustness/deep_syntax.rs`, a generated-source module covering deep and
@@ -1293,6 +1295,7 @@ Initial tagged release.
 [#219]: https://github.com/Inferara/inference/issues/219
 [#220]: https://github.com/Inferara/inference/issues/220
 [#315]: https://github.com/Inferara/inference/issues/315
+[#314]: https://github.com/Inferara/inference/issues/314
 [#322]: https://github.com/Inferara/inference/issues/322
 [#329]: https://github.com/Inferara/inference/issues/329
 [#333]: https://github.com/Inferara/inference/issues/333
