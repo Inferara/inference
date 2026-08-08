@@ -2160,12 +2160,16 @@ mod tests {
         );
     }
 
+    /// A root that cannot be read yields an empty completed scan, not a give-up,
+    /// so a missing source root never suppresses warnings by accident.
+    ///
+    /// The scanned path is a never-created child of a per-run `TempProject` root,
+    /// so it is absent by construction and no concurrent test process can collide
+    /// with it.
     #[test]
     fn scan_of_unreadable_root_is_empty_not_a_give_up() {
-        // A root that cannot be read yields an empty completed scan, not a
-        // give-up, so a missing source root never suppresses warnings by accident.
-        let missing = std::env::temp_dir().join("inference-scan-root-does-not-exist-288");
-        let _ = std::fs::remove_dir_all(&missing);
+        let project = TempProject::new("missing-scan-root");
+        let missing = project.root.join("missing");
 
         let files = enumerate_source_files(&missing, MAX_SCAN_DIRECTORIES)
             .expect("an unreadable root returns an empty scan, not a give-up");
