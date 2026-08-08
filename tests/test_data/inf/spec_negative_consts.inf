@@ -1,0 +1,70 @@
+// Negative integer constants, at every width and in every position that reaches
+// a WASM constant instruction.
+//
+// Gallina's `-` is an infix operator, so a negative constant must reach the `.v`
+// parenthesized or the emitted term reads as a subtraction and `coqc` rejects
+// the whole module (#314). Widths do not share a lowering: `i8`, `i16` and `i32`
+// all become `i32.const` while `i64` becomes `i64.const`, and each is emitted by
+// its own arm of the translator.
+//
+// The unsigned functions carry no minus sign at all. A `u32`/`u64` literal above
+// the signed maximum is the same bit pattern as a negative constant of that
+// width, and that is what the WASM instruction stores — so the ill-typed
+// spelling is reachable from source that never writes a minus.
+
+pub fn bias_i32(x: i32) -> i32 {
+    const K: i32 = -70000;
+    return x + K;
+}
+
+pub fn bias_i64(x: i64) -> i64 {
+    const K: i64 = -4294967296;
+    return x + K;
+}
+
+pub fn step_i8(x: i8) -> i8 {
+    return x + -8;
+}
+
+pub fn step_i16(x: i16) -> i16 {
+    return x + -300;
+}
+
+pub fn step_i32(x: i32) -> i32 {
+    return x + -70000;
+}
+
+pub fn step_i64(x: i64) -> i64 {
+    return x + -4294967296;
+}
+
+pub fn floor_i32() -> i32 {
+    return -2147483648;
+}
+
+pub fn floor_i64() -> i64 {
+    return -9223372036854775808;
+}
+
+pub fn all_ones_u32() -> u32 {
+    return 4294967295;
+}
+
+pub fn all_ones_u64() -> u64 {
+    return 18446744073709551615;
+}
+
+spec Negatives {
+    // Both arms put a negative constant inside the obligation itself, so the
+    // `hassert` printer is held to the same parenthesization as the module
+    // record's instruction terms.
+    fn bias_moves_down() forall {
+        let a: i32 = @;
+        assert(bias_i32(a) == a + -70000);
+    }
+
+    fn wide_bias_moves_down() forall {
+        let b: i64 = @;
+        assert(bias_i64(b) == b + -4294967296);
+    }
+}

@@ -67,6 +67,8 @@ A003 and A005 require a single exit point per function to simplify formal verifi
 | A010 | `MethodNeverAccessesSelf` | warning | method declares `self` but never reads or writes a field through it |
 | A011 | `EmptyStructDefinition` | warning | struct with no fields and no methods |
 
+A011 keys on no fields *and* no methods, and stays that way deliberately: a field-less struct that declares methods is the supported method-namespace idiom, so warning on it would flag the exact pattern the language points people at. A045 governs *values* of a field-less struct; A011 governs a declaration that declares nothing at all. The two subjects are disjoint, and where they overlap (a bare empty struct that is also given a value) both fire.
+
 ### Variable Initialization (errors)
 
 | ID | Struct | Severity | What it checks |
@@ -164,6 +166,18 @@ A042 enforces that the non-deterministic block forms — inline `forall`/`exists
 
 A044 rejects a shift whose count operand is a statically-known literal outside `0..width` for the operand type — `x << 32` or `x >> -1` on an `i32`. It complements the runtime rule that a shift count is taken modulo the operand type's bit width: a literal that lands outside the valid range is a program error, not a value to fold silently. Parenthesized and negated literals are resolved (`x << (33)`, `x >> -1`); dynamic counts and const-declared counts (`const K: i32 = 33; x << K`) are not detected, the same statically-known-literal scope as A022 and the division-by-zero check. The width is read from the operand type, so every integer width is covered in practice as well as in principle: a literal count takes the type of the operand being shifted, which makes `x << 64` on an `i64` and `x << 8` on a `u8` reachable, and where both operands are literals the type expected of the whole shift fixes the width (`let x: i64 = 1 << 64;` is rejected, `1 << 40` is not). Unparseable or out-of-`i128`-range literals are left to A022 to avoid double-reporting.
 
+### Field-less Struct Values (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A045 | `FieldLessStructValue` | error | a field-less struct used as a value (literal, binding, parameter, return, field, `self` receiver) |
+
+A045 rejects *values* of a struct with no fields. Such a struct occupies zero bytes, so there is no memory region to hold, copy, or reason about one of its values: codegen's frame layout allocates a struct slot only when the size is greater than zero, while struct-literal lowering unconditionally requires one, and a binding or parameter that survives is lowered as a pointer into nothing. The rule covers the struct literal in every expression position, the declared type of a `let` or of a `const` at function or module scope, function/method/`external fn` parameters (including `_: E`) and return types, struct fields, and a `self`/`mut self` receiver declared on such a struct — looking through array nesting at any depth, since an array is zero-sized exactly when its element type is.
+
+Rejecting a field-less struct as the type of a *field* is what closes the hole: a struct all of whose fields are zero-sized would itself be zero-sized, so forbidding a zero-sized field collapses that composition into the base case. In an accepted program a struct is therefore zero-sized if and only if it has no fields, which lets the predicate be `fields.is_empty()` plus array recursion — no transitive size computation, no visited set, no cycle handling. With every value-introducing position rejected, assignments, reads, and method calls on such values need no checks of their own (each requires a binding, parameter, or field that is already rejected), so a program reports one diagnostic per offending declaration rather than one per use. A module-scope `const` is checked here in its own right rather than left to A032, which rejects *every* top-level `const` as not yet implemented: A032 is a gate on an unimplemented feature, and a closure resting on it would go silently incomplete the day that feature lands. Both fire on such a declaration; there is no cross-rule suppression.
+
+*Declaring* a field-less struct stays legal. A field-less struct with associated functions is the supported method-namespace idiom (`E::helper()`) and compiles unchanged; the `self` receiver is rejected because once no value of the struct can exist the method is uncallable by construction, and the fix — dropping `self` — produces exactly that idiom. `external fn` signatures are checked for their ABI surface rather than for the closure (A024 rejects every call to an extern function, so no value can flow through one). Two documented non-scopes: generics, since a type parameter never resolves to a struct, so a generic signature (`fn id T'(x: T) -> T`) is outside the predicate — nothing is missed by that today, because the compiler does not monomorphize and codegen rejects a generic type outright, so there is no instantiation at a field-less struct to check; and local type aliases, which are non-transparent in Inference and so are a dead end rather than a route to a value.
+
 ## Diagnostic Output Format
 
 ```
@@ -232,6 +246,7 @@ The walker module also exposes several type-inspection helpers used by multiple 
 
 - `array_nesting_depth(kind)` — returns how many array layers deep a type is (`[[i32; 3]; 2]` → 2, `i32` → 0)
 - `has_compound_fields(ctx, kind)` — returns true if a struct or array type contains fields that are themselves structs, arrays of structs, or multidimensional arrays; used by A026, A027, and A028
+- `fieldless_struct_name(ctx, kind, module_path)` — returns the bare name of the field-less struct a type is, or is an array of at any depth; resolves all four type carriers (canonical `Struct`, bare `Custom`, and both `::`-qualified forms) so a same-named struct in another file is not picked up by its bare name; used by A045
 - `is_compound_return_call(arena, expr_id, ctx)` — returns true when an expression is a function call that returns a compound type (struct or array); used by A016, A017, and A018
 
 ## Testing
@@ -267,6 +282,7 @@ Test files are organized by rule group:
 | `rules_a041.rs` | A041 (duplicate function-local name across sibling blocks) |
 | `rules_a042.rs` | A042 (non-deterministic construct outside a `spec` declaration) |
 | `rules_a044.rs` | A044 (shift count literal out of range) |
+| `rules_a045.rs` | A045 (field-less struct values) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

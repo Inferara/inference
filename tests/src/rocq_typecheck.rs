@@ -40,12 +40,12 @@ mod gate {
     /// Corpus fixtures under `tests/test_data/inf/`, paired with the module name
     /// each is translated under. Together they exercise the proof-mode surface
     /// the issue calls out: inline and function-body-modifier `forall`/`exists`/
-    /// `assume`, cross-function calls (`BI_call`), comparisons, `assert`, and
-    /// structured control flow (`if`/`loop`). The `unique` block and the
-    /// `exists`-kind spec function are deliberately absent — neither has a
-    /// `hassert` encoding, so proof-mode codegen rejects them with fatal
-    /// `P002`/`P001` diagnostics (pinned by the unit tests in
-    /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
+    /// `assume`, cross-function calls (`BI_call`), comparisons, `assert`,
+    /// structured control flow (`if`/`loop`), and negative integer constants at
+    /// every width. The `unique` block and the `exists`-kind spec function are
+    /// deliberately absent — neither has a `hassert` encoding, so proof-mode
+    /// codegen rejects them with fatal `P002`/`P001` diagnostics (pinned by the
+    /// unit tests in `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
     /// `build_v_rejects_unique_block_with_p002` in `apps/infs`) rather than by a
     /// corpus entry that would compile against the stub.
     const CORPUS: &[(&str, &str)] = &[
@@ -62,6 +62,7 @@ mod gate {
         ("spec_short_circuit.inf", "spec_short_circuit"),
         ("spec_narrow_abi.inf", "spec_narrow_abi"),
         ("spec_literal_ctx.inf", "spec_literal_ctx"),
+        ("spec_negative_consts.inf", "spec_negative_consts"),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -291,6 +292,68 @@ mod gate {
         }
 
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Gallina's `-` is an infix operator, so a negative integer constant has to
+    /// reach the `.v` parenthesized: `Vi32 -1` parses as the subtraction
+    /// `Vi32 - 1`, and `coqc` rejects the whole module with "The term `Vi32` has
+    /// type `Z -> value_num` while it is expected to have type `nat`" — one
+    /// negative constant anywhere makes proof mode unusable for the program
+    /// (#314).
+    ///
+    /// The corpus-wide scan is the load-bearing half: it holds every emitter
+    /// that renders a Rocq term to the rule, not only the arm this fixture
+    /// happens to reach. The per-spelling assertions then pin that the fixture
+    /// keeps *producing* a negative everywhere one is reachable — `i8`/`i16`/
+    /// `i32` share `i32.const` while `i64` has its own arm, the two `MIN` values
+    /// are the widest negatives each width can carry, the two unsigned cases are
+    /// negatives no minus sign appears in the source for, and the two `T_const`
+    /// spellings come from the separate `hassert` obligation printer.
+    #[test]
+    fn negative_constants_are_parenthesized() {
+        const FIXTURE: &str = "spec_negative_consts.inf";
+
+        let generated: Vec<(&str, String)> = CORPUS
+            .iter()
+            .map(|&(file, name)| (file, generate_v(file, name)))
+            .collect();
+        let unparenthesized: Vec<String> = generated
+            .iter()
+            .flat_map(|(file, v)| {
+                v.lines()
+                    .filter(|line| line.contains("Vi32 -") || line.contains("Vi64 -"))
+                    .map(move |line| format!("{file}: {}", line.trim()))
+            })
+            .collect();
+        assert!(
+            unparenthesized.is_empty(),
+            "a negative constant reached the `.v` unparenthesized; Gallina reads \
+             it as a subtraction and `coqc` rejects the module:\n{}",
+            unparenthesized.join("\n")
+        );
+
+        let (_, v) = generated
+            .iter()
+            .find(|(file, _)| *file == FIXTURE)
+            .unwrap_or_else(|| panic!("{FIXTURE} must be a CORPUS entry"));
+        for needle in [
+            "BI_const_num (Vi32 (-8))",                   // i8
+            "BI_const_num (Vi32 (-300))",                 // i16
+            "BI_const_num (Vi32 (-70000))",               // i32
+            "BI_const_num (Vi32 (-2147483648))",          // i32 minimum
+            "BI_const_num (Vi32 (-1))",                   // u32 all-ones
+            "BI_const_num (Vi64 (-4294967296))",          // i64
+            "BI_const_num (Vi64 (-9223372036854775808))", // i64 minimum
+            "BI_const_num (Vi64 (-1))",                   // u64 all-ones
+            "T_const (Vi32 (-70000))",                    // obligation term, i32
+            "T_const (Vi64 (-4294967296))",               // obligation term, i64
+        ] {
+            assert!(
+                v.contains(needle),
+                "{FIXTURE} no longer emits `{needle}`; the coqc gate would stop \
+                 covering that constant:\n{v}"
+            );
+        }
     }
 
     /// `&&`/`||` lower to a valued `if (result i32)` block, which proof-mode

@@ -1333,25 +1333,25 @@ mod codegen_validation_tests {
 
     // Degenerate struct shapes ---
 
-    /// A field-less struct parameter that the body *assigns* still compiles.
+    /// A field-less struct parameter that the body *assigns* still lowers.
     ///
     /// Such a struct lays out to zero bytes and so is given no frame slot, which
     /// makes it the one parameter whose missing slot does not mean "nothing ever
     /// writes it". A guard that read slot presence alone as the verdict of the
-    /// write scan aborts here, on a program whose only complaint is the A011
-    /// warning that the struct is empty.
+    /// write scan aborts here.
     ///
-    /// This pins only that the guard stays quiet. Field-less structs have no
-    /// working value representation (#332) — the sibling shape
-    /// `let p: Nothing = Nothing {};` still aborts — so the assertion is
-    /// deliberately narrow.
+    /// A045 now rejects this shape one phase earlier — a field-less struct has no
+    /// value representation, so no such parameter reaches codegen from a program
+    /// the analysis pass accepts (#332). Analysis is therefore skipped here, which
+    /// keeps the test doing its original job: pinning that the codegen guard
+    /// beneath the rule stays quiet rather than aborting.
     #[test]
-    fn field_less_struct_parameter_assigned_in_body_compiles() {
+    fn field_less_struct_parameter_assigned_in_body_lowers_without_tripping_the_guard() {
         let source = r#"
 struct Nothing { }
 pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
 "#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         inf_wasmparser::validate(output.wasm())
             .unwrap_or_else(|e| panic!("Field-less struct parameter WASM is invalid: {e}"));
     }

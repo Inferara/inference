@@ -10,6 +10,7 @@
 //! [`HAssert::Or`] → `Hor`. Every compound argument is parenthesized, so the
 //! output is unambiguous regardless of Gallina's application/precedence rules.
 
+use crate::gallina::z_literal;
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
 use rustc_hash::FxHashMap;
 
@@ -176,18 +177,9 @@ fn relop(op: HRelop) -> &'static str {
 }
 
 /// Renders a numeric constant as the emitted `Vi32`/`Vi64` helper application.
-/// A negative literal is parenthesized so it does not read as a subtraction.
 fn const_str(c: HConst) -> String {
     match c {
         HConst::I32(v) => format!("Vi32 {}", z_literal(i64::from(v))),
         HConst::I64(v) => format!("Vi64 {}", z_literal(v)),
-    }
-}
-
-fn z_literal(v: i64) -> String {
-    if v < 0 {
-        format!("({v})")
-    } else {
-        v.to_string()
     }
 }
