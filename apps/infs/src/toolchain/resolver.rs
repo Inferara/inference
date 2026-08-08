@@ -24,6 +24,7 @@
 //! ```
 
 use anyhow::{Context, Result, bail};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::toolchain::paths::ToolchainPaths;
@@ -66,7 +67,17 @@ impl ResolutionSource {
 
 /// Returns true if `INFS_VERBOSE` is set to a non-empty non-"0" value.
 fn verbose() -> bool {
-    std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0")
+    verbose_from(std::env::var_os("INFS_VERBOSE").as_deref())
+}
+
+/// The value predicate behind [`verbose`], with the environment read lifted
+/// into a parameter so tests exercise it without writing `INFS_VERBOSE`.
+///
+/// A test that writes an environment variable races every concurrent read of
+/// the environment in the process — including the reads this module performs
+/// from production code — so no test in this crate writes `INFS_VERBOSE`.
+fn verbose_from(raw: Option<&OsStr>) -> bool {
+    raw.is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Emits a resolution trace line to stderr under `INFS_VERBOSE`.
@@ -317,14 +328,14 @@ mod tests {
     #[serial_test::serial]
     fn error_message_contains_installation_instructions() {
         let original_path = env::var("PATH").unwrap_or_default();
+        // An empty managed root, so no toolchain can resolve from it.
+        let inference_home = assert_fs::TempDir::new().unwrap();
 
         // SAFETY: This test runs in isolation and we restore the env vars at the end.
         unsafe {
             env::set_var("PATH", "");
             env::remove_var(INFC_PATH_ENV);
-
-            let temp_dir = env::temp_dir().join("infs_test_resolver");
-            env::set_var("INFERENCE_HOME", &temp_dir);
+            env::set_var("INFERENCE_HOME", inference_home.path());
         }
 
         // Also suppress the workspace-sibling priority so the error path fires
@@ -509,55 +520,27 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn verbose_false_when_unset() {
-        // SAFETY: serialized; state restored.
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-        assert!(!verbose());
+        assert!(!verbose_from(None));
     }
 
     #[test]
-    #[serial_test::serial]
     fn verbose_true_when_set() {
-        // SAFETY: serialized; state restored.
-        unsafe {
-            env::set_var("INFS_VERBOSE", "1");
-        }
-        let got = verbose();
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-        assert!(got);
+        assert!(verbose_from(Some(OsStr::new("1"))));
+        assert!(verbose_from(Some(OsStr::new("yes"))));
+        // Only the exact value "0" disables, so "00" enables like any other
+        // non-empty value.
+        assert!(verbose_from(Some(OsStr::new("00"))));
     }
 
     #[test]
-    #[serial_test::serial]
     fn verbose_false_when_set_to_zero() {
-        // SAFETY: serialized; state restored.
-        unsafe {
-            env::set_var("INFS_VERBOSE", "0");
-        }
-        let got = verbose();
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-        assert!(!got);
+        assert!(!verbose_from(Some(OsStr::new("0"))));
     }
 
     #[test]
-    #[serial_test::serial]
     fn verbose_false_when_empty_string() {
-        // SAFETY: serialized; state restored.
-        unsafe {
-            env::set_var("INFS_VERBOSE", "");
-        }
-        let got = verbose();
-        unsafe {
-            env::remove_var("INFS_VERBOSE");
-        }
-        assert!(!got);
+        assert!(!verbose_from(Some(OsStr::new(""))));
     }
 
     #[test]

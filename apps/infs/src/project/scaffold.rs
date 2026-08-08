@@ -353,20 +353,20 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("infs_test_{}", fastrand::u64(..)));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn cleanup(path: &Path) {
-        let _ = fs::remove_dir_all(path);
+    /// Creates a scratch directory for a scaffolding test.
+    ///
+    /// The returned `TempDir` owns the directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. The name comes from the
+    /// operating system's exclusive-create loop, so it is unique against both
+    /// parallel test threads and concurrent test processes.
+    fn temp_dir() -> assert_fs::TempDir {
+        assert_fs::TempDir::new().unwrap()
     }
 
     #[test]
     fn test_create_project_success() {
         let parent = temp_dir();
-        let result = create_project("my_project", Some(&parent), false);
+        let result = create_project("my_project", Some(parent.path()), false);
 
         assert!(result.is_ok());
         let project_path = result.unwrap();
@@ -379,14 +379,12 @@ mod tests {
         assert!(!project_path.join("tests").join(".gitkeep").exists());
         assert!(!project_path.join("proofs").join(".gitkeep").exists());
         assert!(!project_path.join(".gitignore").exists());
-
-        cleanup(&parent);
     }
 
     #[test]
     fn test_create_project_with_git_creates_gitignore() {
         let parent = temp_dir();
-        let result = create_project("git_enabled_project", Some(&parent), true);
+        let result = create_project("git_enabled_project", Some(parent.path()), true);
 
         assert!(result.is_ok());
         let project_path = result.unwrap();
@@ -396,39 +394,33 @@ mod tests {
         assert!(project_path.join("tests").join(".gitkeep").exists());
         assert!(project_path.join("proofs").join(".gitkeep").exists());
         assert!(project_path.join(".gitignore").exists());
-
-        cleanup(&parent);
     }
 
     #[test]
     fn test_create_project_invalid_name() {
         let parent = temp_dir();
-        let result = create_project("fn", Some(&parent), false);
+        let result = create_project("fn", Some(parent.path()), false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("reserved"));
-
-        cleanup(&parent);
     }
 
     #[test]
     fn test_create_project_directory_exists() {
         let parent = temp_dir();
-        let existing = parent.join("existing");
+        let existing = parent.path().join("existing");
         fs::create_dir_all(&existing).unwrap();
 
-        let result = create_project("existing", Some(&parent), false);
+        let result = create_project("existing", Some(parent.path()), false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
-
-        cleanup(&parent);
     }
 
     #[test]
     fn test_create_project_with_git() {
         let parent = temp_dir();
-        let result = create_project("git_project", Some(&parent), true);
+        let result = create_project("git_project", Some(parent.path()), true);
 
         assert!(result.is_ok());
         let project_path = result.unwrap();
@@ -436,62 +428,52 @@ mod tests {
         // Git directory may or may not exist depending on git availability
         // The function should not fail either way
         assert!(project_path.join("Inference.toml").exists());
-
-        cleanup(&parent);
     }
 
     #[test]
     fn test_init_project_success() {
         let dir = temp_dir();
-        let result = init_project(Some(&dir), Some("init_test"), true);
+        let result = init_project(Some(dir.path()), Some("init_test"), true);
 
         assert!(result.is_ok());
-        assert!(dir.join("Inference.toml").exists());
-        assert!(dir.join("src").join("main.inf").exists());
-
-        cleanup(&dir);
+        assert!(dir.path().join("Inference.toml").exists());
+        assert!(dir.path().join("src").join("main.inf").exists());
     }
 
     #[test]
     fn test_init_project_no_src() {
         let dir = temp_dir();
-        let result = init_project(Some(&dir), Some("init_test"), false);
+        let result = init_project(Some(dir.path()), Some("init_test"), false);
 
         assert!(result.is_ok());
-        assert!(dir.join("Inference.toml").exists());
-        assert!(!dir.join("src").exists());
-
-        cleanup(&dir);
+        assert!(dir.path().join("Inference.toml").exists());
+        assert!(!dir.path().join("src").exists());
     }
 
     #[test]
     fn test_init_project_already_exists() {
         let dir = temp_dir();
-        fs::write(dir.join("Inference.toml"), "content").unwrap();
+        fs::write(dir.path().join("Inference.toml"), "content").unwrap();
 
-        let result = init_project(Some(&dir), Some("test"), false);
+        let result = init_project(Some(dir.path()), Some("test"), false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
-
-        cleanup(&dir);
     }
 
     #[test]
     fn test_init_project_invalid_name() {
         let dir = temp_dir();
-        let result = init_project(Some(&dir), Some("struct"), false);
+        let result = init_project(Some(dir.path()), Some("struct"), false);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("reserved"));
-
-        cleanup(&dir);
     }
 
     #[test]
     fn test_init_project_infers_name() {
         let parent = temp_dir();
-        let dir = parent.join("my_inferred_project");
+        let dir = parent.path().join("my_inferred_project");
         fs::create_dir_all(&dir).unwrap();
 
         let result = init_project(Some(&dir), None, false);
@@ -500,8 +482,6 @@ mod tests {
 
         let manifest_content = fs::read_to_string(dir.join("Inference.toml")).unwrap();
         assert!(manifest_content.contains("my_inferred_project"));
-
-        cleanup(&parent);
     }
 
     #[test]

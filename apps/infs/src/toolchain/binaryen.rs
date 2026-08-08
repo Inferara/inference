@@ -388,8 +388,16 @@ pub fn remove(paths: &ToolchainPaths) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn unique_root(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("infs_binaryen_{tag}_{}", fastrand::u64(..)))
+    /// Builds a `ToolchainPaths` rooted at a fresh temporary directory.
+    ///
+    /// The returned `TempDir` owns the directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. The name comes from the
+    /// operating system's exclusive-create loop, so it is unique against both
+    /// parallel test threads and concurrent test processes.
+    fn temp_paths() -> (assert_fs::TempDir, ToolchainPaths) {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let paths = ToolchainPaths::with_root(temp.path().to_path_buf());
+        (temp, paths)
     }
 
     #[test]
@@ -490,8 +498,7 @@ mod tests {
 
     #[test]
     fn installed_wasm_opt_finds_binary_under_root() {
-        let root = unique_root("installed");
-        let paths = ToolchainPaths::with_root(root.clone());
+        let (_temp, paths) = temp_paths();
         assert!(
             installed_wasm_opt(&paths).is_none(),
             "absent binary must yield None"
@@ -503,14 +510,11 @@ mod tests {
         std::fs::write(&binary, b"fake").unwrap();
 
         assert_eq!(installed_wasm_opt(&paths), Some(binary));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn status_reflects_install_state() {
-        let root = unique_root("status");
-        let paths = ToolchainPaths::with_root(root.clone());
+        let (_temp, paths) = temp_paths();
 
         let absent = status(&paths);
         assert_eq!(absent.name, "wasm-opt");
@@ -525,26 +529,21 @@ mod tests {
         )
         .unwrap();
         assert!(status(&paths).installed);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn remove_bails_when_absent() {
-        let root = unique_root("remove_absent");
-        let paths = ToolchainPaths::with_root(root.clone());
+        let (_temp, paths) = temp_paths();
         let err = remove(&paths).unwrap_err();
         assert!(
             err.to_string().contains("not installed"),
             "removing an absent component must bail, got: {err}"
         );
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn remove_deletes_installed_component() {
-        let root = unique_root("remove_present");
-        let paths = ToolchainPaths::with_root(root.clone());
+        let (_temp, paths) = temp_paths();
         let bin_dir = paths.binaryen_dir(BINARYEN_PIN).join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(
@@ -555,7 +554,5 @@ mod tests {
 
         remove(&paths).unwrap();
         assert!(!paths.binaryen_dir(BINARYEN_PIN).exists());
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }

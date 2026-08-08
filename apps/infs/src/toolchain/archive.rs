@@ -456,12 +456,14 @@ mod tests {
     use std::io::Write;
     use tar::Builder;
 
-    /// Creates a temporary test directory with a unique name.
-    fn temp_test_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("infs_test_{}_{}", name, fastrand::u64(..)));
-        std::fs::create_dir_all(&dir).expect("Should create temp dir");
-        dir
+    /// Creates a temporary test directory.
+    ///
+    /// The returned `TempDir` owns the directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. The name comes from the
+    /// operating system's exclusive-create loop, so it is unique against both
+    /// parallel test threads and concurrent test processes.
+    fn temp_test_dir() -> assert_fs::TempDir {
+        assert_fs::TempDir::new().expect("Should create temp dir")
     }
 
     /// Creates a tar.gz archive with a single file nested under a root folder.
@@ -504,9 +506,9 @@ mod tests {
 
     #[test]
     fn extract_tar_gz_strips_common_root_folder() {
-        let temp_dir = temp_test_dir("tar_gz_strip");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         create_tar_gz_with_root(&archive_path, "root-folder");
 
@@ -514,60 +516,52 @@ mod tests {
 
         assert!(dest_dir.join("infc").exists());
         assert!(!dest_dir.join("root-folder").exists());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_tar_gz_preserves_structure_without_common_root() {
-        let temp_dir = temp_test_dir("tar_gz_preserve");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         create_tar_gz_without_root(&archive_path);
 
         extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
 
         assert!(dest_dir.join("infc").exists());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_archive_selects_tar_gz_for_tar_gz_extension() {
-        let temp_dir = temp_test_dir("archive_select_tar_gz");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         create_tar_gz_without_root(&archive_path);
 
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
         assert!(dest_dir.join("infc").exists());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_archive_selects_tar_gz_for_tgz_extension() {
-        let temp_dir = temp_test_dir("archive_select_tgz");
-        let archive_path = temp_dir.join("test.tgz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tgz");
+        let dest_dir = temp_dir.path().join("output");
 
         create_tar_gz_without_root(&archive_path);
 
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
         assert!(dest_dir.join("infc").exists());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_archive_selects_zip_for_zip_extension() {
-        let temp_dir = temp_test_dir("archive_select_zip");
-        let archive_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         {
             let file = std::fs::File::create(&archive_path).expect("Should create file");
@@ -584,15 +578,13 @@ mod tests {
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
         assert!(dest_dir.join("infc").exists());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_strips_common_root_folder() {
-        let temp_dir = temp_test_dir("archive_strip");
-        let archive_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create a zip with a root folder
         {
@@ -612,16 +604,13 @@ mod tests {
         // Verify root folder was stripped
         assert!(dest_dir.join("infc").exists());
         assert!(!dest_dir.join("root-folder").exists());
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_preserves_structure_without_common_root() {
-        let temp_dir = temp_test_dir("archive_preserve");
-        let archive_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create a zip without a common root folder
         {
@@ -640,9 +629,6 @@ mod tests {
 
         // Verify structure is preserved
         assert!(dest_dir.join("infc").exists());
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// Creates a flat tar.gz archive with a single file at root.
@@ -689,9 +675,9 @@ mod tests {
 
     #[test]
     fn extract_tar_gz_flat_single_file_not_stripped() {
-        let temp_dir = temp_test_dir("tar_gz_flat_single");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         // Archive contains just "infs" at root (like CI produces)
         create_tar_gz_flat_single_file(&archive_path, "infs");
@@ -700,15 +686,13 @@ mod tests {
 
         // File should be extracted as-is, not skipped
         assert!(dest_dir.join("infs").exists(), "infs should exist at root");
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_tar_gz_flat_multiple_files_not_stripped() {
-        let temp_dir = temp_test_dir("tar_gz_flat_multi");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         create_tar_gz_flat_multiple_files(&archive_path);
 
@@ -720,15 +704,13 @@ mod tests {
             dest_dir.join("README.md").exists(),
             "README.md should exist"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_tar_gz_single_nested_file_stripped() {
-        let temp_dir = temp_test_dir("tar_gz_nested_single");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         // Archive contains "root/infs" (nested under root folder)
         {
@@ -758,15 +740,13 @@ mod tests {
             !dest_dir.join("root").exists(),
             "root folder should not exist"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_flat_single_file_not_stripped() {
-        let temp_dir = temp_test_dir("zip_flat_single");
-        let archive_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create a zip with single file at root
         {
@@ -788,8 +768,6 @@ mod tests {
             dest_dir.join("infs.exe").exists(),
             "infs.exe should exist at root"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// Creates a tar.gz archive with ./ prefix (like CI produces with -C dir .).
@@ -826,9 +804,9 @@ mod tests {
 
     #[test]
     fn extract_tar_gz_with_dot_prefix_not_stripped() {
-        let temp_dir = temp_test_dir("tar_gz_dot_prefix");
-        let archive_path = temp_dir.join("test.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         // Archive contains "./" and "./infs" (like CI produces with tar -C dir .)
         create_tar_gz_with_dot_prefix(&archive_path, "infs");
@@ -840,8 +818,6 @@ mod tests {
             dest_dir.join("infs").exists(),
             "infs should exist at root (dot prefix should be handled)"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// Creates a tar.gz archive mimicking CI infc toolchain structure.
@@ -874,9 +850,9 @@ mod tests {
 
     #[test]
     fn extract_tar_gz_ci_infc_toolchain_structure() {
-        let temp_dir = temp_test_dir("tar_gz_ci_infc");
-        let archive_path = temp_dir.join("infc-linux-x64.tar.gz");
-        let dest_dir = temp_dir.join("toolchain");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("infc-linux-x64.tar.gz");
+        let dest_dir = temp_dir.path().join("toolchain");
 
         // Create archive exactly like CI produces for infc toolchain
         create_tar_gz_like_ci_infc_toolchain(&archive_path);
@@ -894,15 +870,13 @@ mod tests {
             !dest_dir.join(".").exists() || dest_dir.join(".") == dest_dir,
             "No literal '.' directory should be created"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_flat_multiple_files_not_stripped() {
-        let temp_dir = temp_test_dir("zip_flat_multi");
-        let archive_path = temp_dir.join("test.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("test.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create a zip with multiple files at root (no common folder)
         {
@@ -929,8 +903,6 @@ mod tests {
             dest_dir.join("README.md").exists(),
             "README.md should exist"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     // Note: The `tar` crate itself prevents creating archives with `..` paths,
@@ -940,9 +912,9 @@ mod tests {
 
     #[test]
     fn extract_tar_gz_empty_archive() {
-        let temp_dir = temp_test_dir("tar_gz_empty");
-        let archive_path = temp_dir.join("empty.tar.gz");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("empty.tar.gz");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create an empty tar.gz archive (no entries)
         {
@@ -962,15 +934,13 @@ mod tests {
             .expect("Should read dir")
             .collect();
         assert!(entries.is_empty(), "Destination directory should be empty");
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_empty_archive() {
-        let temp_dir = temp_test_dir("zip_empty");
-        let archive_path = temp_dir.join("empty.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("empty.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create an empty ZIP archive (no entries)
         {
@@ -989,8 +959,6 @@ mod tests {
             .expect("Should read dir")
             .collect();
         assert!(entries.is_empty(), "Destination directory should be empty");
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[cfg(unix)]
@@ -1000,14 +968,14 @@ mod tests {
 
         #[test]
         fn set_executable_permissions_sets_755_on_root_infc() {
-            let temp_dir = temp_test_dir("exec_perm_root_infc");
-            let infc_path = temp_dir.join("infc");
+            let temp_dir = temp_test_dir();
+            let infc_path = temp_dir.path().join("infc");
             std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
 
             std::fs::set_permissions(&infc_path, std::fs::Permissions::from_mode(0o644))
                 .expect("Should set initial perms");
 
-            set_executable_permissions(&temp_dir).expect("Should set permissions");
+            set_executable_permissions(temp_dir.path()).expect("Should set permissions");
 
             let mode = std::fs::metadata(&infc_path)
                 .expect("Should get metadata")
@@ -1015,26 +983,22 @@ mod tests {
                 .mode();
 
             assert_eq!(mode & 0o777, 0o755, "infc should have 0o755 mode");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
 
         #[test]
         fn set_executable_permissions_handles_missing_infc() {
-            let temp_dir = temp_test_dir("exec_perm_no_infc");
+            let temp_dir = temp_test_dir();
 
-            let result = set_executable_permissions(&temp_dir);
+            let result = set_executable_permissions(temp_dir.path());
 
             assert!(result.is_ok(), "Should succeed without infc binary");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
 
         #[test]
         fn set_executable_permissions_sets_755_on_bundled_inference_lsp() {
-            let temp_dir = temp_test_dir("exec_perm_lsp");
-            let infc_path = temp_dir.join("infc");
-            let lsp_path = temp_dir.join("inference-lsp");
+            let temp_dir = temp_test_dir();
+            let infc_path = temp_dir.path().join("infc");
+            let lsp_path = temp_dir.path().join("inference-lsp");
             std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
             std::fs::write(&lsp_path, b"lsp binary").expect("Should write inference-lsp");
 
@@ -1043,38 +1007,35 @@ mod tests {
                     .expect("Should set initial perms");
             }
 
-            set_executable_permissions(&temp_dir).expect("Should set permissions");
+            set_executable_permissions(temp_dir.path()).expect("Should set permissions");
 
             let lsp_mode = std::fs::metadata(&lsp_path)
                 .expect("Should get metadata")
                 .permissions()
                 .mode();
             assert_eq!(lsp_mode & 0o777, 0o755, "inference-lsp should have 0o755 mode");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
 
         #[test]
         fn set_executable_permissions_skips_absent_inference_lsp() {
-            let temp_dir = temp_test_dir("exec_perm_lsp_absent");
-            let infc_path = temp_dir.join("infc");
+            let temp_dir = temp_test_dir();
+            let infc_path = temp_dir.path().join("infc");
             std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
 
             // A toolchain that predates the bundling has no inference-lsp; the
             // call must still succeed and leave the directory unchanged.
-            set_executable_permissions(&temp_dir).expect("Should succeed without inference-lsp");
+            set_executable_permissions(temp_dir.path())
+                .expect("Should succeed without inference-lsp");
             assert!(
-                !temp_dir.join("inference-lsp").exists(),
+                !temp_dir.path().join("inference-lsp").exists(),
                 "no inference-lsp file should be created"
             );
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
 
         #[test]
         fn set_executable_file_sets_755_on_named_file() {
-            let temp_dir = temp_test_dir("exec_file_755");
-            let file = temp_dir.join("wasm-opt");
+            let temp_dir = temp_test_dir();
+            let file = temp_dir.path().join("wasm-opt");
             std::fs::write(&file, b"binary").expect("Should write file");
 
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
@@ -1087,32 +1048,28 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o755, "file should have 0o755 mode");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
 
         #[test]
         fn set_executable_file_errors_on_missing_path() {
-            let temp_dir = temp_test_dir("exec_file_missing");
-            let missing = temp_dir.join("nope");
+            let temp_dir = temp_test_dir();
+            let missing = temp_dir.path().join("nope");
 
             assert!(
                 set_executable_file(&missing).is_err(),
                 "a missing path must surface as an error"
             );
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
         }
     }
 
     #[test]
     fn extract_zip_with_nested_tar_gz() {
-        let temp_dir = temp_test_dir("zip_nested_tar_gz");
-        let archive_path = temp_dir.join("outer.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("outer.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create inner tar.gz with actual files
-        let inner_tar_gz_path = temp_dir.join("inner.tar.gz");
+        let inner_tar_gz_path = temp_dir.path().join("inner.tar.gz");
         create_tar_gz_like_ci_infc_toolchain(&inner_tar_gz_path);
 
         // Create outer zip containing only the tar.gz
@@ -1139,18 +1096,16 @@ mod tests {
             !dest_dir.join("infc-linux-x64.tar.gz").exists(),
             "tar.gz should be cleaned up"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_with_nested_tar_gz_and_sha256() {
-        let temp_dir = temp_test_dir("zip_nested_sha256");
-        let archive_path = temp_dir.join("outer.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("outer.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create inner tar.gz with actual files
-        let inner_tar_gz_path = temp_dir.join("inner.tar.gz");
+        let inner_tar_gz_path = temp_dir.path().join("inner.tar.gz");
         create_tar_gz_like_ci_infc_toolchain(&inner_tar_gz_path);
 
         // Create outer zip containing tar.gz and sha256
@@ -1186,18 +1141,16 @@ mod tests {
             !dest_dir.join("infc-linux-x64.tar.gz.sha256").exists(),
             "sha256 should be cleaned up"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn extract_zip_with_mixed_content_not_nested() {
-        let temp_dir = temp_test_dir("zip_mixed_content");
-        let archive_path = temp_dir.join("outer.zip");
-        let dest_dir = temp_dir.join("output");
+        let temp_dir = temp_test_dir();
+        let archive_path = temp_dir.path().join("outer.zip");
+        let dest_dir = temp_dir.path().join("output");
 
         // Create inner tar.gz with actual files
-        let inner_tar_gz_path = temp_dir.join("inner.tar.gz");
+        let inner_tar_gz_path = temp_dir.path().join("inner.tar.gz");
         create_tar_gz_like_ci_infc_toolchain(&inner_tar_gz_path);
 
         // Create zip with tar.gz PLUS other files - should NOT extract nested
@@ -1232,7 +1185,5 @@ mod tests {
             !dest_dir.join("infc").exists(),
             "infc should NOT exist (not nested scenario)"
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -86,58 +86,48 @@ pub fn compute_sha256(file_path: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
-    #[test]
-    fn compute_sha256_produces_correct_hash() {
-        let temp_dir = std::env::temp_dir().join("infs_test_sha256");
-        std::fs::create_dir_all(&temp_dir).expect("Should create temp dir");
-        let test_file = temp_dir.join("test_file.txt");
+    /// SHA-256 of the fixture content written by [`fixture_file`].
+    const FIXTURE_SHA256: &str = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
+
+    /// Writes the hashing fixture into a unique temporary directory.
+    ///
+    /// The returned `TempDir` owns that directory and deletes it on drop, so
+    /// callers must keep it bound for the whole test. Every call yields a
+    /// distinct path, so neither parallel test threads nor concurrent test
+    /// processes can observe each other's files.
+    fn fixture_file() -> (assert_fs::TempDir, PathBuf) {
+        let temp = assert_fs::TempDir::new().expect("Should create temp dir");
+        let test_file = temp.path().join("test_file.txt");
 
         let mut file = std::fs::File::create(&test_file).expect("Should create test file");
         file.write_all(b"hello world\n")
             .expect("Should write test content");
-        drop(file);
+
+        (temp, test_file)
+    }
+
+    #[test]
+    fn compute_sha256_produces_correct_hash() {
+        let (_temp, test_file) = fixture_file();
 
         let hash = compute_sha256(&test_file).expect("Should compute hash");
 
-        assert_eq!(
-            hash,
-            "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
-        );
-
-        std::fs::remove_file(&test_file).ok();
+        assert_eq!(hash, FIXTURE_SHA256);
     }
 
     #[test]
     fn verify_checksum_passes_for_matching_hash() {
-        let temp_dir = std::env::temp_dir().join("infs_test_verify_pass");
-        std::fs::create_dir_all(&temp_dir).expect("Should create temp dir");
-        let test_file = temp_dir.join("test_file.txt");
+        let (_temp, test_file) = fixture_file();
 
-        let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n")
-            .expect("Should write test content");
-        drop(file);
-
-        let result = verify_checksum(
-            &test_file,
-            "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447",
-        );
+        let result = verify_checksum(&test_file, FIXTURE_SHA256);
         assert!(result.is_ok());
-
-        std::fs::remove_file(&test_file).ok();
     }
 
     #[test]
     fn verify_checksum_fails_for_mismatched_hash() {
-        let temp_dir = std::env::temp_dir().join("infs_test_verify_fail");
-        std::fs::create_dir_all(&temp_dir).expect("Should create temp dir");
-        let test_file = temp_dir.join("test_file.txt");
-
-        let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n")
-            .expect("Should write test content");
-        drop(file);
+        let (_temp, test_file) = fixture_file();
 
         let result = verify_checksum(&test_file, "wrong_hash_value");
         assert!(result.is_err());
@@ -145,28 +135,14 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("Checksum verification failed"));
         assert!(error_msg.contains("wrong_hash_value"));
-
-        std::fs::remove_file(&test_file).ok();
     }
 
     #[test]
     fn verify_checksum_handles_uppercase_expected() {
-        let temp_dir = std::env::temp_dir().join("infs_test_verify_uppercase");
-        std::fs::create_dir_all(&temp_dir).expect("Should create temp dir");
-        let test_file = temp_dir.join("test_file.txt");
+        let (_temp, test_file) = fixture_file();
 
-        let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n")
-            .expect("Should write test content");
-        drop(file);
-
-        let result = verify_checksum(
-            &test_file,
-            "A948904F2F0F479B8F8197694B30184B0D2ED1C1CD2A1EC0FB85D299A192A447",
-        );
+        let result = verify_checksum(&test_file, &FIXTURE_SHA256.to_uppercase());
         assert!(result.is_ok());
-
-        std::fs::remove_file(&test_file).ok();
     }
 
     #[test]
