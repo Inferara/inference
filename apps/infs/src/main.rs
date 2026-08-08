@@ -57,6 +57,8 @@
 mod commands;
 mod errors;
 mod project;
+#[cfg(test)]
+mod testing;
 mod toolchain;
 mod tui;
 

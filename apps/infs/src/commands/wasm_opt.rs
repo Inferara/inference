@@ -1007,6 +1007,10 @@ mod tests {
 
     /// Writes an executable stub at `<dir>/wasm-opt` printing `version_output`
     /// (empty means print nothing) and exiting `exit_code`.
+    ///
+    /// The stub is settled before it is returned: `probe_wasm_opt_version` maps
+    /// a failed spawn to `None`, so an `ETXTBSY` there would surface as a
+    /// missing version rather than an error a retry could see.
     #[cfg(unix)]
     fn write_version_stub(
         dir: &assert_fs::TempDir,
@@ -1021,6 +1025,7 @@ mod tests {
         ))
         .unwrap();
         std::fs::set_permissions(stub.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::settle_executable(stub.path(), &["--version"]);
         stub.path().to_path_buf()
     }
 
@@ -1191,10 +1196,13 @@ mod tests {
         std::fs::write(&wasm_path, original).unwrap();
 
         let fake = write_failing_wasm_opt(&dir);
-        let err = optimize_in_place(&fake, "z", &wasm_path, false).unwrap_err();
+        let err = crate::testing::retry_while_exec_busy(|| {
+            optimize_in_place(&fake, "z", &wasm_path, false)
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("wasm-opt failed"),
-            "a nonzero exit must surface as a wasm-opt failure, got: {err}"
+            "a nonzero exit must surface as a wasm-opt failure, got: {err:#}"
         );
         assert_eq!(
             std::fs::read(&wasm_path).unwrap(),
