@@ -30,6 +30,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.1.3
 
+      # The infs run-path integration tests execute the artifacts they build
+      # and self-skip when `wasmtime` is not in PATH; without it the run
+      # family never executes anywhere in the build matrix.
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+
       - name: Install MinGW (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
