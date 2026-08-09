@@ -337,6 +337,7 @@ infs build example.inf # Uses managed toolchain
 | `INFC_PATH` | Explicit path to `infc` binary (priority 1) |
 | `INFERENCE_HOME` | Toolchain directory (default: `~/.inference`) |
 | `INFS_DIST_SERVER` | Distribution server URL (default: `https://inference-lang.org`) |
+| `INFERENCE_TEST_INFC` | Test-only: pins the `infc` the integration suite spawns, overriding its probing |
 
 ### Release Manifest Format
 
@@ -436,7 +437,10 @@ Some integration tests are conditional:
 - `run_full_workflow_with_wasmtime` - requires wasmtime
 - Unix-specific tests (permissions) - `#[cfg(unix)]`
 
-These tests skip gracefully when external tools or platforms are unavailable.
+These tests skip gracefully when external tools or platforms are unavailable, except when `CI` is set to
+a non-empty, non-`0` value: a missing `infc` or `wasmtime` then fails the run rather than skipping, because
+cargo captures the skip notice and a skipped test is otherwise indistinguishable from a passing one. The
+`wasm-opt` gate is the deliberate exception — no CI runner provides Binaryen — so it always skips softly.
 
 ### Manual QA Tests
 
