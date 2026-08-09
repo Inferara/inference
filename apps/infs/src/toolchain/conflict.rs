@@ -24,7 +24,6 @@
 
 use std::path::{Path, PathBuf};
 
-use super::Platform;
 use super::paths::ToolchainPaths;
 
 /// Represents a conflict where a binary in PATH shadows the managed version.
@@ -61,14 +60,13 @@ pub struct PathConflict {
 /// A vector of `PathConflict` for each binary that has a conflict.
 #[must_use]
 pub fn detect_path_conflicts(bin_dir: &Path) -> Vec<PathConflict> {
-    let Ok(platform) = Platform::detect() else {
-        return vec![];
-    };
-    let ext = platform.executable_extension();
-
     let mut conflicts = Vec::new();
 
-    let binary_with_ext = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
+    let binary_with_ext = format!(
+        "{}{}",
+        ToolchainPaths::MANAGED_BINARY,
+        std::env::consts::EXE_SUFFIX
+    );
     let expected = bin_dir.join(&binary_with_ext);
 
     if let Ok(found_path) = which::which(&binary_with_ext)
@@ -88,9 +86,9 @@ pub fn detect_path_conflicts(bin_dir: &Path) -> Vec<PathConflict> {
 /// Enumerates every `infc` binary visible on the current `PATH`, in
 /// first-wins order (the same order `which::which` would traverse).
 ///
-/// Returns an empty vector when nothing is found or when platform
-/// detection fails. More than one entry means the later entries are
-/// shadowed; `infs build` will invoke the first one.
+/// Returns an empty vector when nothing is found. More than one entry
+/// means the later entries are shadowed; `infs build` will invoke the
+/// first one.
 ///
 /// Uses [`which::which_all`] rather than [`which::which`] so both
 /// active and shadowed binaries are visible — the common pitfall a
@@ -98,10 +96,11 @@ pub fn detect_path_conflicts(bin_dir: &Path) -> Vec<PathConflict> {
 /// already in the tree and v8 exposes `which_all` directly.
 #[must_use]
 pub fn enumerate_infc_on_path() -> Vec<PathBuf> {
-    let Ok(platform) = Platform::detect() else {
-        return vec![];
-    };
-    let binary_with_ext = format!("{}{}", ToolchainPaths::MANAGED_BINARY, platform.executable_extension());
+    let binary_with_ext = format!(
+        "{}{}",
+        ToolchainPaths::MANAGED_BINARY,
+        std::env::consts::EXE_SUFFIX
+    );
     which::which_all(&binary_with_ext)
         .map(Iterator::collect)
         .unwrap_or_default()
@@ -412,8 +411,11 @@ mod tests {
     /// Creates an executable `infc[.exe]` stub in `dir` so `which::which_all`
     /// will count it as a match.
     fn write_executable_infc_stub(dir: &Path) -> PathBuf {
-        let platform = Platform::detect().unwrap();
-        let name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, platform.executable_extension());
+        let name = format!(
+            "{}{}",
+            ToolchainPaths::MANAGED_BINARY,
+            std::env::consts::EXE_SUFFIX
+        );
         let stub = dir.join(&name);
         std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -513,6 +515,47 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn detect_conflicts_reports_managed_infc_shadowed_on_path() {
+        // The positive case: the managed bin directory holds an `infc`, but
+        // PATH resolves `infc` somewhere else, so the managed copy is
+        // shadowed. Every other `detect_path_conflicts` test asserts the
+        // empty result, which a function that always returned `vec![]` would
+        // satisfy too.
+        let bin_dir = assert_fs::TempDir::new().unwrap();
+        let expected = write_executable_infc_stub(bin_dir.path());
+
+        let path_dir = assert_fs::TempDir::new().unwrap();
+        let shadowing = write_executable_infc_stub(path_dir.path());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        // SAFETY: serialized; restored below before assertions.
+        unsafe {
+            env::set_var("PATH", path_dir.path());
+        }
+
+        let conflicts = detect_path_conflicts(bin_dir.path());
+
+        // SAFETY: restore PATH before assertions so a panic cannot leak it.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        assert_eq!(conflicts.len(), 1, "expected one conflict: {conflicts:?}");
+        assert_eq!(
+            conflicts[0].binary,
+            format!(
+                "{}{}",
+                ToolchainPaths::MANAGED_BINARY,
+                std::env::consts::EXE_SUFFIX
+            )
+        );
+        assert_eq!(canon(&conflicts[0].found), canon(&shadowing));
+        assert_eq!(canon(&conflicts[0].expected), canon(&expected));
+    }
+
+    #[test]
     fn format_duplicate_path_warning_lists_active_and_shadowed() {
         let paths = vec![
             PathBuf::from("/usr/local/bin/infc"),
@@ -551,8 +594,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn detect_conflicts_excludes_shadowed_inference_lsp() {
-        let platform = Platform::detect().unwrap();
-        let lsp_name = format!("inference-lsp{}", platform.executable_extension());
+        let lsp_name = format!("inference-lsp{}", std::env::consts::EXE_SUFFIX);
 
         // The managed bin directory holds the expected inference-lsp...
         let bin_dir = assert_fs::TempDir::new().unwrap();

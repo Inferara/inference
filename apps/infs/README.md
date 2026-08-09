@@ -309,8 +309,11 @@ When running `build`, `run` commands, `infs` locates the `infc` compiler using t
 | Priority | Source | Description |
 |----------|--------|-------------|
 | 1 (highest) | `INFC_PATH` env var | Explicit path to a specific `infc` binary |
-| 2 | System PATH | Searches for `infc` in system PATH via `which` |
-| 3 (lowest) | Managed toolchain | Uses `~/.inference/toolchains/VERSION/infc` |
+| 2 | Sibling of `infs` | An `infc` in the same directory as the running `infs`, whatever that directory is named |
+| 3 | System PATH | Searches for `infc` in system PATH via `which` |
+| 4 (lowest) | Managed toolchain | Uses `~/.inference/toolchains/VERSION/infc` |
+
+`infs doctor` reports which priority fired on its `Resolved infc` line.
 
 ### When to Use Each
 
@@ -320,9 +323,13 @@ export INFC_PATH=/path/to/custom/infc
 infs build example.inf
 ```
 
-**Priority 2 - System PATH**: Automatic if `infc` is installed system-wide (e.g., via package manager).
+**Priority 2 - Sibling of `infs`**: Automatic, and what makes `./target/debug/infs build foo.inf` use the compiler you just built rather than an installed one. Only adjacency is checked, so it holds regardless of `CARGO_TARGET_DIR`, `--target-dir`, the cargo profile, or the host platform. It also applies to installed layouts, where `infs` and `infc` share a directory. Set `INFC_PATH` to override it.
 
-**Priority 3 - Managed Toolchain**: Default for end users after running `infs install`:
+Because this tier assumes the two binaries were built together rather than proving it, the compatibility handshake checks the assumption: if the adjacent `infc` reports a different build commit, the build warns and names both. The other tiers stay silent on a commit mismatch — for a pinned, installed, or managed `infc` a differing commit is normal. The check catches cross-commit drift only; two binaries built from the same commit with different working trees are indistinguishable to it.
+
+**Priority 3 - System PATH**: Automatic if `infc` is installed system-wide (e.g., via package manager).
+
+**Priority 4 - Managed Toolchain**: Default for end users after running `infs install`:
 ```bash
 infs install           # Downloads to ~/.inference/toolchains/
 infs default 0.1.0     # Sets default version
@@ -334,6 +341,7 @@ infs build example.inf # Uses managed toolchain
 | Variable | Purpose |
 |----------|---------|
 | `INFS_NO_TUI` | Disable interactive TUI (any value) |
+| `INFS_VERBOSE` | Trace `infc` resolution to stderr — which priority resolved it, and when the sibling priority declined (any non-empty value other than `0`) |
 | `INFC_PATH` | Explicit path to `infc` binary (priority 1) |
 | `INFERENCE_HOME` | Toolchain directory (default: `~/.inference`) |
 | `INFS_DIST_SERVER` | Distribution server URL (default: `https://inference-lang.org`) |

@@ -4,7 +4,7 @@
 //! across different installation contexts. The search order prioritizes:
 //!
 //! 1. Explicit override via `INFC_PATH` environment variable
-//! 2. Cargo-workspace sibling at `target/<profile>/infc[.exe]`
+//! 2. Sibling `infc[.exe]` in the directory holding the running `infs`
 //! 3. System PATH via `which::which("infc")`
 //! 4. Managed toolchain at `~/.inference/toolchains/VERSION/infc`
 //!
@@ -12,23 +12,23 @@
 //!
 //! - `INFC_PATH`: Explicit path to the infc binary (highest priority)
 //! - `INFS_VERBOSE`: When set to a non-empty, non-"0" value, emits resolution
-//!   trace lines to stderr describing which priority resolved `infc`
+//!   trace lines to stderr describing which priority resolved `infc`, and
+//!   reports when the sibling priority declined
 //!
 //! ## Example
 //!
 //! ```rust,ignore
-//! use crate::toolchain::resolver::find_infc;
+//! use crate::toolchain::resolver::find_infc_with_source;
 //!
-//! let infc_path = find_infc()?;
-//! println!("Using infc at: {}", infc_path.display());
+//! let (infc_path, source) = find_infc_with_source()?;
+//! println!("Using infc at: {} (via {})", infc_path.display(), source.label());
 //! ```
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::toolchain::paths::ToolchainPaths;
-use crate::toolchain::platform::Platform;
 
 /// Environment variable for explicit infc binary path override.
 const INFC_PATH_ENV: &str = "INFC_PATH";
@@ -41,8 +41,8 @@ const INFC_PATH_ENV: &str = "INFC_PATH";
 pub enum ResolutionSource {
     /// Resolved via the `INFC_PATH` environment variable (priority 1).
     InfcPathEnv,
-    /// Resolved via the workspace sibling `target/<profile>/infc` (priority 2).
-    WorkspaceSibling,
+    /// Resolved via an `infc` sitting next to the running `infs` (priority 2).
+    ExecutableSibling,
     /// Resolved via `which::which("infc")` against the system `PATH` (priority 3).
     SystemPath,
     /// Resolved via the managed toolchain under `~/.inference/toolchains/` (priority 4).
@@ -58,7 +58,7 @@ impl ResolutionSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::InfcPathEnv => "INFC_PATH env",
-            Self::WorkspaceSibling => "workspace sibling",
+            Self::ExecutableSibling => "sibling of infs",
             Self::SystemPath => "PATH",
             Self::ManagedToolchain => "managed toolchain",
         }
@@ -109,15 +109,15 @@ fn current_exe_for_resolver() -> std::io::Result<PathBuf> {
     std::env::current_exe()
 }
 
-/// Priority-2 (relative to PATH): when `infs` was itself cargo-built into
-/// `target/<profile>/infs[.exe]`, a sibling `infc[.exe]` in the same dir is
-/// assumed to be the paired build. Falls through silently on any error.
+/// Priority-2 (relative to PATH): the `infc[.exe]` sitting next to the running
+/// `infs`, if one is there. Falls through silently on any error, except under
+/// `INFS_VERBOSE`, which reports the decline so the PATH fallback is visible.
 ///
 /// Canonicalizes the current exe first for the common case where cargo
 /// invokes via a symlink, but falls back to the raw path when
 /// `canonicalize()` fails (broken symlinks, restricted ACLs, some
 /// container `/proc/self/exe` setups).
-pub(crate) fn workspace_sibling_infc() -> Option<PathBuf> {
+pub(crate) fn sibling_infc() -> Option<PathBuf> {
     let raw = current_exe_for_resolver().ok()?;
     let canonical = raw.canonicalize().ok();
     if canonical.is_none() && verbose() {
@@ -126,42 +126,43 @@ pub(crate) fn workspace_sibling_infc() -> Option<PathBuf> {
             raw.display()
         );
     }
-    workspace_sibling_infc_from(canonical.as_deref().unwrap_or(&raw))
+    let exe = canonical.as_deref().unwrap_or(&raw);
+    let found = sibling_infc_from(exe);
+    if found.is_none() && verbose() {
+        // A path with no directory component is reported as itself; naming
+        // the useless empty string would be worse than naming the path the
+        // probe was handed.
+        let looked_in = exe_dir(exe).unwrap_or(exe);
+        eprintln!(
+            "infs: no infc beside {}; falling back to PATH",
+            looked_in.display()
+        );
+    }
+    found
 }
 
-fn workspace_sibling_infc_from(exe: &Path) -> Option<PathBuf> {
-    let platform = Platform::detect().ok()?;
-    let ext = platform.executable_extension();
-    let dir = exe.parent()?;
-    let profile = dir.file_name()?.to_str()?;
-    if profile != "debug" && profile != "release" {
-        return None;
-    }
-    // Accept both the standard `target/<profile>/` layout and the
-    // `target/<triple>/<profile>/` layout produced by `cargo build
-    // --target <triple>`. Nightly CI and cross-compilation builds
-    // routinely put the triple between `target` and the profile dir.
-    let grandparent = dir.parent()?;
-    let is_target = grandparent.file_name().and_then(|n| n.to_str()) == Some("target")
-        || grandparent
-            .parent()
-            .and_then(|gg| gg.file_name())
-            .and_then(|n| n.to_str())
-            == Some("target");
-    if !is_target {
-        return None;
-    }
-    let expected_infs = format!("infs{ext}");
-    let actual = exe.file_name()?.to_str()?;
-    let matches = if platform.is_windows() {
-        actual.eq_ignore_ascii_case(&expected_infs)
-    } else {
-        actual == expected_infs
-    };
-    if !matches {
-        return None;
-    }
-    let candidate = dir.join(format!("infc{ext}"));
+/// The directory holding `exe`, or `None` when the path names no directory.
+///
+/// A path with no directory component has `Some("")` as its parent, not
+/// `None`. Refusing it is what stops a candidate from degrading to a bare
+/// `infc` probed against the current working directory — a location that has
+/// nothing to do with where `infs` lives.
+fn exe_dir(exe: &Path) -> Option<&Path> {
+    exe.parent().filter(|dir| !dir.as_os_str().is_empty())
+}
+
+/// Looks for `infc` in the directory that holds `exe`, and nowhere else.
+///
+/// A compiler driver and its companion tools ship as one unit, so the copy
+/// that belongs to this `infs` is the copy installed alongside it — the same
+/// rule clang and rustc use to find their own companions. Naming neither the
+/// directory nor the driver's own filename is the point: a cargo target
+/// directory redirected by `CARGO_TARGET_DIR` or `--target-dir`, a custom
+/// cargo profile, a release tarball unpacked anywhere, and a driver renamed
+/// for local development all keep the pairing that matters, which is
+/// adjacency.
+fn sibling_infc_from(exe: &Path) -> Option<PathBuf> {
+    let candidate = exe_dir(exe)?.join(format!("infc{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
 }
 
@@ -174,22 +175,40 @@ fn workspace_sibling_infc_from(exe: &Path) -> Option<PathBuf> {
 pub(crate) fn managed_toolchain_infc() -> Option<PathBuf> {
     let paths = ToolchainPaths::new().ok()?;
     let version = paths.get_default_version().ok().flatten()?;
-    let platform = Platform::detect().ok()?;
-    let ext = platform.executable_extension();
-    let infc_name = format!("infc{ext}");
+    let infc_name = format!("infc{}", std::env::consts::EXE_SUFFIX);
     let infc_path = paths.binary_path(&version, &infc_name);
     infc_path.is_file().then_some(infc_path)
 }
 
 /// Locates the `infc` compiler binary and reports which priority fired.
 ///
-/// Priorities match [`find_infc`]; callers that only need the path should
-/// use that wrapper. Doctor and other diagnostic surfaces use this richer
-/// form to tell the user *why* a particular binary was selected.
+/// Searches in the following priority order:
+///
+/// 1. **`INFC_PATH` environment variable** - Explicit override for testing
+///    or custom installations (hardest override)
+/// 2. **Sibling of infs** - Prefer the `infc[.exe]` installed in the same
+///    directory as the running `infs`, whatever that directory is; companion
+///    tools ship together, so adjacency identifies the paired compiler
+/// 3. **System PATH** - Uses `which::which("infc")` to find infc in PATH
+/// 4. **Managed toolchain** - Looks in `~/.inference/toolchains/VERSION/infc`
+///    using the default toolchain version if set
+///
+/// Fallthrough on any priority's failure is intentional; each priority is
+/// best-effort. Set `INFS_VERBOSE=1` to trace which priority resolved
+/// `infc` on stderr.
+///
+/// Every caller wants the source alongside the path: build and run feed it
+/// to the compatibility handshake, which holds the sibling tier — and only
+/// the sibling tier — to its claim that the two binaries are a pair. Doctor
+/// reports it so a user can see *why* one binary was selected over another.
 ///
 /// # Errors
 ///
-/// Same as [`find_infc`].
+/// Returns an error if:
+/// - `INFC_PATH` is set but the path does not exist
+/// - No infc binary could be found in any location
+///
+/// The error message provides helpful guidance on how to install infc.
 pub fn find_infc_with_source() -> Result<(PathBuf, ResolutionSource)> {
     // Priority 1: INFC_PATH environment variable
     if let Ok(path) = std::env::var(INFC_PATH_ENV) {
@@ -204,10 +223,10 @@ pub fn find_infc_with_source() -> Result<(PathBuf, ResolutionSource)> {
         );
     }
 
-    // Priority 2: cargo-workspace sibling infc
-    if let Some(path) = workspace_sibling_infc() {
-        trace_resolved(ResolutionSource::WorkspaceSibling, &path);
-        return Ok((path, ResolutionSource::WorkspaceSibling));
+    // Priority 2: infc sitting next to the running infs
+    if let Some(path) = sibling_infc() {
+        trace_resolved(ResolutionSource::ExecutableSibling, &path);
+        return Ok((path, ResolutionSource::ExecutableSibling));
     }
 
     // Priority 3: System PATH
@@ -221,13 +240,6 @@ pub fn find_infc_with_source() -> Result<(PathBuf, ResolutionSource)> {
         trace_resolved(ResolutionSource::ManagedToolchain, &path);
         return Ok((path, ResolutionSource::ManagedToolchain));
     }
-    // If a default toolchain is configured but the binary is missing, surface
-    // the detection attempt so platform-detection errors still bubble up.
-    if let Ok(paths) = ToolchainPaths::new()
-        && let Ok(Some(_)) = paths.get_default_version()
-    {
-        Platform::detect().context("Failed to detect platform while searching for infc")?;
-    }
 
     bail!(
         "infc compiler not found.\n\n\
@@ -237,43 +249,6 @@ pub fn find_infc_with_source() -> Result<(PathBuf, ResolutionSource)> {
         - Or download from: https://github.com/Inferara/inference/releases\n  \
         - Or set INFC_PATH environment variable to the infc binary path"
     );
-}
-
-/// Locates the `infc` compiler binary.
-///
-/// Searches for the infc binary in the following priority order:
-///
-/// 1. **`INFC_PATH` environment variable** - Explicit override for testing
-///    or custom installations (hardest override)
-/// 2. **Workspace sibling** - When `infs` is running from
-///    `target/<profile>/infs[.exe]`, prefer the paired
-///    `target/<profile>/infc[.exe]` if present
-/// 3. **System PATH** - Uses `which::which("infc")` to find infc in PATH
-/// 4. **Managed toolchain** - Looks in `~/.inference/toolchains/VERSION/infc`
-///    using the default toolchain version if set
-///
-/// Fallthrough on any priority's failure is intentional; each priority is
-/// best-effort. Set `INFS_VERBOSE=1` to trace which priority resolved
-/// `infc` on stderr.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - `INFC_PATH` is set but the path does not exist
-/// - No infc binary could be found in any location
-///
-/// The error message provides helpful guidance on how to install infc.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let infc_path = find_infc()?;
-/// std::process::Command::new(&infc_path)
-///     .arg("--help")
-///     .status()?;
-/// ```
-pub fn find_infc() -> Result<PathBuf> {
-    find_infc_with_source().map(|(path, _)| path)
 }
 
 #[cfg(test)]
@@ -298,8 +273,35 @@ mod tests {
     }
 
     fn exe_name(name: &str) -> String {
-        let ext = Platform::detect().unwrap().executable_extension();
-        format!("{name}{ext}")
+        format!("{name}{}", std::env::consts::EXE_SUFFIX)
+    }
+
+    /// Creates `dir` and writes an empty file per entry in `names`, returning
+    /// the directory.
+    ///
+    /// Callers root `dir` in a fresh `TempDir`, keeping every layout off any
+    /// real system path whose contents a test could neither predict nor own.
+    fn populate(dir: PathBuf, names: &[&str]) -> PathBuf {
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in names {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        dir
+    }
+
+    /// Asserts that a directory holding `driver` and an `infc` resolves that
+    /// `infc` when probed with the driver's path.
+    ///
+    /// The layout matrix varies only the directory shape and the driver's
+    /// name, so naming the layout is the whole test and the assertion never
+    /// differs.
+    fn assert_driver_finds_sibling(dir: PathBuf, driver: &str) {
+        let driver_name = exe_name(driver);
+        let infc_name = exe_name("infc");
+        let dir = populate(dir, &[&driver_name, &infc_name]);
+
+        let result = sibling_infc_from(&dir.join(driver_name));
+        assert_eq!(result.as_deref(), Some(dir.join(infc_name).as_path()));
     }
 
     #[test]
@@ -312,7 +314,7 @@ mod tests {
             env::set_var(INFC_PATH_ENV, path);
         }
 
-        let result = find_infc();
+        let result = find_infc_with_source().map(|(path, _)| path);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("INFC_PATH"));
@@ -338,11 +340,11 @@ mod tests {
             env::set_var("INFERENCE_HOME", inference_home.path());
         }
 
-        // Also suppress the workspace-sibling priority so the error path fires
+        // Also suppress the sibling priority so the error path fires
         // regardless of how the test binary itself is laid out.
         let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
 
-        let result = find_infc();
+        let result = find_infc_with_source().map(|(path, _)| path);
 
         // SAFETY: Cleanup - restoring previous state
         unsafe {
@@ -359,135 +361,128 @@ mod tests {
     }
 
     #[test]
-    fn sibling_infc_found_when_exe_in_target_debug() {
+    fn sibling_infc_found_in_cargo_default_layout() {
         let temp = assert_fs::TempDir::new().unwrap();
-        let debug = temp.path().join("target").join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        let infs_path = debug.join(exe_name("infs"));
-        let infc_path = debug.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
+        assert_driver_finds_sibling(temp.path().join("target").join("debug"), "infs");
     }
 
     #[test]
-    fn sibling_infc_found_when_exe_in_target_release() {
+    fn sibling_infc_found_in_cargo_release_layout() {
         let temp = assert_fs::TempDir::new().unwrap();
-        let release = temp.path().join("target").join("release");
-        std::fs::create_dir_all(&release).unwrap();
-        let infs_path = release.join(exe_name("infs"));
-        let infc_path = release.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
-    }
-
-    #[test]
-    fn sibling_returns_none_when_exe_not_in_target() {
-        // No target/<profile>/ ancestor — should reject regardless of file presence.
-        let fabricated = PathBuf::from("/usr/local/bin").join(exe_name("infs"));
-        let result = workspace_sibling_infc_from(&fabricated);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn sibling_returns_none_when_only_infs_present() {
-        let temp = assert_fs::TempDir::new().unwrap();
-        let debug = temp.path().join("target").join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        let infs_path = debug.join(exe_name("infs"));
-        std::fs::write(&infs_path, b"").unwrap();
-        // Deliberately do not create infc.
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn sibling_returns_none_when_parent_not_target() {
-        let temp = assert_fs::TempDir::new().unwrap();
-        // build/debug/ instead of target/debug/ — shape must reject.
-        let build = temp.path().join("build").join("debug");
-        std::fs::create_dir_all(&build).unwrap();
-        let infs_path = build.join(exe_name("infs"));
-        let infc_path = build.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result, None);
+        assert_driver_finds_sibling(temp.path().join("target").join("release"), "infs");
     }
 
     #[test]
     fn sibling_infc_found_when_exe_in_target_triple_debug() {
         // `cargo build --target x86_64-unknown-linux-gnu` produces
-        // `target/<triple>/debug/` — the sibling heuristic must accept it.
+        // `target/<triple>/debug/`; cross-compiled runs must keep resolving.
         let temp = assert_fs::TempDir::new().unwrap();
-        let debug = temp
+        let dir = temp
             .path()
             .join("target")
             .join("x86_64-unknown-linux-gnu")
             .join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        let infs_path = debug.join(exe_name("infs"));
-        let infc_path = debug.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
+        assert_driver_finds_sibling(dir, "infs");
     }
 
     #[test]
     fn sibling_infc_found_when_exe_in_target_triple_release() {
         let temp = assert_fs::TempDir::new().unwrap();
-        let release = temp
+        let dir = temp
             .path()
             .join("target")
             .join("aarch64-apple-darwin")
             .join("release");
-        std::fs::create_dir_all(&release).unwrap();
-        let infs_path = release.join(exe_name("infs"));
-        let infc_path = release.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
-
-        let result = workspace_sibling_infc_from(&infs_path);
-        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
+        assert_driver_finds_sibling(dir, "infs");
     }
 
     #[test]
-    fn sibling_returns_none_when_no_target_ancestor_at_either_depth() {
-        // foo/bar/debug/infs — neither parent nor grandparent is named
-        // "target"; must reject even though the profile dir is valid and
-        // a sibling infc exists.
+    fn sibling_infc_found_when_target_dir_is_redirected() {
+        // `CARGO_TARGET_DIR=/tmp/out` puts the build in `out/debug/`, with no
+        // directory named `target` anywhere on the path.
         let temp = assert_fs::TempDir::new().unwrap();
-        let debug = temp.path().join("foo").join("bar").join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        let infs_path = debug.join(exe_name("infs"));
-        let infc_path = debug.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
+        assert_driver_finds_sibling(temp.path().join("out").join("debug"), "infs");
+    }
 
-        let result = workspace_sibling_infc_from(&infs_path);
+    #[test]
+    fn sibling_infc_found_when_target_dir_is_named_build() {
+        // `cargo build --target-dir build` produces `build/debug/`.
+        let temp = assert_fs::TempDir::new().unwrap();
+        assert_driver_finds_sibling(temp.path().join("build").join("debug"), "infs");
+    }
+
+    #[test]
+    fn sibling_infc_found_under_custom_cargo_profile() {
+        // A profile declared in `[profile.dist]` builds into `target/dist/`,
+        // which is neither `debug` nor `release`.
+        let temp = assert_fs::TempDir::new().unwrap();
+        assert_driver_finds_sibling(temp.path().join("target").join("dist"), "infs");
+    }
+
+    #[test]
+    fn sibling_infc_found_with_no_recognizable_ancestor() {
+        // Nothing about `foo/bar/debug/` says "cargo output"; adjacency is
+        // the whole rule, so it resolves like any other directory.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dir = temp.path().join("foo").join("bar").join("debug");
+        assert_driver_finds_sibling(dir, "infs");
+    }
+
+    #[test]
+    fn sibling_infc_found_in_flat_install_layout() {
+        // An unpacked release tarball holds both binaries in one directory
+        // with no profile dir at all. Installed layouts resolve too.
+        let temp = assert_fs::TempDir::new().unwrap();
+        assert_driver_finds_sibling(temp.path().join("inference").join("bin"), "infs");
+    }
+
+    #[test]
+    fn sibling_infc_found_when_driver_is_renamed() {
+        // The driver's own filename is never inspected, so a locally renamed
+        // `infs-dev` still finds the `infc` shipped beside it.
+        let temp = assert_fs::TempDir::new().unwrap();
+        assert_driver_finds_sibling(temp.path().join("bin"), "infs-dev");
+    }
+
+    #[test]
+    fn sibling_returns_none_when_only_infs_present() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dir = temp.path().join("target").join("debug");
+        let dir = populate(dir, &[&exe_name("infs")]);
+        // Deliberately do not create infc.
+
+        let result = sibling_infc_from(&dir.join(exe_name("infs")));
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn sibling_returns_none_when_infc_is_a_directory() {
+        // A directory that happens to be named `infc` is not a compiler.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dir = populate(temp.path().join("bin"), &[&exe_name("infs")]);
+        std::fs::create_dir(dir.join(exe_name("infc"))).unwrap();
+
+        let result = sibling_infc_from(&dir.join(exe_name("infs")));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn sibling_returns_none_for_bare_relative_exe_path() {
+        // Pins the empty-parent refusal documented on `exe_dir`.
+        assert_eq!(sibling_infc_from(Path::new("infs")), None);
     }
 
     #[test]
     #[serial_test::serial]
     fn infc_path_env_overrides_sibling() {
-        // Build a plausible workspace-sibling layout that would satisfy L1...
+        // Build a layout the sibling priority would accept...
         let workspace = assert_fs::TempDir::new().unwrap();
-        let debug = workspace.path().join("target").join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
+        let debug = populate(
+            workspace.path().join("target").join("debug"),
+            &[&exe_name("infs"), &exe_name("infc")],
+        );
         let infs_path = debug.join(exe_name("infs"));
         let sibling_infc = debug.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&sibling_infc, b"").unwrap();
 
         // ...then also set INFC_PATH to a distinct file.
         let env_dir = assert_fs::TempDir::new().unwrap();
@@ -501,7 +496,7 @@ mod tests {
             env::set_var(INFC_PATH_ENV, &env_infc);
         }
 
-        let result = find_infc();
+        let result = find_infc_with_source().map(|(path, _)| path);
 
         // SAFETY: cleanup regardless of assertion outcome.
         unsafe {
@@ -511,11 +506,11 @@ mod tests {
         let resolved = result.unwrap();
         assert_eq!(
             resolved, env_infc,
-            "INFC_PATH must outrank the workspace sibling"
+            "INFC_PATH must outrank the sibling infc"
         );
         assert_ne!(
             resolved, sibling_infc,
-            "workspace sibling must not win when INFC_PATH is set"
+            "the sibling infc must not win when INFC_PATH is set"
         );
     }
 
@@ -545,26 +540,24 @@ mod tests {
 
     #[test]
     fn broken_exe_override_falls_through_to_none() {
-        // Inject a path that doesn't exist on disk. canonicalize() will fail;
-        // the raw path shape (/nonexistent/elsewhere/infs) doesn't match
-        // target/<profile>/infs either, so the expected outcome is None.
+        // Inject a path that doesn't exist on disk. canonicalize() will fail,
+        // and no infc sits beside the raw path either, so the expected
+        // outcome is None.
         let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
-        assert_eq!(workspace_sibling_infc(), None);
+        assert_eq!(sibling_infc(), None);
     }
 
     #[test]
-    fn canonicalize_fails_but_raw_matches_shape_without_sibling() {
-        // Fabricate a raw path that MATCHES the target/<profile>/infs shape
-        // but points to a nonexistent location. canonicalize() fails; raw
-        // path passes shape check; but the sibling infc doesn't exist, so
-        // the function still returns None. Exercises the raw-path fallback
-        // branch end-to-end.
+    fn canonicalize_fails_and_raw_path_has_no_sibling() {
+        // A raw path pointing nowhere: canonicalize() fails, the raw path is
+        // used instead, and its directory holds no infc. Exercises the
+        // raw-path fallback branch end-to-end.
         let fabricated = PathBuf::from("/nonexistent")
             .join("target")
             .join("debug")
             .join(exe_name("infs"));
         let _guard = ExeOverrideGuard::set(fabricated);
-        assert_eq!(workspace_sibling_infc(), None);
+        assert_eq!(sibling_infc(), None);
     }
 
     #[test]
@@ -573,8 +566,8 @@ mod tests {
         // trace lines both use them, so they must not drift.
         assert_eq!(ResolutionSource::InfcPathEnv.label(), "INFC_PATH env");
         assert_eq!(
-            ResolutionSource::WorkspaceSibling.label(),
-            "workspace sibling"
+            ResolutionSource::ExecutableSibling.label(),
+            "sibling of infs"
         );
         assert_eq!(ResolutionSource::SystemPath.label(), "PATH");
         assert_eq!(
@@ -585,30 +578,28 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn find_infc_with_source_reports_workspace_sibling() {
-        // Fabricate a target/debug/{infs,infc} layout via the CURRENT_EXE_OVERRIDE
-        // seam so the workspace-sibling priority wins deterministically.
+    fn find_infc_with_source_reports_executable_sibling() {
+        // Fabricate an {infs,infc} pair via the CURRENT_EXE_OVERRIDE seam so
+        // the sibling priority wins deterministically.
         let temp = assert_fs::TempDir::new().unwrap();
-        let debug = temp.path().join("target").join("debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        let infs_path = debug.join(exe_name("infs"));
-        let infc_path = debug.join(exe_name("infc"));
-        std::fs::write(&infs_path, b"").unwrap();
-        std::fs::write(&infc_path, b"").unwrap();
+        let dir = populate(
+            temp.path().join("target").join("debug"),
+            &[&exe_name("infs"), &exe_name("infc")],
+        );
 
         // SAFETY: serialized test; cleanup happens regardless of outcome.
         unsafe {
             env::remove_var(INFC_PATH_ENV);
         }
-        let _guard = ExeOverrideGuard::set(infs_path);
+        let _guard = ExeOverrideGuard::set(dir.join(exe_name("infs")));
 
         let result = find_infc_with_source();
 
         let (path, source) = result.unwrap();
-        assert_eq!(source, ResolutionSource::WorkspaceSibling);
+        assert_eq!(source, ResolutionSource::ExecutableSibling);
         assert_eq!(
             path.canonicalize().unwrap(),
-            infc_path.canonicalize().unwrap()
+            dir.join(exe_name("infc")).canonicalize().unwrap()
         );
     }
 
@@ -619,8 +610,8 @@ mod tests {
         let env_infc = env_dir.path().join(exe_name("infc"));
         std::fs::write(&env_infc, b"").unwrap();
 
-        // Neutralize the workspace-sibling priority so it cannot accidentally
-        // fire before INFC_PATH — the test is about priority-1 winning.
+        // Neutralize the sibling priority so it cannot accidentally fire
+        // before INFC_PATH — the test is about priority-1 winning.
         let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
 
         // SAFETY: serialized test; env restored below.
@@ -658,7 +649,7 @@ mod tests {
         }
 
         let original_path = env::var("PATH").unwrap_or_default();
-        // Neutralize workspace-sibling priority so PATH lookup is reached.
+        // Neutralize the sibling priority so PATH lookup is reached.
         let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
 
         // SAFETY: serialized test; env restored below.
@@ -687,5 +678,60 @@ mod tests {
                 "PATH resolution must return the fabricated stub"
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn sibling_overrides_path() {
+        // Two different compilers, one beside `infs` and one on PATH. The
+        // whole point of the sibling priority is that the neighbour wins, so
+        // this asserts unconditionally: if `which` cannot see the stub the
+        // sibling still wins, and if it can, the sibling must beat it.
+        let path_dir = assert_fs::TempDir::new().unwrap();
+        let stub = path_dir.path().join(exe_name("infc"));
+        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).unwrap();
+        }
+
+        let workspace = assert_fs::TempDir::new().unwrap();
+        let dir = populate(
+            workspace.path().join("target").join("debug"),
+            &[&exe_name("infs"), &exe_name("infc")],
+        );
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let _guard = ExeOverrideGuard::set(dir.join(exe_name("infs")));
+
+        // SAFETY: serialized test; env restored below.
+        unsafe {
+            env::remove_var(INFC_PATH_ENV);
+            env::set_var("PATH", path_dir.path());
+        }
+
+        let result = find_infc_with_source();
+
+        // SAFETY: restore PATH regardless of outcome.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        let (path, source) = result.unwrap();
+        assert_eq!(source, ResolutionSource::ExecutableSibling);
+        let resolved = path.canonicalize().unwrap();
+        assert_eq!(
+            resolved,
+            dir.join(exe_name("infc")).canonicalize().unwrap(),
+            "the sibling infc must outrank the one on PATH"
+        );
+        assert_ne!(
+            resolved,
+            stub.canonicalize().unwrap(),
+            "the PATH stub must not win when a sibling exists"
+        );
     }
 }

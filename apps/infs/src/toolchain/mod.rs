@@ -32,5 +32,4 @@ pub use download::{ProgressCallback, ProgressEvent, download_file, download_file
 pub use manifest::{fetch_artifact, fetch_manifest, latest_stable, latest_version};
 pub use paths::ToolchainPaths;
 pub use platform::Platform;
-pub use resolver::find_infc;
 pub use verify::verify_checksum;

@@ -5532,7 +5532,7 @@ fn seed_managed_wasm_opt(home: &assert_fs::TempDir) -> std::path::PathBuf {
 
 /// A `wasm-opt` on PATH takes precedence over a managed copy: with both present,
 /// resolution reports the PATH tier (the `INFS_VERBOSE` trace names it), matching
-/// `find_infc`'s PATH-over-managed precedence.
+/// the `infc` resolver's PATH-over-managed precedence.
 #[cfg(unix)]
 #[test]
 fn wasm_opt_path_beats_managed() {

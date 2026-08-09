@@ -52,7 +52,7 @@ use crate::commands::build::{BuildMode, format_wasm_dep_arg};
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
 use crate::project::manifest::MANIFEST_FILE_NAME;
-use crate::toolchain::find_infc;
+use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
     COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, WasmFeatureName, render_feature_list,
 };
@@ -148,8 +148,8 @@ pub(crate) fn run_project_build(
         );
     }
 
-    let infc_path = find_infc()?;
-    let compat = probe_compiler_compatibility(&infc_path)?;
+    let (infc_path, infc_source) = find_infc_with_source()?;
+    let compat = probe_compiler_compatibility(&infc_path, infc_source)?;
 
     let entry_relative = ProjectContext::entry_relative();
 
@@ -326,26 +326,81 @@ pub(crate) fn forward_wasm_features(
     Ok(())
 }
 
+/// The pairing warning owed to a sibling-resolved `infc`, or `None` when
+/// there is nothing to report.
+///
+/// Resolution tier 2 claims an adjacent `infc` is this `infs`'s pair on the
+/// strength of adjacency alone. Nothing enforces that claim, so a stale
+/// `infc` left behind in a build directory keeps winning silently. Comparing
+/// the two build commits is what turns the tier's implicit claim into a
+/// checked one.
+///
+/// Deliberately restricted to [`ResolutionSource::ExecutableSibling`]. For
+/// `INFC_PATH`, `PATH`, and the managed toolchain a differing commit is the
+/// normal state — a released `infc` is routinely built from a different
+/// commit than the `infs` invoking it — so warning there would fire on every
+/// build for every end user. Only adjacency asserts pairing, so only
+/// adjacency can have that assertion falsified.
+///
+/// This detects *cross-commit* drift only. Two binaries built from the same
+/// commit but different working-tree states report the same hash and are
+/// indistinguishable here.
+fn sibling_pairing_warning(
+    source: ResolutionSource,
+    local_commit: &str,
+    remote_commit: Option<&str>,
+) -> Option<String> {
+    if source != ResolutionSource::ExecutableSibling {
+        return None;
+    }
+    // Both build scripts stamp the literal "unknown" when git is unavailable,
+    // so an infs built outside a checkout has no commit to compare against.
+    // The infc side needs no such guard: `probe_flag` already maps "unknown"
+    // and empty output to `None`.
+    if local_commit == "unknown" {
+        return None;
+    }
+    let remote = remote_commit?;
+    if remote == local_commit {
+        return None;
+    }
+    Some(format!(
+        "warning: the infc beside infs is from a different build (infs \
+         {local_commit}, infc {remote}); adjacent binaries are assumed to be \
+         built together. Rebuild the workspace, or set INFC_PATH to pin the \
+         compiler you want."
+    ))
+}
+
 /// Runs the `infc` compatibility handshake and returns its capability.
 ///
-/// Sequence (unchanged from the original boolean handshake — same messages):
+/// Sequence:
 /// 1. Query `infc --commit-hash`. If it equals `INFS_GIT_COMMIT`, short-circuit —
 ///    the two binaries were built from the same source tree and the ABI is
 ///    guaranteed compatible (`commit_matched = true`).
-/// 2. Otherwise query `infc --abi-version` and compare against the major/minor
-///    constants from `inference-compiler-interface`. Major mismatch is a hard
-///    error; minor mismatch is a warning; exact match is silent.
+/// 2. Otherwise, when `source` is the sibling tier, report the build-pairing
+///    mismatch ([`sibling_pairing_warning`]). An exact ABI match is silent and
+///    the ABI rarely moves, so without this the common case of a stale
+///    neighbour says nothing at all.
+/// 3. Query `infc --abi-version` and compare against the major/minor constants
+///    from `inference-compiler-interface`. Major mismatch is a hard error;
+///    minor mismatch is a warning; exact match is silent.
 ///
 /// Old binaries that do not understand the flags (non-zero exit, empty output,
 /// or the literal `unknown`) are treated as graceful skips — we neither warn
-/// nor error on them, and the returned `abi` is `None`. The L1/L2 resolver
-/// fixes remain the correctness guarantee; this handshake is a safety net
-/// against residual drift.
+/// nor error on them, and the returned `abi` is `None`. The resolver's
+/// priority order remains the correctness guarantee; this handshake is a
+/// safety net against residual drift, and it sees only *cross-commit* drift:
+/// two binaries built from one commit with different working trees are
+/// identical to it.
 ///
 /// # Errors
 ///
 /// Hard-errors only on a *major* ABI mismatch (with remediation).
-pub(crate) fn probe_compiler_compatibility(infc_path: &Path) -> Result<CompilerCompat> {
+pub(crate) fn probe_compiler_compatibility(
+    infc_path: &Path,
+    source: ResolutionSource,
+) -> Result<CompilerCompat> {
     // --commit-hash / --abi-version print and exit 0 immediately; no timeout needed.
     let local_commit = env!("INFS_GIT_COMMIT");
     let remote_commit = probe_flag(infc_path, "--commit-hash");
@@ -357,6 +412,10 @@ pub(crate) fn probe_compiler_compatibility(infc_path: &Path) -> Result<CompilerC
             commit_matched: true,
             abi: None,
         });
+    }
+
+    if let Some(warning) = sibling_pairing_warning(source, local_commit, remote_commit.as_deref()) {
+        eprintln!("{warning}");
     }
 
     let Some(abi_raw) = probe_flag(infc_path, "--abi-version") else {
@@ -735,6 +794,72 @@ mod project_tests {
         assert_eq!(ctx.entry_point, ctx.root.join("src").join("main.inf"));
         assert!(ctx.entry_point.exists());
     }
+
+    const LOCAL: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const REMOTE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn sibling_from_a_different_build_warns_and_names_both_hashes() {
+        let warning =
+            sibling_pairing_warning(ResolutionSource::ExecutableSibling, LOCAL, Some(REMOTE))
+                .expect("a differing sibling commit must warn");
+        assert!(
+            warning.contains(LOCAL) && warning.contains(REMOTE),
+            "the warning must name both builds so the drift is diagnosable: {warning}"
+        );
+        assert!(
+            warning.contains("INFC_PATH"),
+            "the warning must name the pinning escape hatch: {warning}"
+        );
+    }
+
+    #[test]
+    fn sibling_from_the_same_build_is_silent() {
+        assert_eq!(
+            sibling_pairing_warning(ResolutionSource::ExecutableSibling, LOCAL, Some(LOCAL)),
+            None
+        );
+    }
+
+    #[test]
+    fn sibling_that_reports_no_commit_is_silent() {
+        // `probe_flag` maps an old infc's empty output and its literal
+        // "unknown" to `None`, so this is the shape those reach us in.
+        assert_eq!(
+            sibling_pairing_warning(ResolutionSource::ExecutableSibling, LOCAL, None),
+            None
+        );
+    }
+
+    #[test]
+    fn sibling_is_silent_when_infs_itself_has_no_commit() {
+        // An `infs` built outside a git checkout is stamped "unknown" and has
+        // nothing to compare, so every sibling would otherwise look stale.
+        assert_eq!(
+            sibling_pairing_warning(ResolutionSource::ExecutableSibling, "unknown", Some(REMOTE)),
+            None
+        );
+    }
+
+    #[test]
+    fn non_sibling_tiers_never_warn_about_a_differing_commit() {
+        // The anti-noise guarantee. A released `infc` is routinely built from
+        // a different commit than the `infs` invoking it, so warning on these
+        // tiers would fire on every build for every end user. Covers all
+        // three: only adjacency claims the two binaries are a pair.
+        for source in [
+            ResolutionSource::InfcPathEnv,
+            ResolutionSource::SystemPath,
+            ResolutionSource::ManagedToolchain,
+        ] {
+            assert_eq!(
+                sibling_pairing_warning(source, LOCAL, Some(REMOTE)),
+                None,
+                "{} must not warn about a differing commit",
+                source.label()
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -743,6 +868,13 @@ mod tests {
     use assert_fs::prelude::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    /// The resolution tier the ABI-handshake tests report.
+    ///
+    /// Any tier but the sibling one keeps [`sibling_pairing_warning`] silent,
+    /// so these tests observe the ABI handshake alone. The sibling tier's own
+    /// behaviour is covered separately, against the pure function.
+    const ABI_PROBE_SOURCE: ResolutionSource = ResolutionSource::InfcPathEnv;
 
     /// Writes an executable `infc` stub that prints fixed strings for
     /// `--commit-hash` and `--abi-version`. The stub exits 0 by default but
@@ -782,7 +914,7 @@ mod tests {
     fn abi_major_mismatch_is_hard_error() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "nottherightcommit", "2.0", false);
-        let err = probe_compiler_compatibility(&stub).unwrap_err();
+        let err = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("ABI") && msg.contains("rebuild"),
@@ -798,7 +930,7 @@ mod tests {
         // any plausible local COMPILER_ABI_MINOR; the branch warns but does not
         // hard-error.
         let stub = write_stub(&dir, "nottherightcommit", "1.5", false);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(result.is_ok(), "minor mismatch should not hard-error");
     }
 
@@ -812,7 +944,7 @@ mod tests {
         // major constant so it stays valid across future major bumps.
         let abi = format!("{COMPILER_ABI_MAJOR}.0");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(
             result.is_ok(),
             "infs-newer-than-infc minor mismatch must warn, not hard-error; got: {:?}",
@@ -831,7 +963,7 @@ mod tests {
         // the equal-minor branch; the warn-only tests cover Greater and Less.
         let abi = format!("{COMPILER_ABI_MAJOR}.{COMPILER_ABI_MINOR}");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(
             result.is_ok(),
             "exact ABI match (differing commit) must be a silent Ok via the Equal arm; got: {:?}",
@@ -845,7 +977,7 @@ mod tests {
         // ABI "9.9" would trigger a major mismatch if the ABI check ran.
         // A matching commit hash must short-circuit before that.
         let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(
             result.is_ok(),
             "matching commit hash must short-circuit ABI check, got: {:?}",
@@ -854,10 +986,36 @@ mod tests {
     }
 
     #[test]
+    fn sibling_tier_keeps_the_commit_match_short_circuit() {
+        // The pairing warning is inserted on the commit-mismatch path only.
+        // A sibling built from this very commit must still short-circuit
+        // before the ABI probe, so the "9.9" major mismatch stays unreached.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
+        let compat =
+            probe_compiler_compatibility(&stub, ResolutionSource::ExecutableSibling).unwrap();
+        assert!(compat.commit_matched);
+        assert_eq!(compat.abi, None);
+    }
+
+    #[test]
+    fn sibling_tier_with_differing_commit_still_reports_abi() {
+        // The warning is advisory: it must not disturb the returned
+        // capability, which the flag gates depend on.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let abi = format!("{COMPILER_ABI_MAJOR}.{COMPILER_ABI_MINOR}");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let compat =
+            probe_compiler_compatibility(&stub, ResolutionSource::ExecutableSibling).unwrap();
+        assert!(!compat.commit_matched);
+        assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR)));
+    }
+
+    #[test]
     fn unknown_commit_and_unknown_abi_is_silent() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "unknown", "unknown", false);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(result.is_ok(), "unknown outputs must be graceful");
     }
 
@@ -865,7 +1023,7 @@ mod tests {
     fn old_infc_returns_nonzero_for_flags_is_graceful() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "anything", "anything", true);
-        let result = probe_compiler_compatibility(&stub);
+        let result = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE);
         assert!(
             result.is_ok(),
             "non-zero exit from flag probes must be graceful"
@@ -877,7 +1035,7 @@ mod tests {
         let dir = assert_fs::TempDir::new().unwrap();
         // ABI "9.9" would major-mismatch if probed; commit match must short-circuit.
         let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert!(
             compat.commit_matched,
             "matching commit must set commit_matched"
@@ -894,7 +1052,7 @@ mod tests {
         let dir = assert_fs::TempDir::new().unwrap();
         let abi = format!("{COMPILER_ABI_MAJOR}.1");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert!(!compat.commit_matched);
         assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 1)));
         assert!(
@@ -908,7 +1066,7 @@ mod tests {
         let dir = assert_fs::TempDir::new().unwrap();
         let abi = format!("{COMPILER_ABI_MAJOR}.0");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 0)));
         assert!(
             !compat.supports_out_dir(),
@@ -921,7 +1079,7 @@ mod tests {
         let dir = assert_fs::TempDir::new().unwrap();
         let abi = format!("{COMPILER_ABI_MAJOR}.2");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert!(!compat.commit_matched);
         assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 2)));
         assert!(
@@ -937,7 +1095,7 @@ mod tests {
         let dir = assert_fs::TempDir::new().unwrap();
         let abi = format!("{COMPILER_ABI_MAJOR}.1");
         let stub = write_stub(&dir, "nottherightcommit", &abi, false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert!(compat.supports_out_dir());
         assert!(
             !compat.supports_wasm_features(),
@@ -949,7 +1107,7 @@ mod tests {
     fn probe_capability_unknown_abi_rejects_out_dir() {
         let dir = assert_fs::TempDir::new().unwrap();
         let stub = write_stub(&dir, "unknown", "unknown", false);
-        let compat = probe_compiler_compatibility(&stub).unwrap();
+        let compat = probe_compiler_compatibility(&stub, ABI_PROBE_SOURCE).unwrap();
         assert!(!compat.commit_matched);
         assert_eq!(compat.abi, None);
         assert!(
@@ -960,7 +1118,7 @@ mod tests {
 
     // The end-to-end out-dir capability gate (old infc + out_dir → hard error)
     // is covered by the `cli_integration` test using INFC_PATH in a subprocess,
-    // which avoids mutating this process's environment (find_infc reads
+    // which avoids mutating this process's environment (the resolver reads
     // INFC_PATH globally).
 
     #[test]

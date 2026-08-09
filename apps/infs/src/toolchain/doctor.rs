@@ -215,11 +215,7 @@ pub fn check_default_toolchain() -> DoctorCheck {
 /// contract; duplicates are inlined with `; ` separators.
 #[must_use]
 pub fn check_infc() -> DoctorCheck {
-    let Ok(platform) = Platform::detect() else {
-        return DoctorCheck::error("infc", "Cannot detect platform");
-    };
-
-    let binary_with_ext = format!("infc{}", platform.executable_extension());
+    let binary_with_ext = format!("infc{}", std::env::consts::EXE_SUFFIX);
 
     let on_path = enumerate_infc_on_path();
     match on_path.len() {
@@ -277,8 +273,8 @@ pub fn check_infc() -> DoctorCheck {
 ///
 /// Complements [`check_infc`], which only confirms *availability*. This
 /// check tells the user *why* one binary was selected over another —
-/// critical for developers whose machine has both a workspace sibling and
-/// a managed toolchain installed.
+/// critical for developers whose machine has both an `infc` beside their
+/// `infs` and a managed toolchain installed.
 #[must_use]
 pub fn check_resolved_infc() -> DoctorCheck {
     match find_infc_with_source() {
@@ -290,23 +286,44 @@ pub fn check_resolved_infc() -> DoctorCheck {
     }
 }
 
-/// Warns when both a workspace sibling and a managed toolchain `infc`
-/// exist — the exact ambiguity the priority-2 workspace-sibling rule was
-/// introduced to handle silently. Surfacing it here gives developers a
-/// clear knob: either intentionally run from the workspace, or remove the
+/// Warns when an `infc` sits beside the running `infs` *and* a managed
+/// toolchain `infc` exists — the exact ambiguity the priority-2 sibling
+/// rule resolves silently. Surfacing it here gives developers a clear
+/// knob: either intentionally run the neighbouring build, or remove the
 /// stale managed install.
 ///
 /// Returns `None` when no ambiguity exists, so the check is elided from
 /// output in the common single-source case.
 #[must_use]
 pub fn check_resolution_ambiguity() -> Option<DoctorCheck> {
-    let sibling = resolver::workspace_sibling_infc()?;
+    let sibling = resolver::sibling_infc()?;
     let managed = resolver::managed_toolchain_infc()?;
+    resolution_ambiguity_between(&sibling, &managed)
+}
+
+/// The decision behind [`check_resolution_ambiguity`], separated from the
+/// process state it reads so both outcomes are unit-testable.
+///
+/// A managed install puts `infs` next to the managed `infc` link in
+/// `<INFERENCE_HOME>/bin`, so both priorities find the same compiler by two
+/// different routes. That is not an ambiguity, and warning about it would
+/// send every ordinary user chasing a conflict between one file and itself.
+/// Canonicalizing collapses the symlink hop that makes the two spellings
+/// differ; when a path cannot be canonicalized it does not exist as named,
+/// and the literal paths are all there is to compare.
+fn resolution_ambiguity_between(sibling: &Path, managed: &Path) -> Option<DoctorCheck> {
+    let same_file = match (sibling.canonicalize(), managed.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => sibling == managed,
+    };
+    if same_file {
+        return None;
+    }
     Some(DoctorCheck::warning(
         "Resolution ambiguity",
         format!(
-            "both workspace sibling ({}) and managed toolchain ({}) exist; \
-             workspace sibling wins. Remove the stale managed install or \
+            "both a sibling of infs ({}) and a managed toolchain ({}) exist; \
+             the sibling wins. Remove the stale managed install or \
              set INFC_PATH to pin your choice.",
             sibling.display(),
             managed.display()
@@ -342,13 +359,7 @@ pub fn check_resolution_ambiguity() -> Option<DoctorCheck> {
 ///   message hints at upgrading and notes any PATH fallback.
 #[must_use]
 pub fn check_optional_managed_binaries() -> Vec<DoctorCheck> {
-    let Ok(platform) = Platform::detect() else {
-        return ToolchainPaths::OPTIONAL_MANAGED_BINARIES
-            .iter()
-            .map(|name| DoctorCheck::error(*name, "Cannot detect platform"))
-            .collect();
-    };
-    let ext = platform.executable_extension();
+    let ext = std::env::consts::EXE_SUFFIX;
 
     let Ok(paths) = ToolchainPaths::new() else {
         return ToolchainPaths::OPTIONAL_MANAGED_BINARIES
@@ -517,6 +528,39 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn check_infc_names_the_platform_binary_found_on_path() {
+        // A single `infc` on PATH is the one branch whose message quotes the
+        // composed binary name, so it pins that the extension comes from the
+        // build target rather than from a host allow-list.
+        let path_dir = assert_fs::TempDir::new().unwrap();
+        let expected_name = format!("infc{}", std::env::consts::EXE_SUFFIX);
+        let stub = path_dir.path().join(&expected_name);
+        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: serialized; restored below before assertions.
+        unsafe {
+            std::env::set_var("PATH", path_dir.path());
+        }
+
+        let check = check_infc();
+
+        // SAFETY: restore PATH before assertions so a panic cannot leak it.
+        unsafe {
+            std::env::set_var("PATH", original_path);
+        }
+
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert_eq!(check.message, format!("Found {expected_name} in PATH"));
+    }
+
+    #[test]
     fn check_infs_binary_returns_valid_doctor_check() {
         let check = check_infs_binary();
         assert!(!check.name.is_empty());
@@ -573,6 +617,59 @@ mod tests {
     }
 
     #[test]
+    fn resolution_ambiguity_reported_for_two_distinct_compilers() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let sibling = temp.path().join("sibling_infc");
+        let managed = temp.path().join("managed_infc");
+        std::fs::write(&sibling, b"infc").unwrap();
+        std::fs::write(&managed, b"infc").unwrap();
+
+        let check = resolution_ambiguity_between(&sibling, &managed).expect("two distinct files");
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.message.contains(&sibling.display().to_string()));
+        assert!(check.message.contains(&managed.display().to_string()));
+        assert!(check.message.contains("INFC_PATH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolution_ambiguity_silent_when_symlink_resolves_to_same_file() {
+        // The shape a plain managed install produces: `infs` sits in bin/
+        // beside the managed `infc` symlink, so the sibling and managed
+        // priorities name one compiler by two routes.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let real = temp.path().join("toolchain_infc");
+        std::fs::write(&real, b"infc").unwrap();
+        let link = temp.path().join("bin_infc");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_ne!(link, real, "the two paths must differ literally");
+        assert!(resolution_ambiguity_between(&link, &real).is_none());
+    }
+
+    #[test]
+    fn resolution_ambiguity_silent_for_identical_paths() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let infc = temp.path().join("infc");
+        std::fs::write(&infc, b"infc").unwrap();
+
+        assert!(resolution_ambiguity_between(&infc, &infc).is_none());
+    }
+
+    #[test]
+    fn resolution_ambiguity_falls_back_to_raw_compare_when_uncanonicalizable() {
+        // Both paths name children of an empty directory, so canonicalize()
+        // fails on each and only the literal spellings can be compared.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let missing = temp.path().join("bin").join("infc");
+        let other = temp.path().join("toolchains").join("0.1.0").join("infc");
+
+        assert!(resolution_ambiguity_between(&missing, &missing).is_none());
+        let check = resolution_ambiguity_between(&missing, &other).expect("distinct raw paths");
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+    }
+
+    #[test]
     fn no_default_toolchain_message_with_installed_versions() {
         let (_temp, paths) = fresh_paths();
         std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
@@ -584,8 +681,7 @@ mod tests {
 
     /// The bundled `inference-lsp` binary name for the running platform.
     fn lsp_binary_name() -> String {
-        let ext = Platform::detect().unwrap().executable_extension();
-        format!("inference-lsp{ext}")
+        format!("inference-lsp{}", std::env::consts::EXE_SUFFIX)
     }
 
     /// Builds a `ToolchainPaths` rooted at a fresh, empty temporary directory.
@@ -626,6 +722,13 @@ mod tests {
                 check.status,
                 DoctorCheckStatus::Ok | DoctorCheckStatus::Warning | DoctorCheckStatus::Error
             ));
+            // The check derives its extension from the build target, so no
+            // host can turn every optional binary into a detection failure.
+            assert!(
+                !check.message.contains("Cannot detect platform"),
+                "platform detection must not gate this check: {}",
+                check.message
+            );
         }
     }
 
