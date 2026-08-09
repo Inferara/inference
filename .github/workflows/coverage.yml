@@ -65,27 +65,34 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      # The infs integration suite self-skips its run-path tests when `wasmtime`
-      # is not in PATH, and its end-to-end compiler tests when
-      # `target/debug/infc` is absent — cargo-llvm-cov builds into its own
-      # target directory, so the compiler must be built here explicitly.
-      # Provisioning both lets the coverage run exercise the full suite instead
-      # of silently dropping those paths from the report.
+      # The infs integration suite aborts under CI when `wasmtime` is missing or
+      # when it cannot resolve `infc`, so both must be provisioned here or the
+      # coverage run fails outright.
       - name: Install wasmtime
         uses: bytecodealliance/actions/wasmtime/setup@v1
 
+      # A cache restored via the fallback keys may predate the exclusion above
+      # and still carry stale coverage artifacts; start every run from a clean
+      # slate regardless of what the cache brought in. `cargo llvm-cov clean`
+      # only touches `target/llvm-cov-target`, so this may sit on either side of
+      # the `infc` build below; it precedes it to keep provisioning adjacent to
+      # the run that consumes it.
+      - name: Clean stale coverage artifacts
+        run: cargo llvm-cov clean --workspace
+
+      # The suite resolves `infc` from the directory holding the running test
+      # binary, which under cargo-llvm-cov is its private instrumented target
+      # directory. Building an uninstrumented compiler here and pinning it below
+      # keeps the ~70 spawns from each emitting profraw data that would be
+      # unioned into the report and reattributed onto the compiler's own lines.
       - name: Build infc for tests that spawn the real compiler
         env:
           RUSTFLAGS: ""
         run: cargo build -p inference-cli
 
-      # A cache restored via the fallback keys may predate the exclusion above
-      # and still carry stale coverage artifacts; start every run from a clean
-      # slate regardless of what the cache brought in.
-      - name: Clean stale coverage artifacts
-        run: cargo llvm-cov clean --workspace
-
       - name: Run tests with coverage for core crates
+        env:
+          INFERENCE_TEST_INFC: ${{ github.workspace }}/target/debug/infc
         run: |
           cargo llvm-cov \
             --workspace \

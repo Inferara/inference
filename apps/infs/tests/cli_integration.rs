@@ -363,46 +363,236 @@ fn tui_detects_infs_no_tui_environment() {
         .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
 }
 
-// Byte-Identical Output Tests
+// infc Resolution Tests
 
-/// Resolves the path to the `infc` binary in the workspace target directory.
+/// Environment variable that pins the `infc` binary these tests spawn,
+/// overriding the probe.
 ///
-/// This function locates the `infc` binary built by cargo. Since `infc` is in
-/// a different package (inference-cli), we cannot use the `cargo_bin!` macro
-/// directly and must construct the path manually.
-fn infc_binary() -> std::path::PathBuf {
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+/// Deliberately distinct from `INFC_PATH`, which the gated tests set on the
+/// *child* `infs` process. Honouring an ambient `INFC_PATH` here would let a
+/// developer's installed compiler stand in for the one built from this working
+/// tree, and the byte-identity comparison would then be against the wrong
+/// binary.
+///
+/// An empty value counts as unset and falls through to the probe. A workflow
+/// renders a falsy `${{ }}` expression as an empty-but-set variable, so a
+/// conditional pin that does not fire must not abort the suite.
+const INFC_OVERRIDE_ENV: &str = "INFERENCE_TEST_INFC";
 
-    let target_dir = workspace_root.join("target").join("debug");
-
-    #[cfg(target_os = "windows")]
-    let binary_name = "infc.exe";
-    #[cfg(not(target_os = "windows"))]
-    let binary_name = "infc";
-
-    target_dir.join(binary_name)
+/// Derives the cargo profile directory that holds uplifted package binaries
+/// from the path of the running test executable.
+///
+/// Cargo builds integration tests into `<profile-dir>/deps/` and uplifts each
+/// package's binaries into `<profile-dir>` itself, so dropping the file name
+/// and a trailing `deps` component names the directory a sibling package's
+/// binary was written to. Deriving it from the running executable encodes no
+/// layout knowledge of its own, so it holds equally for `target/<profile>`, for
+/// `target/<triple>/<profile>` under `--target`, for a redirected
+/// `CARGO_TARGET_DIR`, and for the private target directory a coverage run
+/// builds into.
+fn cargo_profile_dir(test_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut profile_dir = test_exe.parent()?.to_path_buf();
+    if profile_dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        profile_dir.pop();
+    }
+    Some(profile_dir)
 }
 
-/// Helper to check if infc binary is available and skip test if not.
-/// Returns the path to infc if available.
-#[allow(clippy::unnecessary_debug_formatting)]
-fn require_infc() -> Option<std::path::PathBuf> {
-    let infc_path = infc_binary();
-    if infc_path.exists() {
-        Some(infc_path)
-    } else {
-        eprintln!(
-            "Skipping test: infc binary not found at {infc_path:?}. \
-             Build with `cargo build -p inference-cli` first."
+/// The `infc` location probed for a test executable at `test_exe`, when
+/// [`INFC_OVERRIDE_ENV`] is unset.
+///
+/// Resolution is derived from the running test binary instead of from a fixed
+/// workspace path because only the running binary carries this run's profile
+/// and target triple. A fixed `target/debug` path either names the same
+/// directory, and is then dead weight, or names a different one, and then
+/// holds a binary from another profile or target that a `--release` or
+/// `--target` run would silently compare against instead of skipping.
+///
+/// `None` when `test_exe` has no directory component, so a degenerate path
+/// cannot turn into a bare `infc` probed against the working directory.
+fn infc_candidate_for(test_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let profile_dir = cargo_profile_dir(test_exe)?;
+    Some(profile_dir.join(format!("infc{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// [`infc_candidate_for`] applied to the running test executable.
+///
+/// The environment read lives here rather than in the derivation so that the
+/// derivation stays a pure function of a path, exercisable against the layouts
+/// this host cannot produce.
+fn infc_candidate() -> Option<std::path::PathBuf> {
+    let test_exe = std::env::current_exe().ok()?;
+    infc_candidate_for(&test_exe)
+}
+
+/// Resolves the `infc` binary the end-to-end tests spawn, or `None` when the
+/// probed location holds no file.
+///
+/// # Panics
+///
+/// When [`INFC_OVERRIDE_ENV`] names something other than an existing file. A
+/// set-but-wrong override is a configuration mistake; probing past it would
+/// bury that mistake under a skipped test, and accepting a directory would
+/// defer it to an opaque spawn failure in every gated test.
+fn infc_binary() -> Option<std::path::PathBuf> {
+    if let Some(pinned) = std::env::var_os(INFC_OVERRIDE_ENV).filter(|value| !value.is_empty()) {
+        let pinned = std::path::PathBuf::from(pinned);
+        assert!(
+            pinned.is_file(),
+            "{INFC_OVERRIDE_ENV} is set to `{}`, but no file exists there",
+            pinned.display()
         );
-        None
+        return Some(pinned);
+    }
+
+    infc_candidate().filter(|candidate| candidate.is_file())
+}
+
+/// Renders the probed `infc` locations as an indented one-per-line list for the
+/// diagnostics that both the CI abort and the local skip notice print.
+fn probed_infc_paths() -> String {
+    match infc_candidate() {
+        Some(candidate) => format!("  {}", candidate.display()),
+        None => "  (none: the running test executable has no directory)".to_owned(),
     }
 }
+
+/// True when `CI` carries a value that claims an automated run.
+fn is_ci() -> bool {
+    std::env::var_os("CI").is_some_and(|value| ci_value_is_meaningful(&value))
+}
+
+/// The value predicate behind [`is_ci`]: a shell that exports `CI=` or `CI=0`
+/// has not opted into automated-run behavior.
+///
+/// A test that writes an environment variable races every concurrent read of
+/// the environment in the process, so no test in this file writes `CI`; the
+/// predicate is exercised directly instead.
+fn ci_value_is_meaningful(value: &std::ffi::OsStr) -> bool {
+    !value.is_empty() && value != "0"
+}
+
+/// Resolves `infc` for a test that spawns the real compiler, or reports it as
+/// unavailable.
+///
+/// Locally a missing `infc` skips the caller, because `cargo test -p infs` on
+/// its own never builds it. Under CI the run aborts instead: every workflow leg
+/// builds the compiler with this run's profile and target before invoking the
+/// suite, so a missing binary there means resolution is broken — and cargo
+/// captures the skip notice, so the skip would otherwise be indistinguishable
+/// from a pass.
+///
+/// # Panics
+///
+/// When no `infc` resolves during a CI run.
+fn require_infc() -> Option<std::path::PathBuf> {
+    if let Some(infc_path) = infc_binary() {
+        return Some(infc_path);
+    }
+
+    let probed = probed_infc_paths();
+    assert!(
+        !is_ci(),
+        "infc binary not found; a CI run must not silently skip the tests that spawn \
+         the real compiler.\nProbed:\n{probed}\nBuild it with `cargo build -p inference-cli` \
+         using this run's profile and target, or point {INFC_OVERRIDE_ENV} at an existing \
+         binary (unset CI or set CI=0 to restore the local skip)."
+    );
+    eprintln!(
+        "Skipping test: infc binary not found.\nProbed:\n{probed}\n\
+         Build with `cargo build -p inference-cli` first."
+    );
+    None
+}
+
+/// Builds a path from its segments so the expectations below carry no
+/// platform-specific separator.
+fn joined(segments: &[&str]) -> std::path::PathBuf {
+    segments.iter().collect()
+}
+
+/// The profile directory is the test executable's own directory with cargo's
+/// `deps` component dropped, which is where cargo uplifts package binaries.
+#[test]
+fn profile_dir_drops_a_deps_component() {
+    assert_eq!(
+        cargo_profile_dir(&joined(&[
+            "target",
+            "debug",
+            "deps",
+            "cli_integration-1a2b3c"
+        ])),
+        Some(joined(&["target", "debug"]))
+    );
+}
+
+/// Only a component named exactly `deps` is dropped; any other parent is the
+/// profile directory itself.
+#[test]
+fn profile_dir_keeps_a_parent_that_is_not_named_deps() {
+    assert_eq!(
+        cargo_profile_dir(&joined(&["target", "debug", "dependencies", "harness"])),
+        Some(joined(&["target", "debug", "dependencies"]))
+    );
+}
+
+/// A cross-compiled run nests the profile under the target triple; the derived
+/// directory must keep that segment instead of assuming `target/debug`.
+#[test]
+fn profile_dir_resolves_the_target_triple_layout() {
+    assert_eq!(
+        cargo_profile_dir(&joined(&[
+            "target",
+            "x86_64-pc-windows-gnu",
+            "debug",
+            "deps",
+            "cli_integration-1a2b3c.exe"
+        ])),
+        Some(joined(&["target", "x86_64-pc-windows-gnu", "debug"]))
+    );
+}
+
+/// The probe follows the test binary into its own profile directory, keeping
+/// the target triple and the release profile of a cross-compiled run. Driving
+/// it with the exact layout of the Windows leg fails the moment anyone
+/// reintroduces a fixed `target/debug` candidate, which is what left that leg
+/// comparing against a stale host compiler.
+#[test]
+fn infc_candidate_follows_the_test_binary_into_its_profile_directory() {
+    let test_exe = joined(&[
+        "target",
+        "x86_64-pc-windows-gnu",
+        "release",
+        "deps",
+        "cli_integration-1a2b3c.exe",
+    ]);
+    let expected = joined(&["target", "x86_64-pc-windows-gnu", "release"])
+        .join(format!("infc{}", std::env::consts::EXE_SUFFIX));
+
+    assert_eq!(infc_candidate_for(&test_exe), Some(expected));
+}
+
+/// A test executable path with no directory component yields no candidate, so
+/// the unresolvable case reaches the skip-or-abort gate instead of probing a
+/// bare `infc` against the working directory.
+#[test]
+fn infc_candidate_is_absent_without_a_directory_component() {
+    assert_eq!(infc_candidate_for(&joined(&[])), None);
+}
+
+/// CI is claimed only by a meaningful `CI` value, so a shell that exports
+/// `CI=0` or `CI=` keeps the local skip behavior. An unset `CI` is absent by
+/// construction, since [`is_ci`] reaches the predicate only through
+/// `Option::is_some_and`.
+#[test]
+fn ci_predicate_accepts_only_a_meaningful_value() {
+    assert!(ci_value_is_meaningful(std::ffi::OsStr::new("true")));
+    assert!(ci_value_is_meaningful(std::ffi::OsStr::new("1")));
+    assert!(!ci_value_is_meaningful(std::ffi::OsStr::new("0")));
+    assert!(!ci_value_is_meaningful(std::ffi::OsStr::new("")));
+}
+
+// Byte-Identical Output Tests
 
 /// Verifies that `infs build` produces byte-identical WASM output as `infc`.
 ///
@@ -846,11 +1036,11 @@ const PROJECT_MAIN_NONZERO_SRC: &str = "pub fn main() -> i32 {\n    return 42;\n
 const PROJECT_MAIN_BROKEN_SRC: &str = "pub fn main() -> i32 {\n    return nope;\n}\n";
 
 /// Both `infc` and `wasmtime` are required to execute a project end-to-end.
-/// Returns the `infc` path when both are present; otherwise prints a skip
-/// notice and returns `None`, mirroring the existing conditional-test pattern.
+/// Returns the `infc` path when both are present; otherwise defers to
+/// [`require_wasmtime`] and [`require_infc`], which skip locally and abort
+/// under CI.
 fn require_infc_and_wasmtime() -> Option<std::path::PathBuf> {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return None;
     }
     require_infc()
@@ -938,8 +1128,7 @@ fn project_run_from_subdir_runs_root_wasm() {
 /// mode), so the discovery error is only reachable when wasmtime is present.
 #[test]
 fn project_run_without_manifest_errors() {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -957,8 +1146,7 @@ fn project_run_without_manifest_errors() {
 /// entry-point remediation error. Gated on wasmtime (checked before discovery).
 #[test]
 fn project_run_missing_entry_point_errors() {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -1045,8 +1233,7 @@ fn project_run_token_selects_single_file_mode() {
 /// never invoked (no "Invoking 'main'" line on stdout).
 #[test]
 fn project_run_propagates_compile_error() {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -1950,8 +2137,7 @@ fn single_file_run_honors_enclosing_manifest_wasm_features() {
 fn single_file_run_old_infc_with_wasm_features_hard_errors() {
     use std::os::unix::fs::PermissionsExt;
 
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -2378,8 +2564,7 @@ fn project_build_without_dependencies_forwards_no_external_flags() {
 #[cfg(unix)]
 #[test]
 fn project_run_forwards_manifest_dep_to_infc() {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -3541,6 +3726,32 @@ fn is_wasmtime_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Gate for the tests that execute compiled WASM: true when wasmtime is usable.
+///
+/// Mirrors [`require_infc`]. A local run without wasmtime skips with a notice,
+/// while CI aborts: every workflow leg installs wasmtime unconditionally before
+/// invoking this suite, so a silent skip there would report unexecuted tests as
+/// green.
+///
+/// # Panics
+///
+/// When wasmtime is missing during a CI run.
+fn require_wasmtime() -> bool {
+    if is_wasmtime_available() {
+        return true;
+    }
+
+    assert!(
+        !is_ci(),
+        "wasmtime not found on PATH; a CI run must not silently skip the tests that \
+         execute compiled WASM. Every workflow leg installs wasmtime before running \
+         this suite, so its absence means the installation step failed \
+         (unset CI or set CI=0 to restore the local skip)."
+    );
+    eprintln!("Skipping test: wasmtime not available");
+    false
+}
+
 /// Verifies full `infs run` workflow with wasmtime.
 ///
 /// **Prerequisites**: wasmtime must be installed and in PATH, and infc must be built.
@@ -3550,8 +3761,7 @@ fn is_wasmtime_available() -> bool {
 /// **Expected behavior**: Program compiles, runs with wasmtime, exits successfully.
 #[test]
 fn run_full_workflow_with_wasmtime() {
-    if !is_wasmtime_available() {
-        eprintln!("Skipping test: wasmtime not available");
+    if !require_wasmtime() {
         return;
     }
 
@@ -4105,8 +4315,12 @@ fn fake_wasm_opt_binary() -> std::path::PathBuf {
 }
 
 /// Skip-gate for the real-binary end-to-end tests: returns `true` only when a
-/// genuine Binaryen `wasm-opt` is on PATH, mirroring `require_infc`'s
-/// skip-with-notice pattern so the suite still passes without Binaryen.
+/// genuine Binaryen `wasm-opt` is on PATH.
+///
+/// Unlike [`require_infc`] and [`require_wasmtime`], this gate stays a soft
+/// skip even under CI: no workflow installs Binaryen, so aborting here would
+/// fail every run. The fake-binary tests cover the invocation contract; these
+/// only add real-optimizer confirmation where Binaryen happens to be present.
 fn require_wasm_opt() -> bool {
     if which::which("wasm-opt").is_ok() {
         true
