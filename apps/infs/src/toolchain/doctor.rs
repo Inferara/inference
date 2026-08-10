@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use super::conflict::enumerate_infc_on_path;
-use super::resolver::{self, find_infc_with_source};
+use super::resolver::{self, ResolutionSource, find_infc_with_source};
 use super::{Platform, ToolchainPaths};
 
 /// Generates a message for when no default toolchain is set.
@@ -278,12 +278,62 @@ pub fn check_infc() -> DoctorCheck {
 #[must_use]
 pub fn check_resolved_infc() -> DoctorCheck {
     match find_infc_with_source() {
-        Ok((path, source)) => DoctorCheck::ok(
-            "Resolved infc",
-            format!("{} (source: {})", path.display(), source.label()),
-        ),
+        Ok((path, source)) => resolved_infc_status(&path, source),
         Err(err) => DoctorCheck::warning("Resolved infc", err.to_string()),
     }
+}
+
+/// Returns `true` when `path` can actually be executed.
+///
+/// The two arms differ because executability is a different kind of fact on
+/// each platform. On Unix it is a permission bit that resolution never looks
+/// at, so a regular file can be selected and still refuse to run. On Windows
+/// there is no such bit: a regular file carrying the platform's executable
+/// extension is runnable, and resolution already required exactly that, so
+/// there is nothing further to check.
+///
+/// `std::fs::metadata` follows symlinks, which is the behavior wanted here —
+/// the managed `bin/infc` is a link, and what matters is whether its target
+/// runs.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Formats the resolved-compiler line for an already-resolved `(path,
+/// source)`, separated from the process state [`check_resolved_infc`] reads
+/// so both outcomes are unit-testable.
+///
+/// Resolution selects a compiler by path, not by whether that path will run.
+/// A selected binary that is not executable therefore reports as a perfectly
+/// accurate `[OK]` line while `infs build` is guaranteed to fail the moment
+/// it spawns it.
+///
+/// That guarantee is why this is an error rather than a warning: doctor's
+/// warning summary says the toolchain "may work but could have issues", which
+/// is false here. It belongs with [`check_infc`]'s not-found error — the
+/// compiler is unusable — rather than with the optional-binary warnings,
+/// which are warnings precisely so that a legitimately absent extra keeps
+/// doctor's exit code at zero.
+fn resolved_infc_status(path: &Path, source: ResolutionSource) -> DoctorCheck {
+    let located = format!("{} (source: {})", path.display(), source.label());
+    if is_executable(path) {
+        return DoctorCheck::ok("Resolved infc", located);
+    }
+    DoctorCheck::error(
+        "Resolved infc",
+        format!(
+            "{located} is not executable; infs build will fail when it spawns \
+             this binary. Restore its executable permission, or set INFC_PATH \
+             to a working compiler."
+        ),
+    )
 }
 
 /// Warns when an `infc` sits beside the running `infs` *and* a managed
@@ -593,18 +643,17 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn check_resolved_infc_returns_valid_doctor_check() {
-        // find_infc_with_source may succeed (Ok) or fail (Warning) depending
-        // on the test environment — both are valid outcomes. We verify the
-        // returned DoctorCheck is well-formed and uses the expected name.
+        // Every status is reachable depending on the test environment:
+        // resolution may fail (Warning), or succeed and select a binary that
+        // is executable (Ok) or is not (Error). We verify the returned
+        // DoctorCheck is well-formed and uses the expected name.
         let check = check_resolved_infc();
         assert_eq!(check.name, "Resolved infc");
         assert!(!check.message.is_empty());
-        assert!(
-            check.status == DoctorCheckStatus::Ok
-                || check.status == DoctorCheckStatus::Warning,
-            "unexpected status: {:?}",
-            check.status
-        );
+        assert!(matches!(
+            check.status,
+            DoctorCheckStatus::Ok | DoctorCheckStatus::Warning | DoctorCheckStatus::Error
+        ));
         // When resolution succeeds, the message must contain the "source:"
         // tag so users can see which priority fired.
         if check.status == DoctorCheckStatus::Ok {
@@ -614,6 +663,99 @@ mod tests {
                 check.message
             );
         }
+    }
+
+    /// Writes `name` into `dir` with the given permission bits.
+    #[cfg(unix)]
+    fn write_with_mode(dir: &Path, name: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"infc").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_requires_an_execute_bit() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let plain = write_with_mode(temp.path(), "plain", 0o644);
+        let runnable = write_with_mode(temp.path(), "runnable", 0o755);
+
+        assert!(!is_executable(&plain));
+        assert!(is_executable(&runnable));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_rejects_a_directory() {
+        // A directory carries execute bits meaning "traversable", which is
+        // not the same claim; only a regular file can be spawned.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let dir = temp.path().join("infc");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(!is_executable(&dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_rejects_a_missing_path() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        assert!(!is_executable(&temp.path().join("absent")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_follows_a_symlink_to_its_target() {
+        // The managed layout resolves `bin/infc` as a link into the toolchain
+        // directory, so the verdict must come from the target's bits.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let target = write_with_mode(temp.path(), "toolchain_infc", 0o755);
+        let link = temp.path().join("bin_infc");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(is_executable(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_infc_status_is_ok_for_an_executable_binary() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let infc = write_with_mode(temp.path(), "infc", 0o755);
+
+        let check = resolved_infc_status(&infc, ResolutionSource::ExecutableSibling);
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.message.contains("(source: "));
+        assert!(
+            check
+                .message
+                .contains(ResolutionSource::ExecutableSibling.label()),
+            "ok message must name the tier: {}",
+            check.message
+        );
+        assert!(check.message.contains(&infc.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_infc_status_errors_for_a_non_executable_binary() {
+        // Resolution selects on path alone, so this binary is chosen and then
+        // cannot be spawned — a build failure, not a "may work" warning.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let infc = write_with_mode(temp.path(), "infc", 0o644);
+
+        let check = resolved_infc_status(&infc, ResolutionSource::ExecutableSibling);
+        assert_eq!(check.status, DoctorCheckStatus::Error);
+        assert!(
+            check.message.contains(&infc.display().to_string()),
+            "error message must name the unusable path: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("INFC_PATH"),
+            "error message must name the escape hatch: {}",
+            check.message
+        );
     }
 
     #[test]
