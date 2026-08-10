@@ -29,15 +29,18 @@
 //! all. Every diagnostic is gathered before failing so a spec with several
 //! mistakes surfaces them all at once.
 //!
-//! ## A note for the section-emission phase
+//! ## Obligation depth and the encoding cap
 //!
 //! The `inference.hspecs` codec caps assertion-tree depth at
 //! [`inference_hassert::MAX_TREE_DEPTH`] (256). The right-folded statement
-//! translator produces a right-leaning `And`/`Imp` chain whose depth grows with
-//! the statement count, so a specification function with more than that many
-//! top-level statements would exceed the cap. Encoding is a later phase; it must
-//! add a fail-closed pre-encode depth check rather than let the encoder panic on
-//! an over-deep tree.
+//! translator spends one `And`/`Imp` level per structural statement, and a
+//! statement whose slots drain a typing guard spends two — `Imp(guard, And(…))`
+//! — so the practical statement budget for a guard-heavy body is roughly half
+//! the cap. Overrunning it is not an encoder hazard: the pre-encode gate
+//! ([`check_payload`](crate::hspecs_section::check_payload)) already turns an
+//! over-deep tree into a
+//! [`CodegenError::HspecTreeTooDeep`](crate::errors::CodegenError::HspecTreeTooDeep)
+//! naming the offending specification and function.
 
 mod diag;
 mod translate;

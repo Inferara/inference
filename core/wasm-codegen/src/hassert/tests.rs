@@ -1007,6 +1007,39 @@ fn one_guard_dominates_every_later_assert() {
     );
 }
 
+/// A bare nested block is a structural statement like any other: the guards
+/// pending at it drain over both the block's own contribution and the rest of
+/// the enclosing body, so a slot introduced before the block dominates a reader
+/// inside it *and* a later sibling. The nested block never captures the guard
+/// into its own narrower scope.
+#[test]
+fn a_bare_nested_block_drains_pending_guards() {
+    let body = "forall { let a: i32 = @; { assert(a > 0); } assert(a < 10); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            and(nz(gts(local(0), i32c(0))), nz(lts(local(0), i32c(10))))
+        )
+    );
+}
+
+/// A bare call statement contributes an `HA_app_ok` obligation, and it is
+/// structural, so the slots it passes are typed by the guards it drains before
+/// the call is claimed to be defined.
+#[test]
+fn a_bare_call_statement_is_a_guarded_app_ok() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let body = "forall { let a: i32 = @; g(a); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guard(0),
+            HAssert::AppOk(HFnRef("g".to_string()), vec![local(0)])
+        )
+    );
+}
+
 /// The declared type fixes the guard's width: only `i64`/`u64` guard at 64
 /// bits, while bool, enums, and every sub-word integer ride i32.
 #[test]
