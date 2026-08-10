@@ -80,7 +80,7 @@ use crate::commands::project_build::{
 use crate::errors::InfsError;
 use crate::project::manifest::MANIFEST_FILE_NAME;
 use crate::project::{self, ProjectContext};
-use crate::toolchain::find_infc;
+use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::WasmFeatureName;
 
 /// The entry point invoked in project mode and the default for single-file mode.
@@ -192,9 +192,15 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
         .as_ref()
         .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
 
-    let infc_path = find_infc()?;
+    let (infc_path, infc_source) = find_infc_with_source()?;
 
-    let wasm_path = compile_to_wasm(&infc_path, path, &features, manifest_path.as_deref())?;
+    let wasm_path = compile_to_wasm(
+        &infc_path,
+        infc_source,
+        path,
+        &features,
+        manifest_path.as_deref(),
+    )?;
 
     run_wasmtime(&wasm_path, &args.entry_point, &args.args)
 }
@@ -309,6 +315,7 @@ fn check_wasmtime_availability() -> Result<()> {
 /// `infc` exits non-zero, or if the expected artifact is absent afterwards.
 fn compile_to_wasm(
     infc_path: &Path,
+    infc_source: ResolutionSource,
     source_path: &Path,
     features: &[WasmFeatureName],
     manifest_path: Option<&Path>,
@@ -320,7 +327,7 @@ fn compile_to_wasm(
         .arg("-o");
 
     if !features.is_empty() {
-        let compat = probe_compiler_compatibility(infc_path)?;
+        let compat = probe_compiler_compatibility(infc_path, infc_source)?;
         forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
     }
 

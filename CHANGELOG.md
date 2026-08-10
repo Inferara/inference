@@ -285,6 +285,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- A build whose `infc` was chosen by adjacency now warns when that neighbour reports a different build commit than `infs` itself, naming both, so a stale compiler left in a build directory stops winning silently — adjacency asserts the two were built together, and nothing checked it. Only the sibling tier warns: for an `INFC_PATH`-pinned, PATH-installed, or managed `infc` a differing commit is the normal state. Cross-commit drift only; two binaries built from one commit with different working trees report the same hash ([#371])
+- `infs doctor` now fails when the resolved `infc` exists but cannot be executed. Resolution selects a compiler by path, not by runnability, so an `infc` without an execute bit reported as a healthy `Resolved infc` line while every build was guaranteed to fail the moment it spawned. Note the observable change for anyone scripting it: `infs doctor` exits non-zero in that state where it previously exited zero. Executability is not a permission bit on Windows, so the check is inert there ([#371])
 - `[build] wasm-features` in `Inference.toml`: opt into post-MVP WebAssembly proposals (initially `"bulk-memory"`), validated with did-you-mean diagnostics shared with `infc --wasm-features`, forwarded only to ABI ≥ 1.2 compilers, honored in single-file mode ([#315])
 - `[build.wasm-opt]` no longer force-enables Binaryen's bulk-memory feature: `--enable-bulk-memory` is forwarded only when an artifact scan finds a bulk-memory operator, and bulk-free output is re-validated without bulk memory admitted ([#315])
 - Fix `infs doctor` to verify `inference-lsp` at the `<INFERENCE_HOME>/bin` symlink where the editor actually resolves it, WARNing with `infs default <version>` as the repair when broken ([#253])
@@ -336,6 +338,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- infs: `infc` now resolves from the directory holding the running `infs`, whatever that directory is named, instead of requiring a literal `target/<debug|release>/` path and one of three enumerated build targets; a redirected `CARGO_TARGET_DIR`, a `--target-dir`, a custom cargo profile, or an unlisted target used to make the tier decline silently and run whatever `infc` was on `PATH` — the wrong compiler, looking like success. An installed `infs` now prefers an adjacent `infc` over a `PATH` hit, `INFS_VERBOSE` reports the fallthrough, and `infs doctor` labels the tier `sibling of infs` and no longer calls a plain managed install ambiguous ([#371])
+- infs: `infs doctor`, PATH-conflict detection, and the managed `bin/` symlinks no longer consult the three-target allow-list merely to learn whether binaries end in `.exe`. On any other build target `doctor` reported `Cannot detect platform`, conflict detection and symlink validation returned empty results that read as "nothing wrong", and `infs default <version>` failed outright. `Platform` keeps its allow-list wherever the platform identity genuinely matters — downloads, manifest artifact selection, self-update ([#371])
 - infs tests: the integration suite resolves `infc` from the running test binary's own directory instead of a hardcoded `target/debug`, so the end-to-end tests that spawn the real compiler no longer silently self-skip on the Windows and release CI legs; a missing `infc` or `wasmtime` now fails the run under `CI` instead of skipping ([#369])
 - infs: project-mode `build` now forwards both the manifest's `[wasm-dependencies]` and the CLI's `-L`/`--wasm-lib-dir` to `infc`, and project-mode `run` forwards the manifest's (it has no `-L` flag of its own), so a project binding `use { … } from <module>` links — and in proof mode emits its `.v` — without the `INFERENCE_WASM_LIB_PATH` workaround ([#361])
 - wasm-to-v: `(*name*)` comments on `BI_local_get`/`BI_local_set`/`BI_local_tee` now resolve the local-name map by function index instead of type index, fixing misattributed names in linked or externally produced modules ([#336])
@@ -554,6 +558,7 @@ Initial tagged release.
 [#336]: https://github.com/Inferara/inference/issues/336
 [#361]: https://github.com/Inferara/inference/issues/361
 [#369]: https://github.com/Inferara/inference/issues/369
+[#371]: https://github.com/Inferara/inference/issues/371
 [#346]: https://github.com/Inferara/inference/issues/346
 [#345]: https://github.com/Inferara/inference/issues/345
 [#344]: https://github.com/Inferara/inference/issues/344

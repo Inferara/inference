@@ -305,10 +305,11 @@ infs build
     |
     +-- discover_and_load(Inference.toml)
     |
-    +-- find_infc()          # INFC_PATH > system PATH > managed toolchain
+    +-- find_infc_with_source()  # INFC_PATH > sibling of infs > system PATH > managed toolchain
     |
     +-- compatibility handshake
     |       infc --commit-hash    # short-circuit: same-build binaries always compatible
+    |                             # sibling tier only: differing commits warn (stale neighbour)
     |       infc --abi-version    # major mismatch → hard error; minor mismatch → warning
     |
     +-- spawn infc
@@ -376,10 +377,27 @@ error: the resolved infc does not support `--out-dir` (requires infc ABI ≥ 1.1
 
 1. `INFC_PATH` environment variable — an explicit override, useful for
    development and CI.
-2. System `PATH` (`which infc`).
-3. The managed toolchain directory (`~/.inference/toolchains/<version>/infc`).
+2. The `infc` sitting in the same directory as the running `infs`. A driver and
+   its companion tools ship as one unit, so adjacency identifies the paired
+   compiler — the same rule clang and rustc use to find theirs. Nothing about
+   the directory is inspected, only that the two binaries share it, so this
+   holds for a cargo build under any `CARGO_TARGET_DIR`, `--target-dir`,
+   profile, or target triple, and for an unpacked release tarball alike.
+3. System `PATH` (`which infc`).
+4. The managed toolchain directory (`~/.inference/toolchains/<version>/infc`).
+
+Step 2 assumes a pairing rather than proving one, so the handshake checks it:
+when the sibling tier resolved the compiler and `infc --commit-hash` disagrees
+with the commit `infs` was built from, the build warns and names both. The other
+three tiers stay silent on a commit mismatch, because for an explicitly pinned,
+system-installed, or managed `infc` a differing commit is the normal state — only
+adjacency claims the two binaries are a pair. The check sees *cross-commit* drift
+only: two binaries built from one commit with different working trees report the
+same hash.
 
 `INFERENCE_HOME` overrides the managed toolchain root (default `~/.inference`).
+`INFS_VERBOSE` traces which of the four resolved, and reports when step 2
+found no neighbour and fell through.
 
 ## Comparison with Cargo
 

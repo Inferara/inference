@@ -638,8 +638,7 @@ impl ToolchainPaths {
     ///
     /// Returns an error if the symlink cannot be created.
     pub fn update_symlinks(&self, version: &str) -> Result<()> {
-        let platform = crate::toolchain::Platform::detect()?;
-        let ext = platform.executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
 
         std::fs::create_dir_all(&self.bin)
             .with_context(|| format!("Failed to create bin directory: {}", self.bin.display()))?;
@@ -668,8 +667,7 @@ impl ToolchainPaths {
     ///
     /// Returns an error if a symlink cannot be removed.
     pub fn remove_symlinks(&self) -> Result<()> {
-        let platform = crate::toolchain::Platform::detect()?;
-        let ext = platform.executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
 
         for name in Self::managed_binary_names() {
             let binary = format!("{name}{ext}");
@@ -686,10 +684,7 @@ impl ToolchainPaths {
     /// legitimately absent when the default toolchain predates their bundling.
     #[must_use = "returns list of broken symlinks without side effects"]
     pub fn validate_symlinks(&self) -> Vec<String> {
-        let Ok(platform) = crate::toolchain::Platform::detect() else {
-            return Vec::new();
-        };
-        let ext = platform.executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
 
         let mut broken = Vec::new();
         for name in Self::managed_binary_names() {
@@ -1009,8 +1004,7 @@ mod tests {
         std::fs::create_dir_all(&toolchain_dir).unwrap();
         std::fs::create_dir_all(&paths.bin).unwrap();
 
-        let platform = crate::toolchain::Platform::detect().unwrap();
-        let ext = platform.executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
         let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
         let source = toolchain_dir.join(&binary_name);
         std::fs::write(&source, b"fake binary").unwrap();
@@ -1041,9 +1035,7 @@ mod tests {
     /// Returns the primary and optional managed binary file names for the
     /// running platform (with any executable extension applied).
     fn managed_binary_file_names() -> (String, String) {
-        let ext = crate::toolchain::Platform::detect()
-            .unwrap()
-            .executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
         (
             format!("{}{ext}", ToolchainPaths::MANAGED_BINARY),
             format!("inference-lsp{ext}"),
@@ -1139,8 +1131,7 @@ mod tests {
         std::fs::create_dir_all(&toolchain_dir).unwrap();
         std::fs::create_dir_all(&paths.bin).unwrap();
 
-        let platform = crate::toolchain::Platform::detect().unwrap();
-        let ext = platform.executable_extension();
+        let ext = std::env::consts::EXE_SUFFIX;
         let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
         let source = toolchain_dir.join(&binary_name);
         std::fs::write(&source, b"fake binary").unwrap();

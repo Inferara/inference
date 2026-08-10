@@ -92,7 +92,7 @@ use crate::commands::project_build::{
 use crate::errors::InfsError;
 use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME, find_manifest_dir};
 use crate::project::{self, ProjectContext};
-use crate::toolchain::find_infc;
+use crate::toolchain::resolver::find_infc_with_source;
 use inference_compiler_interface::WasmFeatureName;
 
 /// Compilation mode forwarded to `infc --mode <…>`.
@@ -206,8 +206,8 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     let enclosing = enclosing_manifest(path)?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
 
-    let infc_path = find_infc()?;
-    let compat = probe_compiler_compatibility(&infc_path)?;
+    let (infc_path, infc_source) = find_infc_with_source()?;
+    let compat = probe_compiler_compatibility(&infc_path, infc_source)?;
 
     let mut cmd = Command::new(&infc_path);
     cmd.arg(path);
