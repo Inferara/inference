@@ -14,18 +14,36 @@
 //! (so `<root>/out/main.wasm` is produced), and invokes `main` by convention.
 //!
 //! Single-file mode is not manifest-blind: it walks up to the nearest
-//! `Inference.toml` and honors `[build] wasm-features`, so running one file of a
-//! project cannot execute a module at a different WebAssembly instruction level
-//! than `infs build` would produce for it. `[wasm-dependencies]` is not resolved
-//! on this path — the only path where it is not (single-file `build` and both
-//! project paths do resolve it); that asymmetry predates this and is tracked
-//! separately (#367).
+//! `Inference.toml` and honors both `[build] wasm-features` and
+//! `[wasm-dependencies]`, so running one file of a project cannot execute a
+//! module at a different WebAssembly instruction level than `infs build` would
+//! produce for it, and cannot fail to resolve an external that the same build
+//! links. This path overwrites the very artifact `infs build` produces, so any
+//! divergence would be observable as one command destroying the other's output.
+//!
+//! ## External-module search directories
+//!
+//! `-L`/`--wasm-lib-dir` is accepted in both modes, spelled exactly as on `infs
+//! build`, but the two modes anchor a relative directory differently — and both
+//! land on "it means what it meant at the shell":
+//!
+//! - **Single-file mode forwards each directory verbatim.** `infc` inherits the
+//!   invocation working directory here, so a relative dir already resolves
+//!   against the directory the user typed it in.
+//! - **Project mode anchors first**, because the shared helper re-anchors `infc`
+//!   to the project root; see [`crate::commands::project_build`].
 //!
 //! ```bash
 //! infs run                                    # project mode: build + invoke main
 //! infs run program.inf                        # single-file: invoke main()
 //! infs run program.inf --entry-point helper   # single-file: invoke helper()
+//! infs run program.inf -L libs                # single-file: search libs/ for externals
+//! infs run -L libs                            # project mode: same, for the whole project
 //! ```
+//!
+//! Options must be placed **before** the first bare trailing token: [`RunArgs`]
+//! collects trailing var-args for the invoked function, so `infs run f.inf 1 -L
+//! libs` passes `-L` and `libs` to the program rather than parsing them.
 //!
 //! ## Project-mode conventions
 //!
@@ -42,12 +60,14 @@
 //!   project-build helper. Single-file `run` keeps its prior no-handshake
 //!   behavior except when the enclosing manifest requests `wasm-features`, where
 //!   a capability probe is the only way to refuse a request the compiler cannot
-//!   honor.
-//! - **Resolves `[wasm-dependencies]`**, also via the shared helper: the project
-//!   it runs is the one `infs build` would produce, externals included. A
-//!   project binding `use { … } from <module>` is otherwise unrunnable, since
-//!   `infc` resolves externals from forwarded flags only. `run` has no
-//!   `-L`/`--wasm-lib-dir` flag, so the manifest is its only source.
+//!   honor. Neither `--wasm-dep` nor `--wasm-lib-dir` is capability-gated on
+//!   either path: both arrived with external-module support itself rather than
+//!   at a distinguishable ABI minor, so the handshake has nothing to check.
+//! - **Resolves `[wasm-dependencies]`**, also via the shared helper, and
+//!   forwards every `-L` it was passed: the project it runs is the one `infs
+//!   build` would produce, externals included. A project binding `use { … } from
+//!   <module>` is otherwise unrunnable, since `infc` resolves externals from
+//!   forwarded flags only.
 //! - **Always builds in compile mode**, regardless of the manifest's
 //!   `[build] mode`. `run` executes the WASM, and proof-mode WASM embeds the
 //!   custom non-deterministic opcodes (the `0xfc` family) that wasmtime cannot
@@ -73,7 +93,9 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::commands::build::{enclosing_manifest, manifest_wasm_features};
+use crate::commands::build::{
+    enclosing_manifest, format_wasm_dep_arg, manifest_wasm_dependencies, manifest_wasm_features,
+};
 use crate::commands::project_build::{
     forward_wasm_features, probe_compiler_compatibility, run_project_build,
 };
@@ -89,7 +111,13 @@ const DEFAULT_ENTRY_POINT: &str = "main";
 /// Arguments for the run command.
 ///
 /// The run command compiles source to WASM and executes it with wasmtime.
-/// Any arguments after the source path are passed to the invoked function.
+///
+/// [`RunArgs::args`] is a trailing var-arg, which sets the ordering contract for
+/// the whole struct: options are consumed wherever they appear *before* the first
+/// bare token that is not the source path, and everything from that token onward
+/// is handed to the invoked function untouched. `infs run f.inf -L libs 1` passes
+/// `libs` to the compiler and `1` to the program; `infs run f.inf 1 -L libs`
+/// passes all three of `1`, `-L`, `libs` to the program.
 #[derive(Args)]
 pub struct RunArgs {
     /// Path to the source file to run.
@@ -110,6 +138,23 @@ pub struct RunArgs {
     #[clap(long, default_value = DEFAULT_ENTRY_POINT)]
     pub entry_point: String,
 
+    /// Directory to search for external `.wasm` modules referenced by
+    /// `use { … } from <module>;`. Repeatable; forwarded as `--wasm-lib-dir` in
+    /// both single-file and project mode, spelled exactly as on `infs build`. A
+    /// relative dir always means what it meant at the shell: single-file `infc`
+    /// inherits the invocation directory, and the project path anchors the dir to
+    /// that directory before forwarding, because it moves `infc` to the project
+    /// root.
+    ///
+    /// Must appear before the first bare trailing token, which starts the
+    /// arguments handed to the invoked function: `infs run f.inf -L libs 1`
+    /// searches `libs`, `infs run f.inf 1 -L libs` does not.
+    // Kept ahead of `no_wasm_opt` to mirror `BuildArgs`: clap lists options in
+    // declaration order, so the two flags shared with `infs build` must be declared
+    // in the same relative order for both `--help` screens to present them alike.
+    #[clap(short = 'L', long = "wasm-lib-dir", value_name = "DIR")]
+    pub wasm_lib_dirs: Vec<PathBuf>,
+
     /// Skip the `[build.wasm-opt]` post-build optimization for this build.
     ///
     /// Project mode only: `run` executes the artifact it builds, so this makes
@@ -124,6 +169,12 @@ pub struct RunArgs {
     /// For `main`, these are ignored (argc=0, argv=0 is always used). These only
     /// apply in single-file mode: the first bare token binds to `path`, so
     /// project mode (no path) never receives trailing args.
+    ///
+    /// Collection starts at the first bare token after the source path and takes
+    /// everything from there, options included — so `infs run f.inf 1 -L libs`
+    /// yields `["1", "-L", "libs"]` rather than parsing `-L`. Place every option
+    /// before that token, or separate the program's arguments with `--`
+    /// (`infs run f.inf -- -L x` yields `["-L", "x"]`).
     #[clap(trailing_var_arg = true)]
     pub args: Vec<String>,
 }
@@ -156,24 +207,31 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 ///
 /// 1. Validates source file exists
 /// 2. Checks for wasmtime availability
-/// 3. Resolves the enclosing project's `[build] wasm-features`, if any
+/// 3. Resolves the enclosing project's `[build] wasm-features` and
+///    `[wasm-dependencies]`, if any
 /// 4. Locates the infc compiler
-/// 5. Compiles source to WASM via infc subprocess
+/// 5. Compiles source to WASM via infc subprocess, forwarding those settings
+///    alongside every `-L` the user passed
 /// 6. Executes WASM with wasmtime, invoking `--entry-point`
 /// 7. Propagates exit code from wasmtime
 ///
-/// The enclosing manifest's `wasm-features` is honored here for the same reason
-/// `infs build <path>` honors it: one project must not emit modules at two
-/// different WebAssembly instruction levels depending on how the build was
-/// invoked, and this path overwrites the very artifact `infs build` produces.
-/// `[wasm-dependencies]` is *not* resolved here — the last path where it is not,
-/// a gap that predates this and is tracked separately (#367).
+/// The enclosing manifest is honored here for the same reason `infs build
+/// <path>` honors it: one project must not emit modules at two different
+/// WebAssembly instruction levels, or bind one module name to two different
+/// `.wasm` files, depending on how the build was invoked — and this path
+/// overwrites the very artifact `infs build` produces.
+///
+/// Every manifest-derived setting comes off the single [`enclosing_manifest`]
+/// call above, and that resolution happens *before* the compiler lookup so a
+/// malformed manifest is reported without first probing the toolchain.
 ///
 /// ## Errors
 ///
 /// Returns an error if:
 /// - The source file does not exist
 /// - wasmtime is not found in PATH
+/// - a `[wasm-dependencies]` key is not a well-formed logical module name, or a
+///   resolved dependency path is not valid UTF-8
 /// - infc compiler cannot be found
 /// - the enclosing manifest requests `wasm-features` the resolved `infc` cannot
 ///   honor (which is also the only case that runs the ABI handshake here)
@@ -188,6 +246,7 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 
     let enclosing = enclosing_manifest(path)?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    let deps = manifest_wasm_dependencies(enclosing.as_ref())?;
     let manifest_path = enclosing
         .as_ref()
         .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
@@ -198,6 +257,8 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
         &infc_path,
         infc_source,
         path,
+        &args.wasm_lib_dirs,
+        &deps,
         &features,
         manifest_path.as_deref(),
     )?;
@@ -208,11 +269,13 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// Builds and runs a discovered project (project mode).
 ///
 /// Resolves the project from the current directory, performs the shared project
-/// build (which runs the `infc` compatibility handshake), then invokes `main` on
-/// `<root>/out/main.wasm` via wasmtime. Project mode always invokes `main`; a
-/// non-`main` `--entry-point` is rejected. Trailing var-args cannot reach this
-/// path (the first token binds to `path`); the warning is a defensive guard
-/// documenting the ignore-args policy.
+/// build (which runs the `infc` compatibility handshake and forwards the
+/// `-L` directories given here), then invokes `main` on `<root>/out/main.wasm`
+/// via wasmtime. Project mode always invokes `main`; a non-`main` `--entry-point`
+/// is rejected. Trailing var-args cannot reach this path (the first token binds
+/// to `path`); the warning is a defensive guard documenting the ignore-args
+/// policy. `-L` is the one flag that *can* reach here, since it takes its own
+/// value rather than a bare token.
 ///
 /// wasmtime availability is checked *first* — before any compilation — so an
 /// environment lacking the runtime fails fast, matching single-file mode.
@@ -223,7 +286,8 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// - `--entry-point` is set to a non-`main` value (project mode invokes `main`)
 /// - wasmtime is not found in PATH
 /// - No `Inference.toml` is found in the current directory or any ancestor
-/// - The project build fails (missing entry point, ABI handshake, infc error)
+/// - The project build fails (missing entry point, ABI handshake,
+///   external-module forwarding, infc error)
 /// - The build succeeds but `<root>/out/main.wasm` is absent
 /// - WASM execution fails
 fn execute_project(args: &RunArgs) -> Result<()> {
@@ -254,13 +318,19 @@ fn execute_project(args: &RunArgs) -> Result<()> {
     // regardless of `[build] mode` in the manifest: proof-mode WASM embeds the
     // custom non-deterministic opcodes (0xfc family) that wasmtime cannot
     // execute. Hence `mode = None` and `out_dir = None` here — manifest
-    // mode/output-dir resolution lives only in `build`'s project path. The
-    // empty `wasm_lib_dirs` is not a suppression: `run` simply has no
-    // `-L` flag, and the manifest's `[wasm-dependencies]` still reaches `infc`
-    // through the shared helper. The `[build.wasm-opt]` optimization still
-    // applies (unless `--no-wasm-opt`) so `run` executes exactly what `build`
-    // would ship.
-    run_project_build(&ctx, false, None, None, &[], args.no_wasm_opt)?;
+    // mode/output-dir resolution lives only in `build`'s project path. The lib
+    // dirs pass straight through; the helper anchors them to the invocation
+    // directory because it moves `infc` to the project root. The
+    // `[build.wasm-opt]` optimization still applies (unless `--no-wasm-opt`) so
+    // `run` executes exactly what `build` would ship.
+    run_project_build(
+        &ctx,
+        false,
+        None,
+        None,
+        &args.wasm_lib_dirs,
+        args.no_wasm_opt,
+    )?;
 
     let wasm_path = project_wasm_path(&ctx);
     if !wasm_path.exists() {
@@ -299,24 +369,48 @@ fn check_wasmtime_availability() -> Result<()> {
 
 /// Compiles source file to WASM binary using infc subprocess.
 ///
-/// Calls infc with `--parse --codegen -o` flags to generate the WASM file
-/// in the `out/` directory, forwarding `features` as `--wasm-features` so the
-/// artifact this command then executes carries the instruction set the enclosing
-/// project asked for.
+/// Calls infc with `--parse --codegen -o` to generate the WASM file in the
+/// `out/` directory, forwarding everything the artifact this command then
+/// executes must be built with. The wire order is
+///
+/// ```text
+/// <source> --parse --codegen -o [--wasm-lib-dir <dir>]* [--wasm-dep <name>=<path>]* [--wasm-features <list>]
+/// ```
+///
+/// which is the relative order single-file `infs build` uses, so the two
+/// commands present one project to `infc` identically.
+///
+/// `wasm_lib_dirs` is forwarded **verbatim**, deliberately: this path never sets
+/// the child's working directory, so `infc` inherits the invocation directory and
+/// a relative dir still names what the user typed. Anchoring them would be wrong
+/// here, and is required only where the child is re-anchored to the project root —
+/// see [`run_project_build`].
+///
+/// `deps` arrives already resolved to absolute paths, so it needs no anchoring
+/// under any working directory.
 ///
 /// The compatibility handshake runs only when there is a feature request to gate.
 /// Single-file `run` otherwise keeps its historical handshake-free behavior: the
 /// probe exists to refuse an unhonorable request, and paying for it on every run
 /// would add ABI warnings to invocations that ask nothing of the compiler.
+/// Neither `--wasm-lib-dir` nor `--wasm-dep` is gated: both arrived with
+/// external-module support itself rather than at a distinguishable ABI minor, so
+/// there is no capability to probe. An `infc` too old to accept them is therefore
+/// reported by `infc`'s own argument parser rather than with remediation from
+/// here.
 ///
 /// # Errors
 ///
-/// Returns an error if the resolved `infc` cannot honor a requested feature, if
-/// `infc` exits non-zero, or if the expected artifact is absent afterwards.
+/// Returns an error if a resolved dependency path is not valid UTF-8 (it cannot
+/// round-trip through the single-`String` `--wasm-dep` argument), if the resolved
+/// `infc` cannot honor a requested feature, if `infc` exits non-zero, or if the
+/// expected artifact is absent afterwards.
 fn compile_to_wasm(
     infc_path: &Path,
     infc_source: ResolutionSource,
     source_path: &Path,
+    wasm_lib_dirs: &[PathBuf],
+    deps: &[(String, PathBuf)],
     features: &[WasmFeatureName],
     manifest_path: Option<&Path>,
 ) -> Result<PathBuf> {
@@ -325,6 +419,14 @@ fn compile_to_wasm(
         .arg("--parse")
         .arg("--codegen")
         .arg("-o");
+
+    for dir in wasm_lib_dirs {
+        cmd.arg("--wasm-lib-dir").arg(dir);
+    }
+
+    for (name, path) in deps {
+        cmd.arg("--wasm-dep").arg(format_wasm_dep_arg(name, path)?);
+    }
 
     if !features.is_empty() {
         let compat = probe_compiler_compatibility(infc_path, infc_source)?;
@@ -411,6 +513,127 @@ fn run_wasmtime(wasm_path: &Path, entry_point: &str, args: &[String]) -> Result<
 }
 
 #[cfg(test)]
+mod cli_surface_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// A minimal parser wrapping [`RunArgs`], standing in for the real CLI so
+    /// the flag surface can be exercised without spawning the binary.
+    #[derive(Parser)]
+    struct RunCli {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    /// Parses `argv` (with the command name prepended) or panics with the clap
+    /// error, so a failed parse is diagnosed rather than reported as a bad field.
+    fn parse(argv: &[&str]) -> RunArgs {
+        let mut full = vec!["run"];
+        full.extend_from_slice(argv);
+        RunCli::try_parse_from(full)
+            .unwrap_or_else(|err| panic!("`infs {}` must parse: {err}", argv.join(" ")))
+            .args
+    }
+
+    /// The lib-dir flag is an *option*, not a second positional. Were the
+    /// `short`/`long` attributes lost, `wasm_lib_dirs` would become positional #2
+    /// and silently swallow the trailing-var-arg slot, so the source path and the
+    /// (empty) program arguments are asserted alongside the directory.
+    #[test]
+    fn lib_dir_flag_is_an_option_not_a_second_positional() {
+        let args = parse(&["f.inf", "-L", "libs"]);
+        assert_eq!(args.path.as_deref(), Some(Path::new("f.inf")));
+        assert_eq!(args.wasm_lib_dirs, [PathBuf::from("libs")]);
+        assert!(args.args.is_empty());
+    }
+
+    /// The flag is positionally free relative to the source path, as any option
+    /// is: it binds the same whether it precedes or follows the path.
+    #[test]
+    fn lib_dir_flag_may_precede_the_source_path() {
+        let args = parse(&["-L", "libs", "f.inf"]);
+        assert_eq!(args.path.as_deref(), Some(Path::new("f.inf")));
+        assert_eq!(args.wasm_lib_dirs, [PathBuf::from("libs")]);
+        assert!(args.args.is_empty());
+    }
+
+    /// Both spellings parse, repeat, mix, and preserve the order given. The
+    /// order is contractual, not cosmetic: `infc` searches the directories in the
+    /// order received and the first hit wins, so a parse that reordered them
+    /// would change which `.wasm` a module resolves to.
+    #[test]
+    fn lib_dir_flag_accepts_both_spellings_and_preserves_order() {
+        let args = parse(&[
+            "-L",
+            "first",
+            "--wasm-lib-dir",
+            "second",
+            "-L",
+            "third",
+            "f.inf",
+        ]);
+        assert_eq!(
+            args.wasm_lib_dirs,
+            [
+                PathBuf::from("first"),
+                PathBuf::from("second"),
+                PathBuf::from("third")
+            ]
+        );
+        assert_eq!(args.path.as_deref(), Some(Path::new("f.inf")));
+    }
+
+    /// Project mode is the only mode `-L` can reach without a source path: any
+    /// bare token would bind to `path` and select single-file mode instead, so a
+    /// project-mode lib dir must arrive through the option's own value.
+    #[test]
+    fn lib_dir_flag_reaches_project_mode_without_a_source_path() {
+        let args = parse(&["-L", "libs"]);
+        assert!(args.path.is_none(), "no bare token means project mode");
+        assert_eq!(args.wasm_lib_dirs, [PathBuf::from("libs")]);
+        assert!(args.args.is_empty());
+    }
+
+    /// Options placed between the source path and the first bare token are still
+    /// parsed as options; collection of the program's arguments starts at that
+    /// bare token.
+    #[test]
+    fn options_before_the_first_bare_token_are_parsed() {
+        let args = parse(&["f.inf", "--entry-point", "helper", "-L", "libs", "1"]);
+        assert_eq!(args.path.as_deref(), Some(Path::new("f.inf")));
+        assert_eq!(args.entry_point, "helper");
+        assert_eq!(args.wasm_lib_dirs, [PathBuf::from("libs")]);
+        assert_eq!(args.args, ["1"]);
+    }
+
+    /// The ordering contract, stated as the failure it produces: once a bare
+    /// trailing token has been seen, everything after it — flags included — goes
+    /// to the invoked function verbatim. This is not a parse bug to be fixed but
+    /// the property that lets a program take arguments that look like `infs`
+    /// flags; it is pinned so a future flag rearrangement cannot silently change
+    /// which side of the boundary an argument lands on.
+    #[test]
+    fn a_lib_dir_after_the_first_bare_token_becomes_a_program_argument() {
+        let args = parse(&["f.inf", "1", "-L", "libs"]);
+        assert!(
+            args.wasm_lib_dirs.is_empty(),
+            "`-L` after a bare token is the program's, not the compiler's"
+        );
+        assert_eq!(args.args, ["1", "-L", "libs"]);
+    }
+
+    /// `--` is the explicit form of the same boundary, for a program whose first
+    /// argument itself looks like a flag.
+    #[test]
+    fn a_double_dash_hands_flag_shaped_arguments_to_the_program() {
+        let args = parse(&["f.inf", "--", "-L", "x"]);
+        assert_eq!(args.path.as_deref(), Some(Path::new("f.inf")));
+        assert!(args.wasm_lib_dirs.is_empty());
+        assert_eq!(args.args, ["-L", "x"]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -443,6 +666,7 @@ mod tests {
             path: None,
             entry_point: "helper".to_string(),
             no_wasm_opt: false,
+            wasm_lib_dirs: Vec::new(),
             args: Vec::new(),
         };
 
@@ -467,6 +691,7 @@ mod tests {
             path: None,
             entry_point: DEFAULT_ENTRY_POINT.to_string(),
             no_wasm_opt: false,
+            wasm_lib_dirs: Vec::new(),
             args: Vec::new(),
         };
 

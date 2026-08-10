@@ -98,7 +98,9 @@ than silently shipping a differently-configured artifact. Only
 `[dependencies]` and `[wasm-dependencies]` accept arbitrary keys, because their
 keys name the dependencies. `wasm-features` entries are WebAssembly *proposal* names
 (`"bulk-memory"`), not instruction names, and the setting is honored in project
-builds, single-file builds, and single-file `infs run`; see
+builds, single-file builds, and single-file `infs run`. `[wasm-dependencies]`
+entries have the same reach: project `build`, project `run`, single-file
+`build`, and single-file `run` all forward every declared entry to `infc`. See
 `apps/infs/docs/inference-toml.md` for the full reference.
 
 ### Reserved Project Names
@@ -228,7 +230,22 @@ directory), with no manifest `output-dir` forwarded.
 infs run                                 # project mode: build + invoke main
 infs run program.inf                     # single-file: compile and invoke main
 infs run program.inf --entry-point helper  # single-file: invoke helper()
+infs run program.inf -L libs             # single-file: search libs/ for external .wasm
 ```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--entry-point <name>` | Function to invoke in single-file mode (default `main`); rejected for anything but `main` in project mode |
+| `-L <DIR>` / `--wasm-lib-dir <DIR>` | Add a directory to search for external `.wasm` modules; repeatable. Anchored to the invocation directory in project mode; in single-file mode no anchoring step runs, since `infc` already inherits that directory |
+| `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
+
+In single-file mode, `-L` and the other options must appear before the first
+bare trailing token: `infs run program.inf -L libs 1` parses `-L libs` and
+passes `1` to the invoked function, while `infs run program.inf 1 -L libs`
+passes `1 -L libs` verbatim as two trailing arguments, parsing no `-L` at all.
+Use `--` to pass arguments that themselves look like flags.
 
 In **project mode** (no path given):
 
@@ -239,13 +256,21 @@ In **project mode** (no path given):
   is rejected with guidance to use single-file mode instead.
 - Checks wasmtime availability before starting the build, failing fast if the
   runtime is absent.
+- Resolves the manifest's `[wasm-dependencies]` and forwards any `-L`
+  directories the same way project `build` does, anchored to the invocation
+  directory, so a project binding `use { … } from <module>` runs without a
+  separate link step.
 - `out/main.wasm` is the expected artifact; if the build succeeds but the file
   is absent, `run` errors before invoking wasmtime.
 
 In **single-file mode** (path given), `--entry-point` (default `main`) selects
 which exported function to invoke. `main` is called with `argc=0, argv=0`
 automatically; other functions receive the trailing arguments from the command
-line.
+line — anything after the first bare token that options did not consume, or
+after `--`. Single-file `run` also resolves the enclosing manifest's
+`[wasm-dependencies]` and forwards any `-L` directories verbatim: `infc`
+inherits the invoking shell's working directory here, so a relative `-L`
+already means what it meant at the shell, with no anchoring step needed.
 
 Both modes require `wasmtime` in `PATH`. Installation instructions are printed
 when it is not found.
@@ -301,7 +326,7 @@ section.
 itself — all of that is `infc`'s responsibility. The relationship:
 
 ```text
-infs build
+infs build / infs run (project mode)
     |
     +-- discover_and_load(Inference.toml)
     |
@@ -315,15 +340,96 @@ infs build
     +-- spawn infc
             CWD = <project root>
             arg: src/main.inf
-            arg: -v                     (if .v requested)
-            arg: --mode proof           (if effective proof mode)
-            arg: --out-dir <dir>        (if effective proof mode + ABI ≥ 1.1)
+            arg: -v                     (if .v requested; `run` never requests it)
+            arg: --mode proof           (if effective proof mode; `run` never requests it)
+            arg: --out-dir <dir>        (if effective proof mode + ABI ≥ 1.1; `run` never requests it)
             arg: --wasm-lib-dir <dir>   (one per -L/--wasm-lib-dir; a relative
                                          dir is anchored to the invocation
-                                         directory, since infc runs at the root)
+                                         directory, since infc runs at the root —
+                                         `build` and `run` both pass their own
+                                         `-L` flags through here)
             arg: --wasm-dep name=path   (one per [wasm-dependencies] entry; the
                                          declared path resolved against the root)
+            arg: --wasm-features <list> (if [build] wasm-features requests any;
+                                         requires infc ABI ≥ 1.2. Applies in both
+                                         modes — a `.v` describing a different
+                                         instruction set than the shipped `.wasm`
+                                         would be worthless)
 ```
+
+Project `run` forces compile mode (`mode = None`) and never requests `--out-dir`,
+so the `-v`/`--mode proof`/`--out-dir` lines above never fire for it — but it
+shares this exact spawn otherwise, including the `-L` and `[wasm-dependencies]`
+forwarding.
+
+Single-file `build <path>` and `run <path>` spawn `infc` directly instead of
+through the shared project-build helper, and — unlike the two project-mode
+paths above — they do **not** send `infc` the same argument list: `build`
+forwards only what the user explicitly passed, leaning on `infc`'s own
+phase-flag default for the rest, while `run` always requests the full
+pipeline explicitly, because it needs the finished WASM artifact in hand to
+execute it. What they do agree on: neither sets `current_dir`, so `infc`
+inherits the invocation directory; every `-L` is forwarded verbatim, with no
+anchoring step; and whichever of `--wasm-lib-dir`, `--wasm-dep`, and
+`--wasm-features` a given invocation sends, they appear in that same relative
+order.
+
+```text
+infs build <path> (single-file mode)
+    |
+    +-- enclosing_manifest(path)   # walk up from the source file; optional
+    |
+    +-- compatibility handshake     # unconditional — always runs, before any
+    |       infc --commit-hash      # flag below is decided (unlike `run`,
+    |       infc --abi-version      # which only handshakes when wasm-features
+    |                               # are requested)
+    |
+    +-- spawn infc
+            CWD = inherited from the invoking shell
+            arg: <path>
+            arg: -v                     (if `-v` was passed; `run` never sends it)
+            arg: --mode <mode>          (if `--mode` was passed; `run` never
+                                         sends it)
+            arg: --wasm-lib-dir <dir>   (one per -L/--wasm-lib-dir, forwarded
+                                         verbatim; no anchoring step runs)
+            arg: --wasm-dep name=path   (one per [wasm-dependencies] entry from
+                                         the enclosing manifest, if any)
+            arg: --wasm-features <list> (if the enclosing manifest requests any;
+                                         requires infc ABI ≥ 1.2)
+```
+
+`build` never adds `--parse`, `--codegen`, or `-o`: with no phase flag at all,
+`infc`'s own default — full compilation, WASM written to disk — already does
+what `build` wants.
+
+```text
+infs run <path> (single-file mode)
+    |
+    +-- enclosing_manifest(path)   # walk up from the source file; optional
+    |
+    +-- compatibility handshake     # conditional — runs only when the
+    |       infc --commit-hash      # enclosing manifest requests wasm-features,
+    |       infc --abi-version      # the only thing here needing a capability
+    |                               # check; skipped entirely otherwise, unlike
+    |                               # `build`
+    |
+    +-- spawn infc
+            CWD = inherited from the invoking shell
+            arg: <path>
+            arg: --parse                (always; `build` never sends it)
+            arg: --codegen              (always; `build` never sends it)
+            arg: -o                     (always; `build` never sends it)
+            arg: --wasm-lib-dir <dir>   (one per -L/--wasm-lib-dir, forwarded
+                                         verbatim; no anchoring step runs)
+            arg: --wasm-dep name=path   (one per [wasm-dependencies] entry from
+                                         the enclosing manifest, if any)
+            arg: --wasm-features <list> (if the enclosing manifest requests any;
+                                         requires infc ABI ≥ 1.2)
+```
+
+`run` always requests `--parse --codegen -o` explicitly rather than relying on
+`infc`'s default, and neither `-v` nor `--mode` is ever part of its argv: the
+`RunArgs` struct (`apps/infs/src/commands/run.rs`) carries no such flags.
 
 **`infc` flags** confirmed against `core/cli/src/parser.rs`:
 
@@ -341,7 +447,7 @@ infs build
 | `--commit-hash` | Print the build commit hash and exit; used by the `infs` handshake |
 | `--abi-version` | Print `<major>.<minor>` ABI version and exit; used by the `infs` handshake |
 
-> **Note:** The current ABI version is `1.1`.
+> **Note:** The current ABI version is `1.2`.
 
 The default behavior when no phase flag is supplied is full compilation with
 WASM output written to disk — equivalent to `--codegen -o`.
@@ -359,12 +465,14 @@ is parsed as `<major>.<minor>`:
 - **Unknown/old** (`infc` exits non-zero or prints `unknown`): silent; treated
   as graceful skip, equivalent to ABI unknown.
 
-The current ABI is `1.1` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 1`
-in `core/compiler-interface/src/lib.rs`). The `--out-dir` flag was introduced
-at minor 1. `infs` gates its use: `--out-dir` is forwarded only to an `infc`
-that reports ABI minor ≥ 1 (or matches by commit hash). Pairing a manifest
-with a non-default `[verification] output-dir` against an older `infc` is a
-hard error:
+The current ABI is `1.2` (`COMPILER_ABI_MAJOR = 1`, `COMPILER_ABI_MINOR = 2`
+in `core/compiler-interface/src/lib.rs`). Each additive flag is gated at the
+minor it was introduced at, independently: `--out-dir` landed at minor 1, and
+`--wasm-features` at minor 2. `infs` forwards each only to an `infc` that
+reports an ABI minor at or above the flag's own (or matches by commit hash) —
+an `infc` that reports minor 1, for instance, supports `--out-dir` but not
+`--wasm-features`. Pairing a manifest with a non-default `[verification]
+output-dir` against an older `infc` is a hard error:
 
 ```text
 error: the resolved infc does not support `--out-dir` (requires infc ABI ≥ 1.1);

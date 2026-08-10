@@ -124,10 +124,10 @@ When `infs build` runs in project mode, it reads fields from `Inference.toml` to
 | `[build] mode = "compile"` (default) | Forwards nothing; `infc` defaults to compile mode |
 | `[verification] output-dir` | Honored only in effective-proof mode; relocates both `.wasm` and `.v` |
 | `[build] wasm-features` | Opt-in post-MVP WebAssembly proposals (currently `"bulk-memory"`); forwarded as `--wasm-features`, echoed as a `wasm-features:` line, and applied in both compile and proof mode. Empty (the default) means pure WebAssembly 1.0 |
-| `[wasm-dependencies]` | Each entry is forwarded as `--wasm-dep <name>=<path>`, with the declared path resolved against the project root; honored by both project `build` and project `run`, and never capability-gated |
+| `[wasm-dependencies]` | Each entry is forwarded as `--wasm-dep <name>=<path>`, with the declared path resolved against the project root; honored on every build and run path, and never capability-gated |
 | `[build.wasm-opt]` | Opt-in post-build optimization of `out/main.wasm` via Binaryen `wasm-opt`, resolved from `WASM_OPT_PATH` → PATH → an infs-managed install; absent table is a no-op |
 
-Some of these are also honored in **single-file** mode, by walking up to the nearest `Inference.toml`. `[build] wasm-features` is honored by both `infs build <path>` and `infs run <path>` — deliberately, since those two and project `infs build` all write `out/main.wasm` for the same project and must not disagree about its instruction set. `[wasm-dependencies]` is honored by single-file `build` and by both project-mode paths (`infs build` and `infs run`); single-file `run` is the one path that does not resolve it, a pre-existing gap tracked as [#367](https://github.com/Inferara/inference/issues/367). `[build] wasm-features` requires an `infc` with ABI 1.2 or newer; an older compiler cannot honor the request, so it is refused with remediation instead of being handed the flag.
+Some of these are also honored in **single-file** mode, by walking up to the nearest `Inference.toml`. `[build] wasm-features` is honored by both `infs build <path>` and `infs run <path>` — deliberately, since those two and project `infs build` all write `out/main.wasm` for the same project and must not disagree about its instruction set. `[wasm-dependencies]` is honored on all four compilation paths — single-file `build`, single-file `run`, project `build`, and project `run` — and is never capability-gated. `[build] wasm-features` requires an `infc` with ABI 1.2 or newer; an older compiler cannot honor the request, so it is refused with remediation instead of being handed the flag.
 
 Every table with a fixed set of fields rejects keys it does not recognize, so a misspelled manifest key is an error naming the offending key and the accepted ones, not a setting that silently does nothing.
 
@@ -149,6 +149,9 @@ infs run example.inf
 # Single-file mode: invoke a custom entry point
 infs run example.inf --entry-point helper
 
+# Single-file mode: search libs/ for external .wasm modules
+infs run example.inf -L libs
+
 # Pass arguments to the program (single-file only)
 infs run example.inf -- arg1 arg2
 
@@ -156,7 +159,17 @@ infs run example.inf -- arg1 arg2
 infs run --no-wasm-opt
 ```
 
-Requires `wasmtime` to be installed. In project mode, `infs run` applies the same `[build.wasm-opt]` post-build optimization as `infs build` before executing the result.
+### Run Flags
+
+| Flag | Description |
+|------|-------------|
+| `--entry-point <name>` | Function to invoke in single-file mode (default `main`); project mode always invokes `main`, and requesting anything else is rejected with guidance to use single-file mode |
+| `-L <dir>` / `--wasm-lib-dir <dir>` | Directory to search for external `.wasm` modules referenced by `use { … } from <module>;`; repeatable. In project mode a relative dir is anchored to the directory you invoked `infs` from; in single-file mode no anchoring step runs, because `infc` already inherits that directory as its working directory |
+| `--no-wasm-opt` | Skip `[build.wasm-opt]` post-build optimization (project mode only) |
+
+In single-file mode, options must appear before the first bare trailing token: everything from that token onward — including anything that looks like a flag — is passed to the invoked function instead of being parsed by `infs run`. `infs run f.inf -L libs 1` parses `-L libs` and passes `1` to the function; `infs run f.inf 1 -L libs` passes `1 -L libs` verbatim and parses no `-L` at all. Use `--` to pass arguments that themselves start with `-` unambiguously.
+
+Requires `wasmtime` to be installed. In both modes, `infs run` resolves the enclosing or discovered manifest's `[wasm-dependencies]` and forwards any `-L` directories, so a file or project binding `use { … } from <module>` runs without a separate link step. In project mode, `infs run` also applies the same `[build.wasm-opt]` post-build optimization as `infs build` before executing the result.
 
 ### Project Commands
 

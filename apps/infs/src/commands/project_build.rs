@@ -35,14 +35,15 @@
 //! parameters but reads `[build] wasm-features` and `[wasm-dependencies]`
 //! straight off `ctx`. The rule: a setting a CLI flag can override, or that a
 //! caller must be able to suppress, is threaded so the caller stays the single
-//! place that resolves it (`run` deliberately passes `mode = None` to force
-//! compile mode, and has no `-L` flag of its own to pass on). A setting only the
-//! manifest can express, with no flag and nothing to suppress, is read from
-//! `ctx` — threading it would let two callers disagree about a property of the
-//! project itself. An instruction-set request is the latter, as is the set of
-//! external modules the project links against: `build` and `run` emitting
-//! different instruction levels — or resolving one project's `use { … } from
-//! <module>` against different `.wasm` files — is a bug, not a configuration.
+//! place that resolves it — `build` and `run` each own their `-L` entries and
+//! pass them through, and `run` deliberately passes `mode = None` to force
+//! compile mode. A setting only the manifest can express, with no flag and
+//! nothing to suppress, is read from `ctx` — threading it would let two callers
+//! disagree about a property of the project itself. An instruction-set request
+//! is the latter, as is the set of external modules the project links against:
+//! `build` and `run` emitting different instruction levels — or resolving one
+//! project's `use { … } from <module>` against different `.wasm` files — is a
+//! bug, not a configuration.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -101,8 +102,9 @@ use inference_compiler_interface::{
 /// forwarding it verbatim would have `infc` read it as `<root>/../libs` instead
 /// — failing to link, or silently linking a same-named module that happens to
 /// sit at the root-anchored path. Joining onto the invocation directory leaves
-/// an absolute dir unchanged. Single-file mode needs no such treatment: `infc`
-/// inherits the working directory there, so a relative dir keeps its meaning.
+/// an absolute dir unchanged. Neither single-file path needs that treatment:
+/// single-file `build` and `run` both let `infc` inherit the working directory,
+/// so a relative dir already keeps its meaning and is forwarded verbatim.
 ///
 /// The manifest's `[build] wasm-features` is read straight off `ctx` rather than
 /// passed in, so `build` and `run` cannot disagree about the instruction level of
