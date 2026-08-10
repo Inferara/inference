@@ -291,7 +291,9 @@ mod tests {
     /// reproduce the hand-spelled explicit tree node-for-node — pinning slot
     /// numbering, the `assume`→`Himpl` / exists-arm→`HA_and` polarity split,
     /// the `&&` split into two `nz`, the `nz`/`term_eq` guard pair, the `HA_ex`
-    /// placement, and the `T_lvar 0` / `SX_S` choices.
+    /// placement, the `T_lvar 0` / `SX_S` choices, and the `HA_has_type`
+    /// argument-typing guard each universal slot leads its antecedent with (the
+    /// exists arm's witness needs none).
     #[test]
     fn canonical_prime_hspec1_structure() {
         // Shared sub-terms (PrimeExample.v).
@@ -309,14 +311,20 @@ mod tests {
         let is_prime_call = || HTerm::App(HFnRef("is_prime".to_string()), vec![n()]);
 
         let built = HAssert::imp(
-            HAssert::nz(gt(n(), one())),
+            HAssert::and(
+                HAssert::HasType(n(), HNumType::I32),
+                HAssert::nz(gt(n(), one())),
+            ),
             HAssert::and(
                 HAssert::imp(
                     HAssert::nz(is_prime_call()),
                     HAssert::imp(
                         HAssert::and(
-                            HAssert::nz(gt(m_then(), one())),
-                            HAssert::nz(lt(m_then(), n())),
+                            HAssert::HasType(m_then(), HNumType::I32),
+                            HAssert::and(
+                                HAssert::nz(gt(m_then(), one())),
+                                HAssert::nz(lt(m_then(), n())),
+                            ),
                         ),
                         HAssert::nz(gt(rem(n(), m_then()), HTerm::Const(HConst::I32(0)))),
                     ),
@@ -336,14 +344,20 @@ mod tests {
         let nz =
             |t: HTerm| HAssert::Not(Box::new(HAssert::TermEq(t, HTerm::Const(HConst::I32(0)))));
         let expected = HAssert::Imp(
-            Box::new(nz(gt(n(), one()))),
+            Box::new(HAssert::And(
+                Box::new(HAssert::HasType(n(), HNumType::I32)),
+                Box::new(nz(gt(n(), one()))),
+            )),
             Box::new(HAssert::And(
                 Box::new(HAssert::Imp(
                     Box::new(nz(is_prime_call())),
                     Box::new(HAssert::Imp(
                         Box::new(HAssert::And(
-                            Box::new(nz(gt(m_then(), one()))),
-                            Box::new(nz(lt(m_then(), n()))),
+                            Box::new(HAssert::HasType(m_then(), HNumType::I32)),
+                            Box::new(HAssert::And(
+                                Box::new(nz(gt(m_then(), one()))),
+                                Box::new(nz(lt(m_then(), n()))),
+                            )),
                         )),
                         Box::new(nz(gt(rem(n(), m_then()), HTerm::Const(HConst::I32(0))))),
                     )),

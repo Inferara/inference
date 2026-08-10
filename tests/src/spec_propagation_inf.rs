@@ -380,9 +380,9 @@ mod fixture_with_spec_smoke {
         // `prop`'s `forall { let i = @; assert(foo(i) == i); }` becomes an
         // obligation, not module-record WASM: the spec function is OMITTED from
         // the emitted module, so no `BI_forall`/`BI_uzumaki` appears in the `.v`.
-        // The obligation is `nz(relop Eq (foo(i)) i)` = `HA_not (term_eq …)`,
-        // where `foo(i)` is a `T_app` into `mod_funcs` and `i` is the universal
-        // `T_local 0`.
+        // The obligation is `nz(relop Eq (foo(i)) i)` = `HA_not (term_eq …)`
+        // under the `HA_has_type` guard of the slot it reads, where `foo(i)` is a
+        // `T_app` into `mod_funcs` and `i` is the universal `T_local 0`.
         assert!(
             v.contains("Definition withspec__MySpec_hspec1 : hassert :="),
             "MySpec's obligation must be emitted:\n{v}"

@@ -168,14 +168,29 @@ fn ex(a: HAssert) -> HAssert {
 fn teq(a: HTerm, b: HTerm) -> HAssert {
     HAssert::TermEq(a, b)
 }
-fn defined(t: HTerm) -> HAssert {
-    HAssert::Defined(t)
+fn hastype(t: HTerm, ty: HNumType) -> HAssert {
+    HAssert::HasType(t, ty)
 }
 fn nz(t: HTerm) -> HAssert {
     not(teq(t, i32c(0)))
 }
 fn eqz(t: HTerm) -> HAssert {
     teq(t, i32c(0))
+}
+
+/// The typing guard universal slot `n` carries at the common i32 width — the
+/// antecedent every positive-position read of that slot sits under.
+fn guard(n: u32) -> HAssert {
+    hastype(local(n), HNumType::I32)
+}
+
+/// The class a slot declared at `decl_ty` is guarded at.
+fn guard_width(decl_ty: &str) -> HNumType {
+    if matches!(decl_ty, "i64" | "u64") {
+        HNumType::I64
+    } else {
+        HNumType::I32
+    }
 }
 
 // convenience relop/binop shorthands at i32/signed (the common width)
@@ -192,7 +207,10 @@ fn rems(l: HTerm, r: HTerm) -> HTerm {
 // ----- 1. the canonical prime obligation --------------------------------
 
 /// The single most important test: the `PrimeExample` source spec must produce
-/// `prime_hspec1` (wasm-verifier's `theories/examples/PrimeExample.v`) node-for-node.
+/// `prime_hspec1` (wasm-verifier's `theories/examples/PrimeExample.v`)
+/// node-for-node — including the two argument-typing guards fused into the
+/// antecedents the source's `assume`s already build, which is what makes the
+/// obligation dischargeable under the verifier's strictified `ValidSpec`.
 #[test]
 fn canonical_prime_spec_matches_prime_hspec1() {
     let source = "\
@@ -226,12 +244,15 @@ spec prime_properties {
     let is_prime = || app("is_prime", vec![n()]);
 
     let expected = imp(
-        nz(gts(n(), one())),
+        and(guard(0), nz(gts(n(), one()))),
         and(
             imp(
                 nz(is_prime()),
                 imp(
-                    and(nz(gts(m_then(), one())), nz(lts(m_then(), n()))),
+                    and(
+                        guard(1),
+                        and(nz(gts(m_then(), one())), nz(lts(m_then(), n()))),
+                    ),
                     nz(gts(rems(n(), m_then()), i32c(0))),
                 ),
             ),
@@ -250,8 +271,9 @@ spec prime_properties {
 // ----- 2. op / atom coverage --------------------------------------------
 
 /// `assert(<lhs op rhs> == <cmp>)` in universal mode is `nz(relop Eq lhs_term
-/// cmp_term)`; this returns `lhs_term` for a two-slot body so each operator's
-/// width/signedness/narrowing can be pinned in isolation.
+/// cmp_term)` under both slots' typing guards; this returns `lhs_term` for a
+/// two-slot body so each operator's width/signedness/narrowing can be pinned in
+/// isolation.
 fn lhs_term_of_binary(decl_ty: &str, op: &str) -> HTerm {
     // Parenthesize the operation so it is not re-associated against `==`; `term`
     // unwraps the parentheses, so the extracted term is the bare operation.
@@ -259,9 +281,18 @@ fn lhs_term_of_binary(decl_ty: &str, op: &str) -> HTerm {
         "forall {{ let a: {decl_ty} = @; let b: {decl_ty} = @; assert((a {op} b) == a); }}"
     );
     let obligation = obligation_of("", &body);
+    let HAssert::Imp(antecedent, claim) = obligation else {
+        panic!("expected a guarded implication, got {obligation:?}");
+    };
+    let width = guard_width(decl_ty);
+    assert_eq!(
+        *antecedent,
+        and(hastype(local(0), width), hastype(local(1), width)),
+        "both universal slots must be guarded at their declared width"
+    );
     // `nz(relop Eq lhs rhs)`; the outer relop width is the operand width (I64 for
     // 64-bit operands), which is irrelevant here — only `lhs` is under test.
-    match obligation {
+    match *claim {
         HAssert::Not(inner) => match *inner {
             HAssert::TermEq(HTerm::Relop(_, HRelop::Eq, lhs, _), _) => *lhs,
             other => panic!("expected nz(relop Eq ..), got {other:?}"),
@@ -359,12 +390,21 @@ fn relational_operators_carry_width_and_signedness() {
     let body = "forall { let a: u32 = @; let b: u32 = @; assert(a < b); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(HNumType::I32, HRelop::LtU, local(0), local(1)))
+        imp(
+            and(guard(0), guard(1)),
+            nz(rel(HNumType::I32, HRelop::LtU, local(0), local(1)))
+        )
     );
     let body = "forall { let a: i64 = @; let b: i64 = @; assert(a >= b); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(HNumType::I64, HRelop::GeS, local(0), local(1)))
+        imp(
+            and(
+                hastype(local(0), HNumType::I64),
+                hastype(local(1), HNumType::I64)
+            ),
+            nz(rel(HNumType::I64, HRelop::GeS, local(0), local(1)))
+        )
     );
 }
 
@@ -374,34 +414,43 @@ fn unary_operators_mirror_codegen() {
     let body = "forall { let a: i32 = @; assert(-a == a); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(
-            HNumType::I32,
-            HRelop::Eq,
-            bin(HNumType::I32, HBinop::Sub, i32c(0), local(0)),
-            local(0),
-        ))
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                bin(HNumType::I32, HBinop::Sub, i32c(0), local(0)),
+                local(0),
+            ))
+        )
     );
     // Bitwise not: x ^ -1 (i32).
     let body = "forall { let a: i32 = @; assert(~a == a); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(
-            HNumType::I32,
-            HRelop::Eq,
-            bin(HNumType::I32, HBinop::Xor, local(0), i32c(-1)),
-            local(0),
-        ))
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                bin(HNumType::I32, HBinop::Xor, local(0), i32c(-1)),
+                local(0),
+            ))
+        )
     );
     // Term-position `!x` is the i32.eqz form (relop Eq x 0).
     let body = "forall { let a: bool = @; assert(!a == a); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(
-            HNumType::I32,
-            HRelop::Eq,
-            rel(HNumType::I32, HRelop::Eq, local(0), i32c(0)),
-            local(0),
-        ))
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                rel(HNumType::I32, HRelop::Eq, local(0), i32c(0)),
+                local(0),
+            ))
+        )
     );
 }
 
@@ -411,7 +460,13 @@ fn unary_operators_mirror_codegen() {
 fn literal_const_of(decl_ty: &str, literal: &str) -> HTerm {
     let body =
         format!("forall {{ let m: {decl_ty} = {literal}; let a: {decl_ty} = @; assert(a == m); }}");
-    match obligation_of("", &body) {
+    let obligation = obligation_of("", &body);
+    let HAssert::Imp(antecedent, claim) = obligation else {
+        panic!("expected a guarded implication, got {obligation:?}");
+    };
+    // Only `a` takes a slot: a pure `let` inlines its constant and is unguarded.
+    assert_eq!(*antecedent, hastype(local(0), guard_width(decl_ty)));
+    match *claim {
         HAssert::Not(inner) => match *inner {
             HAssert::TermEq(HTerm::Relop(_, HRelop::Eq, _, rhs), _) => *rhs,
             other => panic!("expected nz(relop Eq ..), got {other:?}"),
@@ -454,7 +509,10 @@ fn literals_parse_per_width_including_cast_signed() {
     let body = "forall { let m: bool = true; let a: bool = @; assert(a == m); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(1)))
+        imp(
+            guard(0),
+            nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(1)))
+        )
     );
 }
 
@@ -464,7 +522,10 @@ fn enum_variant_lowers_to_its_tag_constant() {
     let obligation = obligation_of("enum Color { Red, Green, Blue }", body);
     assert_eq!(
         obligation,
-        nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(2)))
+        imp(
+            guard(0),
+            nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(2)))
+        )
     );
 }
 
@@ -475,19 +536,28 @@ fn conjunction_splits_and_disjunction_is_or() {
     let body = "forall { let a: i32 = @; let b: i32 = @; assert(a > 0 && b > 0); }";
     assert_eq!(
         obligation_of("", body),
-        and(nz(gts(local(0), i32c(0))), nz(gts(local(1), i32c(0))))
+        imp(
+            and(guard(0), guard(1)),
+            and(nz(gts(local(0), i32c(0))), nz(gts(local(1), i32c(0))))
+        )
     );
     let body = "forall { let a: i32 = @; let b: i32 = @; assert(a > 0 || b > 0); }";
     assert_eq!(
         obligation_of("", body),
-        or(nz(gts(local(0), i32c(0))), nz(gts(local(1), i32c(0))))
+        imp(
+            and(guard(0), guard(1)),
+            or(nz(gts(local(0), i32c(0))), nz(gts(local(1), i32c(0))))
+        )
     );
 }
 
 #[test]
 fn negation_of_a_comparison_is_the_zero_equality() {
     let body = "forall { let a: i32 = @; assert(!(a > 0)); }";
-    assert_eq!(obligation_of("", body), eqz(gts(local(0), i32c(0))));
+    assert_eq!(
+        obligation_of("", body),
+        imp(guard(0), eqz(gts(local(0), i32c(0))))
+    );
 }
 
 #[test]
@@ -496,30 +566,46 @@ fn equality_is_non_strict_universally_and_strict_existentially() {
     let body = "forall { let a: i32 = @; let b: i32 = @; assert(a == b); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(HNumType::I32, HRelop::Eq, local(0), local(1)))
+        imp(
+            and(guard(0), guard(1)),
+            nz(rel(HNumType::I32, HRelop::Eq, local(0), local(1)))
+        )
     );
-    // Existential `==` is strict term_eq.
+    // Existential `==` is strict term_eq. Only the universal `n` is guarded; the
+    // witness the prover picks needs no typing hypothesis.
     let body = "forall { let n: i32 = @; exists { let m: i32 = @; assert(m == n); } }";
-    assert_eq!(obligation_of("", body), ex(teq(lvar(0), local(0))));
+    assert_eq!(
+        obligation_of("", body),
+        imp(guard(0), ex(teq(lvar(0), local(0))))
+    );
 }
 
+/// `!=` carries no `HA_defined` conjunct of its own. Both sides denoting is
+/// exactly what the verifier's strictified negated equality already demands, so
+/// an emitted conjunct would restate the relop's own definedness — including on
+/// the `T_app`-bearing side, which is the case the conjunct used to single out.
 #[test]
-fn disequality_conjoins_defined_only_for_app_bearing_sides() {
-    // No app on either side: no HA_defined.
+fn disequality_is_a_bare_negated_relop_like_every_comparison() {
     let body = "forall { let a: i32 = @; let b: i32 = @; assert(a != b); }";
     assert_eq!(
         obligation_of("", body),
-        nz(rel(HNumType::I32, HRelop::Ne, local(0), local(1)))
+        imp(
+            and(guard(0), guard(1)),
+            nz(rel(HNumType::I32, HRelop::Ne, local(0), local(1)))
+        )
     );
-    // Left side bears a T_app: conjoin HA_defined for it.
     let prelude = "fn g(x: i32) -> i32 { return x; }";
     let body = "forall { let a: i32 = @; assert(g(a) != a); }";
-    let call = || app("g", vec![local(0)]);
     assert_eq!(
         obligation_of(prelude, body),
-        and(
-            nz(rel(HNumType::I32, HRelop::Ne, call(), local(0))),
-            defined(call()),
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Ne,
+                app("g", vec![local(0)]),
+                local(0)
+            ))
         )
     );
 }
@@ -531,10 +617,13 @@ fn pure_let_is_inlined_as_a_term() {
     let body = "forall { let a: i32 = @; let s: i32 = a + 1; assert(s > 0); }";
     assert_eq!(
         obligation_of("", body),
-        nz(gts(
-            bin(HNumType::I32, HBinop::Add, local(0), i32c(1)),
-            i32c(0)
-        ))
+        imp(
+            guard(0),
+            nz(gts(
+                bin(HNumType::I32, HBinop::Add, local(0), i32c(1)),
+                i32c(0)
+            ))
+        )
     );
 }
 
@@ -544,7 +633,7 @@ fn let_of_call_inlines_the_application() {
     let body = "forall { let a: i32 = @; let c: i32 = g(a); assert(c > 0); }";
     assert_eq!(
         obligation_of(prelude, body),
-        nz(gts(app("g", vec![local(0)]), i32c(0)))
+        imp(guard(0), nz(gts(app("g", vec![local(0)]), i32c(0))))
     );
 }
 
@@ -560,13 +649,17 @@ spec S {
   }
 }
 ";
-    // p = slot 0, a = slot 1, t = inlined term, b = slot 2.
+    // p = slot 0, a = slot 1, t = inlined term, b = slot 2. All three guards are
+    // still pending at the assert, and drain there in introduction order.
     assert_eq!(
         sole_obligation(&ok(source), "S"),
-        nz(gts(
-            local(2),
-            bin(HNumType::I32, HBinop::Add, local(0), local(1))
-        ))
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(
+                local(2),
+                bin(HNumType::I32, HBinop::Add, local(0), local(1))
+            ))
+        )
     );
 }
 
@@ -585,10 +678,17 @@ spec S {
 }
 ";
     // `b` is a branch-local slot 1; the outer `a` (slot 0) is still bound for the
-    // trailing assert after the branch scope is restored.
-    let expected = and(
-        imp(nz(gts(local(0), i32c(0))), nz(gts(local(1), i32c(5)))),
-        nz(gts(local(0), i32c(3))),
+    // trailing assert after the branch scope is restored. `b`'s guard is scoped
+    // to the consequent it was introduced in, while `a`'s spans the whole `if`.
+    let expected = imp(
+        guard(0),
+        and(
+            imp(
+                nz(gts(local(0), i32c(0))),
+                imp(guard(1), nz(gts(local(1), i32c(5)))),
+            ),
+            nz(gts(local(0), i32c(3))),
+        ),
     );
     assert_eq!(sole_obligation(&ok(source), "S"), expected);
 }
@@ -596,7 +696,10 @@ spec S {
 #[test]
 fn block_local_const_is_inlined() {
     let body = "forall { let a: i32 = @; const k: i32 = 3; assert(a > k); }";
-    assert_eq!(obligation_of("", body), nz(gts(local(0), i32c(3))));
+    assert_eq!(
+        obligation_of("", body),
+        imp(guard(0), nz(gts(local(0), i32c(3))))
+    );
 }
 
 // ----- 5. existentials / de Bruijn --------------------------------------
@@ -604,7 +707,10 @@ fn block_local_const_is_inlined() {
 #[test]
 fn single_existential_binds_lvar_zero() {
     let body = "forall { let n: i32 = @; exists { let m: i32 = @; assert(m > n); } }";
-    assert_eq!(obligation_of("", body), ex(nz(gts(lvar(0), local(0)))));
+    assert_eq!(
+        obligation_of("", body),
+        imp(guard(0), ex(nz(gts(lvar(0), local(0)))))
+    );
 }
 
 #[test]
@@ -658,7 +764,10 @@ fn universal_if_without_else_is_a_single_guarded_implication() {
     let body = "forall { let n: i32 = @; if n > 0 { assert(n > 1); } }";
     assert_eq!(
         obligation_of("", body),
-        imp(nz(gts(local(0), i32c(0))), nz(gts(local(0), i32c(1))))
+        imp(
+            guard(0),
+            imp(nz(gts(local(0), i32c(0))), nz(gts(local(0), i32c(1))))
+        )
     );
 }
 
@@ -666,9 +775,12 @@ fn universal_if_without_else_is_a_single_guarded_implication() {
 fn universal_if_else_is_a_guard_pair() {
     let body = "forall { let n: i32 = @; if n > 0 { assert(n > 1); } else { assert(n < 0); } }";
     let cond = || gts(local(0), i32c(0));
-    let expected = and(
-        imp(nz(cond()), nz(gts(local(0), i32c(1)))),
-        imp(eqz(cond()), nz(lts(local(0), i32c(0)))),
+    let expected = imp(
+        guard(0),
+        and(
+            imp(nz(cond()), nz(gts(local(0), i32c(1)))),
+            imp(eqz(cond()), nz(lts(local(0), i32c(0)))),
+        ),
     );
     assert_eq!(obligation_of("", body), expected);
 }
@@ -688,8 +800,11 @@ fn if_condition_may_be_a_call_result() {
     assert_eq!(
         obligation_of(prelude, body),
         imp(
-            nz(app("is_even", vec![local(0)])),
-            nz(gts(local(0), i32c(0)))
+            guard(0),
+            imp(
+                nz(app("is_even", vec![local(0)])),
+                nz(gts(local(0), i32c(0)))
+            )
         )
     );
 }
@@ -715,12 +830,15 @@ spec S {
     assert_eq!(obligation_named(&map, "S", "S.helper"), HAssert::True);
     assert_eq!(
         obligation_named(&map, "S", "S.prop"),
-        nz(rel(
-            HNumType::I32,
-            HRelop::Eq,
-            app("S.helper", vec![]),
-            local(0)
-        ))
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                app("S.helper", vec![]),
+                local(0)
+            ))
+        )
     );
 }
 
@@ -743,12 +861,15 @@ fn cross_file_qualified_callee_carries_its_defining_path() {
     );
     assert_eq!(
         sole_obligation(&map, "S"),
-        nz(rel(
-            HNumType::I32,
-            HRelop::Eq,
-            app("lib.add", vec![local(0), local(0)]),
-            local(0),
-        ))
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                app("lib.add", vec![local(0), local(0)]),
+                local(0),
+            ))
+        )
     );
 }
 
@@ -760,6 +881,8 @@ fn assert_free_and_empty_bodies_are_trivially_true() {
         sole_obligation(&ok("spec S { fn f() forall { } }"), "S"),
         HAssert::True
     );
+    // A slot with nothing left to read it guards nothing: the pending guard is
+    // dropped rather than left dangling over a `⊤` claim.
     assert_eq!(
         sole_obligation(&ok("spec S { fn f() forall { let a: i32 = @; } }"), "S"),
         HAssert::True
@@ -774,14 +897,318 @@ fn assert_free_and_empty_bodies_are_trivially_true() {
 #[test]
 fn assume_then_assert_has_no_trailing_conjunction_with_true() {
     let body = "forall { let n: i32 = @; assume { assert(n > 0); } assert(n > 1); }";
-    // imp(nz(n>0), nz(n>1)) — the fold leaves no `∧ ⊤`.
+    // The slot's guard fuses into the `assume` antecedent; the fold leaves no
+    // `∧ ⊤` behind it.
     assert_eq!(
         obligation_of("", body),
-        imp(nz(gts(local(0), i32c(0))), nz(gts(local(0), i32c(1))))
+        imp(
+            and(guard(0), nz(gts(local(0), i32c(0)))),
+            nz(gts(local(0), i32c(1)))
+        )
     );
 }
 
-// ----- 9. diagnostics ----------------------------------------------------
+// ----- 9. universal-slot typing guards -----------------------------------
+
+/// Both a named and an ignored parameter take a guarded slot. A guard on a slot
+/// no payload reads is inert, and emitting one uniformly keeps slot numbering
+/// out of a use analysis.
+#[test]
+fn parameter_slots_are_guarded_whether_named_or_ignored() {
+    let source = "spec S { fn f(p: i32, _: i32) forall { assert(p > 0); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(and(guard(0), guard(1)), nz(gts(local(0), i32c(0))))
+    );
+}
+
+/// A parameter's guard fuses into the antecedent a following `assume` builds,
+/// exactly as a `let`-introduced slot's does.
+#[test]
+fn parameter_guard_fuses_with_a_following_assume() {
+    let source = "spec S { fn f(p: i32) forall { assume { assert(p > 0); } assert(p > 1); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            and(guard(0), nz(gts(local(0), i32c(0)))),
+            nz(gts(local(0), i32c(1)))
+        )
+    );
+}
+
+/// Several slots pending at one `assume` fuse in introduction order, the guards
+/// first and the source filter innermost.
+#[test]
+fn several_slot_guards_fuse_with_one_assume() {
+    let body =
+        "forall { let a: i32 = @; let b: i32 = @; assume { assert(a > b); } assert(a > 0); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), nz(gts(local(0), local(1))))),
+            nz(gts(local(0), i32c(0)))
+        )
+    );
+}
+
+/// An anonymous slot taken by a `@` in call-argument position is guarded like a
+/// named one, and joins the drain of the statement that introduced it.
+#[test]
+fn uzumaki_in_call_argument_position_takes_a_guarded_slot() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let body = "forall { assert(g(@) > 0); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(guard(0), nz(gts(app("g", vec![local(0)]), i32c(0))))
+    );
+    // An anonymous slot has no declared type, so the width comes from the type
+    // recorded for the argument — a 64-bit parameter position guards at i64.
+    let prelude = "fn h(x: i64) -> i64 { return x; }";
+    let body = "forall { assert(h(@) > 0); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            hastype(local(0), HNumType::I64),
+            nz(rel(
+                HNumType::I64,
+                HRelop::GtS,
+                app("h", vec![local(0)]),
+                i64c(0)
+            ))
+        )
+    );
+}
+
+/// A `@` inside a *pure* `let`'s right-hand side takes its slot there, but the
+/// guard waits for the next structural statement, so it scopes over the uses of
+/// the inlined term rather than over the `let` alone.
+#[test]
+fn uzumaki_inside_a_pure_let_drains_at_the_next_statement() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let body = "forall { let t: i32 = g(@); assert(t > 0); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(guard(0), nz(gts(app("g", vec![local(0)]), i32c(0))))
+    );
+}
+
+/// One guard covers every later reader of its slot, not merely the next
+/// statement: the drain runs before the rest of the block is translated, so a
+/// deeper structural statement cannot capture the guard into a narrower scope.
+#[test]
+fn one_guard_dominates_every_later_assert() {
+    let body = "forall { let a: i32 = @; assert(a > 0); assert(a < 10); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            and(nz(gts(local(0), i32c(0))), nz(lts(local(0), i32c(10))))
+        )
+    );
+}
+
+/// A bare nested block is a structural statement like any other: the guards
+/// pending at it drain over both the block's own contribution and the rest of
+/// the enclosing body, so a slot introduced before the block dominates a reader
+/// inside it *and* a later sibling. The nested block never captures the guard
+/// into its own narrower scope.
+#[test]
+fn a_bare_nested_block_drains_pending_guards() {
+    let body = "forall { let a: i32 = @; { assert(a > 0); } assert(a < 10); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            and(nz(gts(local(0), i32c(0))), nz(lts(local(0), i32c(10))))
+        )
+    );
+}
+
+/// A bare call statement contributes an `HA_app_ok` obligation, and it is
+/// structural, so the slots it passes are typed by the guards it drains before
+/// the call is claimed to be defined.
+#[test]
+fn a_bare_call_statement_is_a_guarded_app_ok() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    let body = "forall { let a: i32 = @; g(a); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guard(0),
+            HAssert::AppOk(HFnRef("g".to_string()), vec![local(0)])
+        )
+    );
+}
+
+/// The declared type fixes the guard's width: only `i64`/`u64` guard at 64
+/// bits, while bool, enums, and every sub-word integer ride i32.
+#[test]
+fn slot_guard_width_follows_the_declared_type() {
+    for decl_ty in ["bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"] {
+        let body = format!("forall {{ let x: {decl_ty} = @; assert(x == x); }}");
+        let obligation = obligation_of("", &body);
+        let HAssert::Imp(antecedent, _) = obligation else {
+            panic!("expected a guarded implication for `{decl_ty}`, got {obligation:?}");
+        };
+        assert_eq!(
+            *antecedent,
+            hastype(local(0), guard_width(decl_ty)),
+            "guard width for a `{decl_ty}` slot"
+        );
+    }
+    // An enum slot is its i32 tag.
+    let body = "forall { let c: Color = @; assert(c == Color::Red); }";
+    assert_eq!(
+        obligation_of("enum Color { Red, Green, Blue }", body),
+        imp(
+            guard(0),
+            nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(0)))
+        )
+    );
+}
+
+/// The shape a knowingly false specification emits. Downstream, wasm-verifier's
+/// strictified `ValidSpec` rejects the unguarded form of this payload outright
+/// and discharges the guarded one only against a real interpretation of `f`;
+/// its `theories/examples/with_spec.v` carries the two as a negative/positive
+/// pair.
+#[test]
+fn a_false_spec_emits_the_guarded_shape() {
+    let prelude = "fn foo(x: i32) -> i32 { return x; }";
+    let body = "forall { let x: i32 = @; assert(foo(x) == 42); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guard(0),
+            nz(rel(
+                HNumType::I32,
+                HRelop::Eq,
+                app("foo", vec![local(0)]),
+                i32c(42)
+            ))
+        )
+    );
+}
+
+/// Collects the slots an antecedent states a typing for, walking the `And` spine
+/// the drain builds.
+fn guarded_slots(antecedent: &HAssert, into: &mut Vec<u32>) {
+    match antecedent {
+        HAssert::HasType(HTerm::Local(slot), _) => into.push(*slot),
+        HAssert::And(l, r) => {
+            guarded_slots(l, into);
+            guarded_slots(r, into);
+        }
+        _ => {}
+    }
+}
+
+/// Records every universal slot `assertion` reads in positive position without a
+/// dominating typing guard.
+///
+/// This is an over-approximation of the emitter's own discipline, not a semantic
+/// check: an `Imp` contributes the `HasType` conjuncts of its antecedent to the
+/// guarded set of its consequent and is not itself descended into, since an
+/// antecedent is a hypothesis whose own reads are discharged by refuting it.
+/// Every other connective passes the guarded set through unchanged.
+fn unguarded_reads(assertion: &HAssert, guarded: &[u32], out: &mut Vec<u32>) {
+    match assertion {
+        // A constant reads nothing, and a typing or definedness atom states a
+        // slot's premise rather than relying on one.
+        HAssert::True | HAssert::False | HAssert::HasType(_, _) | HAssert::Defined(_) => {}
+        HAssert::Not(inner) | HAssert::Ex(inner) => unguarded_reads(inner, guarded, out),
+        HAssert::And(l, r) | HAssert::Or(l, r) => {
+            unguarded_reads(l, guarded, out);
+            unguarded_reads(r, guarded, out);
+        }
+        HAssert::Imp(antecedent, consequent) => {
+            let mut extended = guarded.to_vec();
+            guarded_slots(antecedent, &mut extended);
+            unguarded_reads(consequent, &extended, out);
+        }
+        HAssert::TermEq(a, b) => {
+            unguarded_term_reads(a, guarded, out);
+            unguarded_term_reads(b, guarded, out);
+        }
+        HAssert::AppOk(_, args) => {
+            for arg in args {
+                unguarded_term_reads(arg, guarded, out);
+            }
+        }
+    }
+}
+
+fn unguarded_term_reads(term: &HTerm, guarded: &[u32], out: &mut Vec<u32>) {
+    match term {
+        HTerm::Local(slot) if !guarded.contains(slot) => out.push(*slot),
+        HTerm::Local(_) | HTerm::Const(_) | HTerm::LVar(_) => {}
+        HTerm::App(_, args) => {
+            for arg in args {
+                unguarded_term_reads(arg, guarded, out);
+            }
+        }
+        HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
+            unguarded_term_reads(l, guarded, out);
+            unguarded_term_reads(r, guarded, out);
+        }
+    }
+}
+
+/// Whatever a spec body's shape, no positive-position read of a universal slot
+/// escapes its typing guard. The matrix crosses every way a slot is introduced
+/// (parameter named and ignored, `let`, bare call argument, call argument inside
+/// a pure `let`) with every place the drain can land (assert, chained asserts,
+/// `assume`, `if`/`else`, a branch-local slot, an exists arm).
+#[test]
+fn every_universal_slot_read_is_dominated_by_its_guard() {
+    let sources = [
+        "spec S { fn f(p: i32, q: i32) forall { assert(p > q); } }",
+        "spec S { fn f(p: i32, _: i32) forall { assert(p > 0); } }",
+        "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; assert(a > b); } }",
+        "spec S { fn f() forall { let a: i32 = @; assert(a > 0); assert(a < 10); } }",
+        "spec S { fn f() forall { let a: i32 = @; assume { assert(a > 0); } assert(a > 1); } }",
+        "spec S { fn f(p: i32) forall { let a: i32 = @; assume { assert(a > p); } assert(a > 0); } }",
+        "spec S { fn f() forall { let a: i32 = @; if a > 0 { assert(a > 1); } else { assert(a < 0); } } }",
+        "spec S { fn f() forall { let a: i32 = @; if a > 0 { let b: i32 = @; assert(b > a); } assert(a > 3); } }",
+        "spec S { fn f() forall { let n: i32 = @; exists { let m: i32 = @; assert(m > n); } } }",
+        "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { assert(g(@) > 0); } }",
+        "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { let t: i32 = g(@); assert(t > 0); } }",
+        "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { let a: i32 = @; assert(g(a) != a); } }",
+    ];
+    for source in sources {
+        for entries in ok(source).values() {
+            for entry in entries {
+                let mut unguarded = Vec::new();
+                unguarded_reads(&entry.hassert, &[], &mut unguarded);
+                assert!(
+                    unguarded.is_empty(),
+                    "slots {unguarded:?} are read with no dominating guard in `{source}`; \
+                     obligation: {:?}",
+                    entry.hassert
+                );
+            }
+        }
+    }
+}
+
+/// The checker above must be able to fail, or the matrix proves nothing: the
+/// pre-guard shape of a claim, and a guard over the wrong slot, are both caught.
+#[test]
+fn the_domination_checker_catches_an_unguarded_read() {
+    let mut bare = Vec::new();
+    unguarded_reads(&nz(gts(local(0), i32c(0))), &[], &mut bare);
+    assert_eq!(bare, vec![0]);
+
+    let mut mismatched = Vec::new();
+    unguarded_reads(
+        &imp(guard(1), nz(gts(local(0), i32c(0)))),
+        &[],
+        &mut mismatched,
+    );
+    assert_eq!(mismatched, vec![0]);
+}
+
+// ----- 10. diagnostics ---------------------------------------------------
 
 #[test]
 fn p001_rejects_a_quantified_spec_function() {

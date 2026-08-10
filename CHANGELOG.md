@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Proof-mode obligations now guard every universal slot with an explicit `HA_has_type (T_local i) T_i32`/`T_i64` antecedent (fused into a following `assume`'s antecedent when present), and `!=` no longer conjoins per-side `HA_defined` — aligning emitted hspecs with wasm-verifier's strictified `ValidSpec`, under which the old unguarded shapes were undischargeable (and, pre-hardening, vacuously provable). Downstream proofs over previously emitted obligation trees must be restated against the guarded shapes; wasm-verifier's `PrimeExample.v`/`with_spec.v` already prove them ([#353])
 - `wasm-to-v` now fails closed on every construct outside the wasm-verifier proof contract, refusing each as `WasmToVError::UnsupportedFeature` naming the construct: all floating-point, SIMD, and conversion instructions (integer width conversions included), `f32`/`f64`/`v128` as a value type in any position, and the unlowered proposal families. Only foreign bytes via external linking (`infc -L` / `--wasm-dep` / `INFERENCE_WASM_LIB_PATH`) or `translate_bytes` are affected — they now fail at `infc` instead of at `coqc` or the prover; every `.v` the Inference corpus produces is unchanged ([#284])
 - `core/wasm-linker` retracts `i32.wrap_i64`, `i64.extend_i32_s`, and `i64.extend_i32_u` from its operator allow-list: an external `.wasm` using any of the three no longer links, failing with `integer width conversions (not supported by the Rocq translator)` ([#284])
 - `inference_wasm_codegen::codegen()` now takes its configuration as one value: `codegen(typed_context, target, mode, opt_level, module_name, features)` → `codegen(typed_context, module_name, CodegenOptions { target, mode, opt_level, features })`; no behavior or emitted-byte change. Migration: wrap the four arguments in the struct or use `CodegenOptions::default()`; the two-argument `inference::codegen` wrapper is unchanged ([#315])
@@ -565,3 +566,4 @@ Initial tagged release.
 [#345]: https://github.com/Inferara/inference/issues/345
 [#344]: https://github.com/Inferara/inference/issues/344
 [#343]: https://github.com/Inferara/inference/issues/343
+[#353]: https://github.com/Inferara/inference/issues/353

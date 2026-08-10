@@ -17,6 +17,22 @@
 //! no re-indexing at its use site — the final pass alone resolves it. This is
 //! what keeps `exists { let a = @; let t = a + 1; let b = @; assert(b > t); }`
 //! correct without shifting already-built subterms.
+//!
+//! ## Universal slots state their own typing
+//!
+//! wasm-verifier's `ValidSpec` evaluates an obligation through a strong-Kleene
+//! strictification (`Assertions.ktrue`) over valuations it constrains in no way,
+//! so a slot readout may simply fail to denote. A payload that reads a universal
+//! slot is dischargeable only when it says so itself, which is why every slot
+//! introduction — a scalar parameter, `let x: T = @`, a `@` in call-argument
+//! position — records a pending `HA_has_type (T_local i) T_i32`/`T_i64` guard
+//! that the next *structural* statement in the same block discharges as the
+//! antecedent of its own claim. `T_local` is prover-uncontrolled and bears no
+//! `T_app`, so such an antecedent is honestly refutable rather than a vacuous
+//! escape: where the slot is undefined or mis-typed the guard is refuted, and
+//! everywhere else it hands the proof the value together with its typing. A body
+//! that introduces no slot is untouched — its antecedent is `⊤`, which
+//! [`HAssert::imp`] absorbs (issue #353).
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
@@ -82,6 +98,9 @@ pub(super) struct SpecFnTranslator<'a> {
     /// Existential binders introduced by call-argument `@`s within the statement
     /// currently being translated, not yet wrapped around its atom.
     pending: u32,
+    /// Typing guards for the universal slots introduced since the last
+    /// structural statement, in introduction order, awaiting their drain.
+    univ_guards: Vec<HAssert>,
     env: FxHashMap<String, Binding>,
     diags: Vec<HassertDiagnostic>,
 }
@@ -102,6 +121,7 @@ impl<'a> SpecFnTranslator<'a> {
             slots: 0,
             depth: 0,
             pending: 0,
+            univ_guards: Vec::new(),
             env: FxHashMap::default(),
             diags: Vec::new(),
         }
@@ -154,29 +174,40 @@ impl<'a> SpecFnTranslator<'a> {
         lower_assert(&raw, 0)
     }
 
-    /// Binds each parameter to a universal slot in declaration order. A
-    /// non-scalar parameter type is [`PCode::P004`]; the slot is still consumed
-    /// so later slot numbers stay aligned with the source.
+    /// Binds each parameter to a universal slot in declaration order.
     fn bind_parameters(&mut self, args: &[inference_ast::nodes::ArgData]) {
         for arg in args {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
-                    if !self.type_is_scalar(*ty) {
-                        self.error(PCode::P004, arg.location, self.non_scalar_message(*ty));
-                    }
-                    let slot = self.next_slot();
+                    let slot = self.parameter_slot(arg.location, *ty);
                     self.env
                         .insert(self.arena[*name].name.clone(), Binding::Slot(slot));
                 }
                 ArgKind::Ignored { ty } => {
-                    if !self.type_is_scalar(*ty) {
-                        self.error(PCode::P004, arg.location, self.non_scalar_message(*ty));
-                    }
-                    let _ = self.next_slot();
+                    let _ = self.parameter_slot(arg.location, *ty);
                 }
                 ArgKind::SelfRef { .. } | ArgKind::TypeOnly(_) => {}
             }
         }
+    }
+
+    /// Consumes the slot a parameter occupies and records the typing guard its
+    /// readers depend on. An ignored parameter is guarded like a named one: the
+    /// guard is inert for a slot the payload never reads, and uniformity beats a
+    /// use analysis. A non-scalar parameter type is [`PCode::P004`]; its slot is
+    /// still consumed so later slot numbers stay aligned with the source, and it
+    /// contributes no guard — it has no numeric typing to state.
+    fn parameter_slot(&mut self, location: Location, ty: TypeId) -> u32 {
+        let scalar = self.type_is_scalar(ty);
+        if !scalar {
+            self.error(PCode::P004, location, self.non_scalar_message(ty));
+        }
+        let slot = self.next_slot();
+        if scalar {
+            let width = self.declared_class(ty);
+            self.push_univ_guard(slot, width);
+        }
+        slot
     }
 
     // ----- statement-list translation -----------------------------------
@@ -186,6 +217,8 @@ impl<'a> SpecFnTranslator<'a> {
     /// universal `assume`) over the translation of the rest.
     fn t_stmts(&mut self, stmts: &[StmtId], mode: Mode) -> HAssert {
         let Some((first, rest)) = stmts.split_first() else {
+            // A slot introduced with nothing left to read it guards nothing.
+            self.univ_guards.clear();
             return HAssert::True;
         };
         let stmt_id = *first;
@@ -199,7 +232,7 @@ impl<'a> SpecFnTranslator<'a> {
             Stmt::Assert { expr } => {
                 let expr = *expr;
                 let atom = self.eval_atom(mode, |s| s.p_expr(expr, mode));
-                HAssert::and(atom, self.t_stmts(rest, mode))
+                self.t_structural(atom, rest, mode)
             }
             Stmt::If {
                 condition,
@@ -207,7 +240,8 @@ impl<'a> SpecFnTranslator<'a> {
                 else_block,
             } => {
                 let (condition, then_block, else_block) = (*condition, *then_block, *else_block);
-                self.t_if(condition, then_block, else_block, rest, mode)
+                let guarded = self.t_if(condition, then_block, else_block, mode);
+                self.t_structural(guarded, rest, mode)
             }
             Stmt::Block(block_id) => {
                 let block_id = *block_id;
@@ -253,6 +287,40 @@ impl<'a> SpecFnTranslator<'a> {
         }
     }
 
+    /// A structural statement's contribution: the universal-slot guards pending
+    /// at this point become the antecedent of the statement's own claim
+    /// conjoined with the rest of the block.
+    ///
+    /// `contribution` must already be translated, so a `@` in call-argument
+    /// position inside this statement joins the same drain. Draining *before*
+    /// the rest is what scopes a slot over every later reader of it rather than
+    /// letting a deeper structural statement capture it into a narrower
+    /// antecedent.
+    fn t_structural(&mut self, contribution: HAssert, rest: &[StmtId], mode: Mode) -> HAssert {
+        let antecedent = self.drain_guards_over(HAssert::True);
+        debug_assert!(
+            mode == Mode::Univ || antecedent == HAssert::True,
+            "existential translation introduces no universal slot, so none can be pending"
+        );
+        let tail = self.t_stmts(rest, mode);
+        HAssert::imp(antecedent, HAssert::and(contribution, tail))
+    }
+
+    /// Removes every pending universal-slot guard and right-folds it over
+    /// `seed`: `g₁ ∧ (g₂ ∧ (… ∧ seed))`.
+    fn drain_guards_over(&mut self, seed: HAssert) -> HAssert {
+        std::mem::take(&mut self.univ_guards)
+            .into_iter()
+            .rev()
+            .fold(seed, |acc, guard| HAssert::and(guard, acc))
+    }
+
+    /// Records the typing a newly-introduced universal slot depends on.
+    fn push_univ_guard(&mut self, slot: u32, width: HNumType) {
+        self.univ_guards
+            .push(HAssert::HasType(HTerm::Local(slot), width));
+    }
+
     /// `let` translation. A bare `@` right-hand side binds a slot (universal) or
     /// an existential binder; any other right-hand side is a pure `let`, inlined
     /// as a term.
@@ -271,12 +339,17 @@ impl<'a> SpecFnTranslator<'a> {
         };
 
         if matches!(self.arena[value_expr].kind, Expr::Uzumaki) {
-            if !self.type_is_scalar(ty) {
+            let scalar = self.type_is_scalar(ty);
+            if !scalar {
                 self.emit_non_scalar_uzumaki(ty, self.arena[value_expr].location);
             }
             return match mode {
                 Mode::Univ => {
                     let slot = self.next_slot();
+                    if scalar {
+                        let width = self.declared_class(ty);
+                        self.push_univ_guard(slot, width);
+                    }
                     self.env.insert(name, Binding::Slot(slot));
                     self.t_stmts(rest, Mode::Univ)
                 }
@@ -310,18 +383,19 @@ impl<'a> SpecFnTranslator<'a> {
         }
     }
 
-    /// A bare `if`. Universal mode is a conjunction of guarded implications
-    /// (`nz`/`eqz` guards); existential mode is a strict disjunction of guarded
-    /// conjunctions, so a non-denoting condition cannot fabricate a witness.
+    /// A bare `if`, translated to its own contribution alone — the caller folds
+    /// in the rest of the block. Universal mode is a conjunction of guarded
+    /// implications (`nz`/`eqz` guards); existential mode is a strict disjunction
+    /// of guarded conjunctions, so a non-denoting condition cannot fabricate a
+    /// witness.
     fn t_if(
         &mut self,
         condition: ExprId,
         then_block: BlockId,
         else_block: Option<BlockId>,
-        rest: &[StmtId],
         mode: Mode,
     ) -> HAssert {
-        let guarded = match mode {
+        match mode {
             Mode::Univ => {
                 let cond = self.term(condition, Mode::Univ);
                 let then_h =
@@ -362,27 +436,33 @@ impl<'a> SpecFnTranslator<'a> {
                 self.depth -= introduced;
                 wrap_existentials(disjunction, introduced)
             }
-        };
-        HAssert::and(guarded, self.t_stmts(rest, mode))
+        }
     }
 
     /// A block statement, dispatched on its kind. `assume` bodies always
     /// translate existentially (their `@`s read as "some choice satisfies the
     /// filter"); `assume` flips between implication (universal) and conjunction
     /// (existential).
+    ///
+    /// A universal `assume` fuses the pending slot guards into the antecedent it
+    /// already builds, so `let n: i32 = @; assume { assert(n > 1); }` states the
+    /// slot's typing and the source filter as one hypothesis.
     fn t_block(&mut self, block_id: BlockId, rest: &[StmtId], mode: Mode) -> HAssert {
         let kind = self.arena[block_id].block_kind;
         match kind {
             BlockKind::Assume => {
                 let body = self.scoped_block(block_id, Mode::Exist);
                 match mode {
-                    Mode::Univ => HAssert::imp(body, self.t_stmts(rest, Mode::Univ)),
+                    Mode::Univ => {
+                        let antecedent = self.drain_guards_over(body);
+                        HAssert::imp(antecedent, self.t_stmts(rest, Mode::Univ))
+                    }
                     Mode::Exist => HAssert::and(body, self.t_stmts(rest, Mode::Exist)),
                 }
             }
             BlockKind::Regular => {
                 let body = self.scoped_block(block_id, mode);
-                HAssert::and(body, self.t_stmts(rest, mode))
+                self.t_structural(body, rest, mode)
             }
             BlockKind::Forall => {
                 if mode == Mode::Exist {
@@ -395,11 +475,11 @@ impl<'a> SpecFnTranslator<'a> {
                     );
                 }
                 let body = self.scoped_block(block_id, mode);
-                HAssert::and(body, self.t_stmts(rest, mode))
+                self.t_structural(body, rest, mode)
             }
             BlockKind::Exists => {
                 let body = self.scoped_block(block_id, Mode::Exist);
-                HAssert::and(body, self.t_stmts(rest, mode))
+                self.t_structural(body, rest, mode)
             }
             BlockKind::Unique => {
                 self.error_no_encoding(self.arena[block_id].location, "`unique` block");
@@ -413,7 +493,7 @@ impl<'a> SpecFnTranslator<'a> {
     fn t_expr_stmt(&mut self, expr: ExprId, rest: &[StmtId], mode: Mode) -> HAssert {
         if matches!(self.arena[expr].kind, Expr::FunctionCall { .. }) {
             let atom = self.eval_atom(mode, |s| s.app_ok(expr, mode));
-            HAssert::and(atom, self.t_stmts(rest, mode))
+            self.t_structural(atom, rest, mode)
         } else {
             let _ = self.term(expr, mode);
             self.t_stmts(rest, mode)
@@ -509,10 +589,18 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// A comparison in assertion position. `==` is the one operator whose
-    /// encoding depends on the mode: strict `term_eq` on a witness path, the
-    /// non-strict `nz(relop)` under universal quantification (so junk valuations
-    /// discharge vacuously). `!=` conjoins `HA_defined` for each side that bears
-    /// a `T_app`, matching the verifier's disequality discipline.
+    /// encoding depends on the mode: strict `term_eq` on a witness path,
+    /// `nz(relop)` under universal quantification — which the verifier's
+    /// strictified reading makes just as strict (a non-denoting relop refutes
+    /// the obligation rather than discharging it, which is what the slot
+    /// typing guards are for).
+    ///
+    /// Every other comparison, `!=` included, is the bare `nz(relop)`. A
+    /// per-side `HA_defined` conjunct would add nothing: wasm-verifier's
+    /// `ValidSpec` evaluates the payload through a strong-Kleene strictification
+    /// (`Assertions.ktrue`) under which a negated equality already demands that
+    /// both sides denote, so the definedness a disequality needs comes from the
+    /// relop itself rather than from an emitted conjunct.
     fn p_comparison(
         &mut self,
         left: ExprId,
@@ -528,16 +616,7 @@ impl<'a> SpecFnTranslator<'a> {
                 Mode::Univ => HAssert::nz(relop(num_ty, HRelop::Eq, ta, tb)),
                 Mode::Exist => HAssert::TermEq(ta, tb),
             },
-            OperatorKind::Ne => {
-                let mut assertion = HAssert::nz(relop(num_ty, HRelop::Ne, ta.clone(), tb.clone()));
-                if term_bears_app(&ta) {
-                    assertion = HAssert::and(assertion, HAssert::Defined(ta));
-                }
-                if term_bears_app(&tb) {
-                    assertion = HAssert::and(assertion, HAssert::Defined(tb));
-                }
-                assertion
-            }
+            OperatorKind::Ne => HAssert::nz(relop(num_ty, HRelop::Ne, ta, tb)),
             OperatorKind::Lt => HAssert::nz(relop(num_ty, signed_relop(unsigned, Lt), ta, tb)),
             OperatorKind::Le => HAssert::nz(relop(num_ty, signed_relop(unsigned, Le), ta, tb)),
             OperatorKind::Gt => HAssert::nz(relop(num_ty, signed_relop(unsigned, Gt), ta, tb)),
@@ -866,7 +945,7 @@ impl<'a> SpecFnTranslator<'a> {
         args.iter()
             .map(|(_, arg)| {
                 if matches!(self.arena[*arg].kind, Expr::Uzumaki) {
-                    self.uzumaki_argument(mode)
+                    self.uzumaki_argument(*arg, mode)
                 } else {
                     self.term(*arg, mode)
                 }
@@ -876,9 +955,16 @@ impl<'a> SpecFnTranslator<'a> {
 
     /// A `@` in call-argument position: an anonymous universal slot, or a
     /// pending existential binder to be wrapped around the enclosing statement.
-    fn uzumaki_argument(&mut self, mode: Mode) -> HTerm {
+    /// An anonymous slot has no declared type, so its guard width comes from the
+    /// type recorded for the argument.
+    fn uzumaki_argument(&mut self, arg: ExprId, mode: Mode) -> HTerm {
         match mode {
-            Mode::Univ => HTerm::Local(self.next_slot()),
+            Mode::Univ => {
+                let slot = self.next_slot();
+                let width = self.expr_class(arg);
+                self.push_univ_guard(slot, width);
+                HTerm::Local(slot)
+            }
             Mode::Exist => {
                 let level = self.depth + self.pending;
                 self.pending += 1;
@@ -1030,12 +1116,17 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Translates a block's statements as a fresh environment scope, so a
-    /// branch-local `let` does not leak to the rest of the enclosing block.
+    /// branch-local `let` does not leak to the rest of the enclosing block. The
+    /// pending guards travel with the environment: a branch-local slot's guard
+    /// stays inside the branch, and a guard pending outside cannot be drained
+    /// into the narrower scope.
     fn scoped_block(&mut self, block_id: BlockId, mode: Mode) -> HAssert {
         let stmts = self.arena[block_id].stmts.clone();
-        let saved = self.env.clone();
+        let saved_env = self.env.clone();
+        let saved_guards = std::mem::take(&mut self.univ_guards);
         let result = self.t_stmts(&stmts, mode);
-        self.env = saved;
+        self.env = saved_env;
+        self.univ_guards = saved_guards;
         result
     }
 
@@ -1066,17 +1157,29 @@ impl<'a> SpecFnTranslator<'a> {
     /// as `lower_binary_expression` reads the left operand's.
     fn operand_class(&self, expr: ExprId) -> (HNumType, bool) {
         let kind = self.ctx.get_node_typeinfo(node_expr(expr)).map(|t| t.kind);
-        let is_i64 = matches!(
-            kind,
-            Some(TypeInfoKind::Number(NumberType::I64 | NumberType::U64))
-        );
         let unsigned = matches!(
             kind,
             Some(TypeInfoKind::Number(
                 NumberType::U8 | NumberType::U16 | NumberType::U32 | NumberType::U64
             ))
         );
-        (if is_i64 { HNumType::I64 } else { HNumType::I32 }, unsigned)
+        (num_class(kind.as_ref()), unsigned)
+    }
+
+    /// The number class of an expression, defaulting to i32 with the same
+    /// latitude [`Self::operand_class`] takes when no type was recorded.
+    fn expr_class(&self, expr: ExprId) -> HNumType {
+        num_class(
+            self.ctx
+                .get_node_typeinfo(node_expr(expr))
+                .map(|t| t.kind)
+                .as_ref(),
+        )
+    }
+
+    /// The number class of a declared type.
+    fn declared_class(&self, ty: TypeId) -> HNumType {
+        num_class(Some(&TypeInfo::from_type_id(self.arena, ty).kind))
     }
 
     /// Whether a declared type is a scalar the term language can represent (a
@@ -1315,15 +1418,16 @@ fn narrows(op: &OperatorKind) -> bool {
     )
 }
 
-/// Whether a term contains a `T_app` anywhere, deciding whether a generated
-/// disequality must conjoin `HA_defined` for that side.
-fn term_bears_app(term: &HTerm) -> bool {
-    match term {
-        HTerm::App(_, _) => true,
-        HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
-            term_bears_app(l) || term_bears_app(r)
-        }
-        HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => false,
+/// The number class a scalar's values ride in: `i64` and `u64` at 64 bits,
+/// every other scalar — bool, enums, and the sub-word integer widths — at 32.
+fn num_class(kind: Option<&TypeInfoKind>) -> HNumType {
+    if matches!(
+        kind,
+        Some(TypeInfoKind::Number(NumberType::I64 | NumberType::U64))
+    ) {
+        HNumType::I64
+    } else {
+        HNumType::I32
     }
 }
 

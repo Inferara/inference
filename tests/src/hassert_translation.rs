@@ -98,6 +98,9 @@ fn teq(a: HTerm, b: HTerm) -> HAssert {
 fn nz(t: HTerm) -> HAssert {
     not(teq(t, i32c(0)))
 }
+fn hastype(t: HTerm, ty: HNumType) -> HAssert {
+    HAssert::HasType(t, ty)
+}
 
 /// Building the PrimeExample source through the whole front end must yield an
 /// obligation structurally equal to wasm-verifier's `prime_hspec1`
@@ -146,12 +149,15 @@ spec prime_properties {
     let is_prime = || app("is_prime", vec![n()]);
 
     let expected = imp(
-        nz(gts(n(), one())),
+        and(hastype(n(), HNumType::I32), nz(gts(n(), one()))),
         and(
             imp(
                 nz(is_prime()),
                 imp(
-                    and(nz(gts(m_then(), one())), nz(lts(m_then(), n()))),
+                    and(
+                        hastype(m_then(), HNumType::I32),
+                        and(nz(gts(m_then(), one())), nz(lts(m_then(), n()))),
+                    ),
                     nz(gts(rems(n(), m_then()), i32c(0))),
                 ),
             ),
@@ -168,13 +174,19 @@ spec prime_properties {
 }
 
 /// `with_spec.inf` (a `forall` fn asserting `foo(i) == i`) produces the
-/// `Himpl`-free `nz(relop_eq(app, local))` shape.
+/// `nz(relop_eq(app, local))` claim under the typing guard of the universal slot
+/// it reads — structurally wasm-verifier's `with_spec__MySpec_hspec1_guarded`
+/// (its `theories/examples/with_spec.v`), the payload that file proves the
+/// hardened `ValidSpec` accepts where the unguarded one is rejected.
 #[test]
 fn with_spec_fixture_produces_the_expected_app_equality() {
     let map = proof_hspecs(&read_inf("with_spec.inf"));
     assert_eq!(
         sole_obligation(&map, "MySpec"),
-        nz(rel(HRelop::Eq, app("foo", vec![local(0)]), local(0)))
+        imp(
+            hastype(local(0), HNumType::I32),
+            nz(rel(HRelop::Eq, app("foo", vec![local(0)]), local(0)))
+        )
     );
 }
 
@@ -235,7 +247,10 @@ spec Widths {
 ";
     let n = || local(0);
     let expected = imp(
-        not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        and(
+            hastype(n(), HNumType::I64),
+            not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        ),
         not(teq(
             rel64(HRelop::GtS, app("scaled", vec![n()]), add64(n(), i64c(1))),
             i32c(0),
@@ -264,7 +279,10 @@ spec MaxArg {
 }
 ";
     let expected = imp(
-        not(teq(rel64(HRelop::GtU, local(0), i64c(0)), i32c(0))),
+        and(
+            hastype(local(0), HNumType::I64),
+            not(teq(rel64(HRelop::GtU, local(0), i64c(0)), i32c(0))),
+        ),
         not(teq(app("is_max", vec![i64c(-1)]), i32c(0))),
     );
     assert_eq!(sole_obligation(&proof_hspecs(source), "MaxArg"), expected);
@@ -302,7 +320,10 @@ fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
 
     let n = || local(0);
     let expected = imp(
-        not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        and(
+            hastype(n(), HNumType::I64),
+            not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+        ),
         and(
             not(teq(
                 rel64(HRelop::GtS, app("scaled", vec![n()]), add64(n(), i64c(1))),
