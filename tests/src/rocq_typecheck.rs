@@ -94,6 +94,7 @@ mod gate {
         "T_app ",
         "T_local ",
         "HA_ex",
+        "HA_has_type ",
         "BT_valtype (Some",
     ];
 

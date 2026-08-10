@@ -227,7 +227,7 @@ Definition rocq_spec_shapes : module := {|
 |}.
 
 Definition rocq_spec_shapes__Shapes_hspec1 : hassert :=
-  Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i ROI_eq) (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 0))) (T_const (Vi32 0))))) (HA_ex (term_eq (T_lvar 0) (T_local 0%N)))).
+  Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0))))) (HA_and (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i ROI_eq) (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 0))) (T_const (Vi32 0))))) (HA_ex (term_eq (T_lvar 0) (T_local 0%N)))).
 Definition rocq_spec_shapes__Shapes_specs : list hassert := (rocq_spec_shapes__Shapes_hspec1 :: nil).
 
 Section Host.
@@ -361,10 +361,16 @@ language:
   predicate variant, `TermEq`; there is no general `HA_pred` escape
   hatch, so every equality obligation the translator can produce is
   exactly `term_eq a b`.
-- **Disequalities conjoin `HA_defined`** — a `!=` comparison
-  additionally asserts `HA_defined` for any side whose term contains a
-  `T_app` (`term_bears_app`), since an uninterpreted application may be
-  undefined.
+- **Universal slots state their own typing** — every slot a payload
+  reads is introduced under an explicit `HA_has_type (T_local i)
+  T_i32`/`T_i64` antecedent. wasm-verifier's `ValidSpec` evaluates
+  payloads through a strong-Kleene strictification (`Assertions.ktrue`)
+  over unconstrained valuations: a negated equality demands its terms
+  denote, so definedness needs no emitted conjunct (`!=` is the bare
+  `nz(relop Ne …)`), while a slot readout the payload depends on must be
+  guarded on explicitly — `T_local` is prover-uncontrolled and
+  `T_app`-free, so the guard is honestly refutable rather than a
+  silence escape.
 - **Single-result `T_app`** — a call in *term* position must have a
   single scalar result (`ResultClass::Scalar`); a void or compound
   result is `P005` ("its result is not a single scalar").
@@ -594,15 +600,16 @@ two polarities, universal (`Mode::Univ`) and existential (`Mode::Exist`)
 
 | Source construct | Universal mode | Existential mode |
 | --- | --- | --- |
-| Parameter / forall-context `@` | `T_local` slot (sequential, never rewound) | — |
+| Parameter / forall-context `@` | `T_local` slot (sequential, never rewound), plus a pending `HA_has_type (T_local i) T_i32`/`T_i64` typing guard for the slot (64-bit for `i64`/`u64`, i32 for every other scalar) | — |
+| Pending slot guards | Discharged at the next structural statement: fused into an immediately-following `assume`'s antecedent as `HA_and (guard, …, assume-body)`, otherwise an `Himpl` antecedent over the statement's claim conjoined with the rest of the block; a slot introduced after the last structural statement guards nothing (an unread slot introduced earlier is still guarded — uniformity beats a use analysis) | — (an `HA_ex` witness is prover-chosen, so it needs no typing guard) |
 | Call-argument / `let`-bound `@` | (not applicable — only forall context takes slots) | `HA_ex` binder at the binding point; body uses `T_lvar` at its de Bruijn index, resolved by a final level-to-index pass (no shifting needed while building) |
 | `assume { … }` | Implication antecedent (`Himpl`) | Conjunct (`HA_and`) |
 | `if c { A } else { B }` | `HA_and (Himpl (nz c) A') (Himpl (eqz c) B')` | Strict `HA_or (HA_and (nz c) A') (HA_and (eqz c) B')` — no witness is fabricated via undefinedness |
 | `&&` (assertion position) | `HA_and` of each side's translation | same |
 | `\|\|` (assertion position) | `Hor` of each side's translation | same |
 | `!` (assertion position) | Falsiness dual (De Morgan push-through) | same |
-| `==` | `nz(relop Eq …)` — non-strict, vacuous at junk valuations | strict `term_eq` |
-| `!=` | `nz(relop Ne …)`, conjoined with `HA_defined` for each `T_app`-bearing side | same |
+| `==` | `nz(relop Eq …)` — wasm-verifier's `ValidSpec` evaluates the payload through a strong-Kleene strictification (`Assertions.ktrue`), under which the negated equality demands the relop denote, so this is only dischargeable inside the slots' typing guards | strict `term_eq` |
+| `!=` | `nz(relop Ne …)` — no per-side `HA_defined` conjunct: the strictified negation already demands both sides denote, so an emitted conjunct would be implied | same |
 | A call in term position | `T_app` (single scalar result required) | same |
 | A bare call statement | `HA_app_ok`, any result arity | same |
 
@@ -614,8 +621,13 @@ sequences codegen emits, and `**` has no encoding (`P002`). Implication
 and disjunction are explicit `Imp`/`Or` IR nodes — never a De Morgan
 encoding the printer has to pattern-match — because wasm-verifier's
 `Himpl`/`Hor` are definitionally-transparent `Definition`s the printer
-can name directly. No implicit `HA_has_type` guard is emitted for a
-`T_local` slot, matching the canonical worked example below.
+can name directly. Every universal slot leads its antecedent with an
+explicit `HA_has_type (T_local i) T_i32`/`T_i64` guard: `ValidSpec`
+quantifies its valuations with no constraint at all, so a payload that
+needs a slot readout to exist must say so itself, and `T_local` being
+prover-uncontrolled and `T_app`-free keeps that antecedent honestly
+refutable rather than a silence escape. This matches the canonical
+worked example below.
 
 The worked derivation to compare against is `prime_hspec1` from
 wasm-verifier's own `theories/examples/PrimeExample.v`; the smart

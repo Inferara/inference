@@ -93,7 +93,7 @@ Definition spec_literal_ctx : module := {|
 Definition spec_literal_ctx__LiteralPositions_hspec1 : hassert :=
   HA_true.
 Definition spec_literal_ctx__LiteralPositions_hspec2 : hassert :=
-  Himpl (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi64 4294967296))) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_app 0 ((T_local 0%N) :: nil)) (T_binop T_i64 (Binop_i BOI_add) (T_local 0%N) (T_const (Vi64 1)))) (T_const (Vi32 0)))) (HA_not (term_eq (T_app 1 ((T_const (Vi64 (-1))) :: nil)) (T_const (Vi32 0))))).
+  Himpl (HA_and (HA_has_type (T_local 0%N) T_i64) (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi64 4294967296))) (T_const (Vi32 0))))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_app 0 ((T_local 0%N) :: nil)) (T_binop T_i64 (Binop_i BOI_add) (T_local 0%N) (T_const (Vi64 1)))) (T_const (Vi32 0)))) (HA_not (term_eq (T_app 1 ((T_const (Vi64 (-1))) :: nil)) (T_const (Vi32 0))))).
 Definition spec_literal_ctx__LiteralPositions_specs : list hassert := (spec_literal_ctx__LiteralPositions_hspec1 :: spec_literal_ctx__LiteralPositions_hspec2 :: nil).
 
 Section Host.
