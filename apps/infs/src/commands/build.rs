@@ -69,17 +69,20 @@
 //!
 //! Two `[build]`-adjacent settings are read from the *enclosing* project even
 //! when a source path is given, by walking up to the nearest `Inference.toml`:
-//! `[wasm-dependencies]`, and `[build] wasm-features`. The latter is not an
-//! optional nicety — `infs build`, `infs build src/main.inf`, and `infs run
-//! src/main.inf` all write `out/main.wasm` for the same project, so they must not
-//! disagree about its WebAssembly instruction level; the feature request, its
-//! validation, and its ABI gate are identical on all three paths (see
-//! [`crate::commands::run`] for the third). A file outside any project takes the
-//! defaults and never errors.
+//! `[wasm-dependencies]`, and `[build] wasm-features`. Neither is an optional
+//! nicety — `infs build`, `infs build src/main.inf`, and `infs run
+//! src/main.inf` all write `out/main.wasm` for the same project, so they must
+//! not disagree about its WebAssembly instruction level, nor about which `.wasm`
+//! files its `use { … } from <module>` bindings resolve to. The feature request
+//! (with its validation and ABI gate) and the dependency resolution are
+//! identical on all three paths — which is why both are derived by the shared
+//! helpers here rather than re-derived per command (see
+//! [`crate::commands::run`] for the third path). A file outside any project
+//! takes the defaults and never errors.
 //!
-//! `[wasm-dependencies]` is resolved on every path but one: single-file `build`
-//! (here) and both project paths forward it. That single-file `run` does not
-//! resolve it predates this and is tracked separately (#367).
+//! `[wasm-dependencies]` is therefore resolved on every compilation path: both
+//! single-file paths through [`manifest_wasm_dependencies`], and both project
+//! paths off the discovered [`ProjectContext`].
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -328,11 +331,17 @@ pub(crate) fn enclosing_manifest(source_path: &Path) -> Result<Option<(PathBuf, 
 /// `.wasm` path (relative entries resolved against the manifest directory).
 /// `None` — a source outside any project — yields an empty list.
 ///
+/// The paths are absolute by construction, which is what lets a caller forward
+/// them without knowing the working directory `infc` will inherit. Centralizing
+/// that is why both single-file paths call this rather than reaching into
+/// `wasm_dependencies` themselves: one project must bind the same module name to
+/// the same file whether it was built or run.
+///
 /// ## Errors
 ///
 /// Returns an error if any `[wasm-dependencies]` key is not a well-formed logical
 /// module name.
-fn manifest_wasm_dependencies(
+pub(crate) fn manifest_wasm_dependencies(
     enclosing: Option<&(PathBuf, InferenceToml)>,
 ) -> Result<Vec<(String, PathBuf)>> {
     let Some((manifest_dir, manifest)) = enclosing else {

@@ -338,10 +338,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- infs: single-file `run` now forwards the enclosing manifest's `[wasm-dependencies]` and gains a `-L`/`--wasm-lib-dir` flag (project `run` forwards `-L` too), so a file or project binding `use { … } from <module>` runs instead of failing external resolution ([#367])
 - infs: `infc` now resolves from the directory holding the running `infs`, whatever that directory is named, instead of requiring a literal `target/<debug|release>/` path and one of three enumerated build targets; a redirected `CARGO_TARGET_DIR`, a `--target-dir`, a custom cargo profile, or an unlisted target used to make the tier decline silently and run whatever `infc` was on `PATH` — the wrong compiler, looking like success. An installed `infs` now prefers an adjacent `infc` over a `PATH` hit, `INFS_VERBOSE` reports the fallthrough, and `infs doctor` labels the tier `sibling of infs` and no longer calls a plain managed install ambiguous ([#371])
 - infs: `infs doctor`, PATH-conflict detection, and the managed `bin/` symlinks no longer consult the three-target allow-list merely to learn whether binaries end in `.exe`. On any other build target `doctor` reported `Cannot detect platform`, conflict detection and symlink validation returned empty results that read as "nothing wrong", and `infs default <version>` failed outright. `Platform` keeps its allow-list wherever the platform identity genuinely matters — downloads, manifest artifact selection, self-update ([#371])
 - infs tests: the integration suite resolves `infc` from the running test binary's own directory instead of a hardcoded `target/debug`, so the end-to-end tests that spawn the real compiler no longer silently self-skip on the Windows and release CI legs; a missing `infc` or `wasmtime` now fails the run under `CI` instead of skipping ([#369])
-- infs: project-mode `build` now forwards both the manifest's `[wasm-dependencies]` and the CLI's `-L`/`--wasm-lib-dir` to `infc`, and project-mode `run` forwards the manifest's (it has no `-L` flag of its own), so a project binding `use { … } from <module>` links — and in proof mode emits its `.v` — without the `INFERENCE_WASM_LIB_PATH` workaround ([#361])
+- infs: project-mode `build` now forwards both the manifest's `[wasm-dependencies]` and the CLI's `-L`/`--wasm-lib-dir` to `infc`, and project-mode `run` forwards the manifest's, so a project binding `use { … } from <module>` links — and in proof mode emits its `.v` — without the `INFERENCE_WASM_LIB_PATH` workaround ([#361])
 - wasm-to-v: `(*name*)` comments on `BI_local_get`/`BI_local_set`/`BI_local_tee` now resolve the local-name map by function index instead of type index, fixing misattributed names in linked or externally produced modules ([#336])
 - A dynamic array index appearing only inside a function-scoped `const` initializer no longer aborts the compiler (`bounds-check scratch local must be reserved` panic); it now compiles and is guarded like any other index ([#220])
 - Exported functions now normalize narrow scalar parameters (`bool`, `i8`, `u8`, `i16`, `u16`) at entry — low-bits/sign-extension per the C convention, `bool` by truthiness — so arbitrary host bit patterns cannot leak into the body
@@ -557,6 +558,7 @@ Initial tagged release.
 [#335]: https://github.com/Inferara/inference/pull/335
 [#336]: https://github.com/Inferara/inference/issues/336
 [#361]: https://github.com/Inferara/inference/issues/361
+[#367]: https://github.com/Inferara/inference/issues/367
 [#369]: https://github.com/Inferara/inference/issues/369
 [#371]: https://github.com/Inferara/inference/issues/371
 [#346]: https://github.com/Inferara/inference/issues/346

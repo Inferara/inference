@@ -73,13 +73,13 @@ for.
 
 `infs build path/to/file.inf` and `infs run path/to/file.inf` compile one named
 file rather than the project's entry point, but they are not manifest-blind: each
-walks up from the source file to the nearest `Inference.toml`. Which settings are
-honored differs by command:
+walks up from the source file to the nearest `Inference.toml`. Both commands
+honor the same settings:
 
 | Setting | `infs build <path>` | `infs run <path>` |
 |---|---|---|
 | `[build] wasm-features` | honored | honored |
-| `[wasm-dependencies]` | honored | **not** resolved |
+| `[wasm-dependencies]` | honored | honored |
 
 `[build] wasm-features` is honored by both, with the same validation and the same
 ABI gate as project mode. This is deliberate rather than incidental: `infs build`,
@@ -87,12 +87,13 @@ ABI gate as project mode. This is deliberate rather than incidental: `infs build
 `out/main.wasm` for the same project, so if they disagreed about the instruction
 set, the artifact you ship would depend on which command last touched it.
 
-`[wasm-dependencies]` is otherwise resolved everywhere: project `infs build` and
-project `infs run` both forward every declared entry to `infc`. That `infs run
-<path>` does not is a pre-existing gap, not a consequence of the above; it is
-tracked as [#367](https://github.com/Inferara/inference/issues/367). A file that
-imports an external module therefore needs project mode, `infs build <path>`, or
-`-L` rather than single-file `run`.
+`[wasm-dependencies]` is resolved identically everywhere: project `infs build`,
+project `infs run`, single-file `infs build <path>`, and single-file `infs run
+<path>` all forward every declared entry to `infc` as `--wasm-dep <name>=<path>`,
+and none of the four gate it on `infc`'s ABI. Both single-file commands also
+accept `-L`/`--wasm-lib-dir` to add extra search directories beyond the
+manifest, so a file that imports an external module runs directly without a
+separate link step.
 
 Everything else in the manifest is project-mode configuration: `[build] mode`,
 `[verification] output-dir`, and `[build.wasm-opt]` are not consulted in
