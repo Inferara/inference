@@ -14,6 +14,7 @@
 use inference_ast::nodes::Location;
 
 use crate::syntax_kind::SyntaxKind;
+use crate::token_set::TokenSet;
 
 /// A single lexical token: its kind, source [`Location`], and whether it abuts
 /// the next token with no trivia between them.
@@ -55,6 +56,39 @@ pub fn tokenize(src: &str) -> Vec<Token> {
     Lexer::new(src).run()
 }
 
+/// The token kinds an expression can end with, after which a `-` is the binary
+/// subtraction operator rather than the sign of a literal.
+///
+/// A `-` glued to a digit folds into one `Number` only in *prefix* position, so
+/// `return v-1;` lexes as `v`, `-`, `1` while `= -1` still lexes as one literal.
+/// Restricting the fold cannot change the meaning of a valid program: Inference
+/// has no juxtaposition syntax, so the two adjacent atoms the fold used to
+/// produce here (`Ident` then `Number`) were always a parse error.
+///
+/// `RBrace` is deliberately excluded. It closes a struct literal, but it also
+/// closes a block, and a statement may open with a negative literal — so
+/// `if true { } -1;` has to keep lexing `-1` as a single literal. Nothing
+/// reachable is lost by the omission, because a struct value is never an operand
+/// of `-`: `S { a: 1 } - 1` is a type error however it lexes.
+///
+/// `TypeKw`, `FromKw` and `SpecKw` are contextual keywords the grammar also
+/// accepts in identifier positions, so an expression can end with them too.
+const EXPR_END: TokenSet = TokenSet::new(&[
+    SyntaxKind::Number,
+    SyntaxKind::String,
+    SyntaxKind::TrueKw,
+    SyntaxKind::FalseKw,
+    SyntaxKind::Ident,
+    SyntaxKind::SelfKw,
+    SyntaxKind::TypeKw,
+    SyntaxKind::FromKw,
+    SyntaxKind::SpecKw,
+    SyntaxKind::RParen,
+    SyntaxKind::RBracket,
+    SyntaxKind::At,
+    SyntaxKind::Tick,
+]);
+
 /// Single-pass scanner over the source bytes, tracking position for [`Location`].
 struct Lexer<'a> {
     src: &'a [u8],
@@ -64,6 +98,12 @@ struct Lexer<'a> {
     line: u32,
     /// Current 1-based byte column within the line.
     column: u32,
+    /// The kind of the last non-trivia token, or `None` at the start of input.
+    ///
+    /// This one-token lookbehind is what separates a prefix `-` (the sign of a
+    /// literal) from an infix one (subtraction); see [`EXPR_END`]. Trivia leaves
+    /// it untouched, so neither spacing nor comments can change how a `-` reads.
+    prev_significant: Option<SyntaxKind>,
 }
 
 impl<'a> Lexer<'a> {
@@ -73,6 +113,7 @@ impl<'a> Lexer<'a> {
             offset: 0,
             line: 1,
             column: 1,
+            prev_significant: None,
         }
     }
 
@@ -80,7 +121,11 @@ impl<'a> Lexer<'a> {
     fn run(mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
         while (self.offset as usize) < self.src.len() {
-            tokens.push(self.next_token());
+            let token = self.next_token();
+            if !token.kind.is_trivia() {
+                self.prev_significant = Some(token.kind);
+            }
+            tokens.push(token);
         }
         let eof_loc = self.zero_width_location();
         tokens.push(Token {
@@ -111,7 +156,7 @@ impl<'a> Lexer<'a> {
         if byte == b'"' {
             return self.string();
         }
-        if byte.is_ascii_digit() || (byte == b'-' && self.peek_at(1).is_ascii_digit()) {
+        if byte.is_ascii_digit() || (byte == b'-' && self.at_signed_literal()) {
             return self.number();
         }
         if is_ident_start(byte) {
@@ -164,8 +209,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether the `-` at the cursor signs a literal rather than subtracting: a
+    /// digit must follow it and no expression may have just ended (see
+    /// [`EXPR_END`]).
+    ///
+    /// The digit test comes first so `->` short-circuits before the lookbehind.
+    fn at_signed_literal(&self) -> bool {
+        self.peek_at(1).is_ascii_digit()
+            && !self
+                .prev_significant
+                .is_some_and(|kind| EXPR_END.contains(kind))
+    }
+
     /// A `-?\d+` integer literal. A leading `-` is consumed only because the
-    /// caller verified a digit follows it.
+    /// caller accepted it via [`Lexer::at_signed_literal`].
     fn number(&mut self) -> Token {
         let start = self.mark();
         if self.peek() == b'-' {
@@ -378,6 +435,8 @@ mod tests {
             "// a comment\n/// a doc\nstruct S { i32 field; }",
             "use foo::bar from \"m\";\nspec s() { forall { assume true; } }",
             "let bool b = a && b || !c;\nx = arr[0] + obj.field;",
+            "fn f(v: i32) -> i32 { return v-1; }",
+            "fn g(a: [i32;3], n: i32) -> i32 { return a[n-1]; }",
         ];
         for src in sources {
             let toks = tokenize(src);
@@ -614,6 +673,168 @@ mod tests {
                 SyntaxKind::Minus,
                 SyntaxKind::Whitespace,
                 SyntaxKind::Number,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn minus_after_an_expression_end_is_the_operator() {
+        // One row per `EXPR_END` member: a `-1` glued to the end of an
+        // expression is subtraction, not a negative literal. Each row pins the
+        // member it exercises as the token right before the `Minus`.
+        for (src, expr_end) in [
+            ("a-1", SyntaxKind::Ident),
+            ("1-2", SyntaxKind::Number),
+            ("\"s\"-1", SyntaxKind::String),
+            ("true-1", SyntaxKind::TrueKw),
+            ("false-1", SyntaxKind::FalseKw),
+            ("self-1", SyntaxKind::SelfKw),
+            ("type-1", SyntaxKind::TypeKw),
+            ("from-1", SyntaxKind::FromKw),
+            ("spec-1", SyntaxKind::SpecKw),
+            (")-1", SyntaxKind::RParen),
+            ("]-1", SyntaxKind::RBracket),
+            ("@-1", SyntaxKind::At),
+            ("i32'-1", SyntaxKind::Tick),
+        ] {
+            let kinds = kinds(src);
+            let [.., end, minus, number, eof] = kinds.as_slice() else {
+                panic!("expected at least four tokens for {src:?}, got {kinds:?}");
+            };
+            assert_eq!(
+                (*end, *minus, *number, *eof),
+                (
+                    expr_end,
+                    SyntaxKind::Minus,
+                    SyntaxKind::Number,
+                    SyntaxKind::Eof
+                ),
+                "expected an infix minus for {src:?}, got {kinds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn minus_in_prefix_position_still_folds() {
+        // The byte-identity guard: everywhere a value has *not* just ended, the
+        // sign stays part of the literal, so today's token stream is unchanged.
+        for src in [
+            "-42",
+            "=-42",
+            "return-42",
+            ",-42",
+            "[-42",
+            "(-42",
+            "{-42",
+            ";-42",
+            ":-42",
+            "+-42",
+            "*-42",
+            "<<-42",
+            "==-42",
+            "->-42",
+            "--42",
+            "_-42",
+        ] {
+            let toks = tokenize(src);
+            let [.., number, eof] = toks.as_slice() else {
+                panic!("expected at least two tokens for {src:?}");
+            };
+            assert_eq!(eof.kind, SyntaxKind::Eof, "for {src:?}");
+            assert_eq!(
+                number.kind,
+                SyntaxKind::Number,
+                "the sign must not split off for {src:?}"
+            );
+            assert_eq!(
+                number.text(src),
+                "-42",
+                "the sign must fold into the literal for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_brace_does_not_end_an_expression() {
+        // `}` closes a block as well as a struct literal, and a statement may
+        // open with a negative literal, so `-1` after it still folds.
+        assert_eq!(
+            kinds("}-1"),
+            [SyntaxKind::RBrace, SyntaxKind::Number, SyntaxKind::Eof]
+        );
+    }
+
+    #[test]
+    fn lookbehind_skips_trivia() {
+        // Neither spacing nor comments move a `-` between prefix and infix
+        // position: only the last non-trivia token decides.
+        assert_eq!(
+            kinds("a\n-1"),
+            [
+                SyntaxKind::Ident,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Minus,
+                SyntaxKind::Number,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("a // c\n-1"),
+            [
+                SyntaxKind::Ident,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Comment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Minus,
+                SyntaxKind::Number,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("= // c\n-1"),
+            [
+                SyntaxKind::Eq,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Comment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Number,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("= /// d\n-1"),
+            [
+                SyntaxKind::Eq,
+                SyntaxKind::Whitespace,
+                SyntaxKind::DocComment,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Number,
+                SyntaxKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn arrow_is_unaffected() {
+        // `>` is not a digit, so a return arrow never reaches the lookbehind.
+        assert_eq!(
+            kinds(")->i32"),
+            [
+                SyntaxKind::RParen,
+                SyntaxKind::Arrow,
+                SyntaxKind::I32Kw,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds(") -> i32"),
+            [
+                SyntaxKind::RParen,
+                SyntaxKind::Whitespace,
+                SyntaxKind::Arrow,
+                SyntaxKind::Whitespace,
+                SyntaxKind::I32Kw,
                 SyntaxKind::Eof,
             ]
         );

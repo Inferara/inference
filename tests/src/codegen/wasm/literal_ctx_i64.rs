@@ -10,7 +10,8 @@
 /// - `call_with_literal`        -> i64 argument to `scale`
 /// - `return_literal`           -> i64.const
 /// - `return_glued_negative`    -> i64.const (the glued `-42` is one token)
-/// - `return_spaced_negation`   -> i64.sub against an i64 operand
+/// - `return_parenthesized_negation` -> i64.sub against an i64 operand, the
+///   expected type having descended through both the `-` and the parentheses
 /// - `complement_literal`       -> i64.xor against -1
 /// - `parenthesized_literal`    -> i64.const through parentheses
 /// - `shift_of_two_literals`    -> both operands typed by the return type
@@ -109,7 +110,7 @@ mod literal_ctx_i64_tests {
 
         call!("return_literal", i64, (), 65_536_i64);
         call!("return_glued_negative", i64, (), -42_i64);
-        call!("return_spaced_negation", i64, (), -42_i64);
+        call!("return_parenthesized_negation", i64, (), -42_i64);
         call!("parenthesized_literal", i64, (), 65_536_i64);
         call!("complement_literal", i64, (), -1_i64);
 

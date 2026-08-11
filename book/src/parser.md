@@ -131,10 +131,17 @@ Three properties matter:
 A few Inference-specific lexical rules are worth calling out, because they affect
 parsing downstream:
 
-- **Greedy negative numbers.** A leading `-` is part of a number literal when it
-  is immediately followed by a digit, so `-42` lexes as a single `Number` token,
-  not `Minus` then `Number`. (`- 42`, with a space, lexes as two tokens and parses
-  as a unary negation.)
+- **Prefix-position negative numbers.** A leading `-` is part of a number literal
+  when it is immediately followed by a digit *and* no expression has just ended,
+  so `-42` lexes as a single `Number` token, not `Minus` then `Number`. The
+  lexer keeps a one-token lookbehind (`prev_significant`, ignoring trivia) and
+  consults the `EXPR_END` token set for that second condition: after `a`, `1`,
+  `)`, `]`, `@` and the other kinds an expression can end with, the `-` is
+  subtraction, so `v-1` lexes as three tokens. `}` is deliberately *not* in that
+  set — it closes a block as well as a struct literal, and a statement may open
+  with a negative literal, as in `if c { } -1;`. (`- 42`, with a space, lexes as
+  two tokens and parses as a unary negation; analysis rule A046 then rejects that
+  spelling, so the glued form is the only way to write a negative literal.)
 - **Reserved-but-not-keyword identifiers.** `constructor`, `proof`, and `uzumaki`
   lex as ordinary identifiers, matching the grammar's reserved-identifier rule.
 
@@ -271,7 +278,8 @@ handled at statement level (`assign_statement`), matching the grammar.
 An LL parser has to resolve a few grammar ambiguities by hand. The
 notable ones:
 
-- **`-42` vs `- x`** — resolved in the lexer (greedy negative numbers, above).
+- **`-42` vs `- x` vs `v-1`** — resolved in the lexer by the one-token
+  lookbehind (prefix-position negative numbers, above).
 - **`::` and `'` immediacy** — only treated as a path separator / generic
   terminator when the joint bit says there is no intervening whitespace.
 - **Struct literal `{` vs block `{`** — `S { a: 1 }` is a struct literal, but in

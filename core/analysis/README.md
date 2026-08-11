@@ -108,6 +108,8 @@ note: the literal is typed `u8` by the type expected in return statement
 
 The note is present only when a position gave the literal its type; a literal left at the `i32` default has nothing to name and the message is the bare range line. The provenance comes from `TypedContext::literal_type_source`, a diagnostics-only side table — the recorded node type stays the single source of truth for what a literal denotes.
 
+A literal is measured exactly as written, un-negated, so A022 hands the separated-sign spelling over to A046 and skips every literal `walker::separated_negated_literal` identifies. Without that handoff, `- 128` at `i8` would report "literal `128` is out of range" — true of `128`, false of the `-128` the author meant. The handoff accepts nothing: every literal A022 stops measuring is one A046 rejects, so `- 300` at `i8` is still an error, and once the spelling is fixed to `-300` the literal carries its sign and is measured as the negative number it is. Parenthesized negation (`-(128)`) is not part of the handoff.
+
 ### Recursion (errors)
 
 | ID | Struct | Severity | What it checks |
@@ -177,6 +179,18 @@ A045 rejects *values* of a struct with no fields. Such a struct occupies zero by
 Rejecting a field-less struct as the type of a *field* is what closes the hole: a struct all of whose fields are zero-sized would itself be zero-sized, so forbidding a zero-sized field collapses that composition into the base case. In an accepted program a struct is therefore zero-sized if and only if it has no fields, which lets the predicate be `fields.is_empty()` plus array recursion — no transitive size computation, no visited set, no cycle handling. With every value-introducing position rejected, assignments, reads, and method calls on such values need no checks of their own (each requires a binding, parameter, or field that is already rejected), so a program reports one diagnostic per offending declaration rather than one per use. A module-scope `const` is checked here in its own right rather than left to A032, which rejects *every* top-level `const` as not yet implemented: A032 is a gate on an unimplemented feature, and a closure resting on it would go silently incomplete the day that feature lands. Both fire on such a declaration; there is no cross-rule suppression.
 
 *Declaring* a field-less struct stays legal. A field-less struct with associated functions is the supported method-namespace idiom (`E::helper()`) and compiles unchanged; the `self` receiver is rejected because once no value of the struct can exist the method is uncallable by construction, and the fix — dropping `self` — produces exactly that idiom. `external fn` signatures are checked for their ABI surface rather than for the closure (A024 rejects every call to an extern function, so no value can flow through one). Two documented non-scopes: generics, since a type parameter never resolves to a struct, so a generic signature (`fn id T'(x: T) -> T`) is outside the predicate — nothing is missed by that today, because the compiler does not monomorphize and codegen rejects a generic type outright, so there is no instantiation at a field-less struct to check; and local type aliases, which are non-transparent in Inference and so are a dead end rather than a route to a value.
+
+### Spaced Negative Literals (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A046 | `SpacedNegativeLiteral` | error | a unary minus applied to a numeric literal is written apart from the digits (`- 128`) instead of glued (`-128`) |
+
+A046 requires that a unary minus applied to a numeric literal be written against the digits. `-128` is one token: the lexer folds the sign into the digits, and the literal is ranged and lowered as the negative number it spells. `- 128` is not a literal at all — it is a `Neg` over the bare literal `128`, which every later rule measures on its own. That is what made the same value compile or fail on a space: at `i8`, `- 100` was accepted (`100` fits) while `- 128` was rejected as "literal `128` is out of range", a diagnostic about a value the author never wrote and a limit `-128` does not exceed. Every signed minimum was unreachable in that spelling and only in that spelling. Rather than teach the range check to look through a negation, the rule removes the second spelling, leaving one canonical way to write a negative literal — the same readability argument A033 makes for combined unary operators.
+
+The predicate lives in `walker::separated_negated_literal` and is shared with A022, which skips exactly the literals A046 claims (see above). Separation is measured on offsets, not on source text: a `PrefixUnary` node starts at its operator, so the glued spelling is the only one whose digits begin at `offset_start + 1`; a space, several, a newline, and a line comment are all the same offence. A literal whose own text carries a sign is excluded, because that is the grammar's eager lexing of `--42` / `- -42` and belongs to A033 — advising the glued form there would recommend a spelling A033 rejects.
+
+Negating anything that is not a literal stays legal (`- x`, `- g()`): there is no token to glue the sign to and so no second spelling to choose between. Binary subtraction (`a - 1`, `a-1`) has a left operand, is never a `PrefixUnary`, and is never seen. Two documented non-scopes: `~ 5` and `! x`, since only `-` is folded into a literal by the lexer and so only `-` has a whitespace-dependent alternative to remove; and `-(128)`, whose operand is a parenthesized expression rather than a literal — it cannot be closed up into a token, A022's reading of it is unchanged, and peeling the parentheses would demand a rewrite the syntax does not offer.
 
 ## Diagnostic Output Format
 
@@ -248,6 +262,7 @@ The walker module also exposes several type-inspection helpers used by multiple 
 - `has_compound_fields(ctx, kind)` — returns true if a struct or array type contains fields that are themselves structs, arrays of structs, or multidimensional arrays; used by A026, A027, and A028
 - `fieldless_struct_name(ctx, kind, module_path)` — returns the bare name of the field-less struct a type is, or is an array of at any depth; resolves all four type carriers (canonical `Struct`, bare `Custom`, and both `::`-qualified forms) so a same-named struct in another file is not picked up by its bare name; used by A045
 - `is_compound_return_call(arena, expr_id, ctx)` — returns true when an expression is a function call that returns a compound type (struct or array); used by A016, A017, and A018
+- `separated_negated_literal(arena, expr_id)` — returns the numeric literal a `-` is applied to but written apart from, measuring separation on offsets rather than source text; used by A046, which rejects the spelling, and by A022, which skips exactly those literals so the two cannot drift apart
 
 ## Testing
 
@@ -283,6 +298,7 @@ Test files are organized by rule group:
 | `rules_a042.rs` | A042 (non-deterministic construct outside a `spec` declaration) |
 | `rules_a044.rs` | A044 (shift count literal out of range) |
 | `rules_a045.rs` | A045 (field-less struct values) |
+| `rules_a046.rs` | A046 (unary minus separated from the literal it negates) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

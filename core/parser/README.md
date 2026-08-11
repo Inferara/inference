@@ -45,7 +45,7 @@ AstArena        inference_ast::arena::AstArena (unchanged public type)
 | `lib.rs` | Public API: `parse`, `parse_to_cst`, `Parse`; re-exports |
 | `errors.rs` | `ParserError` enum (thiserror) + `ParseError { span: Location, message }` |
 | `syntax_kind.rs` | Single `SyntaxKind` enum: token kinds first, then node kinds from the computed `FIRST_NODE` boundary; keyword table; `is_trivia`, `from_keyword`, `is_token`. Contextual keywords (`self`/`type`/`from`/`spec`) are handled in `grammar/types.rs` via the `IDENT_LIKE` token set, not here |
-| `lexer.rs` | `tokenize(&str) -> Vec<Token>`; handles trivia, joint bits, greedy `-N`, unterminated strings |
+| `lexer.rs` | `tokenize(&str) -> Vec<Token>`; handles trivia, joint bits, prefix-position `-N`, unterminated strings |
 | `token_set.rs` | `TokenSet(u128)` bitset over `SyntaxKind` discriminants for O(1) recovery sets |
 | `input.rs` | Trivia-free token view the parser cursor operates on; carries the source so a rule can read a token's spelling |
 | `event.rs` | `Event` enum + `process` producing `Vec<Step>` consumed by `build_tree` |
