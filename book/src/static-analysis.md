@@ -396,15 +396,22 @@ is statically known.
 | A041 | a function-local name is declared at most once per function body |
 | A042 | non-deterministic constructs (`forall`/`exists`/`assume`/`unique`) are only valid inside a `spec` declaration |
 | A043 | an entry-file top-level `pub fn` may not use a reserved export name (`memory`, `__stack_pointer`) |
+| A046 | a unary minus applied to a numeric literal must be written glued to the digits (`-42`, never `- 42`) |
 
 These are honesty rules: each rejects, with a named diagnostic, a construct
 the pipeline does not (or does not yet) support — rather than letting it fail
 obscurely further down. A025 and A041 also remove whole classes of ambiguity
 (reads of uninitialized memory, shadowing) that would otherwise need proof
-obligations of their own. A042 and A043 are permanent rather than
+obligations of their own. A042, A043, and A046 are permanent rather than
 not-yet-supported restrictions: non-deterministic blocks are proof-only by
-design, and the two reserved names collide with codegen's own synthetic WASM
-exports.
+design, the two reserved names collide with codegen's own synthetic WASM
+exports, and a negative literal has exactly one spelling — the lexer folds the
+sign into the digits only when they are written together, so a separated minus
+is a negation of the bare magnitude and would make the same value compile or
+fail on a space (`- 100` fits `i8`, `- 128` does not, though `-128` is a valid
+`i8`). Rejecting the separated spelling is what keeps whitespace out of the
+meaning of a program, in the same spirit as A033's ban on combined unary
+operators.
 
 ### Advisory rules
 

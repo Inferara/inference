@@ -27,6 +27,7 @@ pub mod reserved_export_name;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod shift_count_out_of_range;
+pub mod spaced_negative_literal;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
 pub mod struct_uzumaki_as_argument;
@@ -70,6 +71,7 @@ use reserved_export_name::ReservedExportName;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use shift_count_out_of_range::ShiftCountOutOfRange;
+use spaced_negative_literal::SpacedNegativeLiteral;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
 use struct_uzumaki_as_argument::StructUzumakiAsArgument;
@@ -135,5 +137,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &ReservedExportName,
         &ShiftCountOutOfRange,
         &FieldLessStructValue,
+        &SpacedNegativeLiteral,
     ]
 }

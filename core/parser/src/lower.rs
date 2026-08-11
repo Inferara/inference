@@ -2900,6 +2900,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lowers_glued_infix_subtraction_as_binary() {
+        // `v-1` reaches lowering as three tokens, so the minus becomes the
+        // operator and the right operand keeps the bare digits.
+        let arena = lower("fn f() { v-1; }");
+        match single_expr(&arena) {
+            Expr::Binary { op, right, .. } => {
+                assert_eq!(*op, OperatorKind::Sub);
+                match &arena[*right].kind {
+                    Expr::NumberLiteral { value } => assert_eq!(value, "1"),
+                    other => panic!("expected a number literal operand, got {other:?}"),
+                }
+            }
+            other => panic!("expected binary, got {other:?}"),
+        }
+    }
+
     /// A malformed literal's node spans the tail the grammar consumed alongside
     /// the digits (`16i64`), so the value must come from the `Number` token, not
     /// the node. A poisoned `"16i64"` fails every downstream `parse` of it: the

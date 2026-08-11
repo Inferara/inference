@@ -1486,6 +1486,51 @@ mod tests {
     }
 
     #[test]
+    fn glued_infix_subtraction_parses() {
+        // A `-` glued to a digit right after an expression is the subtraction
+        // operator, so each of these is one binary expression rather than the
+        // two adjacent atoms the lexer used to produce.
+        for src in [
+            "fn f() { x = v-1; }",
+            "fn f() { x = 1-2; }",
+            "fn f() { x = a[n-1]; }",
+            "fn f() { g(n-1); }",
+            "fn f() { x = g()-1; }",
+            "fn f() { x = (a)-1; }",
+            "fn f() { x = a[0]-1; }",
+            "fn f() { x = s.a-1; }",
+            "fn f() { x = v -1; }",
+        ] {
+            assert_clean(src);
+            let (root, _) = parse_to_cst(src);
+            assert!(
+                find(&root, SyntaxKind::BinaryExpression).is_some(),
+                "expected a binary expression in {src:?}:\n{}",
+                tree(src)
+            );
+            assert!(
+                find(&root, SyntaxKind::PrefixUnaryExpression).is_none(),
+                "the minus must be the operator, not a sign, in {src:?}:\n{}",
+                tree(src)
+            );
+        }
+    }
+
+    #[test]
+    fn block_close_starts_a_negative_literal_statement() {
+        // A closing brace does not end an expression, so a statement may still
+        // open with a negative literal directly after a block.
+        let src = "fn f() { if true { } -1; }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(
+            find(&root, SyntaxKind::BinaryExpression).is_none(),
+            "the literal must not be read as a subtraction:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
     fn double_negation_spaced() {
         // `-1 - -2` : Binary(-, -1, -2) with both operands negative literals.
         let src = "fn f() -> i32 { return -1 - -2; }";

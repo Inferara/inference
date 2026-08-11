@@ -1040,7 +1040,7 @@ fn test_feature() {
 
 **Numeric Literal Range Validation**:
 - Out-of-range literals are rejected. For example, `let a: i8 = 200;` produces a `LiteralOutOfRange` error. The expected type (see [Check Mode: The Expected Type](#check-mode-the-expected-type)) is what gives the range checker a type to validate against.
-- A minus sign written *against* the digits is part of the literal token, so `-200` is one literal and is checked as `-200`. A minus sign separated by whitespace is a `Neg` expression instead; the expected type now descends into its operand, so `let a: i8 = - 100;` type-checks where it used to be an `i8`/`i32` mismatch. The range check still runs on the *un-negated* literal, which makes each signed type's minimum unreachable in that spelling: `- 128` for `i8` is reported as `128` being out of range even though `-128` is a valid `i8`. Write it glued (`-128`), the ordinary spelling, which is checked correctly.
+- A minus sign written *against* the digits is part of the literal token, so `-200` is one literal and is checked as `-200`. A minus sign separated from them is a `Neg` expression instead; the expected type descends into its operand, so `let a: i8 = - 100;` type-checks here. The range check runs on the *un-negated* literal, which would make each signed type's minimum unreachable in that spelling — `- 128` at `i8` measured as `128`. Rather than teach the range check to look through a negation, the separated spelling is rejected outright by analysis rule A046, and A022 skips the literals A046 claims so it never reports a magnitude the author did not write. The glued form is the one canonical spelling of a negative literal and is checked correctly.
 
 **Pattern Matching**:
 - No destructuring of structs or arrays

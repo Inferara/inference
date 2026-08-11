@@ -23,7 +23,7 @@ pub fn return_literal() -> i64 { return 65536; }
 
 pub fn return_glued_negative() -> i64 { return -42; }
 
-pub fn return_spaced_negation() -> i64 { return - 42; }
+pub fn return_parenthesized_negation() -> i64 { return -(42); }
 
 pub fn parenthesized_literal() -> i64 { return (65536); }
 

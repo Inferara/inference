@@ -309,7 +309,10 @@ mod issue_repros {
     }
 
     /// A glued `-42` lexes as one negative literal; only a spaced `- 42` is a
-    /// prefix negation over a literal. Both must reach `i64`.
+    /// prefix negation over a literal. Both must reach `i64` here — the spaced
+    /// spelling is rejected by analysis (A046), which runs after this pass, and
+    /// the expected type still has to descend into its operand for that later
+    /// rejection to be about the spelling rather than about a type error.
     #[test]
     fn return_a_glued_negative_literal() {
         let source = "pub fn n() -> i64 { return -42; }";
@@ -408,6 +411,9 @@ mod transparent_descent {
         assert_literal_typed(source, "65536", "i64");
     }
 
+    /// A spaced minus is the only spelling in which `-` is an operator over a
+    /// bare literal, so it is what pins the descent — even though analysis
+    /// (A046) rejects it afterwards in favour of the glued form.
     #[test]
     fn negation_forwards_the_expected_type() {
         let source = "pub fn f() -> i64 { let x: i64 = - 65536; return x; }";
@@ -438,7 +444,9 @@ mod transparent_descent {
     }
 
     /// The signedness check runs on what the operand came back as, so `-` under
-    /// an unsigned expected type is rejected rather than silently accepted.
+    /// an unsigned expected type is rejected rather than silently accepted. The
+    /// rejection is this pass's own: it must not depend on A046 also rejecting
+    /// the spaced spelling later.
     #[test]
     fn negation_under_an_unsigned_expected_type_is_rejected() {
         let err = rejection("pub fn f() -> u64 { let x: u64 = - 5; return x; }");

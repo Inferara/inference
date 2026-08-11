@@ -261,6 +261,14 @@ pub enum AnalysisDiagnostic {
         position: &'static str,
         location: Location,
     },
+
+    /// The message quotes the fix rather than the offending spelling, because
+    /// the gap may be a space, several, a newline, or a comment, and the advice
+    /// is the same for all of them.
+    #[error(
+        "the minus sign is separated from the numeric literal `{value}`; a unary minus applied to a numeric literal must be written against the digits, so write `-{value}`; the sign is part of the literal token, and separating it leaves a negation of the bare `{value}`, which is then measured against the target type on its own — that is why the same value would otherwise compile or fail depending on the whitespace"
+    )]
+    SpacedNegativeLiteral { value: String, location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -309,7 +317,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::NonDetOutsideSpec { location, .. }
             | AnalysisDiagnostic::ReservedExportName { location, .. }
             | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. }
-            | AnalysisDiagnostic::FieldLessStructValue { location, .. } => location,
+            | AnalysisDiagnostic::FieldLessStructValue { location, .. }
+            | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. } => location,
         }
     }
 
@@ -362,6 +371,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ReservedExportName { .. } => "A043",
             AnalysisDiagnostic::ShiftCountOutOfRange { .. } => "A044",
             AnalysisDiagnostic::FieldLessStructValue { .. } => "A045",
+            AnalysisDiagnostic::SpacedNegativeLiteral { .. } => "A046",
         }
     }
 }
@@ -1491,6 +1501,50 @@ mod tests {
                 err.to_string()
                     .contains(&format!("cannot be used as {position};")),
                 "A045 diagnostic must name the `{position}` position"
+            );
+        }
+    }
+
+    /// The A046 message has one job the rule cannot do for the reader: spell the
+    /// glued form out. It must also say why, so the requirement does not read as
+    /// arbitrary style.
+    #[test]
+    fn display_spaced_negative_literal() {
+        let err = AnalysisDiagnostic::SpacedNegativeLiteral {
+            value: "128".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("separated from the numeric literal `128`"),
+            "A046 diagnostic must name the literal, got: {text}"
+        );
+        assert!(
+            text.contains("write `-128`"),
+            "A046 diagnostic must spell the fix out, got: {text}"
+        );
+        assert!(
+            text.contains("part of the literal token"),
+            "A046 diagnostic must explain the mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("depending on the whitespace"),
+            "A046 diagnostic must say why the separated spelling is rejected, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A046");
+    }
+
+    /// The fix is built from the literal's own text, so it has to track it.
+    #[test]
+    fn display_spaced_negative_literal_quotes_each_value() {
+        for value in ["42", "128", "9223372036854775808"] {
+            let err = AnalysisDiagnostic::SpacedNegativeLiteral {
+                value: value.to_string(),
+                location: test_location(),
+            };
+            assert!(
+                err.to_string().contains(&format!("write `-{value}`")),
+                "A046 diagnostic must recommend the glued form of `{value}`"
             );
         }
     }

@@ -6,7 +6,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
+use inference_ast::nodes::{BlockKind, Def, Expr, Stmt, UnaryOperatorKind};
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
@@ -140,6 +140,44 @@ pub(crate) fn walk_expr(
         | Expr::Uzumaki
         | Expr::Type(_) => {}
     }
+}
+
+/// Returns the numeric literal a `-` is applied to but written apart from,
+/// or `None` when `expr_id` is anything else.
+///
+/// This is A046's whole predicate, and the exact construct A022 hands over to
+/// it: a `Neg` whose operand is *directly* a `NumberLiteral` — no parentheses
+/// peeled — where the literal does not begin one byte after the minus. Both
+/// rules read it from here so neither can drift into flagging a shape the other
+/// has stopped covering.
+///
+/// Separation is measured on offsets rather than on the source text, which
+/// analysis never sees: a `PrefixUnary` node starts at its operator, so the only
+/// spelling in which the digits begin at `offset_start + 1` is the glued one.
+/// Every kind of gap — a space, several, a newline, a line comment — puts them
+/// further along, and none is distinguished from the others.
+///
+/// A literal whose own text carries a sign is excluded, because that is the
+/// grammar's eager lexing of `--42` / `- -42` and belongs to A033: `--42` is
+/// already glued and would be excluded by the offsets alone, but the spaced
+/// `- -42` is not, and A046's advice there ("write `--42`") would recommend a
+/// form A033 rejects. Restricting the predicate to an unsigned literal keeps the
+/// two rules disjoint by construction: A033 owns every doubled sign, A046 owns
+/// the single detached one.
+pub(crate) fn separated_negated_literal(arena: &AstArena, expr_id: ExprId) -> Option<ExprId> {
+    let Expr::PrefixUnary {
+        op: UnaryOperatorKind::Neg,
+        expr: operand,
+    } = &arena[expr_id].kind
+    else {
+        return None;
+    };
+    let Expr::NumberLiteral { value } = &arena[*operand].kind else {
+        return None;
+    };
+    let separated =
+        arena[*operand].location.offset_start > arena[expr_id].location.offset_start + 1;
+    (separated && !value.starts_with('-')).then_some(*operand)
 }
 
 /// Returns how many array layers deep a type is.
@@ -702,6 +740,109 @@ mod tests {
             None,
             "a generic type parameter never names a struct"
         );
+    }
+
+    /// Builds `<op> <literal>` with the operator at `op_start` and the literal
+    /// at `literal_start` — the two offsets are the whole of what the predicate
+    /// reads. Returns the operator node and its operand.
+    fn alloc_negation(
+        arena: &mut AstArena,
+        op: UnaryOperatorKind,
+        op_start: u32,
+        literal: &str,
+        literal_start: u32,
+    ) -> (ExprId, ExprId) {
+        let width = u32::try_from(literal.len()).expect("test literal fits a u32 span");
+        let operand = arena.exprs.alloc(ExprData {
+            location: Location::new(
+                literal_start,
+                literal_start + width,
+                1,
+                literal_start + 1,
+                1,
+                literal_start + 1 + width,
+            ),
+            kind: Expr::NumberLiteral {
+                value: literal.to_string(),
+            },
+        });
+        let negation = arena.exprs.alloc(ExprData {
+            location: Location::new(op_start, literal_start, 1, op_start + 1, 1, op_start + 2),
+            kind: Expr::PrefixUnary { expr: operand, op },
+        });
+        (negation, operand)
+    }
+
+    #[test]
+    fn separated_negated_literal_measures_the_gap_at_one_byte() {
+        // `-42` never reaches the predicate as a negation (the lexer folds it
+        // into one token), but `--42` does, glued: the digits begin exactly one
+        // byte after the minus. That boundary is what separates A033's subject
+        // from A046's, so it is pinned on both sides.
+        let mut arena = AstArena::default();
+        let (glued, _) = alloc_negation(&mut arena, UnaryOperatorKind::Neg, 0, "42", 1);
+        assert_eq!(
+            separated_negated_literal(&arena, glued),
+            None,
+            "a literal beginning one byte after the minus is written glued"
+        );
+        let (spaced, spaced_literal) =
+            alloc_negation(&mut arena, UnaryOperatorKind::Neg, 0, "42", 2);
+        assert_eq!(
+            separated_negated_literal(&arena, spaced),
+            Some(spaced_literal),
+            "one space is already a separation, and the operand is what A022 skips"
+        );
+        let (far, far_literal) = alloc_negation(&mut arena, UnaryOperatorKind::Neg, 0, "42", 40);
+        assert_eq!(
+            separated_negated_literal(&arena, far),
+            Some(far_literal),
+            "a newline or a comment is no different from a space"
+        );
+    }
+
+    #[test]
+    fn separated_negated_literal_ignores_a_signed_literal() {
+        // `- -42` is separated, but the operand carries its own sign: that is
+        // A033's doubled-operator subject, and A046's advice there would spell
+        // out a form A033 rejects.
+        let mut arena = AstArena::default();
+        let (doubled, _) = alloc_negation(&mut arena, UnaryOperatorKind::Neg, 0, "-42", 2);
+        assert_eq!(separated_negated_literal(&arena, doubled), None);
+    }
+
+    #[test]
+    fn separated_negated_literal_ignores_other_operators() {
+        // Only `-` is folded into a literal by the lexer, so only `-` has a
+        // second spelling to remove.
+        let mut arena = AstArena::default();
+        for op in [UnaryOperatorKind::Not, UnaryOperatorKind::BitNot] {
+            let (expr, _) = alloc_negation(&mut arena, op.clone(), 0, "42", 2);
+            assert_eq!(
+                separated_negated_literal(&arena, expr),
+                None,
+                "`{op:?}` is out of scope"
+            );
+        }
+    }
+
+    #[test]
+    fn separated_negated_literal_ignores_a_non_literal_operand() {
+        // Negating a value has no glued spelling to prefer.
+        let mut arena = AstArena::default();
+        let name = alloc_ident(&mut arena, "x");
+        let operand = arena.exprs.alloc(ExprData {
+            location: Location::new(2, 3, 1, 3, 1, 4),
+            kind: Expr::Identifier(name),
+        });
+        let expr = arena.exprs.alloc(ExprData {
+            location: Location::new(0, 3, 1, 1, 1, 2),
+            kind: Expr::PrefixUnary {
+                expr: operand,
+                op: UnaryOperatorKind::Neg,
+            },
+        });
+        assert_eq!(separated_negated_literal(&arena, expr), None);
     }
 
     #[test]

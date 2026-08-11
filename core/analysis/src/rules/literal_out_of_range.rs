@@ -9,12 +9,31 @@
 //! to put a literal out of range. The diagnostic therefore also carries the
 //! position that supplied the type, so the report says why this literal is being
 //! measured against this type.
+//!
+//! ## Rule ownership: the separated sign belongs to A046
+//!
+//! A literal is measured exactly as written, un-negated, so a minus separated
+//! from its digits used to make this rule speak about a value nobody wrote: at
+//! `i8`, `- 128` reported "literal 128 is out of range" — true of `128` and
+//! false of the `-128` the author meant. A046 rejects that spelling outright, so
+//! this rule steps aside for it, skipping every literal
+//! `walker::separated_negated_literal` identifies. Both rules read the shared
+//! predicate rather than restating it, so neither can start flagging a shape the
+//! other has stopped covering.
+//!
+//! The handoff accepts nothing: a magnitude that fits no type in either sign
+//! (`- 300` at `i8`) is still an error, reported by A046. Once the spelling is
+//! fixed to `-300` the literal carries its sign, arrives here as a single token,
+//! and is measured as the negative number it is. Parenthesized negation
+//! (`-(128)`) is not part of the handoff — A046 does not claim it and this rule
+//! still measures `128`.
 
 use inference_ast::ids::{ExprId, NodeId};
 use inference_ast::nodes::Expr;
 use inference_type_checker::errors::TypeMismatchContext;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
+use rustc_hash::FxHashSet;
 
 use crate::{
     errors::{AnalysisDiagnostic, LabeledDiagnostic},
@@ -33,8 +52,19 @@ crate::rule! {
         walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             let module_path = walk_ctx.module_path.clone();
             walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
+                // Collected in a pass of its own rather than while checking, so
+                // that skipping does not depend on a parent being visited before
+                // its operand.
+                let mut owned_by_a046 = FxHashSet::default();
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
-                    check_number_literal(ctx, &module_path, sub_id, &mut errors);
+                    if let Some(literal_id) = walker::separated_negated_literal(arena, sub_id) {
+                        owned_by_a046.insert(literal_id);
+                    }
+                });
+                walker::walk_expr(arena, expr_id, &mut |sub_id| {
+                    if !owned_by_a046.contains(&sub_id) {
+                        check_number_literal(ctx, &module_path, sub_id, &mut errors);
+                    }
                 });
             });
         });

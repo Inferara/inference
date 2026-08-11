@@ -64,9 +64,20 @@
 //! - A039: Struct uzumaki (`@`) passed directly as a function argument
 //! - A040: Uzumaki (`@`) on a struct- or array-typed array-literal element
 //!
-//! ### Syntactic Restrictions (A033)
+//! ### Syntactic Restrictions (A033, A046)
 //!
 //! - A033: Combined/adjacent prefix unary operators (`--x`, `-~x`, `!!x`, including parenthesized variants)
+//! - A046: A unary minus applied to a numeric literal must be written glued to
+//!   the digits. `-128` is one token whose text carries the sign; `- 128` is a
+//!   negation of the bare literal `128`, which every later rule measures on its
+//!   own — so the same value used to compile or fail depending on a space
+//!   (`- 100` was accepted at `i8`, `- 128` was not). Rejecting the separated
+//!   spelling leaves one canonical way to write a negative literal. A022 skips
+//!   exactly the literals this rule claims, so the range check never reports a
+//!   magnitude the author did not write; nothing is silently accepted, since
+//!   every skipped literal is rejected here. Negating a non-literal (`- x`),
+//!   `-(128)`, and binary subtraction are out of scope. See
+//!   [`rules::spaced_negative_literal`].
 //!
 //! ### Recursion (A035)
 //!
@@ -253,6 +264,7 @@ mod tests {
             AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
             AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
             AnalysisDiagnostic::FieldLessStructValue { name: "E".to_string(), position: "a struct literal", location: dummy_location() },
+            AnalysisDiagnostic::SpacedNegativeLiteral { value: "128".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

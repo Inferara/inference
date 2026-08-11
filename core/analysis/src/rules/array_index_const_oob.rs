@@ -8,9 +8,10 @@
 //! A negative literal such as `arr[-42]` lowers to a single `NumberLiteral`
 //! whose raw text keeps the leading `-`, so parsing the value as `i128` catches
 //! negative constant indices directly. Spaced forms like `arr[- 42]` lower to a
-//! `PrefixUnary` and are intentionally out of scope here; they fall to the future
-//! runtime guard. A literal too large to fit in `i128` is treated as out of
-//! bounds, mirroring `literal_out_of_range`'s parse-failure handling.
+//! `PrefixUnary` and are out of scope here — A046 rejects that spelling outright,
+//! so the only way to write a negative constant index is the glued one this rule
+//! sees. A literal too large to fit in `i128` is treated as out of bounds,
+//! mirroring `literal_out_of_range`'s parse-failure handling.
 
 use inference_ast::ids::NodeId;
 use inference_ast::nodes::Expr;

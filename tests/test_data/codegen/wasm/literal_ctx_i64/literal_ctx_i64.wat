@@ -31,7 +31,7 @@
   (export "call_with_literal" (func $call_with_literal))
   (export "return_literal" (func $return_literal))
   (export "return_glued_negative" (func $return_glued_negative))
-  (export "return_spaced_negation" (func $return_spaced_negation))
+  (export "return_parenthesized_negation" (func $return_parenthesized_negation))
   (export "parenthesized_literal" (func $parenthesized_literal))
   (export "complement_literal" (func $complement_literal))
   (export "shift_of_two_literals" (func $shift_of_two_literals))
@@ -104,7 +104,7 @@
     return
     unreachable
   )
-  (func $return_spaced_negation (;8;) (type 8) (result i64)
+  (func $return_parenthesized_negation (;8;) (type 8) (result i64)
     i64.const 0
     i64.const 42
     i64.sub
