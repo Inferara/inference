@@ -270,20 +270,19 @@ mod unchanged_diagnostics {
     use super::*;
 
     #[test]
-    fn duplicate_receiver_keeps_registration_diagnostic() {
-        // Two receivers means the second one is not first, but the pre-existing
-        // duplicate-binding diagnostic is the useful one and must stay the only
-        // report — the positional check reports the first receiver's position,
-        // which here is zero.
+    fn duplicate_receiver_is_not_reported_as_a_misplacement() {
+        // Two receivers means the second one is not first, but the duplicate is the
+        // useful diagnosis and must stay the only report — the positional check
+        // reports the first receiver's position, which here is zero.
         let source = r#"struct S { v: i32; fn twice(self, self) -> i32 { return 1; } }"#;
         let errors = diagnostics(source);
         assert!(
             errors.iter().any(|e| matches!(
                 e,
-                TypeCheckError::RegistrationFailed { name, reason: Some(reason), .. }
-                    if name == "self" && reason.contains("already declared in this scope")
+                TypeCheckError::DuplicateParameterName { function_name, parameter_name, .. }
+                    if function_name == "S::twice" && parameter_name == "self"
             )),
-            "duplicate receiver keeps its registration diagnostic: {errors:?}"
+            "duplicate receiver is reported as a duplicate parameter: {errors:?}"
         );
         assert!(
             !errors

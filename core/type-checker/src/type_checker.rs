@@ -34,8 +34,8 @@ use inference_ast::arena::AstArena;
 use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode, UnaryOperatorKind,
-    Visibility,
+    ArgData, ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode,
+    UnaryOperatorKind, Visibility,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -502,21 +502,7 @@ impl TypeChecker {
                         )
                     })
                     .collect();
-                {
-                    let mut seen_fields = FxHashSet::default();
-                    for field in fields {
-                        let field_name = arena[field.name].name.clone();
-                        if !seen_fields.insert(field_name.clone()) {
-                            self.push_error(
-                                TypeCheckError::DuplicateStructFieldDefinition {
-                                    struct_name: struct_name.clone(),
-                                    field_name,
-                                    location: arena[field.name].location,
-                                },
-                            );
-                        }
-                    }
-                }
+                self.report_type_declaration_diagnostics(def_id, ctx);
                 let method_ids: Vec<DefId> = methods.clone();
                 let vis_clone = vis.clone();
                 self.symbol_table
@@ -543,27 +529,18 @@ impl TypeChecker {
                         ..
                     } = &method_data.kind
                     {
-                        // A receiver in any position still sets `has_self`, so the
+                        // A receiver in any position sets `has_self`, so the
                         // function stays an instance method for the remainder of
-                        // checking and a misplaced one is reported once here at
-                        // its declaration instead of cascading into an
+                        // checking: classifying a misplaced receiver as an
+                        // associated function instead would cascade an
                         // `AssociatedFunctionCalledAsMethod` at every call site of
-                        // a method that is already rejected.
-                        let receiver_position = args
+                        // a method that is already rejected. The misplacement
+                        // itself is reported by `validate_signature_for_def`,
+                        // which unlike this pass also reaches a spec-inner struct
+                        // whose name collides with an already-registered one.
+                        let has_self = args
                             .iter()
-                            .position(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
-                        let has_self = receiver_position.is_some();
-                        if let Some(position) = receiver_position
-                            && position > 0
-                        {
-                            self.push_error(TypeCheckError::SelfReferenceNotFirstParameter {
-                                function_name: format!(
-                                    "{struct_name}::{}",
-                                    arena[*method_name].name
-                                ),
-                                location: args[position].location,
-                            });
-                        }
+                            .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
 
                         let tp_names: Vec<String> =
                             type_params.iter().map(|p| arena[*p].name.clone()).collect();
@@ -630,19 +607,7 @@ impl TypeChecker {
                 let enum_name = arena[*name].name.clone();
                 let variant_names: Vec<&str> =
                     variants.iter().map(|v| arena[*v].name.as_str()).collect();
-                {
-                    let mut seen_variants = FxHashSet::default();
-                    for variant_id in variants {
-                        let variant_name = arena[*variant_id].name.as_str();
-                        if !seen_variants.insert(variant_name) {
-                            self.push_error(TypeCheckError::DuplicateEnumVariant {
-                                enum_name: enum_name.clone(),
-                                variant_name: variant_name.to_string(),
-                                location: arena[*variant_id].location,
-                            });
-                        }
-                    }
-                }
+                self.report_type_declaration_diagnostics(def_id, ctx);
                 self.symbol_table
                     .register_enum(&enum_name, &variant_names, vis.clone(), location)
                     .unwrap_or_else(|_| {
@@ -672,6 +637,7 @@ impl TypeChecker {
                 let mut guard = SpecScopeGuard::enter(self, &spec_name);
                 for inner_id in inner {
                     if guard.reject_duplicate_spec_struct_or_enum(inner_id, ctx) {
+                        guard.report_type_declaration_diagnostics(inner_id, ctx);
                         continue;
                     }
                     guard.register_type_for_def(inner_id, ctx);
@@ -749,6 +715,50 @@ impl TypeChecker {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Reports the diagnostics a `struct` or `enum` declaration carries in its own
+    /// right — a repeated field, a repeated variant — independently of whether the
+    /// declaration goes on to register.
+    ///
+    /// A spec-inner type refused registration by
+    /// [`Self::reject_duplicate_spec_struct_or_enum`] would otherwise take its
+    /// declaration errors down with it. The collision is fatal, so the user would
+    /// never see the second mistake, not even after renaming: nothing beyond the
+    /// collision was ever reported for that declaration.
+    fn report_type_declaration_diagnostics(&mut self, def_id: DefId, ctx: &TypedContext) {
+        let arena = ctx.arena();
+        match &arena[def_id].kind {
+            Def::Struct { name, fields, .. } => {
+                let struct_name = arena[*name].name.clone();
+                let mut seen_fields = FxHashSet::default();
+                for field in fields {
+                    let field_name = arena[field.name].name.clone();
+                    if !seen_fields.insert(field_name.clone()) {
+                        self.push_error(TypeCheckError::DuplicateStructFieldDefinition {
+                            struct_name: struct_name.clone(),
+                            field_name,
+                            location: arena[field.name].location,
+                        });
+                    }
+                }
+            }
+            Def::Enum { name, variants, .. } => {
+                let enum_name = arena[*name].name.clone();
+                let mut seen_variants = FxHashSet::default();
+                for variant_id in variants {
+                    let variant_name = arena[*variant_id].name.as_str();
+                    if !seen_variants.insert(variant_name) {
+                        self.push_error(TypeCheckError::DuplicateEnumVariant {
+                            enum_name: enum_name.clone(),
+                            variant_name: variant_name.to_string(),
+                            location: arena[*variant_id].location,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1029,21 +1039,54 @@ impl TypeChecker {
         for (module_path, defs) in Self::files_with_defs(ctx) {
             self.enter_file(&module_path);
             for def_id in defs {
-                self.validate_signature_for_def(def_id, ctx);
+                self.validate_signature_for_def(def_id, None, ctx);
             }
         }
         self.exit_files();
     }
 
-    fn validate_signature_for_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
+    /// Validates one definition's signature, recursing into a struct's methods and
+    /// a spec's inner definitions.
+    ///
+    /// `owner` names the struct a method is declared in and is `None` for a free,
+    /// spec-inner or `external` function. It is threaded syntactically rather than
+    /// re-derived from the symbol table because a spec-inner struct whose name
+    /// collides with an already-registered one never registers its methods, and a
+    /// collided declaration is exactly the case these diagnostics exist to reach.
+    fn validate_signature_for_def(
+        &mut self,
+        def_id: DefId,
+        owner: Option<&str>,
+        ctx: &mut TypedContext,
+    ) {
         let kind = ctx.arena()[def_id].kind.clone();
         match &kind {
             Def::Function {
+                name,
                 type_params,
                 args,
                 returns,
                 ..
             } => {
+                let label = {
+                    let fn_name = &ctx.arena()[*name].name;
+                    owner.map_or_else(|| fn_name.clone(), |o| format!("{o}::{fn_name}"))
+                };
+                self.report_duplicate_parameters(args, &label, ctx);
+                // A receiver is only a method receiver when the function is
+                // declared inside a struct; elsewhere `SelfReferenceInFunction`
+                // and `SelfReferenceOutsideMethod` own the case.
+                if owner.is_some()
+                    && let Some(position) = args
+                        .iter()
+                        .position(|a| matches!(a.kind, ArgKind::SelfRef { .. }))
+                    && position > 0
+                {
+                    self.push_error(TypeCheckError::SelfReferenceNotFirstParameter {
+                        function_name: label,
+                        location: args[position].location,
+                    });
+                }
                 let tp_names: Vec<String> = type_params
                     .iter()
                     .map(|p| ctx.arena()[*p].name.clone())
@@ -1062,8 +1105,19 @@ impl TypeChecker {
                     self.validate_type(ctx.arena(), *return_type_id, &tp_names);
                 }
             }
+            // Signature *types* of an extern are validated in `collect_for_def`,
+            // which has no type parameters to thread and so needs no second pass;
+            // only the parameter names are checked here, where every function-like
+            // declaration is reached.
+            Def::ExternFunction { name, args, .. } => {
+                let func_name = ctx.arena()[*name].name.clone();
+                self.report_duplicate_parameters(args, &func_name, ctx);
+            }
             Def::Struct {
-                fields, methods, ..
+                name,
+                fields,
+                methods,
+                ..
             } => {
                 // Field types are validated here, after imports resolve, so a
                 // field declared with an item-imported or `::`-qualified type is
@@ -1073,9 +1127,10 @@ impl TypeChecker {
                 for field in fields {
                     self.validate_type(ctx.arena(), field.ty, &[]);
                 }
+                let struct_name = ctx.arena()[*name].name.clone();
                 let method_ids: Vec<DefId> = methods.clone();
                 for method_id in method_ids {
-                    self.validate_signature_for_def(method_id, ctx);
+                    self.validate_signature_for_def(method_id, Some(&struct_name), ctx);
                 }
             }
             Def::Spec { name, defs, .. } => {
@@ -1083,10 +1138,40 @@ impl TypeChecker {
                 let inner: Vec<DefId> = defs.clone();
                 let mut guard = SpecScopeGuard::enter(self, &spec_name);
                 for inner_id in inner {
-                    guard.validate_signature_for_def(inner_id, ctx);
+                    guard.validate_signature_for_def(inner_id, None, ctx);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Reports each parameter name bound more than once in one function-like
+    /// declaration, anchored at the parameter that repeats it.
+    ///
+    /// `_: T` and a bare positional type bind no name, so repeats of those are
+    /// legal and skipped. A receiver participates under the name `self`, which no
+    /// named parameter can claim — the parser rejects `self:` outright — so one set
+    /// covers both spellings.
+    fn report_duplicate_parameters(
+        &mut self,
+        args: &[ArgData],
+        function_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let mut bound = FxHashSet::default();
+        for arg in args {
+            let parameter_name = match &arg.kind {
+                ArgKind::Named { name, .. } => ctx.arena()[*name].name.clone(),
+                ArgKind::SelfRef { .. } => "self".to_string(),
+                ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => continue,
+            };
+            if !bound.insert(parameter_name.clone()) {
+                self.push_error(TypeCheckError::DuplicateParameterName {
+                    function_name: function_name.to_string(),
+                    parameter_name,
+                    location: arg.location,
+                });
+            }
         }
     }
 
@@ -1520,6 +1605,12 @@ impl TypeChecker {
 
         self.symbol_table.push_scope();
 
+        // A repeated parameter name is reported once, at the signature, by
+        // `report_duplicate_parameters`. Only the first of the repeats is bound, so
+        // this pass neither re-reports the collision nor lets a body reference go
+        // unresolved; a body binding that collides with a parameter is a distinct
+        // mistake and still reaches `push_variable_to_scope` below.
+        let mut bound = FxHashSet::default();
         for arg in &args_snapshot {
             match &arg.kind {
                 ArgKind::Named {
@@ -1532,6 +1623,9 @@ impl TypeChecker {
                         TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
                     );
                     let name_str = arena[*arg_name].name.clone();
+                    if !bound.insert(name_str.clone()) {
+                        continue;
+                    }
                     if let Err(err) = self
                         .symbol_table
                         .push_variable_to_scope(&name_str, arg_type, *is_mut)
@@ -1591,6 +1685,10 @@ impl TypeChecker {
         let body_id = *body;
 
         self.symbol_table.push_scope();
+        // As in `infer_variables`: a repeated parameter name — `self` included — is
+        // reported at the signature, and binding only the first of the repeats
+        // leaves the collision out of this pass without unresolving the body.
+        let mut bound = FxHashSet::default();
         for arg in &args_snapshot {
             match &arg.kind {
                 ArgKind::Named {
@@ -1603,6 +1701,9 @@ impl TypeChecker {
                         TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
                     );
                     let name_str = arena[*arg_name].name.clone();
+                    if !bound.insert(name_str.clone()) {
+                        continue;
+                    }
                     if let Err(err) = self
                         .symbol_table
                         .push_variable_to_scope(&name_str, arg_type, *is_mut)
@@ -1616,6 +1717,9 @@ impl TypeChecker {
                     }
                 }
                 ArgKind::SelfRef { is_mut } => {
+                    if !bound.insert("self".to_string()) {
+                        continue;
+                    }
                     if let Err(err) =
                         self.symbol_table
                             .push_variable_to_scope("self", self_type.clone(), *is_mut)

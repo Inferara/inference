@@ -434,6 +434,26 @@ pub enum TypeCheckError {
         location: Location,
     },
 
+    /// Two parameters of one function-like declaration bind the same name. A
+    /// repeated `self` receiver participates under the name `self`.
+    ///
+    /// The repeat is not shadowing: a body reference resolves to the first
+    /// binding, so the later parameter is unreachable and the value passed for it
+    /// is unnameable. Code generation keys parameter slots by name and asserts
+    /// the collision away rather than emitting a module, delegating the diagnosis
+    /// here. Naming the mistake is what makes that delegation real — the
+    /// scope-registration failure it replaces surfaced the symbol table's
+    /// internal wording, and covered only declarations whose parameters reach a
+    /// scope, leaving an `external fn` accepted.
+    #[error(
+        "{location}: parameter `{parameter_name}` is declared more than once in `{function_name}`"
+    )]
+    DuplicateParameterName {
+        function_name: String,
+        parameter_name: String,
+        location: Location,
+    },
+
     #[error("{location}: cannot resolve import path: {path}")]
     ImportResolutionFailed { path: String, location: Location },
 
@@ -876,6 +896,7 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::SelfReferenceNotFirstParameter { location, .. }
+            | TypeCheckError::DuplicateParameterName { location, .. }
             | TypeCheckError::ImportResolutionFailed { location, .. }
             | TypeCheckError::QualifiedPathNotAValue { location, .. }
             | TypeCheckError::QualifiedPathNotReexported { location, .. }
@@ -1374,6 +1395,19 @@ mod tests {
              note: a method call passes the receiver ahead of the arguments written at the call \
              site, so the first parameter position is reserved for it; move `self` (or `mut self`) \
              to the front of the parameter list"
+        );
+    }
+
+    #[test]
+    fn display_duplicate_parameter_name() {
+        let err = TypeCheckError::DuplicateParameterName {
+            function_name: "Number::plus".to_string(),
+            parameter_name: "self".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: parameter `self` is declared more than once in `Number::plus`"
         );
     }
 
