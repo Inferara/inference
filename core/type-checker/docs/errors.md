@@ -392,6 +392,33 @@ struct Number {
 **Solution**: Move `self` (or `mut self`) to the front of the parameter list:
 `fn plus(self, delta: i32) -> i32`.
 
+### `DuplicateParameterName`
+
+A function-like declaration — a free function, a method, or an `external fn` — binds the same
+parameter name more than once. A repeated `self` (or `mut self`) receiver participates under the
+name `self`, since no named parameter can spell it.
+
+**Examples**:
+
+```rust
+// Named parameter repeated
+pub fn add(x: i32, x: i32) -> i32 { return x; }  // Error: parameter `x` is declared more than once in `add`
+
+// Repeated `self` receiver
+struct Number {
+    value: i32;
+
+    fn plus(self, self) -> i32 {
+        // Error: parameter `self` is declared more than once in `Number::plus`
+        return self.value;
+    }
+}
+```
+
+**Solution**: Rename or remove the repeated parameter. Only the first binding of a repeated name
+is reachable from the body — the later parameter is unreachable and the argument passed for it is
+unnameable.
+
 ### `InstanceMethodCalledAsAssociated`
 
 An instance method (one that takes `self`) was called using `Type::method()` syntax instead of
