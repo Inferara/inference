@@ -1248,6 +1248,17 @@ impl Compiler {
                         "parameter `self` collides with an existing entry in locals_map; \
                          the type-checker should have rejected duplicate parameter names",
                     );
+                    // Ordered after the collision check so that a second receiver
+                    // is reported as the duplicate it is, rather than as the
+                    // misplacement its slot index also looks like.
+                    assert_eq!(
+                        local_idx,
+                        u32::from(is_sret),
+                        "parameter `self` does not occupy the first parameter slot; a call pushes \
+                         the receiver ahead of the user arguments, so a receiver declared later \
+                         would bind an argument's value; the type-checker should have rejected a \
+                         method whose `self` is not its first parameter",
+                    );
                     local_idx += 1;
                     // self is a struct pointer; method body will use memory loads/stores
                     self.compound_params.insert("self".to_string());
@@ -2850,6 +2861,10 @@ impl Compiler {
                 _ => None,
             };
 
+            // The receiver precedes the written arguments so that it lands in the
+            // callee's first parameter slot (here the second, behind the sret
+            // pointer). The frontend reserves that slot for the receiver and the
+            // callee's parameter emission asserts it.
             if let Some(receiver) = receiver_expr {
                 self.lower_expression(arena, receiver, ctx, None);
             }
@@ -3657,7 +3672,10 @@ impl Compiler {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
         }
 
-        // Push receiver as the implicit `self` argument
+        // Push receiver as the implicit `self` argument. It lands in the callee's
+        // first parameter slot (behind the sret pointer when there is one), which
+        // the frontend reserves for the receiver and the callee's parameter
+        // emission asserts.
         self.lower_expression(arena, receiver_expr_id, ctx, None);
 
         // Push user arguments
@@ -4167,6 +4185,10 @@ impl Compiler {
         if self.callee_is_sret(&resolved) {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
 
+            // The receiver precedes the written arguments so that it lands in the
+            // callee's first parameter slot (here the second, behind the sret
+            // pointer). The frontend reserves that slot for the receiver and the
+            // callee's parameter emission asserts it.
             if let Some(receiver) = receiver_expr {
                 self.lower_expression(arena, receiver, ctx, None);
             }

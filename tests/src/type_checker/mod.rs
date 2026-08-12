@@ -10,5 +10,6 @@ mod literal_typing;
 mod multi_file;
 mod multi_file_matrix;
 mod pow_rejection;
+mod self_parameter_position;
 mod struct_tests;
 mod type_info_tests;

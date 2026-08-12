@@ -240,12 +240,22 @@ pub(crate) enum ResolvedNominalType {
 /// - **Associated functions** (`has_self = false`): Do not take `self`.
 ///   Typically constructors like `new()`. Called via `Type::function(args)`.
 ///
+/// A receiver declared in any later position is reported as
+/// [`TypeCheckError::SelfReferenceNotFirstParameter`], which is fatal at the
+/// `build_typed_context` boundary, so `has_self = true` means the receiver is
+/// the first declared parameter in every program that passes type checking.
+/// Registration stores the flag verbatim, so a context recovered through
+/// `check_with_diagnostics` can still carry a receiver in a later position;
+/// code generation asserts the position itself rather than trusting this.
+///
 /// # Fields
 ///
 /// - `signature`: Function information including name, parameters, and return type
 /// - `visibility`: Access control for the method
 /// - `scope_id`: The scope where this method is defined (for visibility checking)
 /// - `has_self`: Whether this method takes `self` as first argument
+///
+/// [`TypeCheckError::SelfReferenceNotFirstParameter`]: crate::errors::TypeCheckError::SelfReferenceNotFirstParameter
 #[derive(Debug, Clone)]
 pub(crate) struct MethodInfo {
     pub(crate) signature: FuncInfo,
@@ -255,7 +265,8 @@ pub(crate) struct MethodInfo {
 }
 
 impl MethodInfo {
-    /// Returns true if this method takes `self` as first argument.
+    /// Returns true if this method takes `self`, which is its first declared
+    /// parameter in every program that passes type checking.
     ///
     /// Instance methods (`has_self = true`) are called via `instance.method()`.
     /// Associated functions (`has_self = false`) are called via `Type::function()`.

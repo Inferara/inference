@@ -368,6 +368,30 @@ fn test() {
 }
 ```
 
+### `SelfReferenceNotFirstParameter`
+
+A method declares its `self` (or `mut self`) receiver somewhere other than the first
+parameter.
+
+**Example**:
+
+```rust
+struct Number {
+    value: i32;
+
+    fn plus(delta: i32, self) -> i32 {
+        // Error: `self` must be the first parameter of method `Number::plus`
+        // note: a method call passes the receiver ahead of the arguments written at
+        //       the call site, so the first parameter position is reserved for it;
+        //       move `self` (or `mut self`) to the front of the parameter list
+        return self.value + delta;
+    }
+}
+```
+
+**Solution**: Move `self` (or `mut self`) to the front of the parameter list:
+`fn plus(self, delta: i32) -> i32`.
+
 ### `InstanceMethodCalledAsAssociated`
 
 An instance method (one that takes `self`) was called using `Type::method()` syntax instead of

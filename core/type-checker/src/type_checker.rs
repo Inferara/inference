@@ -543,9 +543,27 @@ impl TypeChecker {
                         ..
                     } = &method_data.kind
                     {
-                        let has_self = args
+                        // A receiver in any position still sets `has_self`, so the
+                        // function stays an instance method for the remainder of
+                        // checking and a misplaced one is reported once here at
+                        // its declaration instead of cascading into an
+                        // `AssociatedFunctionCalledAsMethod` at every call site of
+                        // a method that is already rejected.
+                        let receiver_position = args
                             .iter()
-                            .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
+                            .position(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
+                        let has_self = receiver_position.is_some();
+                        if let Some(position) = receiver_position
+                            && position > 0
+                        {
+                            self.push_error(TypeCheckError::SelfReferenceNotFirstParameter {
+                                function_name: format!(
+                                    "{struct_name}::{}",
+                                    arena[*method_name].name
+                                ),
+                                location: args[position].location,
+                            });
+                        }
 
                         let tp_names: Vec<String> =
                             type_params.iter().map(|p| arena[*p].name.clone()).collect();
