@@ -419,6 +419,21 @@ pub enum TypeCheckError {
     #[error("{location}: self reference is only allowed in methods, not functions")]
     SelfReferenceOutsideMethod { location: Location },
 
+    /// An instance call lowers the receiver ahead of the arguments written at
+    /// the call site while the callee's parameters keep declaration order, so a
+    /// receiver declared after another parameter would bind that argument's
+    /// value. Rejecting the declaration is what keeps the confusion out of code
+    /// generation: before it was diagnosed, such a method returned a silently
+    /// wrong result, and when the swapped values differed in width it emitted a
+    /// module that fails WebAssembly validation.
+    #[error(
+        "{location}: `self` must be the first parameter of method `{function_name}`\nnote: a method call passes the receiver ahead of the arguments written at the call site, so the first parameter position is reserved for it; move `self` (or `mut self`) to the front of the parameter list"
+    )]
+    SelfReferenceNotFirstParameter {
+        function_name: String,
+        location: Location,
+    },
+
     #[error("{location}: cannot resolve import path: {path}")]
     ImportResolutionFailed { path: String, location: Location },
 
@@ -860,6 +875,7 @@ impl TypeCheckError {
             | TypeCheckError::BinaryOperandTypeMismatch { location, .. }
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }
+            | TypeCheckError::SelfReferenceNotFirstParameter { location, .. }
             | TypeCheckError::ImportResolutionFailed { location, .. }
             | TypeCheckError::QualifiedPathNotAValue { location, .. }
             | TypeCheckError::QualifiedPathNotReexported { location, .. }
@@ -1343,6 +1359,21 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: self reference is only allowed in methods, not functions"
+        );
+    }
+
+    #[test]
+    fn display_self_reference_not_first_parameter() {
+        let err = TypeCheckError::SelfReferenceNotFirstParameter {
+            function_name: "Number::plus".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `self` must be the first parameter of method `Number::plus`\n\
+             note: a method call passes the receiver ahead of the arguments written at the call \
+             site, so the first parameter position is reserved for it; move `self` (or `mut self`) \
+             to the front of the parameter list"
         );
     }
 

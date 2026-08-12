@@ -326,3 +326,98 @@ mod duplicate_local_name {
         );
     }
 }
+
+mod misplaced_self_parameter {
+    use crate::utils::build_ast;
+    use inference_type_checker::check_with_diagnostics;
+
+    /// Generates WASM from the *partial* typed context the lossless type-check
+    /// entry point returns, catching panics.
+    ///
+    /// The fatal entry point `try_codegen` uses aborts on the frontend's
+    /// misplaced-receiver diagnostic, so codegen is never reached through it.
+    /// Going through `check_with_diagnostics` keeps the recovered context and
+    /// feeds it to codegen anyway, which is how a library consumer that ignores
+    /// diagnostics would drive the backend.
+    fn try_codegen_ignoring_diagnostics(source: &str) -> Result<(), String> {
+        let arena = build_ast(source.to_string());
+        let outcome = check_with_diagnostics(arena);
+        assert!(
+            !outcome.errors.is_empty(),
+            "the frontend must have rejected this source before codegen"
+        );
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inference_wasm_codegen::codegen(
+                &outcome.typed_context,
+                "output",
+                inference_wasm_codegen::CodegenOptions::default(),
+            )
+        }))
+        .map_err(|panic| {
+            if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            }
+        })?
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    /// A caller that ignores the frontend diagnostic must hit the backend's own
+    /// guard rather than emit a module whose receiver slot holds an argument.
+    #[test]
+    fn receiver_in_second_slot_hits_the_codegen_guard() {
+        let result = try_codegen_ignoring_diagnostics(
+            r#"struct Number { value: i32; fn plus(delta: i32, self) -> i32 { return self.value + delta; } } pub fn main() -> i32 { let number: Number = Number { value: 40 }; return number.plus(2); }"#,
+        );
+        assert!(
+            result.is_err(),
+            "a misplaced receiver must not reach a generated module"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("parameter `self` does not occupy the first parameter slot"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// Same guard with a struct return, where the receiver's reserved slot sits
+    /// behind the sret pointer — the half of the assertion that would go unpinned
+    /// by the plain-return case alone.
+    #[test]
+    fn receiver_behind_sret_pointer_hits_the_codegen_guard() {
+        let result = try_codegen_ignoring_diagnostics(
+            r#"struct P { x: i32; y: i32; fn moved(dx: i32, self) -> P { return P { x: self.x + dx, y: self.y }; } } pub fn main() -> i32 { let p: P = P { x: 1, y: 2 }; let q: P = p.moved(10); return q.x; }"#,
+        );
+        assert!(
+            result.is_err(),
+            "a misplaced receiver behind an sret pointer must not reach a generated module"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("parameter `self` does not occupy the first parameter slot"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// A repeated receiver lands in a later slot too, so both backstops describe
+    /// it. The duplicate is the accurate diagnosis and must be the one reported.
+    #[test]
+    fn duplicated_receiver_reports_the_duplicate_not_the_misplacement() {
+        let result = try_codegen_ignoring_diagnostics(
+            r#"struct Number { value: i32; fn plus(self, delta: i32, self) -> i32 { return self.value + delta; } } pub fn main() -> i32 { let number: Number = Number { value: 40 }; return number.plus(2); }"#,
+        );
+        assert!(
+            result.is_err(),
+            "a duplicated receiver must not reach a generated module"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("collides with an existing entry in locals_map"),
+            "unexpected error message: {err}"
+        );
+    }
+}
