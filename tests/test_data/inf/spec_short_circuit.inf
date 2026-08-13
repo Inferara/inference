@@ -1,11 +1,29 @@
-// Short-circuit `&&`/`||` in proof mode. The executable functions `guard_div`
-// and `either` lower `&&`/`||` to valued `if (result i32)` blocks, so their
-// proof-mode translation is the first producer of
-// `BI_if (BT_valtype (Some (T_num T_i32)))` in the coqc corpus, and it survives
-// a future change that omits spec-function bodies from the module record. No
-// `&&`/`||` anywhere lowers to a term-level `Binop_i BOI_and` — that shape now
-// comes only from bitwise `&`/`|` and narrowing masks, which this fixture has
-// none of — so the coqc gate pins the valued-`BI_if` shape without one.
+// Short-circuit `&&`/`||` in proof mode, in both positions the translation
+// treats differently.
+//
+// The executable functions `guard_div` and `either` lower `&&`/`||` to valued
+// `if (result i32)` blocks, so their proof-mode translation is the first
+// producer of `BI_if (BT_valtype (Some (T_num T_i32)))` in the coqc corpus, and
+// it survives a future change that omits spec-function bodies from the module
+// record.
+//
+// The specification carries both positions. In *assertion* position (the
+// `assume` in `guard_prop`) an operator splits into `HA_and`/`Hor`. In *term*
+// position it cannot: the term language is strict in every operand and has no
+// conditional, so an eager `T_binop` would demand a value the program never
+// computes. Each term-position operator therefore becomes a fresh `HA_ex`
+// witness pinned by a two-armed constraint, and the four spec functions below
+// put one in each place a term is read — a pure `let`, an `if` condition, an
+// operand of a comparison, and nested as the right operand of another
+// short-circuit, which is the only position whose constraint must be planted
+// inside a conditional arm rather than beside it.
+//
+// That coverage is what makes the gate's absence claim mean something: no
+// `&&`/`||` anywhere lowers to a term-level `Binop_i BOI_and`/`BOI_or`, and
+// with term position now exercised the claim is enforced rather than merely
+// unreachable. The fixture deliberately contains no bitwise `&`/`|` and no
+// sub-word unsigned type, the only two other sources of an `and` mask, so a
+// regression to eager lowering has nowhere to hide.
 
 fn guard_div(x: i32) -> bool {
     return x != 0 && 100 / x > 1;
@@ -35,5 +53,34 @@ spec ShortCircuitSpec {
         if either(a > 0, a < 0) {
             assert(a != 0);
         }
+    }
+    // Term position: a pure `let`, whose witness scopes over the rest of the
+    // block under the slot's typing guard.
+    fn let_witness_prop() forall {
+        let x: i32 = @;
+        assume {
+            assert(x == 0);
+        }
+        let safe: bool = x == 0 || 100 / x > 1;
+        assert(safe);
+    }
+    // Term position: an `if` condition, where one binder wraps both arms.
+    fn if_witness_prop() forall {
+        let y: i32 = @;
+        if y > 0 && 100 / y > 1 {
+            assert(y > 0);
+        }
+    }
+    // Term position: an operand of a comparison.
+    fn compare_witness_prop() forall {
+        let z: i32 = @;
+        assert((z == 0 || z != 0) == true);
+    }
+    // Term position with the right operand itself short-circuit: the inner
+    // constraint belongs inside the outer operator's skipped arm, since that is
+    // the only arm on which `100 / n` is evaluated.
+    fn nested_witness_prop() forall {
+        let n: i32 = @;
+        assert((n == 0 || n != 0 && 100 / n == 100 / n) == true);
     }
 }

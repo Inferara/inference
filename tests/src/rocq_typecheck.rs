@@ -91,6 +91,12 @@ mod gate {
         "list hassert",
         "term_eq",
         "Himpl",
+        // `Hor` reached the corpus only with the short-circuit witness. Until
+        // then no fixture emitted one, so the `coqc` compile below never
+        // elaborated the constructor at all and a drift in its arity or
+        // spelling would have passed unnoticed — the same class of hole the
+        // `BI_forall` arity bug shipped through.
+        "Hor ",
         "T_app ",
         "T_local ",
         "HA_ex",
@@ -515,12 +521,22 @@ mod gate {
     /// `&&`/`||` lower to a valued `if (result i32)` block, which proof-mode
     /// translation renders as a valued `BI_if`. This fixture is the first corpus
     /// producer of `BT_valtype (Some ...)` — via its *executable* functions
-    /// `guard_div`/`either`, whose bodies survive in the module record; assert
-    /// the exact valued shape and that the fixture emits no term-level
-    /// `Binop_i BOI_and` — since `&&`/`||` no longer lower to `i32.and`/`i32.or`,
-    /// that shape would only reappear from bitwise `&`/`|` or narrowing masks
-    /// (which this fixture has none of), so a regression to strict `i32.and`
-    /// lowering surfaces here rather than silently.
+    /// `guard_div`/`either`, whose bodies survive in the module record.
+    ///
+    /// The obligations are the other half. A term-position `&&`/`||` cannot be
+    /// an eager `T_binop`: the term language is strict in every operand, so an
+    /// eager encoding demands the operand the compiled code branches around and
+    /// turns a claim the program satisfies into a refutable one. The fixture
+    /// therefore carries the witness shape in every term position — a pure
+    /// `let`, an `if` condition, a comparison operand, and nested on the right —
+    /// and this gate pins both directions: the two eager spellings are absent,
+    /// and the witness spellings that replaced them are present.
+    ///
+    /// The absence half is only as strong as the fixture's reach. `&&`/`||`
+    /// aside, `Binop_i BOI_and`/`BOI_or` come from bitwise `&`/`|` and from the
+    /// masks that narrow a sub-word unsigned result, and the fixture has neither,
+    /// so a regression to eager lowering has nowhere to hide behind an unrelated
+    /// producer.
     #[test]
     fn short_circuit_emits_valued_bi_if() {
         let v = generate_v("spec_short_circuit.inf", "spec_short_circuit");
@@ -528,10 +544,45 @@ mod gate {
             v.contains("BI_if (BT_valtype (Some (T_num T_i32)))"),
             "expected a valued `BI_if` from short-circuit `&&`/`||` lowering; got:\n{v}"
         );
-        assert!(
-            !v.contains("Binop_i BOI_and"),
-            "short-circuit lowering must not emit a term-level `Binop_i BOI_and`; got:\n{v}"
-        );
+        for eager in ["Binop_i BOI_and", "Binop_i BOI_or"] {
+            assert!(
+                !v.contains(eager),
+                "short-circuit lowering must not emit a term-level `{eager}`; got:\n{v}"
+            );
+        }
+        for (needle, what) in [
+            (
+                "HA_ex (HA_and (Hor ",
+                "a term-position operator is an `HA_ex` binder whose body leads \
+                 with the two-armed constraint pinning it",
+            ),
+            (
+                "(HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i ROI_eq) \
+                 (T_local 0%N) (T_const (Vi32 0))) (T_const (Vi32 0)))) \
+                 (term_eq (T_lvar 0) (T_const (Vi32 1))))",
+                "the taken arm of a `||` pins the witness to 1 without \
+                 evaluating the right operand",
+            ),
+            (
+                "(HA_and (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) \
+                 (T_local 0%N) (T_const (Vi32 0))) (T_const (Vi32 0))) \
+                 (term_eq (T_lvar 0) (T_const (Vi32 0))))",
+                "the skipped arm of an `&&` pins the witness to 0 without \
+                 evaluating the right operand",
+            ),
+            (
+                "HA_ex (HA_ex (HA_and (Hor ",
+                "a right-nested pair of operators binds two witnesses",
+            ),
+            (
+                "(term_eq (T_relop T_i32 (Relop_i ROI_eq) (T_local 0%N) \
+                 (T_const (Vi32 0))) (T_const (Vi32 0))) (HA_and (Hor ",
+                "the inner operator's constraint sits inside the outer's \
+                 skipped arm, the only arm that evaluates it",
+            ),
+        ] {
+            assert!(v.contains(needle), "{what}; expected `{needle}` in:\n{v}");
+        }
     }
 
     /// Committed `.v` golden for the PrimeExample fixture — the repository's first
