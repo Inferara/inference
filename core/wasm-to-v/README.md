@@ -333,9 +333,10 @@ Inference extends WebAssembly with custom instructions for non-deterministic com
 This crate's parser recognizes all six via the forked `inf-wasmparser`
 dependency, but **none of them are translated into Rocq instructions any
 more**. The consumer this crate targets, wasm-verifier (a private
-Inferara repository; the vendored signature stub in `rocq-stub/` and
-[`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md) are the in-repo statement of its
-interface), sits on vanilla WasmCert-Coq, which has no
+Inferara repository; [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md) is the
+in-repo statement of its interface, and the vendored signature stub in
+`rocq-stub/` declares the subset of that interface this crate can emit),
+sits on vanilla WasmCert-Coq, which has no
 `BI_forall`/`BI_exists`/`BI_assume`/`BI_unique`/`BI_uzumaki_num`
 counterparts to translate into.
 

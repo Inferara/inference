@@ -33,7 +33,7 @@ mod gate {
     use crate::utils::{build_ast, get_test_data_path};
     use inference_type_checker::TypeCheckerBuilder;
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -48,6 +48,12 @@ mod gate {
     /// unit tests in `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
     /// `build_v_rejects_unique_block_with_p002` in `apps/infs`) rather than by a
     /// corpus entry that would compile against the stub.
+    ///
+    /// The last two entries exist for operator coverage rather than for a proof
+    /// shape: between them they put every arithmetic, bitwise, shift and
+    /// comparison operator the obligation printer can spell into a fixture
+    /// `coqc` elaborates. They are split by theme rather than merged because a
+    /// gate failure should name the operator family it is about (#401).
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -63,6 +69,8 @@ mod gate {
         ("spec_narrow_abi.inf", "spec_narrow_abi"),
         ("spec_literal_ctx.inf", "spec_literal_ctx"),
         ("spec_negative_consts.inf", "spec_negative_consts"),
+        ("spec_bitwise_arith.inf", "spec_bitwise_arith"),
+        ("spec_operator_matrix.inf", "spec_operator_matrix"),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -75,6 +83,21 @@ mod gate {
     /// surviving bodies, so a regression that reintroduced one would fail the
     /// stub compile, not this needle set. Asserting these keeps the `coqc` gate
     /// meaningful even if a future change stops emitting one of them.
+    ///
+    /// [`every_stub_declaration_has_a_producer`] now audits constructor
+    /// coverage mechanically, which makes this list narrower than it used to be
+    /// but not redundant, because the two ask different questions. The audit
+    /// asks whether *some* gated module names a constructor, counting the
+    /// hand-assembled WAT modules; this list asks whether the *corpus* still
+    /// emits one, and the corpus is the only place the real `.inf` → type-check
+    /// → codegen → translate chain runs. A lowering change that stopped
+    /// emitting `BI_loop` from a source `while` would leave the audit green on
+    /// the strength of a hand-written module and fail here. The needles are
+    /// also applied *forms* rather than bare names — `BI_if (`,
+    /// `BT_valtype (Some`, `list hassert` — where the audit is name-level by
+    /// construction. What the audit catches and this list cannot is everything
+    /// nobody thought to write down: a hand-maintained needle list only ever
+    /// guards what somebody remembered to add, which is the #401 hole itself.
     const REQUIRED_CONSTRUCTS: &[&str] = &[
         "BI_if (",
         "BI_loop (",
@@ -102,6 +125,105 @@ mod gate {
         "HA_ex",
         "HA_has_type ",
         "BT_valtype (Some",
+    ];
+
+    /// Every `Binop_i` spelling the obligation printer can write, in the order
+    /// `core/wasm-to-v/src/hassert_print.rs` matches them.
+    ///
+    /// The obligation printer and the instruction translator are two separate
+    /// emitters with two separate per-operator match arms, and this list is the
+    /// first one's. It is deliberately not derived from [`INTEGER_BINOPS`]: the
+    /// `hassert` term language has no rotate, because the source language has no
+    /// rotate operator to build one from, so the two lists differ by exactly the
+    /// two rotates and saying so explicitly is clearer than a filter.
+    ///
+    /// A spelling absent from every emitted `.v` is a spelling `coqc` never
+    /// elaborates, which is the hole this list exists to keep closed (#401): the
+    /// arm could be renamed or given the wrong arity and the gate would still
+    /// pass. Adding an arm to the printer means adding a fixture that produces
+    /// it, not just a row here.
+    const OBLIGATION_BINOPS: &[&str] = &[
+        "BOI_add",
+        "BOI_sub",
+        "BOI_mul",
+        "(BOI_div SX_S)",
+        "(BOI_div SX_U)",
+        "(BOI_rem SX_S)",
+        "(BOI_rem SX_U)",
+        "BOI_and",
+        "BOI_or",
+        "BOI_xor",
+        "BOI_shl",
+        "(BOI_shr SX_S)",
+        "(BOI_shr SX_U)",
+    ];
+
+    /// Every `Relop_i` spelling the obligation printer can write. Unlike the
+    /// binops this is the same set the instruction translator carries — see
+    /// [`OBLIGATION_BINOPS`] for why the two are still listed separately.
+    const OBLIGATION_RELOPS: &[&str] = &[
+        "ROI_eq",
+        "ROI_ne",
+        "(ROI_lt SX_S)",
+        "(ROI_lt SX_U)",
+        "(ROI_gt SX_S)",
+        "(ROI_gt SX_U)",
+        "(ROI_le SX_S)",
+        "(ROI_le SX_U)",
+        "(ROI_ge SX_S)",
+        "(ROI_ge SX_U)",
+    ];
+
+    /// The two integer widths every operator arm is duplicated across, in both
+    /// emitters. `T_i32` and `T_i64` select different arms, so a spelling is
+    /// only covered once it has been elaborated at both.
+    const NUMBER_TYPES: &[&str] = &["T_i32", "T_i64"];
+
+    /// WASM integer binary operators, each paired with the `Binop_i` spelling
+    /// the *instruction* translator must print for it.
+    ///
+    /// This drives both halves of
+    /// [`instruction_surface_type_checks_against_vendored_stub`]: the mnemonic
+    /// builds the WAT that produces the instruction, the spelling is the needle
+    /// that must come back. Deriving the fixture and the expectation from one
+    /// table is what makes the coverage claim total — a new arm in the
+    /// translator that nobody adds here produces no instruction and matches no
+    /// needle, so it cannot quietly appear covered.
+    ///
+    /// `rotl`/`rotr` are the reason this list is not reachable from `.inf` at
+    /// all: Inference has no rotate operator, so the only producer for those two
+    /// arms is a hand-assembled module.
+    const INTEGER_BINOPS: &[(&str, &str)] = &[
+        ("add", "BOI_add"),
+        ("sub", "BOI_sub"),
+        ("mul", "BOI_mul"),
+        ("div_s", "(BOI_div SX_S)"),
+        ("div_u", "(BOI_div SX_U)"),
+        ("rem_s", "(BOI_rem SX_S)"),
+        ("rem_u", "(BOI_rem SX_U)"),
+        ("and", "BOI_and"),
+        ("or", "BOI_or"),
+        ("xor", "BOI_xor"),
+        ("shl", "BOI_shl"),
+        ("shr_s", "(BOI_shr SX_S)"),
+        ("shr_u", "(BOI_shr SX_U)"),
+        ("rotl", "BOI_rotl"),
+        ("rotr", "BOI_rotr"),
+    ];
+
+    /// WASM integer comparisons, paired with the `Relop_i` spelling the
+    /// instruction translator must print. Used exactly like [`INTEGER_BINOPS`].
+    const INTEGER_RELOPS: &[(&str, &str)] = &[
+        ("eq", "ROI_eq"),
+        ("ne", "ROI_ne"),
+        ("lt_s", "(ROI_lt SX_S)"),
+        ("lt_u", "(ROI_lt SX_U)"),
+        ("gt_s", "(ROI_gt SX_S)"),
+        ("gt_u", "(ROI_gt SX_U)"),
+        ("le_s", "(ROI_le SX_S)"),
+        ("le_u", "(ROI_le SX_U)"),
+        ("ge_s", "(ROI_ge SX_S)"),
+        ("ge_u", "(ROI_ge SX_U)"),
     ];
 
     /// Proof-mode `.v` for one fixture, driven entirely in-process.
@@ -167,6 +289,130 @@ mod gate {
         assert_eq!(admit_open_proofs(input), expected);
     }
 
+    /// One generated module this suite hands to `coqc`.
+    struct GatedModule {
+        /// The fixture file for a corpus entry, the module name for a
+        /// hand-assembled one. Only a failure message reads it.
+        source: &'static str,
+        /// The name the translator was given; also the `.v` basename written
+        /// into the work directory.
+        module: &'static str,
+        /// Exactly the text `coqc` is handed — `Qed.` terminators already
+        /// rewritten by [`admit_open_proofs`].
+        v: String,
+    }
+
+    /// The hand-assembled gated modules. Each is a WASM module written directly
+    /// rather than compiled from `.inf`, reaching contract shapes Inference
+    /// codegen cannot produce.
+    ///
+    /// A closed enum rather than a list of names: the match in
+    /// [`HandbuiltModule::build`] is exhaustive, so a member cannot be added
+    /// without a builder and a gate cannot ask for a module that does not
+    /// exist. [`Self::ALL`] is the one part still written twice, and forgetting
+    /// a member there is caught downstream rather than by the compiler — an
+    /// unlisted member is a member [`gated_modules`] does not compile, so
+    /// whichever declarations it was written to produce come back unproduced
+    /// from [`every_stub_declaration_has_a_producer`].
+    #[derive(Clone, Copy)]
+    enum HandbuiltModule {
+        ForeignSegments,
+        ModuleSurface,
+        InstructionSurface,
+        Obligations,
+    }
+
+    impl HandbuiltModule {
+        /// Every member, in gate order.
+        const ALL: &'static [Self] = &[
+            Self::ForeignSegments,
+            Self::ModuleSurface,
+            Self::InstructionSurface,
+            Self::Obligations,
+        ];
+
+        /// The name the translator is given; also the `.v` basename and the
+        /// work-directory label.
+        fn module_name(self) -> &'static str {
+            match self {
+                Self::ForeignSegments => "foreign_segments",
+                Self::ModuleSurface => "module_surface",
+                Self::InstructionSurface => "instruction_surface",
+                Self::Obligations => "handbuilt_obligations",
+            }
+        }
+
+        /// Builds this member. The only place a hand-assembled [`GatedModule`]
+        /// is constructed, so the per-shape gate below and [`gated_modules`]
+        /// cannot be looking at different text for the same member.
+        fn build(self) -> GatedModule {
+            let module = self.module_name();
+            let v = match self {
+                Self::ForeignSegments => translate_wat(module, FOREIGN_SEGMENTS_WAT),
+                Self::ModuleSurface => translate_wat(module, MODULE_SURFACE_WAT),
+                Self::InstructionSurface => translate_wat(module, &instruction_surface_wat()),
+                Self::Obligations => handbuilt_obligations_v(module),
+            };
+            GatedModule {
+                source: module,
+                module,
+                v: admit_open_proofs(&v),
+            }
+        }
+    }
+
+    /// Proof-mode `.v` for every corpus fixture, in [`CORPUS`] order.
+    fn corpus_modules() -> Vec<GatedModule> {
+        CORPUS
+            .iter()
+            .map(|&(source, module)| GatedModule {
+                source,
+                module,
+                v: admit_open_proofs(&generate_v(source, module)),
+            })
+            .collect()
+    }
+
+    /// Every module this suite compiles with `coqc`: the whole corpus plus every
+    /// hand-assembled module.
+    ///
+    /// This is the producer set [`every_stub_declaration_has_a_producer`]
+    /// measures the vendored stub against, and "produced" is only worth
+    /// anything if the producing module is one `coqc` elaborates. That audit
+    /// therefore compiles this whole list itself, rather than trusting the
+    /// per-shape gates below to have compiled it — a gate that is deleted,
+    /// `#[ignore]`d or short-circuited can no longer leave the audit certifying
+    /// coverage nobody checked.
+    ///
+    /// What the list still relies on the gates for is *membership*: a future
+    /// gate that builds its own module instead of taking one from here would be
+    /// compiled by nobody but itself. That drift fails the audit rather than
+    /// passing it — the module's declarations look unproduced — so the unsafe
+    /// direction is closed and the remaining one is merely noisy.
+    fn gated_modules() -> Vec<GatedModule> {
+        let mut modules = corpus_modules();
+        modules.extend(HandbuiltModule::ALL.iter().map(|&m| m.build()));
+        modules
+    }
+
+    /// The vendored stub's `.v` files, as (namespace directory, module name),
+    /// in the dependency order `_CoqProject` fixes: the stub is a two-namespace
+    /// tree, `wasm/` (`Wasm.*`, the WASM datatypes) and `wasm_verifier/`
+    /// (`WasmVerifier.*`, the assertion language and the proof obligations),
+    /// and the second imports the first.
+    ///
+    /// [`compile_stub`] compiles exactly these files and
+    /// [`stub_declarations`] parses exactly these files, so the coverage audit
+    /// can never measure itself against a contract the gate does not compile.
+    const STUB_MODULES: &[(&str, &str)] = &[
+        ("wasm", "bytes"),
+        ("wasm", "numerics"),
+        ("wasm", "datatypes"),
+        ("wasm", "host"),
+        ("wasm_verifier", "Assertions"),
+        ("wasm_verifier", "Verifier"),
+    ];
+
     /// Physical path of the vendored stub directory, relative to this crate.
     fn stub_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -230,19 +476,7 @@ mod gate {
         std::fs::create_dir_all(work.join("wasm")).expect("create work/wasm dir");
         std::fs::create_dir_all(work.join("wasm_verifier")).expect("create work/wasm_verifier dir");
         let src_stub = stub_dir();
-        // The stub is a two-namespace tree: `wasm/` (`Wasm.*`, the WASM datatypes)
-        // and `wasm_verifier/` (`WasmVerifier.*`, the assertion language and the
-        // proof-obligation predicates). Copy both, then compile each `.v` in
-        // dependency order (`Wasm` first, since `WasmVerifier` imports it).
-        let stub_modules: &[(&str, &str)] = &[
-            ("wasm", "bytes"),
-            ("wasm", "numerics"),
-            ("wasm", "datatypes"),
-            ("wasm", "host"),
-            ("wasm_verifier", "Assertions"),
-            ("wasm_verifier", "Verifier"),
-        ];
-        for (dir, module) in stub_modules {
+        for (dir, module) in STUB_MODULES {
             let rel = format!("{dir}/{module}.v");
             std::fs::copy(
                 src_stub.join(dir).join(format!("{module}.v")),
@@ -250,7 +484,7 @@ mod gate {
             )
             .unwrap_or_else(|e| panic!("copy stub {rel}: {e}"));
         }
-        for (dir, module) in stub_modules {
+        for (dir, module) in STUB_MODULES {
             let file = work.join(dir).join(format!("{module}.v"));
             if let Err(log) = coqc_compile(coqc, &work, &file) {
                 panic!(
@@ -266,14 +500,11 @@ mod gate {
     #[test]
     fn corpus_type_checks_against_vendored_stub() {
         // 1. Generate every corpus module in-process.
-        let generated: Vec<(&str, String)> = CORPUS
-            .iter()
-            .map(|&(file, name)| (file, admit_open_proofs(&generate_v(file, name))))
-            .collect();
+        let generated = corpus_modules();
 
         // 2. Always-on guard: the corpus must keep exercising the proof surface,
         //    independent of whether `coqc` is present on this machine.
-        let all: String = generated.iter().map(|(_, v)| v.as_str()).collect();
+        let all: String = generated.iter().map(|m| m.v.as_str()).collect();
         for needle in REQUIRED_CONSTRUCTS {
             assert!(
                 all.contains(needle),
@@ -282,20 +513,44 @@ mod gate {
             );
         }
 
-        // 3. The `byte_scope` preamble line is conditional on a data segment,
+        // 3. The obligation printer's operator arms, each at both widths. This
+        //    is the corpus's half of the #401 coverage: `T_binop`/`T_relop` come
+        //    from a spec body and nothing else, so a hand-assembled WASM module
+        //    cannot stand in for a fixture here the way it can for instructions.
+        for (term, family, spellings) in [
+            ("T_binop", "Binop_i", OBLIGATION_BINOPS),
+            ("T_relop", "Relop_i", OBLIGATION_RELOPS),
+        ] {
+            for spelling in spellings {
+                for width in NUMBER_TYPES {
+                    let needle = format!("{term} {width} ({family} {spelling})");
+                    assert!(
+                        all.contains(&needle),
+                        "no corpus fixture puts `{needle}` in an obligation, so `coqc` \
+                         never elaborates that arm of the obligation printer and a \
+                         rename or arity change in it would ship green — add a `spec` \
+                         that produces it to tests/test_data/inf/"
+                    );
+                }
+            }
+        }
+
+        // 4. The `byte_scope` preamble line is conditional on a data segment,
         //    and Inference codegen emits none, so no corpus module carries one.
         //    Pinning its absence keeps the preamble free of anything a module
         //    does not use, and keeps every committed `.v` byte-identical to the
         //    output it had before byte literals gained a scope requirement.
-        for (file, v) in &generated {
+        for m in &generated {
             assert!(
-                !v.contains("Open Scope byte_scope."),
-                "`{file}` carries no data segment, so its preamble must not \
-                 open `byte_scope`; got:\n{v}"
+                !m.v.contains("Open Scope byte_scope."),
+                "`{}` carries no data segment, so its preamble must not \
+                 open `byte_scope`; got:\n{}",
+                m.source,
+                m.v
             );
         }
 
-        // 4. The coqc compile is gated: real in CI, skipped locally when absent.
+        // 5. The coqc compile is gated: real in CI, skipped locally when absent.
         let Some(coqc) = find_coqc() else {
             eprintln!(
                 "skipped: coqc not found (set COQC or put coqc on PATH). \
@@ -305,18 +560,19 @@ mod gate {
             return;
         };
 
-        // 5. Compile the vendored stub once into a private temp dir.
+        // 6. Compile the vendored stub once into a private temp dir.
         let work = compile_stub(&coqc, "corpus");
 
-        // 6. Type-check every generated module against the compiled stub.
-        for (file, v) in &generated {
-            let v_path = work.join(format!("{}.v", file.trim_end_matches(".inf")));
-            std::fs::write(&v_path, v).unwrap_or_else(|e| panic!("write {file}: {e}"));
+        // 7. Type-check every generated module against the compiled stub.
+        for m in &generated {
+            let v_path = work.join(format!("{}.v", m.module));
+            std::fs::write(&v_path, &m.v).unwrap_or_else(|e| panic!("write {}: {e}", m.source));
             if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
                 panic!(
-                    "coqc rejected proof-mode output for `{file}` against the \
+                    "coqc rejected proof-mode output for `{}` against the \
                      vendored Wasm stub:\n{log}\n\
                      work dir kept for inspection: {}",
+                    m.source,
                     work.display()
                 );
             }
@@ -324,6 +580,42 @@ mod gate {
 
         let _ = std::fs::remove_dir_all(&work);
     }
+
+    /// The WAT for [`foreign_segments_type_check_against_vendored_stub`]: two
+    /// `br_table`s (explicit targets with a distinct default, and a default-only
+    /// table), all three element modes across both item forms (bare function
+    /// indexes and `ref.func` initializer expressions), and active and passive
+    /// data segments.
+    ///
+    /// The passive segment spans both byte spellings and the whole byte range:
+    /// the two extremes, so a spelling that only works for the printable middle
+    /// fails here, and `0x12`/`0x1f` from the twelve-value gap the contract
+    /// declares no hex notation for, so a uniform hex spelling fails here too.
+    const FOREIGN_SEGMENTS_WAT: &str = r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (table (;0;) 4 4 funcref)
+          (memory (;0;) 1)
+          (elem (;0;) (i32.const 0) func 0 1)
+          (elem (;1;) declare func 1)
+          (elem (;2;) funcref (item ref.func 0))
+          (data (;0;) (i32.const 0) "hi")
+          (data (;1;) "\00\12\1f\ff")
+          (func (;0;) (type 0) (param i32) (result i32)
+            block
+              block
+                local.get 0
+                br_table 0 1 1
+              end
+              block
+                local.get 0
+                br_table 0
+              end
+            end
+            local.get 0)
+          (func (;1;) (type 0) (param i32) (result i32)
+            local.get 0))
+        "#;
 
     /// A handcrafted foreign module carrying the element, data, and `br_table`
     /// shapes Inference codegen never produces.
@@ -346,48 +638,8 @@ mod gate {
     /// list is empty (`br_table 0`) is valid WASM carrying nothing else.
     #[test]
     fn foreign_segments_type_check_against_vendored_stub() {
-        const MODULE: &str = "foreign_segments";
-        // Two `br_table`s (explicit targets with a distinct default, and a
-        // default-only table), all three element modes across both item forms
-        // (bare function indexes and `ref.func` initializer expressions), and
-        // active and passive data segments. The passive segment spans both byte
-        // spellings and the whole byte range: the two extremes, so a spelling
-        // that only works for the printable middle fails here, and `0x12`/`0x1f`
-        // from the twelve-value gap the contract declares no hex notation for,
-        // so a uniform hex spelling fails here too.
-        let bytes = wat::parse_str(
-            r#"
-            (module
-              (type (;0;) (func (param i32) (result i32)))
-              (table (;0;) 4 4 funcref)
-              (memory (;0;) 1)
-              (elem (;0;) (i32.const 0) func 0 1)
-              (elem (;1;) declare func 1)
-              (elem (;2;) funcref (item ref.func 0))
-              (data (;0;) (i32.const 0) "hi")
-              (data (;1;) "\00\12\1f\ff")
-              (func (;0;) (type 0) (param i32) (result i32)
-                block
-                  block
-                    local.get 0
-                    br_table 0 1 1
-                  end
-                  block
-                    local.get 0
-                    br_table 0
-                  end
-                end
-                local.get 0)
-              (func (;1;) (type 0) (param i32) (result i32)
-                local.get 0))
-            "#,
-        )
-        .expect("foreign-segment fixture assembles");
-
-        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let empty_hspecs = inference::HSpecMap::default();
-        let v = inference::wasm_to_v(MODULE, &bytes, &empty, &empty_hspecs)
-            .unwrap_or_else(|e| panic!("wasm_to_v failed for the foreign fixture: {e}"));
+        let module = HandbuiltModule::ForeignSegments.build();
+        let v = &module.v;
 
         // Teeth without `coqc`: the exact terms the contract accepts.
         for needle in [
@@ -432,28 +684,1164 @@ mod gate {
             );
         }
 
+        type_check_with_coqc(
+            &module,
+            "Foreign module generated and its element, data and `br_table` \
+             shapes verified",
+        );
+    }
+
+    /// Assembles a hand-written WAT module and drives it through the same public
+    /// `wasm_to_v` entry the corpus uses, with no explicit spec or obligation
+    /// maps.
+    ///
+    /// Building the module from text rather than from codegen is what makes the
+    /// hand-assembled gates possible at all: it reaches constructs Inference
+    /// never emits, and it produces a `.wasm` with no embedded
+    /// `inference.hspecs` section for an explicit map to contradict.
+    fn translate_wat(module_name: &str, wat: &str) -> String {
+        let bytes = wat::parse_str(wat)
+            .unwrap_or_else(|e| panic!("`{module_name}` fixture assembles: {e}"));
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let empty_hspecs = inference::HSpecMap::default();
+        inference::wasm_to_v(module_name, &bytes, &empty, &empty_hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for `{module_name}`: {e}"))
+    }
+
+    /// Compiles one gated module against a freshly built copy of the vendored
+    /// stub, or skips with a message when `coqc` is unavailable.
+    ///
+    /// Taking a whole [`GatedModule`] rather than a loose name and string keeps
+    /// a gate pointed at the same text [`gated_modules`] collects: the only
+    /// hand-assembled `GatedModule` builder is [`HandbuiltModule::build`], so a
+    /// gate reaches its module through a variant rather than by assembling one
+    /// of its own. The module name doubles as the private work directory's
+    /// label, so concurrently running gates in this binary never share one, and
+    /// `covered` completes the skip line so a local run says exactly which half
+    /// of the gate did and did not happen.
+    fn type_check_with_coqc(module: &GatedModule, covered: &str) {
         let Some(coqc) = find_coqc() else {
             eprintln!(
                 "skipped: coqc not found (set COQC or put coqc on PATH). \
-                 Foreign module generated and its emitted shapes verified; \
-                 type-checking against the vendored stub was not run."
+                 {covered}; type-checking against the vendored stub was not run."
             );
             return;
         };
-
-        let work = compile_stub(&coqc, "foreign");
-        let v_path = work.join(format!("{MODULE}.v"));
-        std::fs::write(&v_path, admit_open_proofs(&v))
-            .unwrap_or_else(|e| panic!("write {MODULE}.v: {e}"));
+        let work = compile_stub(&coqc, module.module);
+        let v_path = work.join(format!("{}.v", module.module));
+        std::fs::write(&v_path, &module.v)
+            .unwrap_or_else(|e| panic!("write {}.v: {e}", module.module));
         if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
             panic!(
-                "coqc rejected the foreign module's `.v` against the vendored \
-                 Wasm stub:\n{log}\n\
+                "coqc rejected `{}`'s `.v` against the vendored Wasm stub:\n{log}\n\
                  work dir kept for inspection: {}",
+                module.module,
                 work.display()
             );
         }
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A handcrafted module carrying the import, export, global and `start`
+    /// surface Inference codegen never produces.
+    ///
+    /// Inference emits no `start` section and no exported table, memory or
+    /// global. It does emit an import section — one entry per bound `extern
+    /// fn`, `wasm_codegen_emit_import_section` in
+    /// `core/wasm-codegen/src/compiler.rs` — but none of those survive to the
+    /// translator: the static-merge linker is fail-closed on imports
+    /// (`LinkError::UnsatisfiedImport` in `core/wasm-linker/src/lib.rs`), and
+    /// `infc` links before it translates and aborts on a link failure, so `-v`
+    /// is only ever handed a module whose imports are already merged away. That
+    /// left `MID_func`/`MID_table`/`MID_mem`/`MID_global`, `MED_table`/
+    /// `MED_mem`/`MED_global`, `MUT_const` and `modstart_func` with no producer
+    /// anywhere in the gate and `coqc` never elaborated one (#401).
+    /// `MID_table` is what that costs: it takes a whole `table_type` while its
+    /// neighbour `MID_mem` takes a bare `limits`, the emitter applied it to a
+    /// bare `limits` too, and nothing type-checked the result.
+    ///
+    /// Both mutabilities appear at both an import and a definition, because
+    /// `MUT_const`/`MUT_var` are chosen in two unrelated places — the global
+    /// section and the import descriptor.
+    ///
+    /// The index arithmetic is the other half. An imported function occupies
+    /// index 0, so the module's one defined function is index 1 everywhere it is
+    /// named: the `start` section and the function export both carry the shifted
+    /// value, while `T_app` obligations use the unshifted `mod_funcs` position.
+    /// Confusing the two numbering schemes is a live hazard the corpus cannot
+    /// expose, since every corpus module has zero imports and the two coincide.
+    /// Table, memory and global export indices are not remapped at all — they
+    /// arrive already counting the imports — which is why the exported *defined*
+    /// const global is `MED_global 2%N` and not `0%N`.
+    #[test]
+    fn module_surface_type_checks_against_vendored_stub() {
+        let module = HandbuiltModule::ModuleSurface.build();
+        let v = &module.v;
+
+        for needle in [
+            // Every import descriptor. `MID_func` carries a *type* index, the
+            // other three carry the described type itself.
+            r#"Mi "env" "imported_fn" (MID_func 1%N)"#,
+            "MID_table {|tt_limits := {|lim_min := 1%N; lim_max := None|}; \
+             tt_elem_type := T_funcref|}",
+            "MID_mem {|lim_min := 1%N; lim_max := Some(2%N)|}",
+            "MID_global {|tg_mut := MUT_const; tg_t := T_num T_i32|}",
+            "MID_global {|tg_mut := MUT_var; tg_t := T_num T_i64|}",
+            // Every export descriptor, at the indices described above.
+            r#"Me "exported_table" (MED_table 0%N)"#,
+            r#"Me "exported_mem" (MED_mem 0%N)"#,
+            r#"Me "exported_const_global" (MED_global 2%N)"#,
+            r#"Me "exported_mut_global" (MED_global 3%N)"#,
+            r#"Me "exported_fn" (MED_func 1%N)"#,
+            "mod_start := Some {|modstart_func := 1%N|}",
+            // Defined globals, both mutabilities. The initializer list is
+            // formatted raggedly, so only the constructor prefix is pinned.
+            "Mg MUT_const (T_num T_i32) (",
+            "Mg MUT_var (T_num T_i64) (",
+            // A call whose callee is an import, the operand form the corpus's
+            // import-free modules cannot produce.
+            "BI_call 0%N ::",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the module-surface fixture must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        for wrong in [
+            // The two descriptors' payloads swapped. `MID_table` applied to a
+            // bare `limits` is the defect this fixture was written for; the
+            // mirror is what a mechanical "fix" in the other direction looks
+            // like.
+            "MID_table {|lim_min",
+            "MID_mem {|tt_limits",
+            // A defined global renumbered from zero, as if the export index
+            // shared the function remap. Both exported globals are defined, so
+            // neither may name an imported slot.
+            "MED_global 0%N",
+            "MED_global 1%N",
+            // `start` and the function export renumbered into `mod_funcs`
+            // space, which is the numbering `T_app` uses and these must not.
+            "modstart_func := 0%N",
+            "MED_func 0%N",
+        ] {
+            assert!(
+                !v.contains(wrong),
+                "`{wrong}` is not a term the proof contract accepts; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc(
+            &module,
+            "Module-surface fixture generated and its import, export, global \
+             and start shapes verified",
+        );
+    }
+
+    /// The WAT for [`module_surface_type_checks_against_vendored_stub`]: every
+    /// import and export descriptor, both global mutabilities at both an import
+    /// and a definition, and a `start` section.
+    const MODULE_SURFACE_WAT: &str = r#"
+        (module
+          (type $void (func))
+          (type $i2i (func (param i32) (result i32)))
+          (import "env" "imported_fn" (func $imported_fn (type $i2i)))
+          (import "env" "imported_table" (table $imported_table 1 funcref))
+          (import "env" "imported_mem" (memory $imported_mem 1 2))
+          (import "env" "imported_const_global" (global $imported_const_global i32))
+          (import "env" "imported_mut_global" (global $imported_mut_global (mut i64)))
+          (global $const_global i32 (i32.const 7))
+          (global $mut_global (mut i64) (i64.const 8))
+          (export "exported_table" (table $imported_table))
+          (export "exported_mem" (memory $imported_mem))
+          (export "exported_const_global" (global $const_global))
+          (export "exported_mut_global" (global $mut_global))
+          (export "exported_fn" (func $entry))
+          (start $entry)
+          (func $entry (type $void)
+            i32.const 1
+            call $imported_fn
+            drop
+            nop))
+        "#;
+
+    /// A handcrafted module carrying the instruction surface Inference codegen
+    /// never reaches, plus the complete integer operator matrix.
+    ///
+    /// Inference has no rotate operator, no reference types, no `select`, no
+    /// table, no `unreachable`, and its memory access is confined to the shapes
+    /// its own lowering emits — so roughly half of the translator's per-operator
+    /// match arms had no producer and were never elaborated (#401). A WAT module
+    /// reaches all of them, and reaches them through the same public entry the
+    /// corpus uses.
+    ///
+    /// The operator matrix is generated from [`INTEGER_BINOPS`] and
+    /// [`INTEGER_RELOPS`] rather than written out: the same table supplies the
+    /// mnemonic that produces each instruction and the spelling that must come
+    /// back, so no arm can be listed as covered without a producer behind it.
+    /// Both widths are emitted because the translator matches `i32` and `i64`
+    /// in separate arms with separately-written strings.
+    ///
+    /// The load and store forms are the other bulk of it. Twelve loads and seven
+    /// stores each pair a storage width with — on the loads — a sign extension,
+    /// and every one is a distinct arm printing a distinct `Tp_i8`/`Tp_i16`/
+    /// `Tp_i32` and `SX_S`/`SX_U` combination that only a hand-written module
+    /// can request.
+    #[test]
+    fn instruction_surface_type_checks_against_vendored_stub() {
+        let module = HandbuiltModule::InstructionSurface.build();
+        let v = &module.v;
+
+        // The complete operator matrix, both emitters' widths.
+        for (instruction, family, spellings) in [
+            ("BI_binop", "Binop_i", INTEGER_BINOPS),
+            ("BI_relop", "Relop_i", INTEGER_RELOPS),
+        ] {
+            for (mnemonic, spelling) in spellings {
+                for width in NUMBER_TYPES {
+                    let needle = format!("{instruction} {width} ({family} {spelling})");
+                    assert!(
+                        v.contains(&needle),
+                        "the generated `{mnemonic}` at {width} must translate to \
+                         `{needle}`; got:\n{v}"
+                    );
+                }
+            }
+        }
+
+        for needle in [
+            // Instructions with no Inference source form at all.
+            "BI_unreachable ::",
+            "BI_select None ::",
+            "BI_ref_is_null ::",
+            "BI_ref_func 0%N ::",
+            // A block whose type is a type-section index rather than a single
+            // value type. Only a multi-value or parameterized signature forces
+            // it; anything spellable as a valtype is collapsed to `BT_valtype`.
+            "BI_block (BT_id 1%N)",
+            "BI_nop ::",
+            "BI_drop ::",
+            "BI_return ::",
+            // Locals carry a name-section annotation when the module names
+            // them, so the comment is part of the emitted text.
+            "BI_local_get 0%N (*narrow*) ::",
+            "BI_local_set 2%N (*spill*) ::",
+            "BI_local_tee 2%N (*spill*) ::",
+            "BI_global_get 0%N ::",
+            "BI_global_set 0%N ::",
+            // All twelve integer loads: the two full-width forms, then every
+            // narrow width at both sign extensions.
+            "BI_load T_i32 None (Ma 0%N 2%N)",
+            "BI_load T_i64 None (Ma 0%N 3%N)",
+            "BI_load T_i32 (Some (Tp_i8, SX_S)) (Ma 0%N 0%N)",
+            "BI_load T_i32 (Some (Tp_i8, SX_U)) (Ma 0%N 0%N)",
+            "BI_load T_i32 (Some (Tp_i16, SX_S)) (Ma 0%N 1%N)",
+            "BI_load T_i32 (Some (Tp_i16, SX_U)) (Ma 0%N 1%N)",
+            "BI_load T_i64 (Some (Tp_i8, SX_S)) (Ma 0%N 0%N)",
+            "BI_load T_i64 (Some (Tp_i8, SX_U)) (Ma 0%N 0%N)",
+            "BI_load T_i64 (Some (Tp_i16, SX_S)) (Ma 0%N 1%N)",
+            "BI_load T_i64 (Some (Tp_i16, SX_U)) (Ma 0%N 1%N)",
+            "BI_load T_i64 (Some (Tp_i32, SX_S)) (Ma 0%N 2%N)",
+            "BI_load T_i64 (Some (Tp_i32, SX_U)) (Ma 0%N 2%N)",
+            // All seven stores. A store has no sign extension, so its narrow
+            // forms carry a bare `Tp_*` where the load carries a pair — two
+            // shapes one arm could easily be written into.
+            "BI_store T_i32 None (Ma 0%N 2%N)",
+            "BI_store T_i64 None (Ma 0%N 3%N)",
+            "BI_store T_i32 (Some Tp_i8) (Ma 0%N 0%N)",
+            "BI_store T_i32 (Some Tp_i16) (Ma 0%N 1%N)",
+            "BI_store T_i64 (Some Tp_i8) (Ma 0%N 0%N)",
+            "BI_store T_i64 (Some Tp_i16) (Ma 0%N 1%N)",
+            "BI_store T_i64 (Some Tp_i32) (Ma 0%N 2%N)",
+            // Unary and test operators at both widths.
+            "BI_unop T_i32 (Unop_i UOI_clz)",
+            "BI_unop T_i32 (Unop_i UOI_ctz)",
+            "BI_unop T_i32 (Unop_i UOI_popcnt)",
+            "BI_unop T_i64 (Unop_i UOI_clz)",
+            "BI_unop T_i64 (Unop_i UOI_ctz)",
+            "BI_unop T_i64 (Unop_i UOI_popcnt)",
+            "BI_testop T_i32 TO_eqz",
+            "BI_testop T_i64 TO_eqz",
+            // Memory operators, including the bulk forms and the passive
+            // segment they read from.
+            "BI_memory_size ::",
+            "BI_memory_grow ::",
+            "BI_memory_copy ::",
+            "BI_memory_fill ::",
+            "BI_memory_init 1%N ::",
+            "BI_data_drop 1%N ::",
+            "MD_active 0%N",
+            "MD_passive",
+            // Table operators against both element types.
+            "BI_table_get 0%N ::",
+            "BI_table_set 0%N ::",
+            "BI_table_fill 0%N ::",
+            "BI_table_grow 0%N ::",
+            "BI_table_size 0%N ::",
+            "BI_table_size 1%N ::",
+            // `call_indirect` takes two immediates, the type and the table.
+            "BI_call_indirect 1%N 0%N ::",
+            // Reference types in a signature, a table type and a global type —
+            // the three places `T_ref` is written, by three different arms.
+            "Tf (T_ref T_funcref :: T_ref T_externref :: nil) (nil)",
+            "Mt {|lim_min := 2%N; lim_max := Some(2%N)|} T_funcref",
+            "Mt {|lim_min := 1%N; lim_max := None|} T_externref",
+            "Mg MUT_const (T_ref T_funcref) (",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the instruction-surface fixture must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        for wrong in [
+            // `BI_select` takes an `option (list value_type)`; dropping the
+            // immediate is exactly the #230 arity class.
+            "BI_select ::",
+            // The test operator is `TO_eqz`, alone among the operator families
+            // in not carrying an `I`. Its three siblings are `BOI_`/`ROI_`/
+            // `UOI_`-prefixed, which is what makes the typo plausible.
+            "TOI_eqz",
+            // Width dropped from the operators that take one.
+            "BI_testop TO_eqz",
+            "BI_unop (Unop_i",
+            // `call_indirect` reduced to a single immediate.
+            "BI_call_indirect 1%N ::",
+            // A load's storage width and sign extension written as separate
+            // arguments instead of the pair the contract takes.
+            "BI_load T_i32 (Tp_i8",
+            "BI_load T_i64 (Tp_i32",
+            // A store given the load's pair shape.
+            "BI_store T_i32 (Some (Tp_i8",
+        ] {
+            assert!(
+                !v.contains(wrong),
+                "`{wrong}` is not a term the proof contract accepts; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc(
+            &module,
+            "Instruction-surface fixture generated and its operator, memory, \
+             table and reference shapes verified",
+        );
+    }
+
+    /// The WAT for [`instruction_surface_type_checks_against_vendored_stub`].
+    ///
+    /// `$ops` collects the instructions that need surrounding module state — a
+    /// memory, two tables of different element types, a mutable global, an
+    /// active and a passive data segment. `$arith` is generated from the
+    /// operator tables. `$identity` exists to be the target of `ref.func`,
+    /// `call` and `call_indirect`, and the element segment declares it so
+    /// `ref.func` validates.
+    fn instruction_surface_wat() -> String {
+        let mut arith = String::new();
+        for (width, operand) in [("i32", "local.get $narrow"), ("i64", "local.get $wide")] {
+            for (mnemonic, _) in INTEGER_BINOPS.iter().chain(INTEGER_RELOPS.iter()) {
+                arith.push_str(&format!("{operand}\n{operand}\n{width}.{mnemonic}\ndrop\n"));
+            }
+        }
+        format!(
+            r#"
+            (module
+              (type $void (func))
+              (type $i2i (func (param i32) (result i32)))
+              (type $refs (func (param funcref externref)))
+              (table $funcs 2 2 funcref)
+              (table $externs 1 externref)
+              (memory 1 4)
+              (global $counter (mut i32) (i32.const 0))
+              (global $fnref funcref (ref.func $identity))
+              (data $active (i32.const 0) "hi")
+              (data $passive "\00\ff")
+              (elem (i32.const 0) func $identity)
+
+              (func $identity (type $i2i)
+                local.get 0)
+
+              (func $ref_params (type $refs)
+                local.get 0
+                ref.is_null
+                drop)
+
+              (func $arith (param $narrow i32) (param $wide i64)
+                {arith})
+
+              (func $ops (param $narrow i32) (result i32) (local $wide i64) (local $spill i32)
+                nop
+                i32.const 1
+                drop
+                local.get $narrow
+                i32.const 2
+                local.get $narrow
+                select
+                local.set $spill
+                local.get $narrow
+                local.tee $spill
+                drop
+
+                local.get $narrow
+                block (type $i2i)
+                end
+                drop
+
+                global.get $counter
+                global.set $counter
+
+                i32.const 0
+                i32.load
+                drop
+                i32.const 0
+                i64.load
+                drop
+                i32.const 0
+                i32.load8_s
+                drop
+                i32.const 0
+                i32.load8_u
+                drop
+                i32.const 0
+                i32.load16_s
+                drop
+                i32.const 0
+                i32.load16_u
+                drop
+                i32.const 0
+                i64.load8_s
+                drop
+                i32.const 0
+                i64.load8_u
+                drop
+                i32.const 0
+                i64.load16_s
+                drop
+                i32.const 0
+                i64.load16_u
+                drop
+                i32.const 0
+                i64.load32_s
+                drop
+                i32.const 0
+                i64.load32_u
+                drop
+
+                i32.const 0
+                i32.const 1
+                i32.store
+                i32.const 0
+                i64.const 1
+                i64.store
+                i32.const 0
+                i32.const 1
+                i32.store8
+                i32.const 0
+                i32.const 1
+                i32.store16
+                i32.const 0
+                i64.const 1
+                i64.store8
+                i32.const 0
+                i64.const 1
+                i64.store16
+                i32.const 0
+                i64.const 1
+                i64.store32
+
+                local.get $narrow
+                i32.clz
+                drop
+                local.get $narrow
+                i32.ctz
+                drop
+                local.get $narrow
+                i32.popcnt
+                drop
+                local.get $wide
+                i64.clz
+                drop
+                local.get $wide
+                i64.ctz
+                drop
+                local.get $wide
+                i64.popcnt
+                drop
+                local.get $narrow
+                i32.eqz
+                drop
+                local.get $wide
+                i64.eqz
+                drop
+
+                memory.size
+                drop
+                i32.const 1
+                memory.grow
+                drop
+                i32.const 0
+                i32.const 0
+                i32.const 1
+                memory.copy
+                i32.const 0
+                i32.const 0
+                i32.const 1
+                memory.fill
+                i32.const 0
+                i32.const 0
+                i32.const 1
+                memory.init $passive
+                data.drop $passive
+
+                i32.const 0
+                table.get $funcs
+                drop
+                i32.const 0
+                ref.func $identity
+                table.set $funcs
+                i32.const 0
+                ref.func $identity
+                i32.const 0
+                table.fill $funcs
+                ref.func $identity
+                i32.const 0
+                table.grow $funcs
+                drop
+                table.size $funcs
+                drop
+                table.size $externs
+                drop
+
+                local.get $narrow
+                i32.const 0
+                call_indirect $funcs (type $i2i)
+                drop
+                local.get $narrow
+                call $identity
+                drop
+
+                local.get $narrow
+                if
+                  local.get $narrow
+                  return
+                end
+                block
+                  unreachable
+                end
+                local.get $narrow))
+            "#
+        )
+    }
+
+    /// Translates a bare one-function module under an explicit obligation map
+    /// carrying the three `hassert` arms no source program can reach.
+    ///
+    /// The applied symbol resolves through the WASM name section against the raw
+    /// unsanitized function name, which is why the fixture names its function
+    /// with a `$` and why the module itself must stay anonymous — a name-section
+    /// module name would override the module name passed in.
+    fn handbuilt_obligations_v(module_name: &str) -> String {
+        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HTerm};
+
+        let bytes = wat::parse_str("(module (func $probe (param i32) (result i32) local.get 0))")
+            .expect("obligation-probe fixture assembles");
+
+        let probe = || HFnRef("probe".to_string());
+        // The raw variants, not the `HAssert::and`/`or`/`ex` smart
+        // constructors: those absorb `HA_true` and would collapse the tree
+        // before it reached the printer.
+        //
+        // `HA_not (HA_false)` rather than a bare `HA_false` keeps the assembled
+        // obligation a tautology instead of a contradiction, and the `HA_ex`
+        // binds the de Bruijn index the two applications read.
+        let body = HAssert::Ex(Box::new(HAssert::And(
+            Box::new(HAssert::Not(Box::new(HAssert::False))),
+            Box::new(HAssert::And(
+                Box::new(HAssert::Defined(HTerm::App(probe(), vec![HTerm::LVar(0)]))),
+                Box::new(HAssert::AppOk(probe(), vec![HTerm::LVar(0)])),
+            )),
+        )));
+
+        let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        spec_funcs.insert("Probe".to_string(), Vec::new());
+        let mut hspecs = inference::HSpecMap::default();
+        hspecs.insert("Probe".to_string(), vec![HSpecEntry::new(probe(), body)]);
+
+        inference::wasm_to_v(module_name, &bytes, &spec_funcs, &hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for the obligation probe: {e}"))
+    }
+
+    /// A hand-built obligation map carrying the three `hassert` arms no source
+    /// program can reach.
+    ///
+    /// `HA_false`, `HA_defined` and `HA_app_ok` are live arms of
+    /// `core/wasm-to-v/src/hassert_print.rs`, but nothing upstream builds them:
+    /// the codegen pass that lowers a `spec` body into the `hassert` IR has no
+    /// path that produces a `False`, a `Defined` or an `AppOk`, so no `.inf`
+    /// fixture can put one in front of `coqc` and all three arms were
+    /// unelaborated (#401). Handing `wasm_to_v` an explicit [`inference::HSpecMap`]
+    /// reaches the printer directly, without a source program.
+    ///
+    /// Two constraints make that possible. The module must come from WAT rather
+    /// than codegen, because a `.wasm` carrying its own `inference.hspecs`
+    /// section is compared against the explicit map and a disagreement is an
+    /// error — with no section present the map wins outright. And every key of
+    /// the obligation map must also be a key of the spec-index map, or the
+    /// translator rejects a spec that carries obligations while being absent
+    /// from `inference.spec_funcs`; an empty index list satisfies that.
+    #[test]
+    fn handbuilt_obligations_type_check_against_vendored_stub() {
+        let module = HandbuiltModule::Obligations.build();
+        let v = &module.v;
+
+        for needle in [
+            "HA_not (HA_false)",
+            // Both applications resolve the symbol to the function's `mod_funcs`
+            // index. `HA_defined` takes a term, `HA_app_ok` takes the index and
+            // the argument list directly — two different shapes around the same
+            // application, which is what makes writing one into the other's arm
+            // easy and worth type-checking.
+            "HA_defined (T_app 0 ((T_lvar 0) :: nil))",
+            "HA_app_ok 0 ((T_lvar 0) :: nil)",
+            "Definition handbuilt_obligations__Probe_specs : list hassert",
+            "ValidSpec handbuilt_obligations handbuilt_obligations__Probe_specs",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the obligation probe must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        for wrong in [
+            // The unresolved symbol leaking into the emitted term instead of the
+            // index it resolves to.
+            "HA_app_ok probe",
+            "T_app probe",
+            // The two arms' shapes swapped: `HA_defined` given an index, or
+            // `HA_app_ok` given a term.
+            "HA_defined 0",
+            "HA_app_ok (T_app",
+        ] {
+            assert!(
+                !v.contains(wrong),
+                "`{wrong}` is not a term the proof contract accepts; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc(
+            &module,
+            "Obligation probe generated and its `HA_false`, `HA_defined` and \
+             `HA_app_ok` shapes verified",
+        );
+    }
+
+    /// A stub declaration that no gated module can name, with the reason why.
+    ///
+    /// Each entry claims a producer is *impossible*, never merely absent: "no
+    /// fixture happens to emit it" is the hole this audit exists to close, so
+    /// the remedy for such a name is a fixture, not a row here. Every resident
+    /// below is a name the stub's own files spell while no emitted module can,
+    /// which means [`compile_stub`] elaborates it before every gate runs and a
+    /// drift in it fails the stub compile rather than shipping green.
+    const DECLARATIONS_WITHOUT_A_PRODUCER: &[(&str, &str)] = &[
+        (
+            "byte",
+            "an opaque type Parameter. An emitted module names byte *values* — \
+             the `#NN` notations and `encode` — never the type they inhabit, \
+             and elaborating any one of them forces it. The stub's own \
+             `moddata_init`/`imp_name` field types spell it.",
+        ),
+        (
+            "i32",
+            "an opaque machine-integer type Parameter. Emitted output reaches it \
+             only through the witness `i32m` and the constructor `VAL_int32`, \
+             both of which are produced; the type name itself has no emitted \
+             spelling.",
+        ),
+        (
+            "i64",
+            "an opaque machine-integer type Parameter, unreachable by name for \
+             the same reason as `i32`.",
+        ),
+        (
+            "HA_pred",
+            "the emitter prints `term_eq`, which is a Definition *of* \
+             `HA_pred pred_eq`. Every emitted `term_eq` therefore elaborates it, \
+             and an arity drift in it stops `Assertions.v` from compiling at \
+             all.",
+        ),
+        (
+            "pred_eq",
+            "the distinguished predicate index `term_eq` is defined from; \
+             reached exactly as `HA_pred` is, and never printed by name.",
+        ),
+        (
+            "seq",
+            "a `Notation` for `list`, kept so the stub's inductive fields read \
+             like the real library's `seq term`/`seq hassert`. The emitter \
+             imports no mathcomp and writes `list hassert`, so the notation is \
+             elaborated only where the stub itself uses it.",
+        ),
+    ];
+
+    /// Every name the vendored stub declares must be named by a module this
+    /// test compiles with `coqc`, or carry a reason in
+    /// [`DECLARATIONS_WITHOUT_A_PRODUCER`].
+    ///
+    /// A declaration with no producer is a declaration `coqc` never elaborates:
+    /// its arity and spelling can drift freely and every gate above still
+    /// passes. That is precisely how the #230 `BI_forall` arity bug shipped, and
+    /// roughly sixty declarations sat in that state before #401. The needle
+    /// lists in the gates above only guard what somebody remembered to write
+    /// down, so this test derives both sides mechanically instead: the declared
+    /// side is parsed out of the stub `.v` files [`compile_stub`] compiles, and
+    /// the produced side is tokenised out of every module in [`gated_modules`].
+    ///
+    /// The audit then compiles that same set itself. Measuring coverage against
+    /// generated *text* while leaving the elaboration to other tests would make
+    /// the claim only as strong as their health: `#[ignore]` the two gates
+    /// covering `ME_active` and a live arity drift in it ships with the audit
+    /// green, which is the #230 failure mode wearing the audit's badge. Handing
+    /// every counted module to `coqc` here makes "produced" mean "elaborated"
+    /// by construction, and no other test's state can launder it.
+    ///
+    /// Three ways to fail on the coverage side, so the audit cannot rot into a
+    /// rubber stamp: a declaration that is neither produced nor exempt (the hole
+    /// reopening), an exemption for something that *is* produced (a stale
+    /// reason, to be deleted rather than left to accumulate), and an exemption
+    /// naming nothing the stub declares (a typo, which would silently exempt
+    /// nothing). All three run whether or not `coqc` is installed, and the skip
+    /// message says which half of the claim the run actually established.
+    ///
+    /// This does not make the per-shape gates above redundant, for two reasons
+    /// worth keeping straight. Their negative needles pin terms that type-check
+    /// perfectly well and are still wrong — `MED_global 0%N` for a defined
+    /// global, `modstart_func := 0%N` in `mod_funcs` numbering — and no amount
+    /// of elaboration distinguishes those from the right index. And when they
+    /// do overlap with this audit they fail *better*: a gate names the shape it
+    /// is about, where a failure here is a raw `coqc` log or a list of
+    /// uncovered names. What this audit adds is the floor underneath them —
+    /// coverage of everything nobody thought to write a needle for.
+    ///
+    /// Two deliberate limits. Inductive and record *type* names (`hassert`,
+    /// `module_func`, `sx`, …) are left out of the declared set: the emitter
+    /// spells almost none of them, while `coqc` elaborates a type whenever it
+    /// elaborates one of its constructors, so demanding a producer for the type
+    /// would only grow the exemption list without covering anything new. And
+    /// coverage here is name-level — it proves each constructor is elaborated
+    /// somewhere, not that every *argument shape* of it is, nor that any
+    /// particular module is what elaborates it. `BI_select` is the standing
+    /// example of the first: its `None` form is produced, while its `Some` form
+    /// needs a typed `select` the translator rejects outright. Deleting
+    /// `spec_bitwise_arith.inf` from [`CORPUS`] is the standing example of the
+    /// second — `BOI_sub` stays produced by the hand-assembled instruction
+    /// module, and it is the corpus operator matrix in
+    /// [`corpus_type_checks_against_vendored_stub`], not this audit, that
+    /// notices.
+    #[test]
+    fn every_stub_declaration_has_a_producer() {
+        let modules = gated_modules();
+        // Comments are stripped from the emitted text for the same reason they
+        // are stripped from the stub: `coqc` elaborates neither, so a name that
+        // appears only inside an emitted name-section annotation such as
+        // `(*narrow*)` is not a producer.
+        let compiled: String = modules
+            .iter()
+            .map(|m| strip_rocq_comments(&m.v))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let produced: FxHashSet<&str> = tokenize(&compiled)
+            .into_iter()
+            .filter_map(|token| match token {
+                Tok::Ident(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        let declared = stub_declarations();
+
+        let unknown: Vec<&str> = DECLARATIONS_WITHOUT_A_PRODUCER
+            .iter()
+            .map(|&(exempt, _)| exempt)
+            .filter(|exempt| !declared.iter().any(|(name, _)| name == exempt))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "these entries of DECLARATIONS_WITHOUT_A_PRODUCER name nothing the \
+             vendored stub declares, so they exempt nothing and hide a real \
+             hole behind a typo: {}",
+            unknown.join(", ")
+        );
+
+        let stale: Vec<String> = DECLARATIONS_WITHOUT_A_PRODUCER
+            .iter()
+            .filter(|&&(exempt, _)| produced.contains(exempt))
+            .map(|(exempt, reason)| format!("  {exempt}  — claimed: {reason}"))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these entries of DECLARATIONS_WITHOUT_A_PRODUCER now have a \
+             producer among the gated modules, so their stated reasons are \
+             false; delete the entries rather than leaving a stale exemption \
+             that would cover a future regression:\n{}",
+            stale.join("\n")
+        );
+
+        let missing: Vec<String> = declared
+            .iter()
+            .filter(|(name, _)| !produced.contains(name.as_str()))
+            .filter(|(name, _)| {
+                !DECLARATIONS_WITHOUT_A_PRODUCER
+                    .iter()
+                    .any(|&(exempt, _)| exempt == name)
+            })
+            .map(|(name, file)| format!("  {name}  (declared in {file})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "no module the coqc gate compiles names these stub declarations, so \
+             `coqc` never elaborates them and a rename or arity change in one \
+             would ship green (#401):\n{}\n\
+             Add a fixture or hand-assembled module that produces each — a \
+             CORPUS entry under tests/test_data/inf/ for anything an Inference \
+             program can express, a HandbuiltModule variant otherwise. If a \
+             producer is genuinely impossible, add the name to \
+             DECLARATIONS_WITHOUT_A_PRODUCER with the reason why; \"no fixture \
+             emits it\" is the bug, not a reason.",
+            missing.join("\n")
+        );
+
+        // Everything above compares names in generated text. What turns
+        // "produced" into "elaborated" is this: the audit hands `coqc` the very
+        // modules it just counted, under its own work-directory label, so the
+        // strong claim rests on nothing but this test.
+        let Some(coqc) = find_coqc() else {
+            eprintln!(
+                "skipped: coqc not found (set COQC or put coqc on PATH). \
+                 Stub declarations parsed and partitioned into produced, exempt \
+                 and missing — but coverage was measured against generated text \
+                 only: nothing was elaborated, so a constructor's arity or shape \
+                 is unverified on this run."
+            );
+            return;
+        };
+        let work = compile_stub(&coqc, "audit");
+        for m in &modules {
+            let v_path = work.join(format!("{}.v", m.module));
+            std::fs::write(&v_path, &m.v).unwrap_or_else(|e| panic!("write {}: {e}", m.source));
+            if let Err(log) = coqc_compile(&coqc, &work, &v_path) {
+                panic!(
+                    "coqc rejected `{}`, which this audit counts as a producer; \
+                     until it elaborates, every declaration it is the only \
+                     producer of is uncovered:\n{log}\n\
+                     work dir kept for inspection: {}",
+                    m.source,
+                    work.display()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Every name the vendored stub declares, paired with the stub file that
+    /// declares it. Parses exactly the files [`compile_stub`] compiles.
+    fn stub_declarations() -> Vec<(String, String)> {
+        let stub = stub_dir();
+        STUB_MODULES
+            .iter()
+            .flat_map(|&(dir, module)| {
+                let file = format!("{dir}/{module}.v");
+                let path = stub.join(dir).join(format!("{module}.v"));
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read stub {}: {e}", path.display()));
+                declared_names(&source)
+                    .into_iter()
+                    .map(move |name| (name, file.clone()))
+            })
+            .collect()
+    }
+
+    /// A Rocq token, at the resolution the declaration parser needs.
+    ///
+    /// Identifiers are what both halves of the audit are about; a string
+    /// literal is distinguished only because it is all the *name* of a
+    /// `Notation "#00" := …` is, and those 244 byte notations must not be read
+    /// as identifier declarations. Everything else — numbers, `%`, `->` — comes
+    /// through one character at a time as [`Tok::Punct`], which is enough for
+    /// the `|`, `:=` and `{ … ; … }` landmarks the parser steers by.
+    enum Tok<'a> {
+        Ident(&'a str),
+        Str,
+        Punct(char),
+    }
+
+    fn tokenize(source: &str) -> Vec<Tok<'_>> {
+        let mut tokens = Vec::new();
+        let mut chars = source.char_indices().peekable();
+        while let Some((start, c)) = chars.next() {
+            if c.is_whitespace() {
+                continue;
+            }
+            if c == '"' {
+                // Rocq escapes a quote inside a string literal by doubling it,
+                // and pairing quotes off in order handles that without a special
+                // case: a literal `"c0""c1""c2"` is read as three adjacent
+                // literals covering exactly the same span, because each escape
+                // contributes two quotes and leaves no characters between the
+                // pair it splits. Nothing inside a literal can therefore reach
+                // the token stream as source, which is all this tokenizer needs.
+                for (_, c) in chars.by_ref() {
+                    if c == '"' {
+                        break;
+                    }
+                }
+                tokens.push(Tok::Str);
+                continue;
+            }
+            if c.is_ascii_alphabetic() || c == '_' {
+                let mut end = start + c.len_utf8();
+                while let Some(&(at, c)) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '\'' {
+                        end = at + c.len_utf8();
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(Tok::Ident(&source[start..end]));
+                continue;
+            }
+            tokens.push(Tok::Punct(c));
+        }
+        tokens
+    }
+
+    fn ident_at<'a>(tokens: &[Tok<'a>], at: usize) -> Option<&'a str> {
+        match tokens.get(at) {
+            Some(Tok::Ident(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn is_punct(tokens: &[Tok<'_>], at: usize, c: char) -> bool {
+        matches!(tokens.get(at), Some(Tok::Punct(got)) if *got == c)
+    }
+
+    /// Rocq comments nest — `(* a (* b *) c *)` is one comment, and a parser
+    /// that stops at the first `*)` would read the tail as source. Newlines are
+    /// preserved so a stripped file keeps its line structure, and a string
+    /// literal is copied through untouched so a `(*` inside one cannot open a
+    /// comment. Rocq's escaped quote `""` needs no special case here for the
+    /// reason it needs none in [`tokenize`]: the pair puts no characters
+    /// between the literal it closes and the one it reopens, so the stripper is
+    /// never outside a literal at a position that holds anything.
+    ///
+    /// One divergence from Rocq's own lexer, deliberately not modelled: Rocq
+    /// recognises a string literal *inside* a comment, so `(* "*)" *)` is one
+    /// comment, while this ends it at the inner `*)` and reads the rest as an
+    /// unterminated literal that swallows the file. Nothing writes such a
+    /// comment — the stub's are prose, the emitter's are `(*name*)`
+    /// annotations from the WASM name section — and a name that could produce
+    /// one would already be emitting `.v` that `coqc` rejects.
+    fn strip_rocq_comments(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut chars = source.chars().peekable();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        while let Some(c) = chars.next() {
+            if in_string {
+                out.push(c);
+                in_string = c != '"';
+            } else if depth == 0 && c == '"' {
+                out.push(c);
+                in_string = true;
+            } else if c == '(' && chars.peek() == Some(&'*') {
+                chars.next();
+                depth += 1;
+            } else if depth > 0 && c == '*' && chars.peek() == Some(&')') {
+                chars.next();
+                depth -= 1;
+            } else if depth == 0 || c == '\n' {
+                // Inside a comment only the newlines survive, so a stripped
+                // file keeps the line numbering of the original.
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Every name a stub `.v` file declares, in source order.
+    ///
+    /// The four shapes that matter are inductive constructors, record field
+    /// names, and the top-level `Definition`/`Parameter`/`Axiom` and
+    /// identifier-named `Notation` bindings. Inductive and record *type* names
+    /// are deliberately not collected — see
+    /// [`every_stub_declaration_has_a_producer`] — and neither are the scope
+    /// declarations (`Declare Scope`, `Delimit Scope`) or the `host` `Class`,
+    /// none of which name a term an emitted module could apply.
+    fn declared_names(source: &str) -> Vec<String> {
+        let source = strip_rocq_comments(source);
+        let tokens = tokenize(&source);
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at < tokens.len() {
+            let Some(keyword) = ident_at(&tokens, at) else {
+                // A constructor, in the leading-`|` form every inductive in the
+                // stub is written with.
+                if is_punct(&tokens, at, '|')
+                    && is_punct(&tokens, at + 2, ':')
+                    && let Some(name) = ident_at(&tokens, at + 1)
+                {
+                    names.push(name.to_string());
+                }
+                at += 1;
+                continue;
+            };
+            match keyword {
+                "Inductive" | "Variant" => {
+                    // Rocq lets the *first* constructor omit its leading `|`, so
+                    // it is read here, off the `:=`; the `|` arm above picks up
+                    // the rest either way.
+                    while at + 1 < tokens.len()
+                        && !(is_punct(&tokens, at, ':') && is_punct(&tokens, at + 1, '='))
+                    {
+                        at += 1;
+                    }
+                    at += 2;
+                    if is_punct(&tokens, at + 1, ':')
+                        && let Some(name) = ident_at(&tokens, at)
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+                "Record" => at = push_record_fields(&tokens, at, &mut names),
+                "Definition" => {
+                    if let Some(name) = ident_at(&tokens, at + 1) {
+                        names.push(name.to_string());
+                    }
+                    at += 1;
+                }
+                // `Parameter a b : T.` binds every name before the colon.
+                "Parameter" | "Axiom" => {
+                    at += 1;
+                    while let Some(name) = ident_at(&tokens, at) {
+                        names.push(name.to_string());
+                        at += 1;
+                    }
+                }
+                // A string-named notation binds no identifier.
+                "Notation" => {
+                    if let Some(name) = ident_at(&tokens, at + 1) {
+                        names.push(name.to_string());
+                    }
+                    at += 1;
+                }
+                _ => at += 1,
+            }
+        }
+        names
+    }
+
+    /// Pushes the field names of the `Record` whose keyword sits at `at`,
+    /// returning the index just past its closing brace. A field is the
+    /// identifier that opens each `;`-separated chunk of the brace block, which
+    /// makes the scan independent of how the record is laid out across lines.
+    fn push_record_fields(tokens: &[Tok<'_>], at: usize, names: &mut Vec<String>) -> usize {
+        let mut at = at + 1;
+        while at < tokens.len() && !is_punct(tokens, at, '{') {
+            at += 1;
+        }
+        at += 1;
+        let mut depth = 1usize;
+        let mut at_field = true;
+        while at < tokens.len() && depth > 0 {
+            if is_punct(tokens, at, '{') {
+                depth += 1;
+                at_field = false;
+            } else if is_punct(tokens, at, '}') {
+                depth -= 1;
+                at_field = false;
+            } else if depth == 1 && is_punct(tokens, at, ';') {
+                at_field = true;
+            } else {
+                if at_field
+                    && depth == 1
+                    && is_punct(tokens, at + 1, ':')
+                    && let Some(name) = ident_at(tokens, at)
+                {
+                    names.push(name.to_string());
+                }
+                at_field = false;
+            }
+            at += 1;
+        }
+        at
+    }
+
+    /// The declaration parser is the audit's measuring instrument: a shape it
+    /// silently misses is a declaration exempted from needing a producer, which
+    /// is the failure the audit exists to prevent. This pins every shape the
+    /// stub uses, plus the three traps — a nested comment (a parser that closed
+    /// on the first `*)` would declare `commented_out`), a string-named
+    /// notation (which must not be read as an identifier binding), and a
+    /// `Module` wrapper (whose contents are declarations all the same).
+    ///
+    /// The escaped-quote line is not a fourth trap, and is not claimed as one:
+    /// pairing quotes off in order already reads it correctly, for the reason
+    /// [`tokenize`] gives. It is pinned rather than argued so that a later
+    /// hand-written `""` case cannot get it wrong — `phantom` is what a parser
+    /// that ended the literal at the first half of the pair would declare.
+    ///
+    /// What is *not* pinned, because it is not handled: a string literal
+    /// inside a comment, which Rocq recognises and [`strip_rocq_comments`]
+    /// does not. That limit is stated there rather than covered here.
+    #[test]
+    fn declared_names_reads_every_stub_declaration_shape() {
+        // A `##` delimiter: the byte-notation line below contains `"#`, which
+        // would close a plain `r#"…"#` raw string.
+        let source = r##"
+(* A comment (* nested (* twice *) *) hiding Parameter commented_out : Type. *)
+Require Import BinNat.
+Declare Scope fake_scope.
+Delimit Scope fake_scope with fake.
+Class a_class : Type := { }.
+Parameter opaque_type : Type.
+Parameter first second : nat.
+Axiom an_axiom : nat.
+Notation "#00" := (encode 0%Z) : fake_scope.
+Notation "escaped ""Parameter phantom"" tail" := (list) : fake_scope.
+Notation an_alias := list.
+Unset Elimination Schemes.
+Inductive piped : Type :=
+| Ctor_a : piped
+| Ctor_b : nat -> piped.
+Set Elimination Schemes.
+Inductive unpiped : Type := Ctor_c : unpiped | Ctor_d : unpiped.
+Record a_record : Type := {
+  field_one : nat;
+  field_two : option nat
+}.
+Module A_module.
+  Parameter inner : nat.
+End A_module.
+Definition a_definition (x : nat) : nat := x.
+"##;
+        assert_eq!(
+            declared_names(source),
+            [
+                "opaque_type",
+                "first",
+                "second",
+                "an_axiom",
+                "an_alias",
+                "Ctor_a",
+                "Ctor_b",
+                "Ctor_c",
+                "Ctor_d",
+                "field_one",
+                "field_two",
+                "inner",
+                "a_definition",
+            ]
+        );
     }
 
     /// Gallina's `-` is an infix operator, so a negative integer constant has to

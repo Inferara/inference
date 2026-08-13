@@ -8,10 +8,10 @@ that consumes the generated `.v` files.
 ## Consumer
 
 The consumer is wasm-verifier (a private Inferara repository; this
-document and the vendored signature stub in `rocq-stub/` are the
-authoritative, in-repo statement of the contract — verified against
-wasm-verifier commit `0c5d525e`), built on **vanilla WasmCert-Coq
-v2.2.0** — not the
+document is the authoritative, in-repo statement of the contract —
+verified against wasm-verifier commit `0c5d525e` — and the vendored
+signature stub in `rocq-stub/` type-checks the emittable subset of it
+locally), built on **vanilla WasmCert-Coq v2.2.0** — not the
 `WasmCert-Coq-Essence` fork this crate previously targeted. The fork's
 non-deterministic constructors (`BI_forall`, `BI_exists`, `BI_assume`,
 `BI_unique`, `BI_uzumaki_num`) do not exist in vanilla WasmCert, so a
@@ -113,6 +113,21 @@ Within that context, the translator depends on:
   `Hor p q := HA_not (HA_and (HA_not p) (HA_not q))`. `Hall` (the
   universal-quantifier sugar) exists in the library but is not emitted by
   this milestone (see [Translation scheme summary](#translation-scheme-summary)).
+
+  **Real library versus vendored stub.** Both bullets above describe
+  wasm-verifier's own `theories/Assertions.v` — the library an emitted
+  `.v` is ultimately checked against, and the thing this contract is a
+  contract *with*. The vendored signature stub in
+  [`rocq-stub/`](rocq-stub/README.md) is deliberately **strictly
+  smaller**: it declares only the subset the emitter can actually print,
+  so `T_global`, the entire heap fragment (`HA_emp`, `HA_star`,
+  `HA_iter`, `HA_pto`, `HA_size`) and `Hall` are absent from it. That is
+  not a contract gap. A name the real library has and the stub omits is a
+  name no emitted module may mention, and the local `coqc` gate turns any
+  accidental mention of one into an unbound-constructor error instead of
+  a silently type-checking term. `rocq-stub/README.md` tabulates every
+  omission and the mechanical reason it is unreachable; when a name
+  becomes emittable, it has to be added back there in the same change.
 - A 1-ary `ValidModule : module -> Prop` — structural well-formedness,
   always emitted, independent of specs.
 - A `ValidSpec : forall `{ho : host}, module -> list hassert -> Prop` —
@@ -504,7 +519,7 @@ entries are matched by name, not position.
   | P004 | A non-scalar type in a term, parameter, or `@` position (only bool, integer, and enum values are representable) |
   | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an external function, an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
-  | P007 | A `forall` block nested inside an `exists` context (needs `Hall`, deferred past this milestone) |
+  | P007 | A `forall` block nested inside an `exists` context (needs `Hall`, deferred past this milestone; lifting it must also restore the `Hall` `Definition` to `rocq-stub/wasm_verifier/Assertions.v`, which omits it as unemittable) |
   | P008 | `@` at a compound (array/struct) type |
   | P009 | A quantified specification *method* — never silently dropped, since a method has no free-function fallback path |
 

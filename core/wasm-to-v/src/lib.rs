@@ -613,6 +613,60 @@ mod tests {
              literals are written in; got:\n{output}",
         );
     }
+
+    /// An imported table reaches the `.v` as a complete `table_type` record.
+    ///
+    /// The contract declares `MID_table : table_type -> module_import_desc`,
+    /// and `table_type` is `{tt_limits : limits; tt_elem_type : reference_type}`
+    /// — two fields. Its neighbour `MID_mem` takes a bare `limits`, because the
+    /// contract's `memory_type` *is* `limits`, and that symmetry is what made
+    /// applying `MID_table` to a bare `limits` look right: the emitted term
+    /// dropped the element type and did not type-check. No fixture in the
+    /// `coqc` corpus imports a table — Inference codegen never emits one, and
+    /// the static-merge linker removes every import before `-v` — so the gate
+    /// elaborated this arm exactly never (issue #401).
+    ///
+    /// Both element types are pinned, since the funcref spelling alone would
+    /// pass on a translator that hardcoded it and never consulted the table's
+    /// own type.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_imported_table_carries_its_element_type() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (import "env" "imported_table" (table 1 funcref))
+              (import "env" "imported_extern_table" (table 2 4 externref)))
+            "#,
+        )
+        .expect("table-import fixture assembles");
+
+        let output = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .expect("translate succeeds");
+
+        for needle in [
+            "Mi \"env\" \"imported_table\" (MID_table {|tt_limits := \
+             {|lim_min := 1%N; lim_max := None|}; tt_elem_type := T_funcref|})",
+            "Mi \"env\" \"imported_extern_table\" (MID_table {|tt_limits := \
+             {|lim_min := 2%N; lim_max := Some(4%N)|}; tt_elem_type := T_externref|})",
+        ] {
+            assert!(
+                output.contains(needle),
+                "an imported table must be emitted as `{needle}`; got:\n{output}",
+            );
+        }
+
+        assert!(
+            !output.contains("MID_table {|lim_min"),
+            "`MID_table` applied to a bare `limits` is a type error the contract \
+             rejects — the element type must not be dropped again; got:\n{output}",
+        );
+    }
 }
 
 /// Robustness tests for the external `.wasm` static-linking path through
