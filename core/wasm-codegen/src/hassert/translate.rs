@@ -11,12 +11,13 @@
 //!
 //! While a tree is under construction every [`HTerm::LVar`] stores an *absolute
 //! binder level* (counted from the outside), not a de Bruijn index. A single
-//! [`SpecFnTranslator::finalize`] pass then rewrites each level to the index it
+//! [`lower_assert`] pass then rewrites each level to the index it
 //! has at its own depth. Levels are position-independent, so a pure `let` that
-//! captures an existential variable and is used further inside more binders needs
-//! no re-indexing at its use site — the final pass alone resolves it. This is
-//! what keeps `exists { let a = @; let t = a + 1; let b = @; assert(b > t); }`
-//! correct without shifting already-built subterms.
+//! captures an `HA_ex`-bound variable (a prover-chosen `@` or a pinned witness)
+//! and is used further inside more binders needs no re-indexing at its use site
+//! — the final pass alone resolves it. This is what keeps
+//! `exists { let a = @; let t = a + 1; let b = @; assert(b > t); }` correct
+//! without shifting already-built subterms.
 //!
 //! ## Universal slots state their own typing
 //!
@@ -33,6 +34,38 @@
 //! everywhere else it hands the proof the value together with its typing. A body
 //! that introduces no slot is untouched — its antecedent is `⊤`, which
 //! [`HAssert::imp`] absorbs (issue #353).
+//!
+//! ## Short-circuit `&&`/`||` become pinned witnesses
+//!
+//! The term language is strict: every constructor demands each operand denote,
+//! and it has no conditional. Code generation lowers `a && b` to
+//! `if a != 0 then b else 0` and `a || b` to `if a != 0 then 1 else b`, so the
+//! right operand is evaluated on one arm only. An eager `T_binop` term would
+//! therefore demand a value the program never computes, and
+//! `x == 0 || 10 / x == 10 / x` — true for every `i32` — would become refutable
+//! at `x = 0`.
+//!
+//! Assertion position never had that problem: `&&`/`||` split into `HA_and`/
+//! `Hor`, and neither demands its right conjunct on the arm the source skips.
+//! Term position borrows the same escape hatch one layer up. A term-position
+//! `&&`/`||` allocates a fresh `HA_ex`-bound *witness* and pins it with a
+//! two-armed constraint mirroring the compiled control flow — for `a || b`,
+//! `Hor (nz a ∧ v = 1) (eqz a ∧ … ∧ v = b)`. The witness is the operator's
+//! term; its constraint is planted where the enclosing statement's atom is
+//! wrapped in the binder.
+//!
+//! Placement follows evaluation. A constraint planted unconditionally is
+//! demanded unconditionally, which re-creates the very bug one level up, so the
+//! constraints a *right operand of `&&`/`||`* introduces are captured and moved
+//! into the arm that evaluates it — in term position and in both assertion
+//! polarities alike. Every other operand position is evaluated unconditionally
+//! and keeps its constraints pending for the atom. The binder itself always
+//! hoists to the atom even when its constraint moved deeper; the one left
+//! behind is simply unconstrained, which is sound because the skipped arm never
+//! reads it.
+//!
+//! Witnesses are the reason [`HAssert::Ex`] now appears under [`Mode::Univ`]:
+//! before this, a binder could only come from an existential `@`.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
@@ -49,6 +82,10 @@ use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
 
 /// Polarity of the surrounding quantification.
+///
+/// The mode decides how `@`, `assume`, `if`, and `==` are encoded. It does
+/// *not* decide whether an `HA_ex` binder can appear: a short-circuit witness
+/// is bound in either mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// Universal context: `assume` filters (antecedent), `if` is a
@@ -83,6 +120,21 @@ enum ResultClass {
     Compound,
 }
 
+/// Pending binders taken off the stack as one group, ready to be wrapped.
+///
+/// The level of the group's first binder travels with the definitions because
+/// wrapping needs both: the definitions become the `HA_ex` bodies, and the
+/// levels name the variables whose occurrence decides which definitions survive.
+/// Deriving the level at the split — rather than reading `depth` at the wrap —
+/// is what keeps a group correct when binders allocated before it are left
+/// behind for an enclosing wrap.
+struct PendingGroup {
+    /// One definition per binder, in allocation order; the first is outermost.
+    defs: Vec<HAssert>,
+    /// The absolute level of the first binder in `defs`.
+    base_level: u32,
+}
+
 pub(super) struct SpecFnTranslator<'a> {
     arena: &'a AstArena,
     ctx: &'a TypedContext,
@@ -95,9 +147,16 @@ pub(super) struct SpecFnTranslator<'a> {
     slots: u32,
     /// Number of committed existential binders enclosing the current point.
     depth: u32,
-    /// Existential binders introduced by call-argument `@`s within the statement
-    /// currently being translated, not yet wrapped around its atom.
-    pending: u32,
+    /// Existential binders introduced within the statement currently being
+    /// translated and not yet wrapped around its atom, in allocation order:
+    /// entry `i` is the *defining constraint* of the binder at level
+    /// `depth + i`.
+    ///
+    /// A binder nothing pins carries [`HAssert::True`] — a call-argument `@`,
+    /// which the prover chooses freely, or a witness whose constraint moved
+    /// into a conditional arm. Every allocation site drains its own binders
+    /// around its own statement, so this is empty at every statement boundary.
+    pending: Vec<HAssert>,
     /// Typing guards for the universal slots introduced since the last
     /// structural statement, in introduction order, awaiting their drain.
     univ_guards: Vec<HAssert>,
@@ -120,7 +179,7 @@ impl<'a> SpecFnTranslator<'a> {
             callee,
             slots: 0,
             depth: 0,
-            pending: 0,
+            pending: Vec::new(),
             univ_guards: Vec::new(),
             env: FxHashMap::default(),
             diags: Vec::new(),
@@ -216,6 +275,12 @@ impl<'a> SpecFnTranslator<'a> {
     /// statement contributes a conjunct (or an implication antecedent, for a
     /// universal `assume`) over the translation of the rest.
     fn t_stmts(&mut self, stmts: &[StmtId], mode: Mode) -> HAssert {
+        debug_assert!(
+            self.pending.is_empty(),
+            "a binder leaked across a statement boundary: every allocation site drains its own \
+             binders around its own statement's atom, so a binder still pending here would be \
+             wrapped around a later statement at a level that no longer names it"
+        );
         let Some((first, rest)) = stmts.split_first() else {
             // A slot introduced with nothing left to read it guards nothing.
             self.univ_guards.clear();
@@ -231,7 +296,7 @@ impl<'a> SpecFnTranslator<'a> {
             }
             Stmt::Assert { expr } => {
                 let expr = *expr;
-                let atom = self.eval_atom(mode, |s| s.p_expr(expr, mode));
+                let atom = self.eval_atom(|s| s.p_expr(expr, mode));
                 self.t_structural(atom, rest, mode)
             }
             Stmt::If {
@@ -253,7 +318,7 @@ impl<'a> SpecFnTranslator<'a> {
                 // diagnostic) but contributes nothing; `return` is reachable
                 // only in a `Regular`-kind body (analysis bans it under any
                 // non-deterministic block).
-                let _ = self.term(expr, mode);
+                self.discard_term(expr, mode);
                 self.t_stmts(rest, mode)
             }
             Stmt::Expr(expr) => {
@@ -262,8 +327,7 @@ impl<'a> SpecFnTranslator<'a> {
             }
             Stmt::ConstDef(def_id) => {
                 let def_id = *def_id;
-                self.bind_const(def_id, mode);
-                self.t_stmts(rest, mode)
+                self.bind_const(def_id, rest, mode)
             }
             Stmt::TypeDef { .. } => self.t_stmts(rest, mode),
             Stmt::Assign { .. } => {
@@ -291,9 +355,11 @@ impl<'a> SpecFnTranslator<'a> {
     /// at this point become the antecedent of the statement's own claim
     /// conjoined with the rest of the block.
     ///
-    /// `contribution` must already be translated, so a `@` in call-argument
-    /// position inside this statement joins the same drain. Draining *before*
-    /// the rest is what scopes a slot over every later reader of it rather than
+    /// `contribution` must already be translated *and* already wrapped in the
+    /// binders it introduced, so a `@` in call-argument position inside this
+    /// statement joins the same drain and an `HA_ex` built inside it lands in
+    /// the consequent rather than over the antecedent. Draining *before* the
+    /// rest is what scopes a slot over every later reader of it rather than
     /// letting a deeper structural statement capture it into a narrower
     /// antecedent.
     fn t_structural(&mut self, contribution: HAssert, rest: &[StmtId], mode: Mode) -> HAssert {
@@ -364,23 +430,52 @@ impl<'a> SpecFnTranslator<'a> {
             };
         }
 
-        // Pure `let`: translate the right-hand side once, then inline it. In
-        // existential mode a call-argument `@` in the right-hand side introduces
-        // binders that must scope over the rest of the block.
-        let base = self.pending;
+        // Pure `let`: translate the right-hand side once, then inline it. A
+        // call-argument `@` or a short-circuit witness in the right-hand side
+        // introduces binders that must scope over the rest of the block, since
+        // that is where the inlined term is read.
+        let base = self.pending.len();
         let term = self.term(value_expr, mode);
-        let introduced = self.pending - base;
-        self.pending = base;
+        let group = self.split_pending(base);
         self.env.insert(name, Binding::Term(term));
+        self.scoped_over_rest(group, rest, mode)
+    }
 
-        if mode == Mode::Exist && introduced > 0 {
-            self.depth += introduced;
-            let body = self.t_stmts(rest, Mode::Exist);
-            self.depth -= introduced;
-            wrap_existentials(body, introduced)
-        } else {
-            self.t_stmts(rest, mode)
+    /// Scopes the binders `defs` introduced by a pure `let` or a `const` over
+    /// the rest of the block, dominated by the universal-slot guards pending at
+    /// the binding.
+    ///
+    /// A pure `let` is not a structural statement, so a guard introduced earlier
+    /// in the block is still undrained here. A witness constraint reads the very
+    /// slots those guards type, so leaving the guards pending would put them
+    /// *inside* the `HA_ex` — demanding the constraint at a slot nothing has
+    /// typed yet, which is exactly the escape the slot guards exist to close.
+    /// Draining first yields `Himpl guard (HA_ex (constraint ∧ …))`.
+    ///
+    /// A binding that introduced no binder drains nothing, so a `let` without a
+    /// witness keeps the guard pending for the next structural statement.
+    fn scoped_over_rest(&mut self, group: PendingGroup, rest: &[StmtId], mode: Mode) -> HAssert {
+        if group.defs.is_empty() {
+            return self.t_stmts(rest, mode);
         }
+        let antecedent = self.drain_guards_over(HAssert::True);
+        let body = self.scoped_under(group, |s| s.t_stmts(rest, mode));
+        HAssert::imp(antecedent, body)
+    }
+
+    /// Commits a group as enclosing binders for the duration of `f`, then wraps
+    /// what `f` built in them. The binders keep the levels they were allocated
+    /// at, so `f` may read them and any binder it allocates itself takes a level
+    /// beyond them.
+    fn scoped_under<F>(&mut self, group: PendingGroup, f: F) -> HAssert
+    where
+        F: FnOnce(&mut Self) -> HAssert,
+    {
+        let outer_depth = self.depth;
+        self.depth = group.base_level + level_count(group.defs.len());
+        let body = f(self);
+        self.depth = outer_depth;
+        wrap_existentials(body, group)
     }
 
     /// A bare `if`, translated to its own contribution alone — the caller folds
@@ -388,6 +483,11 @@ impl<'a> SpecFnTranslator<'a> {
     /// implications (`nz`/`eqz` guards); existential mode is a strict disjunction
     /// of guarded conjunctions, so a non-denoting condition cannot fabricate a
     /// witness.
+    ///
+    /// The condition is translated once and read on both arms, so the binders it
+    /// introduces are committed around the whole contribution rather than per
+    /// arm. They stay inside what the caller's drain makes the consequent, which
+    /// is why the guards need no draining here.
     fn t_if(
         &mut self,
         condition: ExprId,
@@ -395,13 +495,14 @@ impl<'a> SpecFnTranslator<'a> {
         else_block: Option<BlockId>,
         mode: Mode,
     ) -> HAssert {
-        match mode {
+        let base = self.pending.len();
+        let cond = self.term(condition, mode);
+        let group = self.split_pending(base);
+        self.scoped_under(group, |s| match mode {
             Mode::Univ => {
-                let cond = self.term(condition, Mode::Univ);
-                let then_h =
-                    self.scoped_block(then_block, self.branch_mode(then_block, Mode::Univ));
+                let then_h = s.scoped_block(then_block, s.branch_mode(then_block, Mode::Univ));
                 if let Some(else_id) = else_block {
-                    let else_h = self.scoped_block(else_id, self.branch_mode(else_id, Mode::Univ));
+                    let else_h = s.scoped_block(else_id, s.branch_mode(else_id, Mode::Univ));
                     HAssert::and(
                         HAssert::imp(HAssert::nz(cond.clone()), then_h),
                         HAssert::imp(HAssert::eqz(cond), else_h),
@@ -411,16 +512,11 @@ impl<'a> SpecFnTranslator<'a> {
                 }
             }
             Mode::Exist => {
-                let base = self.pending;
-                let cond = self.term(condition, Mode::Exist);
-                let introduced = self.pending - base;
-                self.pending = base;
-                self.depth += introduced;
-                self.check_branch_forall(then_block);
-                let then_h = self.scoped_block(then_block, Mode::Exist);
-                let disjunction = if let Some(else_id) = else_block {
-                    self.check_branch_forall(else_id);
-                    let else_h = self.scoped_block(else_id, Mode::Exist);
+                s.check_branch_forall(then_block);
+                let then_h = s.scoped_block(then_block, Mode::Exist);
+                if let Some(else_id) = else_block {
+                    s.check_branch_forall(else_id);
+                    let else_h = s.scoped_block(else_id, Mode::Exist);
                     HAssert::or(
                         HAssert::and(HAssert::nz(cond.clone()), then_h),
                         HAssert::and(HAssert::eqz(cond), else_h),
@@ -432,11 +528,9 @@ impl<'a> SpecFnTranslator<'a> {
                         HAssert::and(HAssert::nz(cond.clone()), then_h),
                         HAssert::eqz(cond),
                     )
-                };
-                self.depth -= introduced;
-                wrap_existentials(disjunction, introduced)
+                }
             }
-        }
+        })
     }
 
     /// A block statement, dispatched on its kind. `assume` bodies always
@@ -492,27 +586,50 @@ impl<'a> SpecFnTranslator<'a> {
     /// any result arity; any other expression is validated and dropped.
     fn t_expr_stmt(&mut self, expr: ExprId, rest: &[StmtId], mode: Mode) -> HAssert {
         if matches!(self.arena[expr].kind, Expr::FunctionCall { .. }) {
-            let atom = self.eval_atom(mode, |s| s.app_ok(expr, mode));
+            let atom = self.eval_atom(|s| s.app_ok(expr, mode));
             self.t_structural(atom, rest, mode)
         } else {
-            let _ = self.term(expr, mode);
+            self.discard_term(expr, mode);
             self.t_stmts(rest, mode)
         }
     }
 
-    /// Binds a block-local `const` as a pure term, exactly like a pure `let`.
-    fn bind_const(&mut self, def_id: DefId, mode: Mode) {
-        if let Def::Constant { name, value, .. } = &self.arena[def_id].kind {
-            let (name, value) = (*name, *value);
-            let term = self.term(value, mode);
-            self.env
-                .insert(self.arena[name].name.clone(), Binding::Term(term));
-        }
+    /// Translates an expression for its diagnostics alone and drops both the
+    /// term and every binder it introduced.
+    ///
+    /// The expression contributes no claim, so nothing wraps those binders.
+    /// Leaving them pending would hand them to a later statement's atom, which
+    /// wraps them at a depth where their levels name something else.
+    fn discard_term(&mut self, expr: ExprId, mode: Mode) {
+        let base = self.pending.len();
+        let _ = self.term(expr, mode);
+        self.pending.truncate(base);
+    }
+
+    /// Binds a block-local `const` as a pure term, exactly like a pure `let` —
+    /// binders in its initializer scope over the rest of the block, where the
+    /// inlined term is read.
+    fn bind_const(&mut self, def_id: DefId, rest: &[StmtId], mode: Mode) -> HAssert {
+        let Def::Constant { name, value, .. } = &self.arena[def_id].kind else {
+            return self.t_stmts(rest, mode);
+        };
+        let (name, value) = (*name, *value);
+        let base = self.pending.len();
+        let term = self.term(value, mode);
+        let group = self.split_pending(base);
+        self.env
+            .insert(self.arena[name].name.clone(), Binding::Term(term));
+        self.scoped_over_rest(group, rest, mode)
     }
 
     // ----- assertion-position translators -------------------------------
 
     /// Truthiness of an assertion expression.
+    ///
+    /// `&&`/`||` split into `HA_and`/`Hor`, which is already faithful to
+    /// short-circuit evaluation — neither demands its right side on the arm the
+    /// source skips. The right side's own witness constraints must join it
+    /// there, or they would be demanded on both arms.
     fn p_expr(&mut self, expr: ExprId, mode: Mode) -> HAssert {
         match &self.arena[expr].kind {
             Expr::Parenthesized { expr } => {
@@ -530,10 +647,16 @@ impl<'a> SpecFnTranslator<'a> {
                 let (left, right, op) = (*left, *right, op.clone());
                 match op {
                     OperatorKind::And => {
-                        return HAssert::and(self.p_expr(left, mode), self.p_expr(right, mode));
+                        let left_h = self.p_expr(left, mode);
+                        let (right_h, right_defs) =
+                            self.capture_definitions(|s| s.p_expr(right, mode));
+                        return HAssert::and(left_h, HAssert::and(right_defs, right_h));
                     }
                     OperatorKind::Or => {
-                        return HAssert::or(self.p_expr(left, mode), self.p_expr(right, mode));
+                        let left_h = self.p_expr(left, mode);
+                        let (right_h, right_defs) =
+                            self.capture_definitions(|s| s.p_expr(right, mode));
+                        return HAssert::or(left_h, HAssert::and(right_defs, right_h));
                     }
                     OperatorKind::Eq
                     | OperatorKind::Ne
@@ -552,7 +675,9 @@ impl<'a> SpecFnTranslator<'a> {
         HAssert::nz(self.term(expr, mode))
     }
 
-    /// Falsiness of an assertion expression (the De Morgan dual of [`Self::p_expr`]).
+    /// Falsiness of an assertion expression (the De Morgan dual of
+    /// [`Self::p_expr`]). The right side's witness constraints ride with it into
+    /// the dual arm, for the same reason.
     fn n_expr(&mut self, expr: ExprId, mode: Mode) -> HAssert {
         match &self.arena[expr].kind {
             Expr::Parenthesized { expr } => {
@@ -572,7 +697,9 @@ impl<'a> SpecFnTranslator<'a> {
                 op: OperatorKind::And,
             } => {
                 let (left, right) = (*left, *right);
-                return HAssert::or(self.n_expr(left, mode), self.n_expr(right, mode));
+                let left_h = self.n_expr(left, mode);
+                let (right_h, right_defs) = self.capture_definitions(|s| s.n_expr(right, mode));
+                return HAssert::or(left_h, HAssert::and(right_defs, right_h));
             }
             Expr::Binary {
                 left,
@@ -580,7 +707,9 @@ impl<'a> SpecFnTranslator<'a> {
                 op: OperatorKind::Or,
             } => {
                 let (left, right) = (*left, *right);
-                return HAssert::and(self.n_expr(left, mode), self.n_expr(right, mode));
+                let left_h = self.n_expr(left, mode);
+                let (right_h, right_defs) = self.capture_definitions(|s| s.n_expr(right, mode));
+                return HAssert::and(left_h, HAssert::and(right_defs, right_h));
             }
             _ => {}
         }
@@ -795,6 +924,11 @@ impl<'a> SpecFnTranslator<'a> {
     /// number class and signedness come from the left operand, sub-word results
     /// are narrowed after the arithmetic and bitwise operators, and `**` has no
     /// encoding.
+    ///
+    /// `&&`/`||` are the two operators `lower_binary_expression` does not
+    /// itself lower — it hands them to `lower_short_circuit_binary` and leaves
+    /// `unreachable!` in their place. They leave here the same way, through
+    /// [`Self::short_circuit`], before the narrowing tail.
     fn binary(
         &mut self,
         expr: ExprId,
@@ -806,6 +940,9 @@ impl<'a> SpecFnTranslator<'a> {
         if matches!(op, OperatorKind::Pow) {
             self.error_no_encoding(self.arena[expr].location, "`**` (the power operator)");
             return zero_sentinel();
+        }
+        if matches!(op, OperatorKind::And | OperatorKind::Or) {
+            return self.short_circuit(left, right, op, mode);
         }
         let (num_ty, unsigned) = self.operand_class(left);
         let l = self.term(left, mode);
@@ -836,9 +973,9 @@ impl<'a> SpecFnTranslator<'a> {
                 l,
                 r,
             ),
-            // `&&`/`||` are non-short-circuit i32 bit operations as terms.
-            OperatorKind::And => binop(HNumType::I32, HBinop::And, l, r),
-            OperatorKind::Or => binop(HNumType::I32, HBinop::Or, l, r),
+            OperatorKind::And | OperatorKind::Or => {
+                unreachable!("`&&`/`||` handled above")
+            }
             OperatorKind::Eq => relop(num_ty, HRelop::Eq, l, r),
             OperatorKind::Ne => relop(num_ty, HRelop::Ne, l, r),
             OperatorKind::Lt => relop(num_ty, signed_relop(unsigned, Lt), l, r),
@@ -852,6 +989,56 @@ impl<'a> SpecFnTranslator<'a> {
             narrow(term, left_kind.as_ref())
         } else {
             term
+        }
+    }
+
+    /// A term-position `&&`/`||`, mirroring `lower_short_circuit_binary`:
+    /// `a && b` computes `if a != 0 then b else 0` and `a || b` computes
+    /// `if a != 0 then 1 else b`, over canonical 0/1 truth values.
+    ///
+    /// The term language has no conditional and is strict in every operand, so
+    /// the result is a fresh logical variable pinned by a two-armed constraint
+    /// naming the same two cases. The constraints the right operand introduced
+    /// ride in the arm that evaluates it: on the other arm the source never
+    /// computes it, so demanding it there would refute an obligation the program
+    /// satisfies.
+    fn short_circuit(
+        &mut self,
+        left: ExprId,
+        right: ExprId,
+        op: &OperatorKind,
+        mode: Mode,
+    ) -> HTerm {
+        let l = self.term(left, mode);
+        let (r, right_defs) = self.capture_definitions(|s| s.term(right, mode));
+        let taken = HAssert::nz(l.clone());
+        let skipped = HAssert::eqz(l);
+        match op {
+            OperatorKind::And => self.bind_witness(|v| {
+                HAssert::or(
+                    HAssert::and(
+                        taken,
+                        HAssert::and(right_defs, HAssert::TermEq(v.clone(), r)),
+                    ),
+                    HAssert::and(
+                        skipped,
+                        HAssert::TermEq(v.clone(), HTerm::Const(HConst::I32(0))),
+                    ),
+                )
+            }),
+            OperatorKind::Or => self.bind_witness(|v| {
+                HAssert::or(
+                    HAssert::and(
+                        taken,
+                        HAssert::TermEq(v.clone(), HTerm::Const(HConst::I32(1))),
+                    ),
+                    HAssert::and(
+                        skipped,
+                        HAssert::and(right_defs, HAssert::TermEq(v.clone(), r)),
+                    ),
+                )
+            }),
+            _ => unreachable!("short_circuit only handles `&&` and `||`"),
         }
     }
 
@@ -957,6 +1144,10 @@ impl<'a> SpecFnTranslator<'a> {
     /// pending existential binder to be wrapped around the enclosing statement.
     /// An anonymous slot has no declared type, so its guard width comes from the
     /// type recorded for the argument.
+    ///
+    /// Unlike a short-circuit witness, this binder carries no defining
+    /// constraint: `@` *is* the prover's free choice, so pinning it to a value
+    /// would be the opposite of what it means.
     fn uzumaki_argument(&mut self, arg: ExprId, mode: Mode) -> HTerm {
         match mode {
             Mode::Univ => {
@@ -965,11 +1156,7 @@ impl<'a> SpecFnTranslator<'a> {
                 self.push_univ_guard(slot, width);
                 HTerm::Local(slot)
             }
-            Mode::Exist => {
-                let level = self.depth + self.pending;
-                self.pending += 1;
-                HTerm::LVar(level)
-            }
+            Mode::Exist => self.bind_witness(|_| HAssert::True),
         }
     }
 
@@ -1097,22 +1284,19 @@ impl<'a> SpecFnTranslator<'a> {
         }
     }
 
-    /// Runs `f` at existential depth, wrapping its atom in one `HA_ex` per
-    /// call-argument `@` that `f` introduced. A no-op under universal mode.
-    fn eval_atom<F>(&mut self, mode: Mode, f: F) -> HAssert
+    /// Runs `f` and wraps its atom in one `HA_ex` per binder `f` introduced —
+    /// a call-argument `@` on a witness path, or a short-circuit witness in
+    /// either mode. The atom is built while the binders are still pending, so
+    /// it reads them at the levels they were allocated at and needs no depth
+    /// adjustment.
+    fn eval_atom<F>(&mut self, f: F) -> HAssert
     where
         F: FnOnce(&mut Self) -> HAssert,
     {
-        match mode {
-            Mode::Univ => f(self),
-            Mode::Exist => {
-                let base = self.pending;
-                let atom = f(self);
-                let introduced = self.pending - base;
-                self.pending = base;
-                wrap_existentials(atom, introduced)
-            }
-        }
+        let base = self.pending.len();
+        let atom = f(self);
+        let group = self.split_pending(base);
+        wrap_existentials(atom, group)
     }
 
     /// Translates a block's statements as a fresh environment scope, so a
@@ -1256,6 +1440,56 @@ impl<'a> SpecFnTranslator<'a> {
         let slot = self.slots;
         self.slots += 1;
         slot
+    }
+
+    /// The number of binders pending at this point, as a level offset.
+    fn pending_len(&self) -> u32 {
+        level_count(self.pending.len())
+    }
+
+    /// Allocates the next pending binder and pins it with the constraint
+    /// `define` builds over its own term.
+    ///
+    /// The binder takes the level just past every binder already in scope or
+    /// pending, so it may be defined in terms of any of them but none of them in
+    /// terms of it. A binder nothing pins passes `HAssert::True`.
+    fn bind_witness<F>(&mut self, define: F) -> HTerm
+    where
+        F: FnOnce(&HTerm) -> HAssert,
+    {
+        let witness = HTerm::LVar(self.depth + self.pending_len());
+        let definition = define(&witness);
+        self.pending.push(definition);
+        witness
+    }
+
+    /// Removes the binders allocated since `base` as one group.
+    fn split_pending(&mut self, base: usize) -> PendingGroup {
+        PendingGroup {
+            base_level: self.depth + level_count(base),
+            defs: self.pending.split_off(base),
+        }
+    }
+
+    /// Runs `f` and takes away the *definitions* of every binder it introduced,
+    /// returning them conjoined in allocation order.
+    ///
+    /// This is how a constraint reaches the arm that evaluates it. Only the
+    /// definitions move: each binder stays pending with a `⊤` definition, so
+    /// the levels allocated inside `f` remain valid and the `HA_ex`s still hoist
+    /// to the enclosing atom. A binder left unconstrained that way is exactly
+    /// right — on the arm the source skips, nothing reads it.
+    fn capture_definitions<T, F>(&mut self, f: F) -> (T, HAssert)
+    where
+        F: FnOnce(&mut Self) -> T,
+    {
+        let base = self.pending.len();
+        let value = f(self);
+        let taken: Vec<HAssert> = self.pending[base..]
+            .iter_mut()
+            .map(|definition| std::mem::replace(definition, HAssert::True))
+            .collect();
+        (value, conjoin(taken))
     }
 
     fn error(&mut self, code: PCode, location: Location, message: String) {
@@ -1404,6 +1638,8 @@ fn mask(term: HTerm, bits: i32) -> HTerm {
 
 /// Whether the operator narrows a sub-word result, matching the exclusion list
 /// in `lower_binary_expression` (relations, `%`, `&&`/`||`, `>>` do not).
+/// `&&`/`||` are excluded because they never reach the narrowing tail — they
+/// leave [`SpecFnTranslator::binary`] as a witness before it.
 fn narrows(op: &OperatorKind) -> bool {
     matches!(
         op,
@@ -1431,12 +1667,74 @@ fn num_class(kind: Option<&TypeInfoKind>) -> HNumType {
     }
 }
 
-/// Wraps an assertion in `count` existential binders.
-fn wrap_existentials(mut assertion: HAssert, count: u32) -> HAssert {
-    for _ in 0..count {
-        assertion = HAssert::ex(assertion);
+/// The level offset a binder count contributes. A specification body cannot
+/// approach `u32::MAX` binders — the arena would have run out of expressions
+/// first — so the conversion is an invariant, not a case to handle.
+fn level_count(count: usize) -> u32 {
+    u32::try_from(count).expect("a specification body cannot introduce 2^32 binders")
+}
+
+/// Right-folds assertions into one conjunction, `⊤` for none:
+/// `a₀ ∧ (a₁ ∧ (… ∧ aₙ))`.
+fn conjoin(assertions: Vec<HAssert>) -> HAssert {
+    assertions
+        .into_iter()
+        .rev()
+        .fold(HAssert::True, |acc, assertion| HAssert::and(assertion, acc))
+}
+
+/// Wraps `body` in one `HA_ex` per entry of `defs`, whose binders occupy levels
+/// `base_level ..` in allocation order. Folding innermost-first puts the
+/// first-allocated binder outermost, so a later definition may name an earlier
+/// binder: `∃v₀. (def₀ ∧ ∃v₁. (def₁ ∧ … ∧ body))`.
+///
+/// A binder whose variable does not occur in the accumulated body is emitted
+/// *without* its definition. A definition pins a value, so keeping one for a
+/// variable nothing reads would turn a specification that claims nothing into a
+/// refutable claim — `let unused: bool = 10 / x == 0 || true;` alone must stay
+/// `HA_true`. Only the definition is dropped, never the binder: dropping the
+/// binder would shift the level of every binder allocated inside it. The
+/// innermost-first order lets one dropped definition cascade outward, and
+/// [`HAssert::ex`] collapses the resulting `∃x. ⊤` away.
+fn wrap_existentials(body: HAssert, group: PendingGroup) -> HAssert {
+    let PendingGroup { defs, base_level } = group;
+    let mut level = base_level + level_count(defs.len());
+    let mut acc = body;
+    for definition in defs.into_iter().rev() {
+        level -= 1;
+        acc = if assert_mentions_level(&acc, level) {
+            HAssert::ex(HAssert::and(definition, acc))
+        } else {
+            HAssert::ex(acc)
+        };
     }
-    assertion
+    acc
+}
+
+/// Whether `assertion` reads the logical variable bound at absolute `level`.
+/// Levels are position-independent, so no shifting is needed under `HA_ex`.
+fn assert_mentions_level(assertion: &HAssert, level: u32) -> bool {
+    match assertion {
+        HAssert::True | HAssert::False => false,
+        HAssert::Not(inner) | HAssert::Ex(inner) => assert_mentions_level(inner, level),
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            assert_mentions_level(l, level) || assert_mentions_level(r, level)
+        }
+        HAssert::TermEq(a, b) => term_mentions_level(a, level) || term_mentions_level(b, level),
+        HAssert::HasType(t, _) | HAssert::Defined(t) => term_mentions_level(t, level),
+        HAssert::AppOk(_, args) => args.iter().any(|t| term_mentions_level(t, level)),
+    }
+}
+
+fn term_mentions_level(term: &HTerm, level: u32) -> bool {
+    match term {
+        HTerm::LVar(l) => *l == level,
+        HTerm::Const(_) | HTerm::Local(_) => false,
+        HTerm::App(_, args) => args.iter().any(|t| term_mentions_level(t, level)),
+        HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
+            term_mentions_level(l, level) || term_mentions_level(r, level)
+        }
+    }
 }
 
 fn block_kind_word(kind: BlockKind) -> &'static str {
@@ -1485,8 +1783,12 @@ fn lower_assert(assertion: &HAssert, depth: u32) -> HAssert {
 
 fn lower_term(term: &HTerm, depth: u32) -> HTerm {
     match term {
+        // An out-of-scope level is a bookkeeping bug in this pass, not a
+        // program error, and there is no honest index to fall back on: the
+        // subtraction would wrap to a `T_lvar` naming a variable that does not
+        // exist, which the codec and the printer would both pass through.
         HTerm::LVar(level) => {
-            debug_assert!(
+            assert!(
                 *level < depth,
                 "logical variable level {level} is not bound at depth {depth}"
             );

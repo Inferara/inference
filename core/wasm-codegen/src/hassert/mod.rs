@@ -36,7 +36,15 @@
 //! translator spends one `And`/`Imp` level per structural statement, and a
 //! statement whose slots drain a typing guard spends two — `Imp(guard, And(…))`
 //! — so the practical statement budget for a guard-heavy body is roughly half
-//! the cap. Overrunning it is not an encoder hazard: the pre-encode gate
+//! the cap.
+//!
+//! A short-circuit `&&`/`||` costs two more levels for its pinned witness
+//! (`Ex` over `And`), plus the depth of the constraint itself. Where the
+//! witness belongs to a statement's own atom the cost is local — it does not
+//! accumulate down the statement fold — but a witness bound by a pure `let` or
+//! a `const` scopes over the rest of its block, so its two levels sit above
+//! every statement that follows and a chain of such bindings adds up.
+//! Overrunning the cap is not an encoder hazard: the pre-encode gate
 //! ([`check_payload`](crate::hspecs_section::check_payload)) already turns an
 //! over-deep tree into a
 //! [`CodegenError::HspecTreeTooDeep`](crate::errors::CodegenError::HspecTreeTooDeep)

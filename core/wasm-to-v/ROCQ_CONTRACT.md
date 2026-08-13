@@ -601,12 +601,14 @@ two polarities, universal (`Mode::Univ`) and existential (`Mode::Exist`)
 | Source construct | Universal mode | Existential mode |
 | --- | --- | --- |
 | Parameter / forall-context `@` | `T_local` slot (sequential, never rewound), plus a pending `HA_has_type (T_local i) T_i32`/`T_i64` typing guard for the slot (64-bit for `i64`/`u64`, i32 for every other scalar) | — |
-| Pending slot guards | Discharged at the next structural statement: fused into an immediately-following `assume`'s antecedent as `HA_and (guard, …, assume-body)`, otherwise an `Himpl` antecedent over the statement's claim conjoined with the rest of the block; a slot introduced after the last structural statement guards nothing (an unread slot introduced earlier is still guarded — uniformity beats a use analysis) | — (an `HA_ex` witness is prover-chosen, so it needs no typing guard) |
+| Pending slot guards | Discharged at the next structural statement: fused into an immediately-following `assume`'s antecedent as `HA_and (guard, …, assume-body)`, otherwise an `Himpl` antecedent over the statement's claim conjoined with the rest of the block; a slot introduced after the last structural statement guards nothing (an unread slot introduced earlier is still guarded — uniformity beats a use analysis). A pure `let`/`const` is not structural, but one that binds a short-circuit witness drains here too, so the guard dominates the `HA_ex` instead of sitting inside it — the witness constraint reads the very slot the guard types | — (a prover-chosen `HA_ex` variable needs no typing guard) |
 | Call-argument / `let`-bound `@` | (not applicable — only forall context takes slots) | `HA_ex` binder at the binding point; body uses `T_lvar` at its de Bruijn index, resolved by a final level-to-index pass (no shifting needed while building) |
 | `assume { … }` | Implication antecedent (`Himpl`) | Conjunct (`HA_and`) |
 | `if c { A } else { B }` | `HA_and (Himpl (nz c) A') (Himpl (eqz c) B')` | Strict `HA_or (HA_and (nz c) A') (HA_and (eqz c) B')` — no witness is fabricated via undefinedness |
-| `&&` (assertion position) | `HA_and` of each side's translation | same |
-| `\|\|` (assertion position) | `Hor` of each side's translation | same |
+| `&&` (assertion position) | `HA_and (left', HA_and (Cᵣ, right'))` | same |
+| `\|\|` (assertion position) | `Hor (left', HA_and (Cᵣ, right'))` | same |
+| `&&` (term position) | A fresh `HA_ex` witness `v` pinned by `Hor (HA_and (nz l) (HA_and Cᵣ (term_eq v r))) (HA_and (eqz l) (term_eq v 0))`; the binder wraps the enclosing statement's atom, `v` is the operator's term | same |
+| `\|\|` (term position) | A fresh `HA_ex` witness `v` pinned by `Hor (HA_and (nz l) (term_eq v 1)) (HA_and (eqz l) (HA_and Cᵣ (term_eq v r)))` | same |
 | `!` (assertion position) | Falsiness dual (De Morgan push-through) | same |
 | `==` | `nz(relop Eq …)` — wasm-verifier's `ValidSpec` evaluates the payload through a strong-Kleene strictification (`Assertions.ktrue`), under which the negated equality demands the relop denote, so this is only dischargeable inside the slots' typing guards | strict `term_eq` |
 | `!=` | `nz(relop Ne …)` — no per-side `HA_defined` conjunct: the strictified negation already demands both sides denote, so an emitted conjunct would be implied | same |
@@ -617,7 +619,24 @@ The binary-operator table (`+`, `-`, `*`, `/`, `%`, bitwise, shifts,
 comparisons) mirrors `lower_binary_expression` exactly: number class and
 signedness come from the left operand's type, sub-word results are
 narrowed with the same `shl`/`shr_s` (signed) or `and`-mask (unsigned)
-sequences codegen emits, and `**` has no encoding (`P002`). Implication
+sequences codegen emits, and `**` has no encoding (`P002`).
+
+`&&` and `||` are the exception, because they are the two operators
+`lower_binary_expression` does not lower itself — it delegates them to
+`lower_short_circuit_binary`, which compiles `a && b` to
+`if a != 0 then b else 0` and `a || b` to `if a != 0 then 1 else b` over
+canonical 0/1 truth values. The term language is strict in every operand
+and has no conditional, so an eager `T_binop` term would demand a right
+operand the program never evaluates and turn `x == 0 || 10 / x == 10 / x`
+— true for every `i32` — into a refutable claim at `x = 0`. The pinned
+witness above names the same two cases the compiled code branches on.
+`Cᵣ` is the conjunction of the constraints the *right operand itself*
+introduced; it rides in the arm that evaluates that operand, in term
+position and in both assertion polarities, since a constraint planted
+unconditionally would be demanded on the arm the source skips. The binder
+still hoists to the statement's atom, and a witness the payload never
+reads is emitted without its definition, so a specification that claims
+nothing stays `HA_true`. Implication
 and disjunction are explicit `Imp`/`Or` IR nodes — never a De Morgan
 encoding the printer has to pattern-match — because wasm-verifier's
 `Himpl`/`Hor` are definitionally-transparent `Definition`s the printer

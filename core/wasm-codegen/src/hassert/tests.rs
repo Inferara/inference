@@ -14,6 +14,7 @@ use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpec
 use inference_type_checker::TypeCheckerBuilder;
 use inference_type_checker::typed_context::TypedContext;
 
+use crate::errors::CodegenError;
 use crate::target::CompilationMode;
 use crate::{EmittableFunctions, collect_emittable_functions};
 
@@ -194,6 +195,9 @@ fn guard_width(decl_ty: &str) -> HNumType {
 }
 
 // convenience relop/binop shorthands at i32/signed (the common width)
+fn eqs(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::Eq, l, r)
+}
 fn gts(l: HTerm, r: HTerm) -> HTerm {
     rel(HNumType::I32, HRelop::GtS, l, r)
 }
@@ -610,7 +614,508 @@ fn disequality_is_a_bare_negated_relop_like_every_comparison() {
     );
 }
 
-// ----- 4. bindings, slots, scoping --------------------------------------
+// ----- 4. short-circuit `&&`/`||` as terms -------------------------------
+
+/// The constraint a term-position `l || r` pins its fresh witness `v` with:
+/// `Hor (l ≠ 0 ∧ v = 1) (l = 0 ∧ v = r)`, naming the same two cases the
+/// compiled `if l != 0 then 1 else r` branches on.
+fn or_witness(v: HTerm, l: HTerm, r: HTerm) -> HAssert {
+    or(
+        and(nz(l.clone()), teq(v.clone(), i32c(1))),
+        and(eqz(l), teq(v, r)),
+    )
+}
+
+/// The dual for `l && r`: `Hor (l ≠ 0 ∧ v = r) (l = 0 ∧ v = 0)`, mirroring
+/// `if l != 0 then r else 0`.
+fn and_witness(v: HTerm, l: HTerm, r: HTerm) -> HAssert {
+    or(
+        and(nz(l.clone()), teq(v.clone(), r)),
+        and(eqz(l), teq(v, i32c(0))),
+    )
+}
+
+/// [`or_witness`] where the right operand introduced a constraint of its own,
+/// conjoined *inside* the arm that evaluates that operand. Kept as a separate
+/// builder rather than an `⊤` argument to [`or_witness`], so the two shapes stay
+/// distinguishable: the pass absorbs an `⊤` conjunct away, and a test that let
+/// the two collapse into one spelling could no longer tell them apart.
+fn or_witness_with(v: HTerm, l: HTerm, right: HAssert, r: HTerm) -> HAssert {
+    or(
+        and(nz(l.clone()), teq(v.clone(), i32c(1))),
+        and(eqz(l), and(right, teq(v, r))),
+    )
+}
+
+/// The term language is strict and has no conditional, so a term-position `||`
+/// cannot be an eager `T_binop`: `x == 0 || 10 / x == 10 / x` is true for every
+/// `i32` yet an eager encoding demands the quotient at `x = 0` and turns it into
+/// a refutable claim. The operator is a fresh `HA_ex`-bound witness instead,
+/// pinned by a two-armed constraint over the value the compiled code branches to.
+#[test]
+fn term_position_or_binds_a_pinned_witness() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; assert((a == 0 || b == 0) == true); }";
+    let v = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                nz(eqs(v(), i32c(1)))
+            ))
+        )
+    );
+}
+
+/// The `&&` dual, whose skipped arm pins the witness to `0` rather than `1`.
+#[test]
+fn term_position_and_binds_a_pinned_witness() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; assert((a == 0 && b == 0) == true); }";
+    let v = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                and_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                nz(eqs(v(), i32c(1)))
+            ))
+        )
+    );
+}
+
+/// The case that separates the correct encoding from the plausible wrong one.
+/// When the right operand is itself short-circuit, its constraint must sit
+/// *inside* the outer operator's `eqz` arm: that arm is the only one where the
+/// source evaluates it, so a constraint hoisted above the disjunction would be
+/// demanded on the arm the program skips — the original bug, one level up.
+///
+/// The two binders and their levels are pinned with it: the inner witness is
+/// allocated first and so binds outermost, leaving the outer operator's witness
+/// at index 0 and the inner one at index 1 where the constraint reads them.
+#[test]
+fn a_short_circuit_right_operands_constraint_stays_inside_the_arm_that_evaluates_it() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; let c: i32 = @; \
+                assert((a == 0 || b == 0 && c == 0) == true); }";
+    let outer = || lvar(0);
+    let inner = || lvar(1);
+    let inner_def = || and_witness(inner(), eqs(local(1), i32c(0)), eqs(local(2), i32c(0)));
+    let guards = || and(guard(0), and(guard(1), guard(2)));
+    let claim = || nz(eqs(outer(), i32c(1)));
+
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards(),
+            ex(ex(and(
+                or_witness_with(outer(), eqs(local(0), i32c(0)), inner_def(), inner()),
+                claim()
+            )))
+        )
+    );
+
+    // Spelled out because it is the shape a hoist produces and the reason the
+    // capture exists: the same tree with the inner constraint lifted above the
+    // outer disjunction, where `c` is demanded even when `a` already decided the
+    // result. Everything else about the two trees is identical.
+    let hoisted = imp(
+        guards(),
+        ex(ex(and(
+            inner_def(),
+            and(
+                or_witness(outer(), eqs(local(0), i32c(0)), inner()),
+                claim(),
+            ),
+        ))),
+    );
+    assert_ne!(obligation_of("", body), hoisted);
+}
+
+/// A *left* operand is evaluated unconditionally, so its constraint keeps the
+/// unconditional placement every other operand position gets — at its own
+/// binder, not inside an arm. Left-associative chains (`a || b || c`) are all
+/// left operands, so none of them takes the conditional treatment.
+#[test]
+fn a_left_operands_constraint_is_unconditional_at_its_own_binder() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; let c: i32 = @; \
+                assert(((a == 0 || b == 0) || c == 0) == true); }";
+    // The left `||`'s witness binds outermost: index 0 under its own binder,
+    // index 1 once the outer operator's binder is entered.
+    let left_at_1 = || lvar(0);
+    let left_at_2 = || lvar(1);
+    let outer = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(
+                or_witness(left_at_1(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                ex(and(
+                    or_witness(outer(), left_at_2(), eqs(local(2), i32c(0))),
+                    nz(eqs(outer(), i32c(1)))
+                ))
+            ))
+        )
+    );
+}
+
+/// Two independent witnesses in one `assert`. Levels are absolute while the
+/// emitted `T_lvar`s are de Bruijn indices, so an off-by-one in the final
+/// level-to-index pass shows here as the first witness escaping its binder: it
+/// is read at index 1 from inside the second binder and at index 0 outside it.
+#[test]
+fn two_witnesses_in_one_assert_index_correctly() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; let c: i32 = @; let d: i32 = @; \
+                assert((a == 0 || b == 0) == (c == 0 || d == 0)); }";
+    let first_at_1 = || lvar(0);
+    let first_at_2 = || lvar(1);
+    let second = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+            ex(and(
+                or_witness(first_at_1(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                ex(and(
+                    or_witness(second(), eqs(local(2), i32c(0)), eqs(local(3), i32c(0))),
+                    nz(eqs(first_at_2(), second()))
+                ))
+            ))
+        )
+    );
+}
+
+/// Assertion position already splits `&&`/`||` into `HA_and`/`Hor`, and the same
+/// placement rule applies to what the split's right side brings with it: a
+/// witness constraint from the right operand rides into that operand's own arm.
+/// The binder itself still hoists to the statement's atom, so on the arm the
+/// source skips it is bound but unconstrained — which is sound, because nothing
+/// there reads it.
+#[test]
+fn an_assertion_position_operator_carries_its_right_constraint_into_its_own_arm() {
+    let v = || lvar(0);
+    let def = || or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0)));
+    let claim = || nz(eqs(v(), i32c(1)));
+    let guards = || and(guard(0), guard(1));
+    let left = || nz(gts(local(0), i32c(0)));
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                assert(a > 0 && (a == 0 || b == 0) == true); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(guards(), ex(and(left(), and(def(), claim()))))
+    );
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                assert(a > 0 || (a == 0 || b == 0) == true); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(guards(), ex(or(left(), and(def(), claim()))))
+    );
+}
+
+/// `!` over a term-position short-circuit takes the falsiness of the *witness*,
+/// leaving the constraint untouched — the operator's own encoding does not
+/// change with the polarity it is read in.
+#[test]
+fn negating_a_term_position_short_circuit_negates_only_the_witness() {
+    let v = || lvar(0);
+    let guards = || and(guard(0), guard(1));
+    let operands = || (eqs(local(0), i32c(0)), eqs(local(1), i32c(0)));
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; assert(!((a == 0 || b == 0) == true)); }";
+    let (l, r) = operands();
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards(),
+            ex(and(or_witness(v(), l, r), eqz(eqs(v(), i32c(1)))))
+        )
+    );
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; assert(!((a == 0 && b == 0) == true)); }";
+    let (l, r) = operands();
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards(),
+            ex(and(and_witness(v(), l, r), eqz(eqs(v(), i32c(1)))))
+        )
+    );
+}
+
+/// The falsiness dual moves a right operand's constraint exactly as the positive
+/// translation does. De Morgan swaps which connective the arm sits under, so a
+/// capture implemented on one side only would leak the constraint out of its arm
+/// as soon as the assertion appeared under a `!`.
+#[test]
+fn the_falsiness_dual_moves_a_right_constraint_too() {
+    let v = || lvar(0);
+    let def = || or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0)));
+    let claim = || eqz(eqs(v(), i32c(1)));
+    let guards = || and(guard(0), guard(1));
+    let left = || eqz(gts(local(0), i32c(0)));
+
+    // ¬(p ∧ q) becomes ¬p ∨ (C_q ∧ ¬q).
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                assert(!(a > 0 && (a == 0 || b == 0) == true)); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(guards(), ex(or(left(), and(def(), claim()))))
+    );
+
+    // ¬(p ∨ q) becomes ¬p ∧ (C_q ∧ ¬q).
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                assert(!(a > 0 || (a == 0 || b == 0) == true)); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(guards(), ex(and(left(), and(def(), claim()))))
+    );
+}
+
+/// A pure `let` is where the inlined term is *read*, not where it is claimed, so
+/// its witness binder scopes over the rest of the block. The pending slot guards
+/// drain ahead of the binder rather than inside it: the constraint reads the very
+/// slots they type, so `HA_ex (guard → …)` would pin a value at slots nothing has
+/// typed yet — the escape the guards exist to close. Chained bindings nest in
+/// source order.
+#[test]
+fn a_witness_bound_by_a_pure_let_scopes_over_the_rest_under_its_guards() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                let ok: bool = a == 0 || b == 0; assert(ok); }";
+    let v = || lvar(0);
+    let obligation = obligation_of("", body);
+    assert_eq!(
+        obligation,
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                nz(v())
+            ))
+        )
+    );
+    // Stated on its own so the nesting order cannot be lost in a future
+    // regeneration of the tree above: guard outside, binder inside.
+    assert!(
+        matches!(&obligation, HAssert::Imp(_, consequent) if matches!(**consequent, HAssert::Ex(_))),
+        "the slot guards must dominate the binder, not sit inside it: {obligation:?}"
+    );
+
+    // Two bindings: the second binder nests inside the first, and the first is
+    // still read at the deeper level.
+    let body = "forall { let a: i32 = @; let b: i32 = @; let p: bool = a == 0 || b == 0; \
+                let q: bool = a > 0 && b > 0; assert(p); assert(q); }";
+    let p_at_1 = || lvar(0);
+    let p_at_2 = || lvar(1);
+    let q = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                or_witness(p_at_1(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                ex(and(
+                    and_witness(q(), gts(local(0), i32c(0)), gts(local(1), i32c(0))),
+                    and(nz(p_at_2()), nz(q()))
+                ))
+            ))
+        )
+    );
+}
+
+/// A block-local `const` binds a witness exactly like a pure `let` does — same
+/// scoping over the rest of the block, same guard drain ahead of the binder.
+#[test]
+fn a_witness_bound_by_a_const_scopes_over_the_rest_like_a_pure_let() {
+    let body = "forall { let a: i32 = @; const k: bool = 1 == 0 || 2 == 0; \
+                assert(k); assert(a > 0); }";
+    let v = || lvar(0);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            ex(and(
+                or_witness(v(), eqs(i32c(1), i32c(0)), eqs(i32c(2), i32c(0))),
+                and(nz(v()), nz(gts(local(0), i32c(0))))
+            ))
+        )
+    );
+}
+
+/// An `if` condition is translated once and read on both arms, so one binder
+/// wraps the whole contribution and the constraint appears once. An encoding
+/// that rebuilt the condition per arm would duplicate the whole two-armed
+/// constraint and, with it, every trap-guarding operand inside it.
+#[test]
+fn a_witness_in_an_if_condition_is_bound_once_over_both_arms() {
+    let v = || lvar(0);
+    let def = || or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0)));
+    let guards = || and(guard(0), guard(1));
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                if a == 0 || b == 0 { assert(a > 0); } }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards(),
+            ex(and(def(), imp(nz(v()), nz(gts(local(0), i32c(0))))))
+        )
+    );
+
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                if a == 0 || b == 0 { assert(a > 0); } else { assert(b > 0); } }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards(),
+            ex(and(
+                def(),
+                and(
+                    imp(nz(v()), nz(gts(local(0), i32c(0)))),
+                    imp(eqz(v()), nz(gts(local(1), i32c(0))))
+                )
+            ))
+        )
+    );
+}
+
+/// A pinned witness and a prover-chosen `@` are both `HA_ex` binders and share
+/// one allocation order, so an existential body that introduces both must
+/// interleave their levels rather than keep two counters. The `@` binder is
+/// emitted without a definition — pinning it would be the opposite of what `@`
+/// means — while the witness keeps its own.
+#[test]
+fn an_existential_witness_and_a_call_argument_uzumaki_interleave_by_level() {
+    let prelude = "fn g(x: i32) -> i32 { return x; }";
+    // Three binders, outermost first: `m`, the anonymous call-argument `@`, and
+    // the witness. Read from the innermost point they are indices 2, 1 and 0.
+    let m = || lvar(2);
+    let anon = || lvar(1);
+    let v = || lvar(0);
+
+    // Term position: the constraint stays at the witness's own binder.
+    let body = "forall { let n: i32 = @; exists { let m: i32 = @; \
+                assert((g(@) > 0 || m == 0) == true); } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guard(0),
+            ex(ex(ex(and(
+                or_witness(v(), gts(app("g", vec![anon()]), i32c(0)), eqs(m(), i32c(0))),
+                teq(v(), i32c(1))
+            ))))
+        )
+    );
+
+    // Assertion position: the constraint moves into the `HA_and`'s right arm and
+    // both binders are left carrying nothing, which the wrap emits bare.
+    let body = "forall { let n: i32 = @; exists { let m: i32 = @; \
+                assert(g(@) > 0 && (m == 0 || n == 0) == true); } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guard(0),
+            ex(ex(ex(and(
+                nz(gts(app("g", vec![anon()]), i32c(0))),
+                and(
+                    or_witness(v(), eqs(m(), i32c(0)), eqs(local(0), i32c(0))),
+                    teq(v(), i32c(1))
+                )
+            ))))
+        )
+    );
+}
+
+/// A definition pins a value, so keeping one for a variable the payload never
+/// reads would turn a specification that claims nothing into a refutable claim.
+/// The binder still survives — dropping it would shift the level of every binder
+/// allocated inside it — but its definition does not.
+#[test]
+fn a_witness_nothing_reads_is_emitted_without_its_constraint() {
+    // Nothing follows the binding, so the whole body claims nothing and the
+    // `∃x. ⊤` the wrap leaves behind collapses.
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                let unused: bool = a == 0 || b == 0; }";
+    assert_eq!(obligation_of("", body), HAssert::True);
+
+    // An unrelated later claim keeps the binder but not the definition, so the
+    // divide the source guards against is never demanded.
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                let unused: bool = a == 0 || b == 0; assert(a > 0); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(and(guard(0), guard(1)), ex(nz(gts(local(0), i32c(0)))))
+    );
+}
+
+/// A witness in call-argument position is the `T_app`'s argument, so the applied
+/// term names the binder rather than restating the operator.
+#[test]
+fn a_witness_passed_as_a_call_argument_is_the_t_app_argument() {
+    let prelude = "fn h(x: bool) -> i32 { return 1; }";
+    let body = "forall { let a: i32 = @; let b: i32 = @; assert(h(a == 0 || b == 0) == 1); }";
+    let v = || lvar(0);
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                nz(eqs(app("h", vec![v()]), i32c(1)))
+            ))
+        )
+    );
+}
+
+/// A bare call statement claims `HA_app_ok`, and a witness in its arguments
+/// wraps that atom alone: the binder is committed and discharged inside the
+/// statement that allocated it, never handed to the next one.
+#[test]
+fn a_call_statements_witness_wraps_its_own_app_ok_atom() {
+    let prelude = "fn h(x: bool) -> i32 { return 1; }";
+    let body = "forall { let a: i32 = @; let b: i32 = @; \
+                h(a == 0 || b == 0); assert(a > 0); }";
+    let v = || lvar(0);
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            and(guard(0), guard(1)),
+            and(
+                ex(and(
+                    or_witness(v(), eqs(local(0), i32c(0)), eqs(local(1), i32c(0))),
+                    HAssert::AppOk(HFnRef("h".to_string()), vec![v()])
+                )),
+                nz(gts(local(0), i32c(0)))
+            )
+        )
+    );
+}
+
+/// An expression translated only for its diagnostics contributes no claim, so
+/// nothing wraps the binders it introduced and they are dropped with the term.
+/// Left pending they would be wrapped around a *later* statement's atom, at a
+/// depth where their levels name something else — which is why the assertion
+/// here is on the following statement's obligation.
+#[test]
+fn a_discarded_expression_leaks_no_binder_into_the_next_statement() {
+    let body = "forall { let a: i32 = @; let b: i32 = @; a == 0 || b == 0; assert(a > 0); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(and(guard(0), guard(1)), nz(gts(local(0), i32c(0))))
+    );
+
+    // The same for a returned expression. `return` is reachable only in a plain
+    // (`Regular`) body, where analysis permits a statement after it.
+    let source = "spec S { fn f(p: i32) -> bool { return p == 0 || p == 1; assert(p > 0); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(guard(0), nz(gts(local(0), i32c(0))))
+    );
+}
+
+// ----- 5. bindings, slots, scoping --------------------------------------
 
 #[test]
 fn pure_let_is_inlined_as_a_term() {
@@ -702,7 +1207,7 @@ fn block_local_const_is_inlined() {
     );
 }
 
-// ----- 5. existentials / de Bruijn --------------------------------------
+// ----- 6. existentials / de Bruijn --------------------------------------
 
 #[test]
 fn single_existential_binds_lvar_zero() {
@@ -757,7 +1262,7 @@ fn assume_inside_exists_is_a_conjunct() {
     );
 }
 
-// ----- 6. if forms -------------------------------------------------------
+// ----- 7. if forms -------------------------------------------------------
 
 #[test]
 fn universal_if_without_else_is_a_single_guarded_implication() {
@@ -809,7 +1314,7 @@ fn if_condition_may_be_a_call_result() {
     );
 }
 
-// ----- 7. calls ----------------------------------------------------------
+// ----- 8. calls ----------------------------------------------------------
 
 #[test]
 fn spec_sibling_helper_is_a_t_app_by_its_folded_key() {
@@ -873,7 +1378,7 @@ fn cross_file_qualified_callee_carries_its_defining_path() {
     );
 }
 
-// ----- 8. simplification -------------------------------------------------
+// ----- 9. simplification -------------------------------------------------
 
 #[test]
 fn assert_free_and_empty_bodies_are_trivially_true() {
@@ -908,7 +1413,7 @@ fn assume_then_assert_has_no_trailing_conjunction_with_true() {
     );
 }
 
-// ----- 9. universal-slot typing guards -----------------------------------
+// ----- 10. universal-slot typing guards ----------------------------------
 
 /// Both a named and an ignored parameter take a guarded slot. A guard on a slot
 /// no payload reads is inert, and emitting one uniformly keeps slot numbering
@@ -1159,6 +1664,13 @@ fn unguarded_term_reads(term: &HTerm, guarded: &[u32], out: &mut Vec<u32>) {
 /// (parameter named and ignored, `let`, bare call argument, call argument inside
 /// a pure `let`) with every place the drain can land (assert, chained asserts,
 /// `assume`, `if`/`else`, a branch-local slot, an exists arm).
+///
+/// The short-circuit rows are the ones a witness can break. A witness constraint
+/// reads the slots it compares, and it is planted at a binder rather than at a
+/// statement's claim, so a drain that ran on the wrong side of the binder would
+/// leave those reads under no guard at all. [`unguarded_reads`] walks `HA_ex`
+/// transparently, so the binder is not itself a hiding place: an escaped read
+/// inside one is reported like any other.
 #[test]
 fn every_universal_slot_read_is_dominated_by_its_guard() {
     let sources = [
@@ -1174,6 +1686,27 @@ fn every_universal_slot_read_is_dominated_by_its_guard() {
         "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { assert(g(@) > 0); } }",
         "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { let t: i32 = g(@); assert(t > 0); } }",
         "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { let a: i32 = @; assert(g(a) != a); } }",
+        // A witness bound by a pure `let`, reading one slot and then two: a
+        // pure `let` is not structural, so the guards it drains are drained
+        // nowhere else.
+        "spec S { fn f() forall { let a: i32 = @; let ok: bool = a == 0 || a > 5; assert(ok); } }",
+        "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; let ok: bool = a > 0 || b > 0; assert(ok); } }",
+        // A witness in a `const` initializer takes the same drain.
+        "spec S { fn f() forall { let a: i32 = @; const k: bool = 1 == 0 || 2 == 0; assert(k); assert(a > 0); } }",
+        // A witness in an `if` condition, where the binder wraps both arms.
+        "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; if a == 0 || b == 0 { assert(a > 0); } else { assert(b > 0); } } }",
+        // A witness inside a nested block, whose atom is wrapped one level in
+        // while the guards drain at the enclosing statement.
+        "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; { assert((a == 0 || b == 0) == true); } assert(a < 10); } }",
+        // A witness in a branch body, reading a branch-local slot and an outer one.
+        "spec S { fn f() forall { let a: i32 = @; if a > 0 { let b: i32 = @; assert((b == 0 || a == 0) == true); } assert(a < 10); } }",
+        // A witness reading an anonymous call-argument slot alongside a named one.
+        "fn g(x: i32) -> i32 { return x; }\nspec S { fn f() forall { let a: i32 = @; assert((g(@) == 0 || a == 0) == true); } }",
+        // A witness whose guards were already drained by a preceding `assume`.
+        "spec S { fn f(p: i32) forall { assume { assert(p > 0); } let ok: bool = p == 0 || p > 1; assert(ok); } }",
+        // A witness inside an `assume` body, where the binder lands in the
+        // antecedent the guards lead.
+        "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; assume { assert((a == 0 || b == 0) == true); } assert(a > 0); } }",
     ];
     for source in sources {
         for entries in ok(source).values() {
@@ -1208,7 +1741,7 @@ fn the_domination_checker_catches_an_unguarded_read() {
     assert_eq!(mismatched, vec![0]);
 }
 
-// ----- 10. diagnostics ---------------------------------------------------
+// ----- 11. diagnostics --------------------------------------------------
 
 #[test]
 fn p001_rejects_a_quantified_spec_function() {
@@ -1289,4 +1822,103 @@ fn every_diagnostic_is_collected_before_failing() {
     let e = err(src);
     assert!(e.contains("error[P004]"), "{e}");
     assert!(e.contains("error[P002]"), "{e}");
+}
+
+// ----- 12. the assertion-spine depth budget -------------------------------
+
+/// A boolean chain of `n` operators, right-nested with explicit parentheses:
+/// `a == 0 || (a == 1 || (… || a == n))`. Right nesting is the expensive shape,
+/// because each operator's constraint is planted inside the previous one's
+/// skipped arm rather than beside it.
+fn nested_or_chain(n: usize) -> String {
+    let mut expr = format!("a == {n}");
+    for k in (0..n).rev() {
+        expr = format!("a == {k} || ({expr})");
+    }
+    format!("spec S {{ fn f() forall {{ let a: i32 = @; assert(({expr}) == true); }} }}")
+}
+
+/// The same chain written the way a program actually writes one — no
+/// parentheses, so the grammar left-associates it and every operator is a *left*
+/// operand of the next.
+fn flat_or_chain(n: usize) -> String {
+    let mut expr = "a == 0".to_string();
+    for k in 1..=n {
+        expr = format!("{expr} || a == {k}");
+    }
+    format!("spec S {{ fn f() forall {{ let a: i32 = @; assert(({expr}) == true); }} }}")
+}
+
+/// Runs the whole code generator in proof mode on a compiler-sized stack.
+///
+/// The pre-encode payload gate lives in code generation, not in the translation
+/// pass, so these cases cannot be driven through [`obligation_of`]. Deeply
+/// nested source also needs more stack than the test harness hands a thread —
+/// the parser and the type checker descend once per level — so the pipeline runs
+/// on [`inference_parser::MIN_COMPILE_STACK`], the same reservation
+/// `inference::with_compiler_stack` makes for a real compile. Without it these
+/// cases would abort the process on a stack overflow long before reaching the
+/// behaviour under test.
+fn proof_codegen(source: String) -> Result<usize, CodegenError> {
+    std::thread::Builder::new()
+        .stack_size(inference_parser::MIN_COMPILE_STACK)
+        .spawn(move || {
+            let ctx = type_check(&source);
+            crate::codegen(
+                &ctx,
+                "depth",
+                crate::CodegenOptions {
+                    target: crate::Target::Wasm32,
+                    mode: CompilationMode::Proof,
+                    opt_level: crate::Target::Wasm32.default_opt_level(),
+                    features: crate::EmitFeatures::default(),
+                },
+            )
+            .map(|output| output.wasm().len())
+            .map_err(|e| {
+                e.downcast::<CodegenError>()
+                    .expect("code generation reports its own error type")
+            })
+        })
+        .expect("spawning the compiler-sized thread")
+        .join()
+        .expect("the compiler-sized thread must not panic")
+}
+
+/// A term-position `&&`/`||` now spends assertion-spine levels rather than term
+/// levels, and the two are budgeted separately: a term tree starts a fresh
+/// counter at every assertion atom, while the spine accumulates. Each operator
+/// costs three spine levels for its constraint plus one for its binder, so a
+/// chain long enough to matter is far shorter than it used to be — measured, a
+/// right-nested chain of 63 operators is the longest that fits and 64 is the
+/// first that does not.
+///
+/// Overrunning must be an error naming the obligation, not a truncated payload:
+/// the encoder is infallible, so an over-deep tree would otherwise serialize
+/// into a section the codec's own decoder rejects downstream.
+#[test]
+fn an_over_deep_boolean_chain_is_rejected_by_name() {
+    let err = proof_codegen(nested_or_chain(80))
+        .expect_err("a chain past the payload depth cap must not be emitted");
+    assert!(
+        matches!(
+            err,
+            CodegenError::HspecTreeTooDeep { ref spec, ref function, max }
+                if spec == "S" && function == "S.f" && max == inference_hassert::MAX_TREE_DEPTH
+        ),
+        "expected the depth cap to be reported against the obligation, got: {err:?}"
+    );
+}
+
+/// The budget still covers chains of the length a specification plausibly
+/// carries: a 32-clause right-nested chain — the expensive nesting — and a
+/// 64-clause flat one, the shape source is actually written in, both compile.
+#[test]
+fn a_realistic_boolean_chain_still_compiles() {
+    let nested = proof_codegen(nested_or_chain(32))
+        .expect("a 32-operator right-nested chain must stay inside the payload depth cap");
+    assert!(nested > 0, "code generation produced an empty module");
+    let flat = proof_codegen(flat_or_chain(64))
+        .expect("a 64-operator left-associated chain must stay inside the payload depth cap");
+    assert!(flat > 0, "code generation produced an empty module");
 }
