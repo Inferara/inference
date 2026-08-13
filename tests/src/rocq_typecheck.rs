@@ -1396,6 +1396,27 @@ mod gate {
     /// side is parsed out of the stub `.v` files [`compile_stub`] compiles, and
     /// the produced side is tokenised out of every module in [`gated_modules`].
     ///
+    /// Tokenising counts every mention of a name, and a mention is a
+    /// *reference* to the stub's declaration only while nothing in the emitted
+    /// text *binds* that name. A fixture function, module or spec whose emitted
+    /// name happened to equal a stub constructor or record field would
+    /// otherwise mark that declaration covered by defining something unrelated
+    /// under its spelling — the constructor-shape drift this audit exists to
+    /// catch, wearing a producer's badge. [`emitted_bindings`] therefore
+    /// collects what each module binds, and the audit asserts that none of it
+    /// is a stub declaration; that assertion is what makes the tokenised set
+    /// mean what it claims. It asserts rather than subtracts because
+    /// subtracting is unsound in the other direction: a name that is both bound
+    /// and genuinely referenced would come back unproduced and fail a producer
+    /// that is really there. A collision is worth failing on for its own sake
+    /// anyway, because the binding shadows the stub's declaration for the rest
+    /// of the file: a module that also *references* that name gets the local
+    /// definition instead, and `coqc` rejects the `.v` (#405). The two halves
+    /// are complementary rather than redundant — a module carrying no such
+    /// reference compiles clean, and is exactly the module whose collision
+    /// coverage cannot see — so the audit fails on the binding itself and says
+    /// which fixture to rename.
+    ///
     /// The audit then compiles that same set itself. Measuring coverage against
     /// generated *text* while leaving the elaboration to other tests would make
     /// the claim only as strong as their health: `#[ignore]` the two gates
@@ -1404,13 +1425,14 @@ mod gate {
     /// every counted module to `coqc` here makes "produced" mean "elaborated"
     /// by construction, and no other test's state can launder it.
     ///
-    /// Three ways to fail on the coverage side, so the audit cannot rot into a
-    /// rubber stamp: a declaration that is neither produced nor exempt (the hole
-    /// reopening), an exemption for something that *is* produced (a stale
-    /// reason, to be deleted rather than left to accumulate), and an exemption
-    /// naming nothing the stub declares (a typo, which would silently exempt
-    /// nothing). All three run whether or not `coqc` is installed, and the skip
-    /// message says which half of the claim the run actually established.
+    /// Three further ways to fail, on the coverage side proper, so the audit
+    /// cannot rot into a rubber stamp: a declaration that is neither produced
+    /// nor exempt (the hole reopening), an exemption for something that *is*
+    /// produced (a stale reason, to be deleted rather than left to accumulate),
+    /// and an exemption naming nothing the stub declares (a typo, which would
+    /// silently exempt nothing). Those three and the collision check all run
+    /// whether or not `coqc` is installed, and the skip message says which half
+    /// of the claim the run actually established.
     ///
     /// This does not make the per-shape gates above redundant, for two reasons
     /// worth keeping straight. Their negative needles pin terms that type-check
@@ -1443,20 +1465,50 @@ mod gate {
         // Comments are stripped from the emitted text for the same reason they
         // are stripped from the stub: `coqc` elaborates neither, so a name that
         // appears only inside an emitted name-section annotation such as
-        // `(*narrow*)` is not a producer.
-        let compiled: String = modules
+        // `(*narrow*)` is neither a producer nor a binding.
+        let stripped: Vec<String> = modules.iter().map(|m| strip_rocq_comments(&m.v)).collect();
+        let declared = stub_declarations();
+
+        // First, because every assertion below reads a producer set that means
+        // "references a stub declaration" only while this holds.
+        let collisions: Vec<String> = stripped
             .iter()
-            .map(|m| strip_rocq_comments(&m.v))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let produced: FxHashSet<&str> = tokenize(&compiled)
-            .into_iter()
+            .zip(&modules)
+            .flat_map(|(text, m)| {
+                emitted_bindings(text)
+                    .into_iter()
+                    .map(move |name| (m, name))
+            })
+            .filter_map(|(m, name)| {
+                let (_, file) = declared.iter().find(|(declared, _)| declared == name)?;
+                Some(format!(
+                    "  {name}  bound by `{}`, declared in {file}",
+                    m.source
+                ))
+            })
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "these gated modules bind a name the vendored stub declares. The \
+             binding shadows that declaration for the rest of the file, which \
+             leaves the coverage measurement below meaningless — the \
+             declaration counts as produced because something unrelated was \
+             defined under its spelling, not because anything referenced it — \
+             and turns any reference to it from the same module into a `coqc` \
+             type error (#405):\n{}\n\
+             Rename the offending fixture function, module or spec; the stub's \
+             names are the contract's and cannot move.",
+            collisions.join("\n")
+        );
+
+        let produced: FxHashSet<&str> = stripped
+            .iter()
+            .flat_map(|text| tokenize(text))
             .filter_map(|token| match token {
                 Tok::Ident(name) => Some(name),
                 _ => None,
             })
             .collect();
-        let declared = stub_declarations();
 
         let unknown: Vec<&str> = DECLARATIONS_WITHOUT_A_PRODUCER
             .iter()
@@ -1557,6 +1609,104 @@ mod gate {
                     .map(move |name| (name, file.clone()))
             })
             .collect()
+    }
+
+    /// The Rocq vernacular an emitted module binds a name with, and all of it.
+    /// `Translator::translate` in `core/wasm-to-v/src/translator.rs` is the
+    /// only writer of top-level sentences, and the only sentences it writes
+    /// that introduce a name are its `Definition`s (the preamble helpers, one
+    /// per surviving function, the module record, and the per-spec
+    /// obligations), its `Theorem`s, and the `Context` the `Section Host` block
+    /// opens with. The rest — `Require`, `From … Require`, `Open Scope`,
+    /// `Section`/`End`, `Proof`/`Qed` — bind nothing an emitted term can name.
+    const EMITTED_BINDING_KEYWORDS: &[&str] = &["Definition", "Theorem", "Context"];
+
+    /// Every name an emitted module binds, in emission order.
+    ///
+    /// All three forms share one shape: the bound names are the identifiers
+    /// between the keyword and the first `:`, whether that colon opens a type
+    /// annotation (`Definition is_prime : module_func`, `Theorem valid_m :
+    /// ValidModule m`, ``Context `{ho: host}``) or heads the `:=` of an
+    /// annotation-free helper (`Definition Mg mut t init :=`). A helper's
+    /// parameters are therefore bound names too, which is the point — a
+    /// parameter shadows inside the body exactly as the definition's own name
+    /// shadows outside it, and either way a token spelled like a stub
+    /// declaration has stopped referring to one.
+    ///
+    /// Takes text whose comments are already stripped, so an identifier inside
+    /// an emitted `(*name*)` name-section annotation cannot be read as a
+    /// binding.
+    fn emitted_bindings(stripped: &str) -> Vec<&str> {
+        let tokens = tokenize(stripped);
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at < tokens.len() {
+            let keyword = ident_at(&tokens, at);
+            at += 1;
+            if !keyword.is_some_and(|k| EMITTED_BINDING_KEYWORDS.contains(&k)) {
+                continue;
+            }
+            while at < tokens.len() && !is_punct(&tokens, at, ':') {
+                if let Some(name) = ident_at(&tokens, at) {
+                    names.push(name);
+                }
+                at += 1;
+            }
+        }
+        names
+    }
+
+    /// [`emitted_bindings`] is the other half of the audit's measuring
+    /// instrument, and a binding form it misses is a name that can collide with
+    /// a stub declaration unnoticed — which is the whole reason the audit may
+    /// read a token as a reference. This pins every form the emitter writes,
+    /// against a miniature module shaped like a real one.
+    ///
+    /// The two traps are the point of the fixture. A definition named after a
+    /// constructor it also *references* in its body (`ROI_eq`) must be reported
+    /// once, as a binding — the collision case a fixture rename causes. And a
+    /// constructor a body only mentions (`BOI_add`) must not be reported at
+    /// all, or the audit would start rejecting honest producers.
+    #[test]
+    fn emitted_bindings_reads_every_emitted_binding_form() {
+        let source = r#"
+Require Import List.
+From Wasm Require Import datatypes.
+Open Scope byte_scope.
+
+Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}|}.
+
+Definition ROI_eq : module_func := {|
+  modfunc_body :=
+    BI_relop T_i32 (Relop_i ROI_eq) ::
+    BI_binop T_i32 (Binop_i BOI_add) ::
+    nil;
+|}.
+
+Definition m__S_specs : list hassert := (@nil hassert).
+
+Section Host.
+Context `{ho: host}.
+
+Theorem valid_m : ValidModule m.
+Proof.
+Admitted.
+
+End Host.
+"#;
+        assert_eq!(
+            emitted_bindings(source),
+            [
+                "Mg",
+                "mut",
+                "t",
+                "init",
+                "ROI_eq",
+                "m__S_specs",
+                "ho",
+                "valid_m",
+            ]
+        );
     }
 
     /// A Rocq token, at the resolution the declaration parser needs.
