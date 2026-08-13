@@ -744,7 +744,7 @@ fn test() {
 2. Find the struct definition in symbol table
 3. Look up method by name in struct's method table
 4. Check visibility of method
-5. Verify argument count and types
+5. Verify argument count, labels, and types
 6. Return method signature with return type
 
 ### Method Type Checking

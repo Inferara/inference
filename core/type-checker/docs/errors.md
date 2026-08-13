@@ -342,6 +342,62 @@ fn test() {
 
 **Solution**: Provide the correct number of arguments.
 
+### `MixedNamedAndPositionalArguments`
+
+One call passes some arguments with a label and others without. When any argument is named,
+all of them must be named.
+
+**Example**:
+
+```rust
+fn subtract(left: i32, right: i32) -> i32 { return left - right; }
+
+fn test() -> i32 {
+    return subtract(left: 10, 3);  // Error: named and positional arguments cannot be mixed in one call
+}
+```
+
+**Solution**: Label every argument, or none of them.
+
+### `UnknownArgumentLabel`
+
+An argument label names no parameter of the callee. A parameter that binds no name — `_: i32`,
+or a bare type as in `external fn sub(i32, i32)` — can only be passed positionally, so any
+label aimed at one is reported here.
+
+**Example**:
+
+```rust
+fn subtract(left: i32, right: i32) -> i32 { return left - right; }
+
+fn test() -> i32 {
+    return subtract(wrong: 10, nonexistent: 3);  // Error: unknown argument label `wrong` in call to function `subtract`
+}
+```
+
+**Solution**: Spell the label exactly as the parameter it names, or drop it.
+
+### `ArgumentLabelOutOfOrder`
+
+An argument label names a parameter the callee declares at a different position. Labels do
+not select parameters — arguments bind positionally — so a label is required to agree with
+the declaration rather than to reorder it.
+
+**Example**:
+
+```rust
+fn subtract(left: i32, right: i32) -> i32 { return left - right; }
+
+fn test() -> i32 {
+    return subtract(right: 3, left: 10);  // Error: argument label `right` is out of order: it names parameter 2 of function `subtract` but appears at position 1
+}
+```
+
+Without this check the call bound positionally and returned `-7`, while the labelled reading
+of the source says `7`.
+
+**Solution**: Write the arguments in declaration order — `subtract(left: 10, right: 3)`.
+
 ### `SelfReferenceInFunction`
 
 `self` appears inside a free function (not inside an `impl` method).

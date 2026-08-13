@@ -659,10 +659,18 @@ MethodInfo {
 
 When a function or method is called, the type checker validates that each argument matches the corresponding parameter type. This is essential for catching type mismatches early.
 
+Arguments bind by position: argument `i` binds parameter `i`. An argument label does not
+select a parameter — where labels are present they are checked for agreement with the
+declaration, and a call that disagrees is rejected rather than reordered.
+
 **Validation Process**:
 
-1. Look up the function signature (parameter types, return type, type parameters)
-2. For each argument in the call:
+1. Look up the function signature (parameter types and names, return type, type parameters)
+2. If any argument is labelled, validate the labels:
+   - All arguments must be labelled, or none of them
+   - Each label must name a parameter of the callee
+   - Each label must name the parameter declared at that argument's position
+3. For each argument in the call:
    - Infer the argument's type
    - Compare it against the corresponding parameter type
    - If types don't match, record a type mismatch error with detailed context

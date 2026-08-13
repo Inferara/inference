@@ -176,6 +176,19 @@ pub(crate) struct TypeChecker {
     /// skips these so a colliding import never produces a binding, no matter
     /// whether its target resolves on a later pass.
     colliding_imports: FxHashSet<(u32, String)>,
+    /// Calls already reported for mixing named and positional arguments.
+    ///
+    /// A call expression is not memoized the way most inferred expressions are,
+    /// and `infer_type_params_from_args` re-infers an argument that fills a
+    /// generic parameter slot, so a call written as such an argument reaches
+    /// inference twice. The set records the report, not the visit, so the
+    /// diagnostic is written once per call site while two genuinely different
+    /// bad calls to the same callee both report.
+    mixed_argument_calls_reported: FxHashSet<ExprId>,
+    /// Calls whose argument labels have already been checked against the
+    /// callee's parameter names. Guards the same repeated visit as
+    /// [`Self::mixed_argument_calls_reported`].
+    labelled_argument_calls_checked: FxHashSet<ExprId>,
 }
 
 /// RAII guard that enters a spec scope on construction and pops it on drop.
@@ -326,10 +339,13 @@ impl TypeChecker {
                 // carries the struct's canonical key (its file identity), letting
                 // a method body distinguish this struct from a same-named one in
                 // another file. Falls back to a bare key if resolution fails.
-                let struct_type = self.symbol_table.lookup_type(&struct_name).unwrap_or(TypeInfo {
-                    kind: TypeInfoKind::Struct(struct_name.clone(), struct_name.clone()),
-                    type_params: vec![],
-                });
+                let struct_type = self
+                    .symbol_table
+                    .lookup_type(&struct_name)
+                    .unwrap_or(TypeInfo {
+                        kind: TypeInfoKind::Struct(struct_name.clone(), struct_name.clone()),
+                        type_params: vec![],
+                    });
                 let method_ids: Vec<DefId> = methods.clone();
                 for method_id in method_ids {
                     self.infer_method_variables(method_id, struct_type.clone(), ctx);
@@ -471,12 +487,7 @@ impl TypeChecker {
                 let type_info = TypeInfo::from_type_id(arena, *ty);
                 let alias_vis = vis.clone();
                 self.symbol_table
-                    .register_type_with_visibility(
-                        &type_name,
-                        Some(type_info),
-                        alias_vis,
-                        location,
-                    )
+                    .register_type_with_visibility(&type_name, Some(type_info), alias_vis, location)
                     .unwrap_or_else(|_| {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Type,
@@ -544,36 +555,44 @@ impl TypeChecker {
 
                         let tp_names: Vec<String> =
                             type_params.iter().map(|p| arena[*p].name.clone()).collect();
-                        let param_types: Vec<TypeInfo> = args
+                        // Types and names are produced by one pass so the receiver
+                        // is dropped from both, keeping them index-aligned with
+                        // the arguments a call site writes.
+                        let (param_types, param_names): (Vec<TypeInfo>, Vec<Option<String>>) = args
                             .iter()
                             .filter_map(|a| match &a.kind {
                                 ArgKind::SelfRef { .. } => None,
-                                ArgKind::Named { ty, .. }
-                                | ArgKind::Ignored { ty }
-                                | ArgKind::TypeOnly(ty) => {
-                                    Some(self.symbol_table.resolve_custom_type(
+                                ArgKind::Named { ty, name, .. } => Some((
+                                    self.symbol_table.resolve_custom_type(
                                         TypeInfo::from_type_id_with_type_params(
                                             arena, *ty, &tp_names,
                                         ),
-                                    ))
-                                }
+                                    ),
+                                    Some(arena[*name].name.clone()),
+                                )),
+                                ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => Some((
+                                    self.symbol_table.resolve_custom_type(
+                                        TypeInfo::from_type_id_with_type_params(
+                                            arena, *ty, &tp_names,
+                                        ),
+                                    ),
+                                    None,
+                                )),
                             })
-                            .collect();
+                            .unzip();
 
                         let return_type = returns
-                            .map(|r| {
-                                TypeInfo::from_type_id_with_type_params(arena, r, &tp_names)
-                            })
+                            .map(|r| TypeInfo::from_type_id_with_type_params(arena, r, &tp_names))
                             .map(|ti| self.symbol_table.resolve_custom_type(ti))
                             .unwrap_or_default();
 
-                        let definition_scope_id =
-                            self.symbol_table.current_scope_id().unwrap_or(0);
+                        let definition_scope_id = self.symbol_table.current_scope_id().unwrap_or(0);
                         let m_name = arena[*method_name].name.clone();
                         let signature = FuncInfo {
                             name: m_name.clone(),
                             type_params: tp_names,
                             param_types,
+                            param_names,
                             return_type,
                             visibility: method_vis.clone(),
                             definition_scope_id,
@@ -582,12 +601,7 @@ impl TypeChecker {
                         };
 
                         self.symbol_table
-                            .register_method(
-                                &struct_name,
-                                signature,
-                                method_vis.clone(),
-                                has_self,
-                            )
+                            .register_method(&struct_name, signature, method_vis.clone(), has_self)
                             .unwrap_or_else(|err| {
                                 self.push_error(TypeCheckError::RegistrationFailed {
                                     kind: RegistrationKind::Method,
@@ -664,11 +678,7 @@ impl TypeChecker {
     /// dispatch). Rejecting at registration time avoids that blast radius and
     /// surfaces a clear diagnostic instead of the previous silent behavior where
     /// the first-registered layout was used for both specs.
-    fn reject_duplicate_spec_struct_or_enum(
-        &mut self,
-        def_id: DefId,
-        ctx: &TypedContext,
-    ) -> bool {
+    fn reject_duplicate_spec_struct_or_enum(&mut self, def_id: DefId, ctx: &TypedContext) -> bool {
         // Without a current scope there is no file to key the candidate against,
         // so it cannot collide with a same-file sibling — never reject. Defaulting
         // to the root scope here would re-key every spec helper as if it lived in
@@ -682,7 +692,9 @@ impl TypeChecker {
         match &def_data.kind {
             Def::Struct { name, .. } => {
                 let struct_name = arena[*name].name.clone();
-                let key = self.symbol_table.canonical_key_for_scope(scope_id, &struct_name);
+                let key = self
+                    .symbol_table
+                    .canonical_key_for_scope(scope_id, &struct_name);
                 if self.symbol_table.lookup_struct_by_key(&key).is_some() {
                     self.push_error(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Struct,
@@ -699,7 +711,9 @@ impl TypeChecker {
             }
             Def::Enum { name, .. } => {
                 let enum_name = arena[*name].name.clone();
-                let key = self.symbol_table.canonical_key_for_scope(scope_id, &enum_name);
+                let key = self
+                    .symbol_table
+                    .canonical_key_for_scope(scope_id, &enum_name);
                 if self.symbol_table.lookup_enum_by_key(&key).is_some() {
                     self.push_error(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Enum,
@@ -931,11 +945,9 @@ impl TypeChecker {
                 if !visited.insert(name.clone()) {
                     return false;
                 }
-                self.symbol_table
-                    .lookup_type(name)
-                    .is_some_and(|resolved| {
-                        self.struct_type_contains(&resolved.kind, target_key, visited)
-                    })
+                self.symbol_table.lookup_type(name).is_some_and(|resolved| {
+                    self.struct_type_contains(&resolved.kind, target_key, visited)
+                })
             }
             TypeInfoKind::Array(elem, _) => {
                 self.struct_type_contains(&elem.kind, target_key, visited)
@@ -972,10 +984,7 @@ impl TypeChecker {
                     let def_data = &ctx.arena()[def_id];
                     (def_data.location, def_data.kind.clone())
                 };
-                if let Def::Constant {
-                    name, ty, vis, ..
-                } = &kind
-                {
+                if let Def::Constant { name, ty, vis, .. } = &kind {
                     let const_name = ctx.arena()[*name].name.clone();
                     let const_type = self
                         .symbol_table
@@ -1267,22 +1276,24 @@ impl TypeChecker {
                     );
                     ctx.set_node_typeinfo(NodeId::Type(*return_type_id), return_type_info);
                 }
-                // Register function even if parameter validation had errors
-                let param_types: Vec<TypeInfo> = args
+                // Register function even if parameter validation had errors.
+                // Types and names are produced by one pass so the receiver is
+                // dropped from both, keeping them index-aligned with the
+                // arguments a call site writes.
+                let (param_types, param_names): (Vec<TypeInfo>, Vec<Option<String>>) = args
                     .iter()
                     .filter_map(|a| match &a.kind {
                         ArgKind::SelfRef { .. } => None,
-                        ArgKind::Named { ty, .. }
-                        | ArgKind::Ignored { ty }
-                        | ArgKind::TypeOnly(ty) => {
-                            Some(TypeInfo::from_type_id_with_type_params(
-                                ctx.arena(),
-                                *ty,
-                                &tp_names,
-                            ))
-                        }
+                        ArgKind::Named { ty, name, .. } => Some((
+                            TypeInfo::from_type_id_with_type_params(ctx.arena(), *ty, &tp_names),
+                            Some(ctx.arena()[*name].name.clone()),
+                        )),
+                        ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => Some((
+                            TypeInfo::from_type_id_with_type_params(ctx.arena(), *ty, &tp_names),
+                            None,
+                        )),
                     })
-                    .collect();
+                    .unzip();
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
                     .unwrap_or_default();
@@ -1290,6 +1301,7 @@ impl TypeChecker {
                     &func_name,
                     tp_names,
                     param_types,
+                    param_names,
                     return_type,
                     func_vis,
                     location,
@@ -1334,17 +1346,23 @@ impl TypeChecker {
                 if let Some(return_type_id) = returns {
                     self.validate_type(ctx.arena(), *return_type_id, &[]);
                 }
-                let param_types: Vec<TypeInfo> = args
+                // Types and names are produced by one pass so a (rejected)
+                // receiver is dropped from both, keeping them index-aligned with
+                // the arguments a call site writes. An extern written by type
+                // alone binds no name, so its labels are all `None`.
+                let (param_types, param_names): (Vec<TypeInfo>, Vec<Option<String>>) = args
                     .iter()
                     .filter_map(|a| match &a.kind {
                         ArgKind::SelfRef { .. } => None,
-                        ArgKind::Named { ty, .. }
-                        | ArgKind::Ignored { ty }
-                        | ArgKind::TypeOnly(ty) => {
-                            Some(TypeInfo::from_type_id(ctx.arena(), *ty))
+                        ArgKind::Named { ty, name, .. } => Some((
+                            TypeInfo::from_type_id(ctx.arena(), *ty),
+                            Some(ctx.arena()[*name].name.clone()),
+                        )),
+                        ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => {
+                            Some((TypeInfo::from_type_id(ctx.arena(), *ty), None))
                         }
                     })
-                    .collect();
+                    .unzip();
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id(ctx.arena(), r))
                     .unwrap_or_default();
@@ -1352,6 +1370,7 @@ impl TypeChecker {
                 if let Err(err) = self.symbol_table.register_extern_function(
                     &func_name,
                     param_types,
+                    param_names,
                     return_type,
                     origin,
                 ) {
@@ -1500,7 +1519,10 @@ impl TypeChecker {
     /// qualifier is rejected the way every other cross-file private access is.
     fn validate_qualified_type(&mut self, path: &[String], location: Location) {
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
-        match self.symbol_table.resolve_qualified_type_path(path, from_scope) {
+        match self
+            .symbol_table
+            .resolve_qualified_type_path(path, from_scope)
+        {
             Some(ResolvedNominalType::Struct(info, _)) => {
                 self.check_and_report_visibility(
                     &info.visibility,
@@ -1520,8 +1542,9 @@ impl TypeChecker {
                 );
             }
             None => {
-                if let Some(diagnosis) =
-                    self.symbol_table.unimported_namespace_prefix(path, from_scope)
+                if let Some(diagnosis) = self
+                    .symbol_table
+                    .unimported_namespace_prefix(path, from_scope)
                 {
                     self.report_unimported_namespace(diagnosis, path, location);
                 } else {
@@ -1640,8 +1663,8 @@ impl TypeChecker {
                 }
                 ArgKind::SelfRef { .. } => {
                     self.push_error(TypeCheckError::SelfReferenceOutsideMethod {
-                            location: arg.location,
-                        });
+                        location: arg.location,
+                    });
                 }
                 ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
             }
@@ -2377,8 +2400,7 @@ impl TypeChecker {
                 // A namespace-qualified enum variant (`geo::Color::Green`) reaches
                 // an enum *inside* an imported file; resolve it before the local
                 // enum-variant handling, which only understands a single qualifier.
-                if let Some(result) =
-                    self.try_infer_namespace_qualified_enum_variant(expr_id, ctx)
+                if let Some(result) = self.try_infer_namespace_qualified_enum_variant(expr_id, ctx)
                 {
                     return result;
                 }
@@ -2493,10 +2515,10 @@ impl TypeChecker {
                             let field_loc = ctx.arena()[*field_name_id].location;
                             if !seen_fields.insert(field_name.clone()) {
                                 self.push_error(TypeCheckError::DuplicateStructField {
-                                        struct_name: struct_name.clone(),
-                                        field_name,
-                                        location: field_loc,
-                                    });
+                                    struct_name: struct_name.clone(),
+                                    field_name,
+                                    location: field_loc,
+                                });
                                 continue;
                             }
                             if let Some(field_info) =
@@ -2507,11 +2529,10 @@ impl TypeChecker {
                                 // file's scope so a cross-file struct literal checks
                                 // (and keys) the field against the same type the
                                 // defining file sees (#63).
-                                let field_type =
-                                    self.symbol_table.resolve_custom_type_in_scope(
-                                        field_info.type_info.clone(),
-                                        struct_info.definition_scope_id,
-                                    );
+                                let field_type = self.symbol_table.resolve_custom_type_in_scope(
+                                    field_info.type_info.clone(),
+                                    struct_info.definition_scope_id,
+                                );
                                 let (field_expr_kind, field_expr_loc) = {
                                     let arena = ctx.arena();
                                     (
@@ -2766,7 +2787,9 @@ impl TypeChecker {
                             }
                         }
                         OperatorKind::Pow => {
-                            unreachable!("`**` is rejected above with PowOperatorNotSupported before operand checks")
+                            unreachable!(
+                                "`**` is rejected above with PowOperatorNotSupported before operand checks"
+                            )
                         }
                         OperatorKind::Add
                         | OperatorKind::Sub
@@ -2950,8 +2973,9 @@ impl TypeChecker {
         }
         let location = ctx.arena()[expr_id].location;
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
-        let (symbol, def_scope_id) =
-            self.symbol_table.resolve_qualified_name(&segments, from_scope)?;
+        let (symbol, def_scope_id) = self
+            .symbol_table
+            .resolve_qualified_name(&segments, from_scope)?;
         let crate::symbol_table::Symbol::Constant(info) = &symbol else {
             return None;
         };
@@ -3011,11 +3035,7 @@ impl TypeChecker {
         let names = self
             .symbol_table
             .resolve_qualified_name(&segments, from_scope)
-            .and_then(|(symbol, _)| {
-                symbol
-                    .as_function()
-                    .map(|_| "a function".to_string())
-            });
+            .and_then(|(symbol, _)| symbol.as_function().map(|_| "a function".to_string()));
         self.push_error(TypeCheckError::QualifiedPathNotAValue {
             path,
             names,
@@ -3064,9 +3084,9 @@ impl TypeChecker {
         let type_name = segments[consumed].clone();
         let method_name = segments[consumed + 1].clone();
 
-        let (struct_info, _key) =
-            self.symbol_table
-                .resolve_struct_in_namespace(&type_name, ns_scope, from_scope)?;
+        let (struct_info, _key) = self
+            .symbol_table
+            .resolve_struct_in_namespace(&type_name, ns_scope, from_scope)?;
         let location = ctx.arena()[call_expr_id].location;
         let path = segments.join("::");
 
@@ -3080,10 +3100,12 @@ impl TypeChecker {
             },
         );
 
-        let Some(method_info) =
-            self.symbol_table
-                .resolve_method_in_namespace(&type_name, &method_name, ns_scope, from_scope)
-        else {
+        let Some(method_info) = self.symbol_table.resolve_method_in_namespace(
+            &type_name,
+            &method_name,
+            ns_scope,
+            from_scope,
+        ) else {
             // The method does not resolve on the same-named struct. When the path
             // instead descends into a sub-file the accessing file never imported —
             // `a::b::deep` where `a` defines `struct b` *and* a sibling `a/b.inf`
@@ -3114,10 +3136,7 @@ impl TypeChecker {
         // then have no callee to lower. Reject it here, matching the same
         // proof-only boundary the plain qualified-call path enforces — without
         // this it reaches codegen and panics on a missing function index.
-        if self
-            .symbol_table
-            .scope_is_within_spec(method_info.scope_id)
-        {
+        if self.symbol_table.scope_is_within_spec(method_info.scope_id) {
             self.push_error(TypeCheckError::SpecFunctionNotCallable {
                 path: path.clone(),
                 function_name: method_name.clone(),
@@ -3133,10 +3152,10 @@ impl TypeChecker {
 
         if method_info.is_instance_method() {
             self.push_error(TypeCheckError::InstanceMethodCalledAsAssociated {
-                    type_name: type_name.clone(),
-                    method_name: method_name.clone(),
-                    location,
-                });
+                type_name: type_name.clone(),
+                method_name: method_name.clone(),
+                location,
+            });
         }
 
         self.check_and_report_visibility(
@@ -3160,6 +3179,14 @@ impl TypeChecker {
                 location,
             });
         }
+        self.check_argument_labels(
+            call_expr_id,
+            "method",
+            &format!("{type_name}::{method_name}"),
+            &signature.param_names,
+            call_args,
+            ctx,
+        );
         let sig_param_types = signature.param_types.clone();
         for (i, arg) in call_args.iter().enumerate() {
             self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
@@ -3238,9 +3265,9 @@ impl TypeChecker {
         let enum_name = segments[consumed].clone();
         let variant_name = segments[consumed + 1].clone();
 
-        let (enum_info, enum_key) =
-            self.symbol_table
-                .resolve_enum_in_namespace(&enum_name, ns_scope, from_scope)?;
+        let (enum_info, enum_key) = self
+            .symbol_table
+            .resolve_enum_in_namespace(&enum_name, ns_scope, from_scope)?;
         let location = ctx.arena()[expr_id].location;
 
         self.check_and_report_visibility(
@@ -3310,9 +3337,9 @@ impl TypeChecker {
         if consumed != segments.len() {
             return (bare, None);
         }
-        let Some((struct_info, key)) =
-            self.symbol_table
-                .resolve_struct_in_namespace(&bare, ns_scope, from_scope)
+        let Some((struct_info, key)) = self
+            .symbol_table
+            .resolve_struct_in_namespace(&bare, ns_scope, from_scope)
         else {
             return (bare, None);
         };
@@ -3376,7 +3403,10 @@ impl TypeChecker {
         // import — this is the call's error to report, not a fall-through: no
         // method/enum/plain-call handler below can resolve a namespace path, so
         // silently falling through would accept it.
-        let signature = match self.symbol_table.resolve_qualified_name(&segments, from_scope) {
+        let signature = match self
+            .symbol_table
+            .resolve_qualified_name(&segments, from_scope)
+        {
             Some((symbol, def_scope)) if symbol.as_function().is_some() => {
                 let sig = symbol.as_function().expect("checked above").clone();
                 // A spec-inner function reached through a qualified path is
@@ -3474,6 +3504,14 @@ impl TypeChecker {
             }
             return Some(None);
         }
+        self.check_argument_labels(
+            call_expr_id,
+            "function",
+            &path,
+            &signature.param_names,
+            call_args,
+            ctx,
+        );
 
         let sig_param_types = signature.param_types.clone();
         for (i, arg) in call_args.iter().enumerate() {
@@ -3522,6 +3560,116 @@ impl TypeChecker {
         Some(Some(signature.return_type))
     }
 
+    /// Reports a call that writes a label on some of its arguments and not on
+    /// the rest.
+    ///
+    /// The labelling of the first argument sets the shape the rest must follow,
+    /// and the diagnostic points at the first argument that departs from it: at
+    /// the label token when that argument is labelled, at the argument
+    /// expression when it is not. The two are never combined into one span — a
+    /// [`Location`] covers a single token, and trivia may sit between a label
+    /// and its colon.
+    ///
+    /// Purely syntactic, so it runs before the callee is resolved: a partly
+    /// labelled call is malformed whatever the callee turns out to be, including
+    /// one that never resolves. That is also why it reports beside an arity
+    /// mismatch where [`Self::check_argument_labels`] stays silent — the count a
+    /// call passes says nothing about whether it was written coherently, so both
+    /// complaints are the author's to answer.
+    fn check_argument_labelling_shape(
+        &mut self,
+        call_expr_id: ExprId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) {
+        let Some((first_label, _)) = call_args.first() else {
+            return;
+        };
+        let first_is_labelled = first_label.is_some();
+        let Some((label, expr)) = call_args
+            .iter()
+            .find(|(label, _)| label.is_some() != first_is_labelled)
+        else {
+            return;
+        };
+        if !self.mixed_argument_calls_reported.insert(call_expr_id) {
+            return;
+        }
+        let location = match label {
+            Some(label) => ctx.arena()[*label].location,
+            None => ctx.arena()[*expr].location,
+        };
+        self.push_error(TypeCheckError::MixedNamedAndPositionalArguments { location });
+    }
+
+    /// Reports each argument label that does not name the parameter it is
+    /// written opposite: one the callee declares in another position is out of
+    /// order, any other names no parameter at all.
+    ///
+    /// `param_names` is index-aligned with the arguments a call site writes (a
+    /// receiver is absent from both), so the comparison is positional. That
+    /// keeps it independent of the duplicate-parameter recovery path, which
+    /// registers a declaration whose names repeat, and it needs no name-to-index
+    /// map. The search for a matching declaration cannot return the written
+    /// position itself, since a label equal to the parameter there was already
+    /// accepted.
+    ///
+    /// Reports nothing unless every argument carries a label and the arity
+    /// matches. A partly labelled call belongs to
+    /// [`Self::check_argument_labelling_shape`], and an arity mismatch already
+    /// has its own diagnostic — three of the five callee branches push it and
+    /// still walk their arguments, so the length gate is what keeps that call to
+    /// one report.
+    fn check_argument_labels(
+        &mut self,
+        call_expr_id: ExprId,
+        kind: &'static str,
+        name: &str,
+        param_names: &[Option<String>],
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) {
+        if call_args.is_empty()
+            || param_names.len() != call_args.len()
+            || !call_args.iter().all(|(label, _)| label.is_some())
+        {
+            return;
+        }
+        if !self.labelled_argument_calls_checked.insert(call_expr_id) {
+            return;
+        }
+        for (position, (label, _)) in call_args.iter().enumerate() {
+            let Some(label_id) = *label else {
+                continue;
+            };
+            let written = ctx.arena()[label_id].name.clone();
+            if param_names[position].as_deref() == Some(written.as_str()) {
+                continue;
+            }
+            let location = ctx.arena()[label_id].location;
+            let declared = param_names
+                .iter()
+                .position(|declared| declared.as_deref() == Some(written.as_str()));
+            let error = match declared {
+                Some(declared_position) => TypeCheckError::ArgumentLabelOutOfOrder {
+                    kind,
+                    name: name.to_string(),
+                    label: written,
+                    expected_position: declared_position + 1,
+                    found_position: position + 1,
+                    location,
+                },
+                None => TypeCheckError::UnknownArgumentLabel {
+                    kind,
+                    name: name.to_string(),
+                    label: written,
+                    location,
+                },
+            };
+            self.push_error(error);
+        }
+    }
+
     /// Infer types for a function call expression.
     ///
     /// Handles associated function calls (Type::method), instance method calls (obj.method),
@@ -3535,6 +3683,8 @@ impl TypeChecker {
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &mut TypedContext,
     ) -> Option<TypeInfo> {
+        self.check_argument_labelling_shape(call_expr_id, call_args, ctx);
+
         // A `::`-separated path that names a function in another file
         // (`math::arith::add(...)`) resolves through the file scope tree and the
         // importing file's resolved imports. This is tried before the
@@ -3603,10 +3753,10 @@ impl TypeChecker {
                     if method_info.is_instance_method() {
                         cov_mark::hit!(type_checker_instance_method_called_as_associated);
                         self.push_error(TypeCheckError::InstanceMethodCalledAsAssociated {
-                                type_name: type_name.clone(),
-                                method_name: method_name.clone(),
-                                location: ctx.arena()[function_expr_id].location,
-                            });
+                            type_name: type_name.clone(),
+                            method_name: method_name.clone(),
+                            location: ctx.arena()[function_expr_id].location,
+                        });
                     }
 
                     self.check_and_report_visibility(
@@ -3632,6 +3782,14 @@ impl TypeChecker {
                             location,
                         });
                     }
+                    self.check_argument_labels(
+                        call_expr_id,
+                        "method",
+                        &format!("{}::{}", type_name, method_name),
+                        &signature.param_names,
+                        call_args,
+                        ctx,
+                    );
 
                     let sig_param_types = signature.param_types.clone();
                     let sig_return_type = signature.return_type.clone();
@@ -3781,10 +3939,10 @@ impl TypeChecker {
                         if !method_info.is_instance_method() {
                             cov_mark::hit!(type_checker_associated_function_called_as_method);
                             self.push_error(TypeCheckError::AssociatedFunctionCalledAsMethod {
-                                    type_name: type_name.clone(),
-                                    method_name: method_name.clone(),
-                                    location: ctx.arena()[function_expr_id].location,
-                                });
+                                type_name: type_name.clone(),
+                                method_name: method_name.clone(),
+                                location: ctx.arena()[function_expr_id].location,
+                            });
                         }
 
                         self.check_and_report_visibility(
@@ -3810,6 +3968,14 @@ impl TypeChecker {
                                 location,
                             });
                         }
+                        self.check_argument_labels(
+                            call_expr_id,
+                            "method",
+                            &format!("{}::{}", type_name, method_name),
+                            &signature.param_names,
+                            call_args,
+                            ctx,
+                        );
 
                         let sig_param_types = signature.param_types.clone();
                         let sig_return_type = signature.return_type.clone();
@@ -3963,17 +4129,25 @@ impl TypeChecker {
             }
             return None;
         }
+        self.check_argument_labels(
+            call_expr_id,
+            "function",
+            &func_name,
+            &signature.param_names,
+            call_args,
+            ctx,
+        );
 
         // Build substitution map for generic functions
         let substitutions = if !signature.type_params.is_empty() {
             if !call_type_params.is_empty() {
                 if call_type_params.len() != signature.type_params.len() {
                     self.push_error(TypeCheckError::TypeParameterCountMismatch {
-                            name: func_name.clone(),
-                            expected: signature.type_params.len(),
-                            found: call_type_params.len(),
-                            location,
-                        });
+                        name: func_name.clone(),
+                        expected: signature.type_params.len(),
+                        found: call_type_params.len(),
+                        location,
+                    });
                     FxHashMap::default()
                 } else {
                     {
@@ -4601,7 +4775,9 @@ impl TypeChecker {
         for import in imports {
             let reexported = matches!(import.visibility, Visibility::Public);
             match &import.kind {
-                ImportKind::Plain => self.resolve_file_import(scope_id, &import, reexported, report),
+                ImportKind::Plain => {
+                    self.resolve_file_import(scope_id, &import, reexported, report)
+                }
                 ImportKind::Partial(items) => {
                     self.resolve_item_imports(scope_id, &import, items, reexported, report);
                 }
@@ -4943,9 +5119,7 @@ impl TypeChecker {
     fn extract_root_variable_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
-            Expr::ArrayIndexAccess { array, .. } => {
-                self.extract_root_variable_name(arena, *array)
-            }
+            Expr::ArrayIndexAccess { array, .. } => self.extract_root_variable_name(arena, *array),
             Expr::MemberAccess { expr, .. } => self.extract_root_variable_name(arena, *expr),
             _ => None,
         }

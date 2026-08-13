@@ -356,6 +356,59 @@ pub enum TypeCheckError {
         location: Location,
     },
 
+    /// A call writes some of its arguments with a label and the rest without.
+    ///
+    /// Binding is positional, and a label is only ever checked against the
+    /// parameter it sits opposite, so a partly labelled list asserts something
+    /// the call cannot honour. Before this was diagnosed no stage read a label
+    /// at all: `subtract(left: 10, 3)` compiled as if it had been written
+    /// `subtract(10, 3)`, and the reader had no way to tell that the one name
+    /// present was decoration. The specification requires all-or-nothing
+    /// labelling, which keeps the written form and the binding in agreement.
+    #[error(
+        "{location}: named and positional arguments cannot be mixed in one call; when any argument is named, all arguments must be named"
+    )]
+    MixedNamedAndPositionalArguments { location: Location },
+
+    /// A call labels an argument with a name the callee declares for no
+    /// parameter.
+    ///
+    /// Labels were discarded before binding, so a misspelled or stale name
+    /// compiled and its argument bound by position to whichever parameter it
+    /// faced — renaming a parameter left every call site of the old name
+    /// silently valid. A parameter written `_: T`, and every parameter of an
+    /// `external fn` declared by type alone, binds no name, so a label aimed at
+    /// one of those positions names no parameter and is reported here.
+    #[error("{location}: unknown argument label `{label}` in call to {kind} `{name}`")]
+    UnknownArgumentLabel {
+        kind: &'static str,
+        name: String,
+        label: String,
+        location: Location,
+    },
+
+    /// A call labels its arguments with names the callee declares, but not in
+    /// declaration order.
+    ///
+    /// Binding stays positional the whole way down — code generation, the proof
+    /// obligations and the emitted Rocq module all consume arguments in written
+    /// order — so a reordered list computed something other than what it read
+    /// as: `subtract(right: 3, left: 10)` returned `3 - 10` while naming
+    /// `left = 10`. A proof discharged against the emitted module was then a
+    /// proof about a program the source does not describe. A label asserts the
+    /// order it is written in; it does not rearrange the call.
+    #[error(
+        "{location}: argument label `{label}` is out of order: it names parameter {expected_position} of {kind} `{name}` but appears at position {found_position}; named arguments must be given in declaration order"
+    )]
+    ArgumentLabelOutOfOrder {
+        kind: &'static str,
+        name: String,
+        label: String,
+        expected_position: usize,
+        found_position: usize,
+        location: Location,
+    },
+
     #[error(
         "{location}: type parameter count mismatch for `{name}`: expected {expected}, found {found}"
     )]
@@ -888,6 +941,9 @@ impl TypeCheckError {
             | TypeCheckError::ExpectedEnumType { location, .. }
             | TypeCheckError::MethodNotFound { location, .. }
             | TypeCheckError::ArgumentCountMismatch { location, .. }
+            | TypeCheckError::MixedNamedAndPositionalArguments { location }
+            | TypeCheckError::UnknownArgumentLabel { location, .. }
+            | TypeCheckError::ArgumentLabelOutOfOrder { location, .. }
             | TypeCheckError::TypeParameterCountMismatch { location, .. }
             | TypeCheckError::MissingTypeParameters { location, .. }
             | TypeCheckError::InvalidBinaryOperand { location, .. }
@@ -1267,6 +1323,50 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: function `add` expects 2 arguments, but 3 provided"
+        );
+    }
+
+    #[test]
+    fn display_mixed_named_and_positional_arguments() {
+        let err = TypeCheckError::MixedNamedAndPositionalArguments {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: named and positional arguments cannot be mixed in one call; \
+             when any argument is named, all arguments must be named"
+        );
+    }
+
+    #[test]
+    fn display_unknown_argument_label() {
+        let err = TypeCheckError::UnknownArgumentLabel {
+            kind: "function",
+            name: "subtract".to_string(),
+            label: "wrong".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: unknown argument label `wrong` in call to function `subtract`"
+        );
+    }
+
+    #[test]
+    fn display_argument_label_out_of_order() {
+        let err = TypeCheckError::ArgumentLabelOutOfOrder {
+            kind: "function",
+            name: "subtract".to_string(),
+            label: "right".to_string(),
+            expected_position: 2,
+            found_position: 1,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: argument label `right` is out of order: it names parameter 2 of function \
+             `subtract` but appears at position 1; named arguments must be given in \
+             declaration order"
         );
     }
 

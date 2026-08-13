@@ -128,6 +128,16 @@ pub(crate) struct FuncInfo {
     pub(crate) name: String,
     pub(crate) type_params: Vec<String>,
     pub(crate) param_types: Vec<TypeInfo>,
+    /// The name each parameter binds, one entry per entry in `param_types` and
+    /// built by the same filter, so the two stay index-aligned: a receiver is
+    /// absent from both, and `param_names[i]` names the parameter whose type is
+    /// `param_types[i]`. `None` where a parameter binds no name at all — `_: T`
+    /// and a bare positional type in an `external fn` declaration.
+    ///
+    /// Read when checking the labels a call writes against the parameters they
+    /// claim to name; a label can never match a `None`, so one aimed at an
+    /// anonymous parameter names no parameter anywhere.
+    pub(crate) param_names: Vec<Option<String>>,
     pub(crate) return_type: TypeInfo,
     pub(crate) visibility: Visibility,
     pub(crate) definition_scope_id: u32,
@@ -1028,9 +1038,9 @@ impl SymbolTable {
         }
     }
 
-    /// Registers a private local function. A thin default-visibility wrapper
-    /// over [`Self::register_function_with_visibility`], kept for test setup that
-    /// does not care about visibility.
+    /// Registers a private local function whose parameters bind no names. A thin
+    /// wrapper over [`Self::register_function_with_visibility`], kept for test
+    /// setup that cares about neither visibility nor argument labels.
     #[cfg(test)]
     pub(crate) fn register_function(
         &mut self,
@@ -1039,21 +1049,28 @@ impl SymbolTable {
         param_types: Vec<TypeInfo>,
         return_type: TypeInfo,
     ) -> Result<(), String> {
+        let param_names = vec![None; param_types.len()];
         self.register_function_with_visibility(
             name,
             type_params,
             param_types,
+            param_names,
             return_type,
             Visibility::Private,
             Location::default(),
         )
     }
 
+    // Same shape as `insert_func_symbol` below: each signature field is an
+    // independent input, and `param_types`/`param_names` are two halves of one
+    // index-aligned pair that a parameter struct would only obscure.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_function_with_visibility(
         &mut self,
         name: &str,
         type_params: Vec<String>,
         param_types: Vec<TypeInfo>,
+        param_names: Vec<Option<String>>,
         return_type: TypeInfo,
         visibility: Visibility,
         location: Location,
@@ -1062,6 +1079,7 @@ impl SymbolTable {
             name,
             type_params,
             param_types,
+            param_names,
             return_type,
             visibility,
             location,
@@ -1080,6 +1098,7 @@ impl SymbolTable {
         &mut self,
         name: &str,
         param_types: Vec<TypeInfo>,
+        param_names: Vec<Option<String>>,
         return_type: TypeInfo,
         origin: Option<ExternOrigin>,
     ) -> Result<(), String> {
@@ -1087,6 +1106,7 @@ impl SymbolTable {
             name,
             vec![],
             param_types,
+            param_names,
             return_type,
             Visibility::Private,
             Location::default(),
@@ -1094,16 +1114,17 @@ impl SymbolTable {
         )
     }
 
-    // The signature fields (name, type params, param/return types, visibility,
-    // source location, local-vs-extern kind) are each independent inputs to a
-    // single private constructor; grouping them into a parameter struct would add
-    // a one-use type without clarifying anything.
+    // The signature fields (name, type params, param types/names, return type,
+    // visibility, source location, local-vs-extern kind) are each independent
+    // inputs to a single private constructor; grouping them into a parameter
+    // struct would add a one-use type without clarifying anything.
     #[allow(clippy::too_many_arguments)]
     fn insert_func_symbol(
         &mut self,
         name: &str,
         type_params: Vec<String>,
         param_types: Vec<TypeInfo>,
+        param_names: Vec<Option<String>>,
         return_type: TypeInfo,
         visibility: Visibility,
         location: Location,
@@ -1118,6 +1139,7 @@ impl SymbolTable {
                     .into_iter()
                     .map(|ti| self.resolve_custom_type(ti))
                     .collect(),
+                param_names,
                 return_type: self.resolve_custom_type(return_type),
                 visibility,
                 definition_scope_id: scope_id,
@@ -3497,21 +3519,28 @@ impl SymbolTable {
             } => {
                 let tp_names: Vec<String> =
                     type_params.iter().map(|p| arena[*p].name.clone()).collect();
-                let param_types: Vec<TypeInfo> = args
+                let (param_types, param_names): (Vec<TypeInfo>, Vec<Option<String>>) = args
                     .iter()
                     .filter_map(|a| match &a.kind {
-                        ArgKind::Named { ty, .. } => Some(TypeInfo::from_type_id_with_type_params(
-                            arena, *ty, &tp_names,
+                        ArgKind::Named {
+                            ty,
+                            name: param_name,
+                            ..
+                        } => Some((
+                            TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
+                            Some(arena[*param_name].name.clone()),
                         )),
-                        ArgKind::Ignored { ty } => Some(TypeInfo::from_type_id_with_type_params(
-                            arena, *ty, &tp_names,
+                        ArgKind::Ignored { ty } => Some((
+                            TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
+                            None,
                         )),
-                        ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id_with_type_params(
-                            arena, *ty, &tp_names,
+                        ArgKind::TypeOnly(ty) => Some((
+                            TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
+                            None,
                         )),
                         ArgKind::SelfRef { .. } => None,
                     })
-                    .collect();
+                    .unzip();
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id_with_type_params(arena, r, &tp_names))
                     .unwrap_or_default();
@@ -3520,6 +3549,7 @@ impl SymbolTable {
                     &arena[*name].name,
                     tp_names,
                     param_types,
+                    param_names,
                     return_type,
                     vis.clone(),
                     location,
@@ -3536,15 +3566,23 @@ impl SymbolTable {
                 ..
             } => {
                 let extern_name = arena[*name].name.clone();
-                let param_types: Vec<TypeInfo> = args
+                let (param_types, param_names): (Vec<TypeInfo>, Vec<Option<String>>) = args
                     .iter()
                     .filter_map(|a| match &a.kind {
                         ArgKind::SelfRef { .. } => None,
-                        ArgKind::Named { ty, .. }
-                        | ArgKind::Ignored { ty }
-                        | ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id(arena, *ty)),
+                        ArgKind::Named {
+                            ty,
+                            name: param_name,
+                            ..
+                        } => Some((
+                            TypeInfo::from_type_id(arena, *ty),
+                            Some(arena[*param_name].name.clone()),
+                        )),
+                        ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => {
+                            Some((TypeInfo::from_type_id(arena, *ty), None))
+                        }
                     })
-                    .collect();
+                    .unzip();
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id(arena, r))
                     .unwrap_or_default();
@@ -3557,6 +3595,7 @@ impl SymbolTable {
                 self.register_extern_function(
                     &extern_name,
                     param_types,
+                    param_names,
                     return_type,
                     Some(origin),
                 )
@@ -3986,6 +4025,7 @@ mod tests {
                     name: "get_value".to_string(),
                     type_params: vec![],
                     param_types: vec![],
+                    param_names: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
@@ -4006,6 +4046,7 @@ mod tests {
                     name: "new".to_string(),
                     type_params: vec![],
                     param_types: vec![],
+                    param_names: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Public,
                     definition_scope_id: 0,
@@ -4027,6 +4068,7 @@ mod tests {
                 name: "instance_method".to_string(),
                 type_params: vec![],
                 param_types: vec![],
+                param_names: vec![],
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
@@ -4050,6 +4092,7 @@ mod tests {
                 name: "constructor".to_string(),
                 type_params: vec![],
                 param_types: vec![],
+                param_names: vec![],
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
@@ -4072,6 +4115,7 @@ mod tests {
                     name: "test".to_string(),
                     type_params: vec![],
                     param_types: vec![],
+                    param_names: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
@@ -4087,6 +4131,7 @@ mod tests {
                     name: "test".to_string(),
                     type_params: vec![],
                     param_types: vec![],
+                    param_names: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
@@ -4162,6 +4207,7 @@ mod tests {
                 .register_extern_function(
                     "sort",
                     vec![i32_type()],
+                    vec![None],
                     i32_type(),
                     Some(origin("collections", "sort")),
                 )
@@ -4180,7 +4226,7 @@ mod tests {
         fn unbound_extern_is_extern_without_origin() {
             let mut table = SymbolTable::default();
             table
-                .register_extern_function("add", vec![i32_type()], i32_type(), None)
+                .register_extern_function("add", vec![i32_type()], vec![None], i32_type(), None)
                 .expect("registering an unbound extern should succeed");
 
             let info = table
@@ -4217,12 +4263,13 @@ mod tests {
                 .register_extern_function(
                     "sort",
                     vec![i32_type()],
+                    vec![None],
                     i32_type(),
                     Some(origin("collections", "sort")),
                 )
                 .unwrap();
             table
-                .register_extern_function("unbound", vec![], i32_type(), None)
+                .register_extern_function("unbound", vec![], vec![], i32_type(), None)
                 .unwrap();
             table
                 .register_function("helper", vec![], vec![], i32_type())
@@ -4247,6 +4294,7 @@ mod tests {
                 .register_extern_function(
                     "sort",
                     vec![i32_type()],
+                    vec![None],
                     i32_type(),
                     Some(origin("collections", "sort")),
                 )
@@ -4256,6 +4304,7 @@ mod tests {
                 .register_extern_function(
                     "sort",
                     vec![i32_type()],
+                    vec![None],
                     i32_type(),
                     Some(origin("collections", "sort")),
                 )

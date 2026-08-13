@@ -10,6 +10,7 @@ mod features;
 mod literal_typing;
 mod multi_file;
 mod multi_file_matrix;
+mod named_call_arguments;
 mod pow_rejection;
 mod self_parameter_position;
 mod spec_type_collision_diagnostics;
