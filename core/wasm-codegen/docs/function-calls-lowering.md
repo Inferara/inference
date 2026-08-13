@@ -198,8 +198,11 @@ lower_function_call(fce, ctx)
 ```
 
 Argument labels (if present in source) are discarded at the WASM level because WebAssembly
-has no concept of named arguments. The type-checker validates label correctness and
-argument count before codegen runs.
+has no concept of named arguments. Discarding them is safe because the type checker has
+already validated argument count and — for a labelled call — that every argument is
+labelled, that each label names a parameter of the callee, and that it names the parameter
+declared at that same position. A label therefore never selects a parameter: it is checked
+for agreement with the declaration, and lowering stays purely positional.
 
 ## Drop Emission Rules
 

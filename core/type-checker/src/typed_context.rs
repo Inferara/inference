@@ -677,10 +677,12 @@ mod tests {
     ) -> TypedContext {
         let arena = AstArena::default();
         let mut ctx = TypedContext::new(arena);
+        let param_names = vec![None; param_types.len()];
         let sig = FuncInfo {
             name: method_name.to_string(),
             type_params: vec![],
             param_types,
+            param_names,
             return_type,
             visibility: visibility.clone(),
             definition_scope_id: 0,
@@ -794,6 +796,7 @@ mod tests {
             name: "get_x".to_string(),
             type_params: vec![],
             param_types: vec![],
+            param_names: vec![],
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
@@ -808,6 +811,7 @@ mod tests {
             name: "get_y".to_string(),
             type_params: vec![],
             param_types: vec![],
+            param_names: vec![],
             return_type: TypeInfo {
                 kind: TypeInfoKind::Number(NumberType::I64),
                 type_params: vec![],
@@ -849,6 +853,7 @@ mod tests {
             name: "get_x".to_string(),
             type_params: vec![],
             param_types: vec![],
+            param_names: vec![],
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
@@ -863,6 +868,7 @@ mod tests {
             name: "get_x".to_string(),
             type_params: vec![],
             param_types: vec![],
+            param_names: vec![],
             return_type: TypeInfo {
                 kind: TypeInfoKind::Number(NumberType::I64),
                 type_params: vec![],
