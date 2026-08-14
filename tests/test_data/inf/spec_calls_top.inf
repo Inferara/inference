@@ -7,7 +7,7 @@ pub fn main() -> i32 {
 }
 
 spec Caller {
-  fn caller() -> i32 {
-    return helper();
+  fn caller() forall {
+    assert(helper() == 7);
   }
 }

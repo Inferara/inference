@@ -29,6 +29,28 @@
 //! all. Every diagnostic is gathered before failing so a spec with several
 //! mistakes surfaces them all at once.
 //!
+//! ## A vacuous obligation is fatal
+//!
+//! Every specification free function must yield a *non-vacuous* obligation. One
+//! that collapses to `HA_true` records `P010` and fails code generation, for the
+//! same reason an untranslatable one does: an obligation any proof discharges
+//! without reading the program is indistinguishable from no verification at all,
+//! and a passing proof of it means nothing.
+//!
+//! The predicate is the translated result, not the body shape. The collapse
+//! happens in the ⊤-absorbing smart constructors ([`HAssert::and`],
+//! [`HAssert::imp`], …) *after* the statement translator has run, so a body can
+//! look like it contributes and still reach `True`: a trailing `assume` block
+//! folds to `Imp(p, ⊤) = ⊤`, and an `if` whose branches are both vacuous folds
+//! the same way. Checking the value the translator returned catches the whole
+//! family exactly, with no shape enumeration to keep in sync.
+//!
+//! A helper that only computes therefore cannot live in a `spec` block. It
+//! belongs at file scope, where a specification function can still apply it as a
+//! `T_app`. A plain specification *method* keeps its helper exemption — it
+//! produces no obligation either way — but one that carries an `assert`, at any
+//! depth, raises `P009` rather than dropping that assertion silently.
+//!
 //! ## Obligation depth and the encoding cap
 //!
 //! The `inference.hspecs` codec caps assertion-tree depth at
@@ -50,6 +72,7 @@
 //! [`CodegenError::HspecTreeTooDeep`](crate::errors::CodegenError::HspecTreeTooDeep)
 //! naming the offending specification and function.
 
+mod claim;
 mod diag;
 mod translate;
 
@@ -58,14 +81,15 @@ mod tests;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::{BlockKind, Def};
+use inference_ast::nodes::BlockKind;
 use inference_fn_key::FnKey;
-use inference_hassert::{HFnRef, HSpecEntry, HSpecMap};
+use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
 use crate::EmittableFunctions;
 
+use claim::Claim;
 pub(crate) use diag::HassertDiagnostic;
 use diag::PCode;
 
@@ -133,9 +157,10 @@ impl CalleeIndex {
 /// Returns the obligations grouped by folded specification name in source order,
 /// paired with every `P0xx` diagnostic raised. A specification function that
 /// raised any diagnostic contributes no obligation (its partial tree would be
-/// unsound); the pass itself keeps going so it can collect every diagnostic in
-/// one pass, and the caller ([`crate::codegen`]) turns a non-empty diagnostic
-/// list into a hard error.
+/// unsound), and one that translated cleanly to the vacuous `HA_true`
+/// contributes none either (it raises `P010` instead). The pass itself keeps
+/// going so it can collect every diagnostic in one pass, and the caller
+/// ([`crate::codegen`]) turns a non-empty diagnostic list into a hard error.
 pub(crate) fn translate_spec_fns(
     ctx: &TypedContext,
     buckets: &EmittableFunctions,
@@ -156,6 +181,12 @@ pub(crate) fn translate_spec_fns(
             diagnostics.extend(fn_diagnostics);
             continue;
         }
+        if hassert == HAssert::True {
+            // Checked only once the function is otherwise clean, so `P010` never
+            // stacks on top of a `P001`–`P008` the same function already raised.
+            diagnostics.push(vacuous_obligation_diagnostic(arena, entry));
+            continue;
+        }
 
         let symbol = FnKey::spec_free_folded(
             &entry.module_path,
@@ -169,11 +200,11 @@ pub(crate) fn translate_spec_fns(
             .push(HSpecEntry::new(HFnRef(symbol), hassert));
     }
 
-    // A quantified specification *method* carries a proof obligation that has no
-    // milestone-1 encoding. Flagging it (rather than silently dropping it) keeps
-    // the contract honest; a plain (`Regular`) spec method stays a helper.
+    // A specification *method* never yields an obligation. Flagging one that
+    // claims a property (rather than silently dropping it) keeps the contract
+    // honest; a method that only computes stays a helper.
     for method in &buckets.spec_methods {
-        if let Some(diagnostic) = quantified_method_diagnostic(arena, method) {
+        if let Some(diagnostic) = method_obligation_diagnostic(arena, method) {
             diagnostics.push(diagnostic);
         }
     }
@@ -181,31 +212,96 @@ pub(crate) fn translate_spec_fns(
     (map, diagnostics)
 }
 
-/// A [`PCode::P009`] for a quantified specification method, or `None` for a
-/// plain one.
-fn quantified_method_diagnostic(
+/// A [`PCode::P010`] for a specification function whose obligation collapsed to
+/// `HA_true`.
+///
+/// The wording is keyed on what the body *claims*, so the remedy names the
+/// construct the user actually wrote; the diagnostic itself is already decided
+/// by the collapsed obligation.
+fn vacuous_obligation_diagnostic(
+    arena: &AstArena,
+    entry: &crate::EmittableSpecFn,
+) -> HassertDiagnostic {
+    let name = arena.def_name(entry.def_id);
+    let vacuous = "so its obligation is the vacuous `HA_true` that any proof discharges without \
+                   reading the program";
+    let message = match claim::first_claim(arena, entry.def_id) {
+        Some(Claim::Quantifier(kind)) => format!(
+            "spec function `{name}` is `{}`-quantified but asserts nothing, {vacuous} — add an \
+             `assert` over the values it binds",
+            quantifier_word(kind)
+        ),
+        Some(Claim::NondetBlock(kind)) => {
+            let word = quantifier_word(kind);
+            format!(
+                "spec function `{name}` claims nothing after its `{word}` block, {vacuous} — add \
+                 an `assert` after the `{word}` block"
+            )
+        }
+        // No body reaches this arm today: a `Stmt::Assert` always contributes a
+        // non-`True` conjunct, and a body whose claim an enclosing construct
+        // absorbs reports that construct instead. It stays a real message rather
+        // than an `unreachable!` because the arm is a diagnostic fallback — a
+        // statement kind that both claims and folds away must still tell the
+        // user something actionable rather than abort the compiler.
+        Some(Claim::Assert) => format!(
+            "spec function `{name}` asserts a property its obligation does not carry, {vacuous} \
+             — state the property where it constrains the program"
+        ),
+        None => format!(
+            "spec function `{name}` only computes a value and states no property, {vacuous} — \
+             assert a property about the computation, or move the function out of the `spec` block"
+        ),
+    };
+    HassertDiagnostic::new(
+        PCode::P010,
+        arena[entry.def_id].location,
+        entry.module_path.clone(),
+        message,
+    )
+}
+
+/// A [`PCode::P009`] for a specification method that carries an obligation the
+/// translation cannot deliver, or `None` for one that only computes or writes a
+/// non-deterministic block that asserts nothing.
+///
+/// What is at stake for a plain body is a *lost assertion*: the method's
+/// obligation is never emitted, so an `assert` the author wrote is silently
+/// dropped. Such a body is therefore reported only when it actually asserts
+/// something — an inline non-deterministic block that asserts nothing drops
+/// nothing. A quantified body is reported either way: the quantifier is a proof
+/// obligation on its own, whatever the body does with the values it binds.
+fn method_obligation_diagnostic(
     arena: &AstArena,
     method: &crate::EmittableSpecMethod,
 ) -> Option<HassertDiagnostic> {
-    let Def::Function { body, .. } = &arena[method.def_id].kind else {
-        return None;
-    };
-    let kind = arena[*body].block_kind;
-    if matches!(kind, BlockKind::Regular) {
-        return None;
-    }
     let name = arena.def_name(method.def_id);
-    Some(HassertDiagnostic::new(
-        PCode::P009,
-        arena[method.def_id].location,
-        method.module_path.clone(),
-        format!(
+    let message = match claim::first_claim(arena, method.def_id)? {
+        Claim::Quantifier(kind) => format!(
             "spec method `{}.{name}` is `{}`-quantified; a quantified spec method carries a \
              proof obligation that cannot yet be translated to a verification assertion — move \
              the property into a `forall` spec function",
             method.struct_name,
             quantifier_word(kind)
         ),
+        Claim::NondetBlock(_) | Claim::Assert => {
+            // The walk is a foregone conclusion for a marker that already is an
+            // `assert`; asking it of both markers keeps the rule in one place.
+            if !claim::states_an_assertion(arena, method.def_id) {
+                return None;
+            }
+            format!(
+                "spec method `{}.{name}` states a property, but a spec method carries no \
+                 verification obligation — move the property into a `forall` spec function",
+                method.struct_name
+            )
+        }
+    };
+    Some(HassertDiagnostic::new(
+        PCode::P009,
+        arena[method.def_id].location,
+        method.module_path.clone(),
+        message,
     ))
 }
 

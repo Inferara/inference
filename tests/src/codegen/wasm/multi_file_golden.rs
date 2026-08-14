@@ -264,14 +264,23 @@ mod multi_file_golden_codegen_tests {
         assert_eq!(call_i32(&mut store, &instance, "hello_world"), 42);
     }
 
-    /// Proof-mode multi-file spec collection. Specs carry no executable obligation
-    /// here, but the module collects specs from every reachable file; the entry
-    /// spec stays bare while the imported file's spec is file-qualified in the
-    /// `inference.spec_funcs` section (the per-spec keying is pinned by the smoke
-    /// test in `multi_file.rs`). This golden pins the *byte* output of that proof
-    /// module and structurally validates it. Proof modules may carry opcodes
+    /// Proof-mode multi-file spec collection. The module collects specs from
+    /// every reachable file; the entry spec stays bare while the imported file's
+    /// spec is file-qualified in the `inference.spec_funcs` section (the per-spec
+    /// keying is pinned by the smoke test in `multi_file.rs`). Each file's spec
+    /// claims a property about that file's own executable function, so the two
+    /// obligations differ in both the symbol they apply and the constant they
+    /// compare against. This golden pins the *byte* output of that proof module
+    /// and structurally validates it. Proof modules may carry opcodes
     /// `wasmprinter`/Wasmtime reject, so this fixture **intentionally skips the WAT
     /// (tier 2) and Wasmtime (tier 4) tiers** — byte compare + validate only.
+    ///
+    /// The obligation payload is additionally decoded and asserted on, outside
+    /// the byte compare: a golden is only ever as good as what it was
+    /// regenerated from, and an obligation that collapsed back to the vacuous
+    /// `HA_true` would pass a byte compare against a golden regenerated from the
+    /// same collapse. Reading the two obligations back proves the section is
+    /// carrying claims rather than merely being present.
     #[test]
     fn proof_specs_test() {
         let actual = proof_wasm_codegen_project(module_path!(), "proof_specs");
@@ -279,6 +288,40 @@ mod multi_file_golden_codegen_tests {
         assert_wasms_modules_equivalence(&expected, &actual);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("validate failed for proof_specs: {e}"));
+
+        let payload = custom_section(&actual, inference_hassert::HSPECS_SECTION_NAME)
+            .expect("a proof module whose specs carry obligations must embed inference.hspecs");
+        let hspecs =
+            inference_hassert::decode(&payload).expect("the embedded hspecs section must decode");
+        for spec in ["EntrySpec", "lib_checks_LibSpec"] {
+            let entries = hspecs.get(spec).unwrap_or_else(|| {
+                panic!(
+                    "no obligations for `{spec}`; have {:?}",
+                    hspecs.keys().collect::<Vec<_>>()
+                )
+            });
+            assert_eq!(entries.len(), 1, "`{spec}` declares one spec function");
+            assert_ne!(
+                entries[0].hassert,
+                inference_hassert::HAssert::True,
+                "`{spec}`'s obligation is vacuous: any proof discharges it without \
+                 reading the program"
+            );
+        }
+    }
+
+    /// The payload of the named custom section, or `None` when the module
+    /// carries no such section.
+    fn custom_section(wasm: &[u8], name: &str) -> Option<Vec<u8>> {
+        inf_wasmparser::Parser::new(0)
+            .parse_all(wasm)
+            .filter_map(Result::ok)
+            .find_map(|payload| match payload {
+                inf_wasmparser::Payload::CustomSection(reader) if reader.name() == name => {
+                    Some(reader.data().to_vec())
+                }
+                _ => None,
+            })
     }
 
     /// Regeneration helpers for the multi-file golden `.wasm`/`.wat` files.

@@ -11,8 +11,10 @@
 //! Every diagnostic is collected — the translator visits all specification
 //! functions and records every problem — so a spec with several mistakes
 //! surfaces them all at once rather than one round-trip at a time. A diagnostic
-//! keeps its function from producing an obligation but does not fail code
-//! generation (see the module docs on why the pass stays additive).
+//! keeps its function from producing an obligation *and* fails code generation:
+//! the caller joins the collected diagnostics into a
+//! [`CodegenError::UntranslatableSpec`](crate::errors::CodegenError::UntranslatableSpec),
+//! because an obligation is a required proof-mode deliverable.
 
 use std::fmt;
 
@@ -41,8 +43,13 @@ pub(crate) enum PCode {
     P007,
     /// `@` at a compound (array/struct) type.
     P008,
-    /// A quantified specification *method* (never silently dropped).
+    /// A specification *method* carrying a proof obligation the translation
+    /// cannot deliver — quantified, or plain but claiming a property. A method
+    /// has no free-function fallback path, so it is flagged rather than
+    /// silently dropped.
     P009,
+    /// A specification function whose obligation is vacuous (`HA_true`).
+    P010,
 }
 
 impl fmt::Display for PCode {
@@ -57,6 +64,7 @@ impl fmt::Display for PCode {
             PCode::P007 => "P007",
             PCode::P008 => "P008",
             PCode::P009 => "P009",
+            PCode::P010 => "P010",
         };
         f.write_str(code)
     }

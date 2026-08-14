@@ -202,10 +202,15 @@ mod codegen_validation_tests {
         // is where the call is actually lowered; it must produce a valid module and
         // never miss its callee index. (The qualified `Spec::fn()` form is rejected
         // at type-check, so it never reaches codegen.)
+        //
+        // Both functions carry a claim because a spec free function that only
+        // computes has no obligation and is rejected before any WASM is emitted;
+        // `inner` still returns a value, which is what keeps the sibling call in
+        // term position where the callee index has to be resolved.
         let source = r#"
             spec Check {
-                fn inner() -> i32 { return 42; }
-                fn outer() -> i32 { return inner(); }
+                fn inner() -> i32 { assert(42 == 42); return 42; }
+                fn outer() forall { assert(inner() == 42); }
             }
             pub fn main() -> i32 { return 0; }
         "#;

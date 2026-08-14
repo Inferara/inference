@@ -1218,6 +1218,15 @@ fn parse_single_file_through_project_front_end_is_quiet() {
         .stderr(predicate::str::is_empty());
 }
 
+// Spec-name validation. Every spec below is scaffolding — these tests are about
+// the NAME, the artifact writes, and the stale-artifact clearing, never about
+// what the spec proves. The bodies are nonetheless written to state a real
+// property (`assert(x == x)`) because a spec function that only computes has a
+// vacuous obligation and is itself a hard codegen error in proof mode. A
+// computing body would therefore reach the assertions below only when some other
+// rejection happens to fire first, silently pinning these tests to diagnostic
+// ordering instead of to the behavior they name.
+
 /// A proof-mode spec whose file-qualified name would fabricate a reserved `__`
 /// run (here `spec _S`, whose leading `_` lands next to the module-path join `_`)
 /// is rejected during codegen — before any artifact is written — with an
@@ -1232,7 +1241,7 @@ fn invalid_spec_name_rejected_early_leaves_no_stale_wasm() {
     write_source(
         temp.path(),
         "lib/geo.inf",
-        "spec _S { fn obligation() -> i32 { return 7; } }",
+        "spec _S { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1264,7 +1273,7 @@ fn trailing_underscore_file_stem_spec_rejected_no_stale_wasm() {
     write_source(
         temp.path(),
         "lib/x_.inf",
-        "spec S { fn obligation() -> i32 { return 1; } }",
+        "spec S { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1296,7 +1305,7 @@ fn trailing_underscore_file_stem_spec_compiles_in_default_mode() {
     write_source(
         temp.path(),
         "lib/x_.inf",
-        "spec S { fn obligation() -> i32 { return 1; } }",
+        "spec S { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1328,7 +1337,7 @@ fn imported_trailing_underscore_spec_rejected_with_source_level_message() {
     write_source(
         temp.path(),
         "lib/geom.inf",
-        "spec Invariant_ { fn obligation() -> i32 { return 7; } }",
+        "spec Invariant_ { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1378,7 +1387,7 @@ fn imported_spec_underscore_offenses_all_source_labeled() {
         write_source(
             temp.path(),
             "lib/geom.inf",
-            &format!("spec {spec_name} {{ fn obligation() -> i32 {{ return 1; }} }}"),
+            &format!("spec {spec_name} {{ fn obligation(x: i32) {{ assert(x == x); }} }}"),
         );
 
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1410,7 +1419,7 @@ fn imported_clean_spec_name_produces_wasm_and_v() {
     write_source(
         temp.path(),
         "lib/geom.inf",
-        "spec Invariant { fn obligation() -> i32 { return 7; } }",
+        "spec Invariant { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1435,7 +1444,7 @@ fn valid_non_entry_spec_name_produces_wasm_and_v() {
     write_source(
         temp.path(),
         "lib/geo.inf",
-        "spec S { fn obligation() -> i32 { return 7; } }",
+        "spec S { fn obligation(x: i32) { assert(x == x); } }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1461,7 +1470,7 @@ fn entry_spec_trailing_underscore_rejected_no_stale_artifact() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec Spec_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+        "spec Spec_ { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 0; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1494,7 +1503,7 @@ fn entry_filename_trailing_underscore_rejected_no_stale_artifact() {
     let entry = write_source(
         temp.path(),
         "app_.inf",
-        "spec Foo { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+        "spec Foo { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 0; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1525,7 +1534,7 @@ fn entry_spec_trailing_underscore_compiles_in_default_mode() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec Spec_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+        "spec Spec_ { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 0; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1738,7 +1747,7 @@ fn rejected_codegen_v_rebuild_clears_prior_wasm() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec Good { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+        "spec Good { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     // A prior default build writes out/main.wasm.
@@ -1749,7 +1758,7 @@ fn rejected_codegen_v_rebuild_clears_prior_wasm() {
     write_source(
         temp.path(),
         "main.inf",
-        "spec Bad_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+        "spec Bad_ { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1821,7 +1830,7 @@ fn codegen_v_success_then_default_success_both_write_artifacts() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec Good { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+        "spec Good { fn obligation(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     // --codegen -v writes the .v but not the .wasm.
@@ -1854,7 +1863,7 @@ fn wasm_to_v_stdlib_collision_leaves_no_wasm() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec list { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+        "spec list { fn ob(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1881,7 +1890,7 @@ fn wasm_to_v_keyword_spec_name_leaves_no_wasm() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec match { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+        "spec match { fn ob(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
@@ -1902,7 +1911,7 @@ fn wasm_to_v_rejection_leaves_no_wasm_under_out_dir() {
     let entry = write_source(
         temp.path(),
         "main.inf",
-        "spec list { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+        "spec list { fn ob(x: i32) { assert(x == x); } }\npub fn main() -> i32 { return 7; }",
     );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));

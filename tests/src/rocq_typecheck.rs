@@ -1233,7 +1233,8 @@ mod gate {
     }
 
     /// Translates a bare one-function module under an explicit obligation map
-    /// carrying the three `hassert` arms no source program can reach.
+    /// carrying the four `hassert` arms the corpus cannot put in front of
+    /// `coqc`.
     ///
     /// The applied symbol resolves through the WASM name section against the raw
     /// unsanitized function name, which is why the fixture names its function
@@ -1248,13 +1249,19 @@ mod gate {
         let probe = || HFnRef("probe".to_string());
         // The raw variants, not the `HAssert::and`/`or`/`ex` smart
         // constructors: those absorb `HA_true` and would collapse the tree
-        // before it reached the printer.
+        // before it reached the printer. That absorption is exactly why the
+        // `HA_true` conjunct has to be assembled here at all — a translated
+        // obligation reaches ⊤ only by collapsing entirely, and one that does is
+        // rejected as vacuous rather than emitted.
         //
         // `HA_not (HA_false)` rather than a bare `HA_false` keeps the assembled
         // obligation a tautology instead of a contradiction, and the `HA_ex`
         // binds the de Bruijn index the two applications read.
         let body = HAssert::Ex(Box::new(HAssert::And(
-            Box::new(HAssert::Not(Box::new(HAssert::False))),
+            Box::new(HAssert::And(
+                Box::new(HAssert::True),
+                Box::new(HAssert::Not(Box::new(HAssert::False))),
+            )),
             Box::new(HAssert::And(
                 Box::new(HAssert::Defined(HTerm::App(probe(), vec![HTerm::LVar(0)]))),
                 Box::new(HAssert::AppOk(probe(), vec![HTerm::LVar(0)])),
@@ -1270,16 +1277,22 @@ mod gate {
             .unwrap_or_else(|e| panic!("wasm_to_v failed for the obligation probe: {e}"))
     }
 
-    /// A hand-built obligation map carrying the three `hassert` arms no source
-    /// program can reach.
+    /// A hand-built obligation map carrying the four `hassert` arms the corpus
+    /// cannot put in front of `coqc`.
     ///
-    /// `HA_false`, `HA_defined` and `HA_app_ok` are live arms of
-    /// `core/wasm-to-v/src/hassert_print.rs`, but nothing upstream builds them:
-    /// the codegen pass that lowers a `spec` body into the `hassert` IR has no
-    /// path that produces a `False`, a `Defined` or an `AppOk`, so no `.inf`
-    /// fixture can put one in front of `coqc` and all three arms were
-    /// unelaborated (#401). Handing `wasm_to_v` an explicit [`inference::HSpecMap`]
-    /// reaches the printer directly, without a source program.
+    /// `HA_true`, `HA_false`, `HA_defined` and `HA_app_ok` are live arms of
+    /// `core/wasm-to-v/src/hassert_print.rs` that no corpus fixture elaborates,
+    /// for three different reasons. `HA_false` and `HA_defined` have no upstream
+    /// producer at all: the codegen pass that lowers a `spec` body into the
+    /// `hassert` IR has no path that builds either. `HA_app_ok` does have one —
+    /// a bare statement call in a spec body lowers to it — but no fixture writes
+    /// that shape. And `HA_true` is unreachable by construction now that a
+    /// specification function whose obligation collapses to ⊤ is rejected
+    /// instead of emitted: the ⊤-absorbing smart constructors keep ⊤ out of
+    /// every proper subterm, and the vacuity check keeps it out of the root.
+    /// All four arms were unelaborated (#401). Handing `wasm_to_v` an explicit
+    /// [`inference::HSpecMap`] reaches the printer directly, without a source
+    /// program.
     ///
     /// Two constraints make that possible. The module must come from WAT rather
     /// than codegen, because a `.wasm` carrying its own `inference.hspecs`
@@ -1294,6 +1307,10 @@ mod gate {
         let v = &module.v;
 
         for needle in [
+            // The applied form, not a bare `HA_true`: it is what proves the raw
+            // variant survived to the printer rather than being absorbed away
+            // by a smart constructor slipped into the fixture.
+            "HA_and (HA_true)",
             "HA_not (HA_false)",
             // Both applications resolve the symbol to the function's `mod_funcs`
             // index. `HA_defined` takes a term, `HA_app_ok` takes the index and
@@ -1329,8 +1346,8 @@ mod gate {
 
         type_check_with_coqc(
             &module,
-            "Obligation probe generated and its `HA_false`, `HA_defined` and \
-             `HA_app_ok` shapes verified",
+            "Obligation probe generated and its `HA_true`, `HA_false`, \
+             `HA_defined` and `HA_app_ok` shapes verified",
         );
     }
 
@@ -2213,8 +2230,11 @@ Definition a_definition (x : nat) : nat := x.
     /// load-bearing — a literal left at the `i32` default could not carry the
     /// value at all. `4294967296` is peer-typed by the `i64` slot it is compared
     /// against, `u64::MAX` is typed by the `u64` parameter it is passed to and
-    /// reaches Rocq as the bit pattern `(-1)`, and `main`'s argument literal is
-    /// typed by `scaled`'s parameter.
+    /// reaches Rocq as the bit pattern `(-1)`, `main`'s argument literal is typed
+    /// by `scaled`'s parameter, and the return position is typed by `threshold`'s
+    /// declared `-> i64` — which the first obligation then applies, so the width
+    /// the return position chose is visible in the claim and not only in the
+    /// module record.
     #[test]
     fn spec_literal_ctx_matches_committed_v_golden() {
         let generated = generate_v("spec_literal_ctx.inf", "spec_literal_ctx");
@@ -2255,6 +2275,17 @@ Definition a_definition (x : nat) : nat := x.
             golden.contains("BI_const_num (Vi64 4294967296)"),
             "the executable `main` must pass its argument literal at `i64` \
              width:\n{golden}"
+        );
+        assert!(
+            golden.contains("(T_app 2 nil) (T_const (Vi64 4294967296))"),
+            "the return-position literal must reach an obligation, compared \
+             against `threshold`'s result at the width its `-> i64` chose:\n{golden}"
+        );
+        assert!(
+            !golden.contains("HA_true"),
+            "no obligation here may be vacuous; an `HA_true` would mean a claim \
+             collapsed away and the golden was regenerated from the \
+             collapse:\n{golden}"
         );
     }
 

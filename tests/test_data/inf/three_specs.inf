@@ -2,9 +2,13 @@ pub fn main() -> i32 {
   return 0;
 }
 
+fn one() -> i32 {
+  return 1;
+}
+
 spec Alpha {
-  fn alpha_inner() -> i32 {
-    return 1;
+  fn alpha_inner() forall {
+    assert(one() == 1);
   }
 }
 

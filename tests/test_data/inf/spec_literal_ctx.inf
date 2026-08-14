@@ -15,14 +15,21 @@ fn nonzero(n: u64) -> bool {
     return n > 0;
 }
 
+// Return position: the declared return type is what types the literal. The
+// specification below applies this function, so the constant the return position
+// typed is what the obligation compares against.
+fn threshold() -> i64 {
+    return 4294967296;
+}
+
 pub fn main() -> i64 {
     return scaled(4294967296);
 }
 
 spec LiteralPositions {
-    // Return position: the declared return type is what types the literal.
-    fn threshold() -> i64 {
-        return 4294967296;
+    fn threshold_is_i64() forall {
+        // Peer position against an `i64`-returning application.
+        assert(threshold() == 4294967296);
     }
 
     fn scaled_grows() forall {

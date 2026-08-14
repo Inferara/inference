@@ -1034,11 +1034,13 @@ fn an_existential_witness_and_a_call_argument_uzumaki_interleave_by_level() {
 /// allocated inside it — but its definition does not.
 #[test]
 fn a_witness_nothing_reads_is_emitted_without_its_constraint() {
-    // Nothing follows the binding, so the whole body claims nothing and the
-    // `∃x. ⊤` the wrap leaves behind collapses.
-    let body = "forall { let a: i32 = @; let b: i32 = @; \
-                let unused: bool = a == 0 || b == 0; }";
-    assert_eq!(obligation_of("", body), HAssert::True);
+    // Nothing follows the binding, so the whole body claims nothing: the
+    // `∃x. ⊤` the wrap leaves behind collapses, and a specification function
+    // that collapses to `⊤` is rejected instead of emitted.
+    let source = "spec S { fn f() forall { let a: i32 = @; let b: i32 = @; \
+                  let unused: bool = a == 0 || b == 0; } }";
+    let dropped = err(source);
+    assert!(dropped.contains("error[P010]"), "{dropped}");
 
     // An unrelated later claim keeps the binder but not the definition, so the
     // divide the source guards against is never demanded.
@@ -1316,23 +1318,35 @@ fn if_condition_may_be_a_call_result() {
 
 // ----- 8. calls ----------------------------------------------------------
 
+/// A call to a specification sibling resolves by that sibling's *folded* key, so
+/// `helper` applied from `prop` is `T_app "S.helper"`. Both functions state a
+/// property of their own, because a specification function that only computes is
+/// rejected outright — a `return`-only sibling could not be the callee here.
+///
+/// The translation pass is driven directly, without the compile around it: the
+/// full pipeline cannot yet resolve a specification-local helper's `T_app`, but
+/// that is a separate open defect in the driver, not in the resolution this test
+/// pins.
 #[test]
 fn spec_sibling_helper_is_a_t_app_by_its_folded_key() {
     let source = "\
 spec S {
-  fn helper() -> i32 {
-    return 3;
+  fn helper(n: i32) -> i32 {
+    assert(n > 0);
+    return n;
   }
   fn prop() forall {
     let a: i32 = @;
-    assert(helper() == a);
+    assert(helper(a) == a);
   }
 }
 ";
     let map = ok(source);
-    // The helper itself is a plain (Regular) spec fn, so it contributes a
-    // trivially-true obligation and keeps its place in source order.
-    assert_eq!(obligation_named(&map, "S", "S.helper"), HAssert::True);
+    // The helper carries its own obligation and keeps its place in source order.
+    assert_eq!(
+        obligation_named(&map, "S", "S.helper"),
+        imp(guard(0), nz(gts(local(0), i32c(0))))
+    );
     assert_eq!(
         obligation_named(&map, "S", "S.prop"),
         imp(
@@ -1340,7 +1354,7 @@ spec S {
             nz(rel(
                 HNumType::I32,
                 HRelop::Eq,
-                app("S.helper", vec![]),
+                app("S.helper", vec![local(0)]),
                 local(0)
             ))
         )
@@ -1380,23 +1394,21 @@ fn cross_file_qualified_callee_carries_its_defining_path() {
 
 // ----- 9. simplification -------------------------------------------------
 
+/// The ⊤-absorbing fold is what makes "empty", "binds but never claims" and
+/// "only computes" one family rather than three shapes to enumerate: each folds
+/// to exactly `HA_true`. That collapse is no longer observable as an emitted
+/// obligation, so it is observed through the rejection it now produces.
 #[test]
-fn assert_free_and_empty_bodies_are_trivially_true() {
-    assert_eq!(
-        sole_obligation(&ok("spec S { fn f() forall { } }"), "S"),
-        HAssert::True
-    );
+fn assert_free_and_empty_bodies_fold_to_the_rejected_vacuous_obligation() {
+    let empty = err("spec S { fn f() forall { } }");
+    assert!(empty.contains("error[P010]"), "{empty}");
     // A slot with nothing left to read it guards nothing: the pending guard is
     // dropped rather than left dangling over a `⊤` claim.
-    assert_eq!(
-        sole_obligation(&ok("spec S { fn f() forall { let a: i32 = @; } }"), "S"),
-        HAssert::True
-    );
-    // A plain (Regular) spec free function is also a trivially-true obligation.
-    assert_eq!(
-        sole_obligation(&ok("spec S { fn f() -> i32 { return 0; } }"), "S"),
-        HAssert::True
-    );
+    let unread = err("spec S { fn f() forall { let a: i32 = @; } }");
+    assert!(unread.contains("error[P010]"), "{unread}");
+    // A plain (Regular) spec free function folds to `⊤` the same way.
+    let computed = err("spec S { fn f() -> i32 { return 0; } }");
+    assert!(computed.contains("error[P010]"), "{computed}");
 }
 
 #[test]
@@ -1921,4 +1933,309 @@ fn a_realistic_boolean_chain_still_compiles() {
     let flat = proof_codegen(flat_or_chain(64))
         .expect("a 64-operator left-associated chain must stay inside the payload depth cap");
     assert!(flat > 0, "code generation produced an empty module");
+}
+
+// ----- 13. helper and property roles ------------------------------------
+
+/// The explanation every vacuity report carries between its diagnosis and its
+/// remedy. Asserting it apart from the two keeps the per-construct checks on the
+/// clauses that actually differ.
+const VACUOUS: &str = "so its obligation is the vacuous `HA_true` that any proof discharges \
+                       without reading the program";
+
+/// Asserts that `rest` — the text completing `spec S { fn f() … }`, a body
+/// optionally preceded by a return type — is rejected as a vacuous obligation,
+/// and returns the rendered diagnostic for a wording check.
+fn vacuous(rest: &str) -> String {
+    let rendered = err(&format!("spec S {{ fn f() {rest} }}"));
+    assert!(
+        rendered.contains("error[P010]"),
+        "expected a vacuity report for `{rest}`, got: {rendered}"
+    );
+    rendered
+}
+
+/// A specification function that only computes states no property at all,
+/// however the computation is written: a returned value, a chain of pure `let`s,
+/// a block-local `const`, or nothing whatsoever. Each is a helper, and a helper
+/// belongs at file scope where a specification can still apply it as a `T_app`.
+#[test]
+fn a_spec_function_that_only_computes_is_rejected() {
+    for rest in [
+        "{ }",
+        "-> i32 { return 0; }",
+        "{ let a: i32 = 1; let b: i32 = a + 2; }",
+        "{ const K: i32 = 7; }",
+    ] {
+        vacuous(rest);
+    }
+}
+
+/// Quantifying a body is not itself a claim. A `forall` that binds values and
+/// never constrains them — or one whose only statement is an expression
+/// evaluated for nothing — claims exactly as much as an empty one.
+#[test]
+fn a_quantified_body_that_binds_but_never_claims_is_rejected() {
+    for rest in [
+        "forall { }",
+        "forall { let a: i32 = @; }",
+        "forall { let n: i32 = @; n + 1; }",
+    ] {
+        vacuous(rest);
+    }
+}
+
+/// Nesting rescues nothing: a bare block, a further quantifier, an inline
+/// non-deterministic block, and an `if` whose arms are both vacuous all fold
+/// through the same ⊤-absorbing constructors as the flat shapes do.
+#[test]
+fn nesting_does_not_rescue_a_body_that_claims_nothing() {
+    for rest in [
+        "forall { { } }",
+        "forall { forall { } }",
+        "forall { exists { let m: i32 = @; } }",
+        "forall { let n: i32 = @; if n > 0 { } else { } }",
+    ] {
+        vacuous(rest);
+    }
+}
+
+/// An `assume` builds an antecedent over the statements that follow it, so one
+/// with nothing after it folds to `Imp(p, ⊤) = ⊤`. This is the family the body
+/// shape alone would misjudge — the filter is written, translated, and then
+/// absorbed — which is why the check reads the translated obligation instead.
+#[test]
+fn a_trailing_assume_is_absorbed_into_a_vacuous_obligation() {
+    for rest in [
+        "{ assume { assert(1 > 0); } }",
+        "forall { let n: i32 = @; assume { assert(n > 0); } }",
+    ] {
+        vacuous(rest);
+    }
+}
+
+/// The remedy names the construct the body actually wrote, so a quantified body,
+/// an inline non-deterministic block, and a plain computation each get the fix
+/// that applies to them rather than one generic sentence.
+#[test]
+fn the_vacuity_report_names_the_construct_the_body_wrote() {
+    let quantified = vacuous("forall { let a: i32 = @; }");
+    assert!(
+        quantified.contains("spec function `f` is `forall`-quantified but asserts nothing"),
+        "{quantified}"
+    );
+    assert!(
+        quantified.contains("add an `assert` over the values it binds"),
+        "{quantified}"
+    );
+    assert!(quantified.contains(VACUOUS), "{quantified}");
+
+    let assumed = vacuous("{ assume { assert(1 > 0); } }");
+    assert!(
+        assumed.contains("spec function `f` claims nothing after its `assume` block"),
+        "{assumed}"
+    );
+    assert!(
+        assumed.contains("add an `assert` after the `assume` block"),
+        "{assumed}"
+    );
+
+    let existential = vacuous("{ exists { let m: i32 = @; } }");
+    assert!(
+        existential.contains("spec function `f` claims nothing after its `exists` block"),
+        "{existential}"
+    );
+    assert!(
+        existential.contains("add an `assert` after the `exists` block"),
+        "{existential}"
+    );
+
+    let computed = vacuous("-> i32 { return 0; }");
+    assert!(
+        computed.contains("spec function `f` only computes a value and states no property"),
+        "{computed}"
+    );
+    assert!(
+        computed.contains(
+            "assert a property about the computation, or move the function out of the `spec` block"
+        ),
+        "{computed}"
+    );
+    assert!(computed.contains(VACUOUS), "{computed}");
+}
+
+/// A body that states a property keeps its obligation, whatever else it does. A
+/// bare call statement counts: `HA_app_ok` claims the application is realized,
+/// which is a property of the program rather than a value the specification
+/// computes for itself.
+#[test]
+fn a_body_that_states_a_property_keeps_its_obligation() {
+    assert_eq!(
+        obligation_of("", "forall { let n: i32 = @; assert(n > 0); }"),
+        imp(guard(0), nz(gts(local(0), i32c(0))))
+    );
+    let source = "spec S { fn f() -> i32 { assert(1 > 0); return 0; } }";
+    assert_eq!(sole_obligation(&ok(source), "S"), nz(gts(i32c(1), i32c(0))));
+    assert_eq!(
+        obligation_of("fn side() -> i32 { return 1; }", "forall { side(); }"),
+        HAssert::AppOk(HFnRef("side".to_string()), vec![])
+    );
+}
+
+/// Nothing in the fold recognizes a tautology, so an `assert` contributes a
+/// non-⊤ conjunct even for a claim that holds of every program. A body carrying
+/// one is therefore never vacuous — the wording reserved for a tautology-only
+/// specification has no free-function witness, and the case it describes is the
+/// one a *method* reaches.
+#[test]
+fn a_tautological_assert_is_still_a_real_obligation() {
+    assert_eq!(
+        sole_obligation(&ok("spec S { fn f() { assert(1 > 0); } }"), "S"),
+        nz(gts(i32c(1), i32c(0)))
+    );
+}
+
+/// The vacuity check runs only on a function that is otherwise clean, so a body
+/// already rejected for a construct with no encoding reports that construct — not
+/// the `⊤` its abandoned translation happened to leave behind.
+#[test]
+fn an_earlier_diagnostic_suppresses_the_vacuity_report() {
+    let looped = err("spec S { fn f() forall { loop { } } }");
+    assert!(looped.contains("error[P002]"), "{looped}");
+    assert!(!looped.contains("P010"), "{looped}");
+
+    let compound = err("spec S { fn f(arr: [i32; 3]) forall { } }");
+    assert!(compound.contains("error[P004]"), "{compound}");
+    assert!(!compound.contains("P010"), "{compound}");
+}
+
+/// The verdict is per function. A vacuous sibling is reported by name without
+/// taking the obligation of a function that does state a property with it, so the
+/// remaining specification still says what it always said.
+#[test]
+fn a_vacuous_sibling_does_not_take_a_real_obligation_with_it() {
+    let source = "spec S { fn a() forall { } fn b() forall { let n: i32 = @; assert(n > 0); } }";
+    let ctx = type_check(source);
+    let (map, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P010]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains("spec function `a`"),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        obligation_named(&map, "S", "S.b"),
+        imp(guard(0), nz(gts(local(0), i32c(0))))
+    );
+}
+
+/// Completes `spec S { struct T { x: i32; fn m(self) … } }` with `rest` — a
+/// body, optionally preceded by a return type or a quantifier — giving the
+/// method shape whose helper exemption the reports below delimit.
+fn spec_method(rest: &str) -> String {
+    format!("spec S {{ struct T {{ x: i32; fn m(self) {rest} }} }}")
+}
+
+/// The message a plain method that loses an assertion is reported with.
+const METHOD_STATES_A_PROPERTY: &str = "spec method `T.m` states a property, but a spec method \
+                                        carries no verification obligation — move the property \
+                                        into a `forall` spec function";
+
+/// Asserts that the method `T.m` written as `rest` is reported for losing an
+/// assertion.
+fn method_states_a_property(rest: &str) {
+    let rendered = err(&spec_method(rest));
+    assert!(
+        rendered.contains("error[P009]"),
+        "method `{rest}`: {rendered}"
+    );
+    assert!(
+        rendered.contains(METHOD_STATES_A_PROPERTY),
+        "method `{rest}`: {rendered}"
+    );
+}
+
+/// Asserts that the method `T.m` written as `rest` is left alone.
+fn method_is_a_silent_helper(rest: &str) {
+    let map = ok(&spec_method(rest));
+    assert!(
+        map.is_empty(),
+        "method `{rest}`: a spec method contributes no obligation, got {map:?}"
+    );
+}
+
+/// A specification method carries no obligation, so an `assert` written in one
+/// is dropped without a trace. It is reported instead, wherever the `assert`
+/// sits: at the top of the body, or inside a non-deterministic block within it.
+#[test]
+fn a_plain_spec_method_that_states_a_property_is_reported() {
+    method_states_a_property("{ assert(1 > 0); }");
+    method_states_a_property("{ exists { let y: i32 = @; assert(y > 0); } }");
+}
+
+/// A plain method is reported only when an assertion is actually lost, so a
+/// non-deterministic block that asserts nothing is left alone — however it is
+/// written, wherever it sits, and whatever it binds. Writing `forall` is an
+/// intent marker for wording a message, never on its own a stated property.
+#[test]
+fn a_plain_spec_method_whose_nondet_block_asserts_nothing_is_not_reported() {
+    for rest in [
+        "{ forall { } }",
+        "{ exists { let y: i32 = @; } }",
+        "{ assume { } }",
+        "{ unique { } }",
+        "{ forall { exists { } } }",
+        "{ if self.x > 0 { forall { } } }",
+    ] {
+        method_is_a_silent_helper(rest);
+    }
+}
+
+/// The exemption is the missing assertion, not the non-deterministic block: an
+/// `assert` the block encloses is reported however deeply it nests, and so is
+/// one that merely follows the block, or that sits in a block a branch guards —
+/// the shapes the first marker alone points away from.
+#[test]
+fn an_assert_around_a_nondet_block_in_a_plain_spec_method_is_reported() {
+    for rest in [
+        "{ forall { assert(self.x > 0); } }",
+        "{ forall { exists { assert(self.x > 0); } } }",
+        "{ assume { assert(self.x > 0); } }",
+        "{ forall { } assert(self.x > 0); }",
+        "{ if self.x > 0 { forall { assert(self.x > 0); } } }",
+        "{ if self.x > 0 { } else { forall { assert(self.x < 0); } } }",
+    ] {
+        method_states_a_property(rest);
+    }
+}
+
+/// The helper role a free function lost is exactly the one a method keeps: a
+/// method that only computes claims nothing, carries no obligation either way,
+/// and is left alone.
+#[test]
+fn a_spec_method_that_only_computes_stays_a_silent_helper() {
+    method_is_a_silent_helper("-> i32 { return 1; }");
+}
+
+/// A quantified method keeps the report it always had, naming the quantifier —
+/// distinct wording from the one a plain method that claims a property gets, so
+/// the two cases stay tellable apart. The quantifier is the obligation, so the
+/// report does not wait for an `assert` the way a plain body's does.
+#[test]
+fn a_quantified_spec_method_keeps_its_own_report() {
+    for rest in ["forall { let y: i32 = @; assert(y > 0); }", "forall { }"] {
+        let rendered = err(&spec_method(rest));
+        assert!(
+            rendered.contains("error[P009]"),
+            "method `{rest}`: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "spec method `T.m` is `forall`-quantified; a quantified spec method carries a \
+                 proof obligation that cannot yet be translated to a verification assertion — \
+                 move the property into a `forall` spec function"
+            ),
+            "method `{rest}`: {rendered}"
+        );
+    }
 }

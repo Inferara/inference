@@ -1,8 +1,35 @@
+// Universal slots at every scalar width. Each slot is read by an assertion,
+// which is what makes its `HA_has_type` guard observable: a slot nothing reads
+// guards nothing, so the translator drops its guard and the obligation this
+// fixture exists to cover would never reach the printer.
+//
+// The identity helpers live at file scope so each assertion carries a real
+// `T_app` over the slot rather than a claim the typing guard alone discharges.
 enum Color {
     Red,
     Green,
     Blue,
 }
+
+pub fn id_u8(v: u8) -> u8 { return v; }
+
+pub fn id_i8(v: i8) -> i8 { return v; }
+
+pub fn id_u16(v: u16) -> u16 { return v; }
+
+pub fn id_i16(v: i16) -> i16 { return v; }
+
+pub fn id_bool(v: bool) -> bool { return v; }
+
+pub fn id_color(v: Color) -> Color { return v; }
+
+pub fn id_i32(v: i32) -> i32 { return v; }
+
+pub fn id_u32(v: u32) -> u32 { return v; }
+
+pub fn id_i64(v: i64) -> i64 { return v; }
+
+pub fn id_u64(v: u64) -> u64 { return v; }
 
 spec NarrowUzu {
     fn narrow_ints() forall {
@@ -10,11 +37,17 @@ spec NarrowUzu {
         let b: i8 = @;
         let c: u16 = @;
         let d: i16 = @;
+        assert(id_u8(a) == a);
+        assert(id_i8(b) == b);
+        assert(id_u16(c) == c);
+        assert(id_i16(d) == d);
     }
 
     fn narrow_bool_enum() forall {
         let e: bool = @;
         let f: Color = @;
+        assert(id_bool(e) == e);
+        assert(id_color(f) == f);
     }
 
     fn full_width() forall {
@@ -22,5 +55,9 @@ spec NarrowUzu {
         let h: u32 = @;
         let i: i64 = @;
         let j: u64 = @;
+        assert(id_i32(g) == g);
+        assert(id_u32(h) == h);
+        assert(id_i64(i) == i);
+        assert(id_u64(j) == j);
     }
 }

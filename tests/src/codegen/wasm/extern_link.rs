@@ -607,14 +607,17 @@ pub fn probe_named_array() -> i32 {
         lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
 
         // `check` must be translatable to an obligation, so it does not call the
-        // extern (an external call has no verified body — `P005`). `add_three`
+        // extern (an external call has no verified body — `P005`), and it must
+        // claim something, since an obligation that collapses to `HA_true` is
+        // rejected outright. Its claim is deliberately self-contained: the
+        // cross-call half is what the companion test below adds. `add_three`
         // (executable) carries the extern call whose operand the omission
         // renumbers.
         let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
              use { sum } from arith;\n\
              pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
              spec MySpec {\n\
-                 fn check(x: i32) -> i32 { return x; }\n\
+                 fn check() forall { let x: i32 = @; assert(x == x); }\n\
              }";
 
         let arena = parse(main_source).expect("main parses");
@@ -670,10 +673,10 @@ pub fn probe_named_array() -> i32 {
     #[test]
     fn proof_mode_hspec_t_app_resolves_across_the_link() {
         // The companion to `proof_mode_spec_omission_renumbers_the_call_to_the_merged_extern`:
-        // that test pins the *executable* `BI_call` renumbering but its spec is a
-        // plain helper (a trivially-true obligation with no cross-call). This one
-        // adds the load-bearing half — an obligation whose `T_app` must resolve
-        // through the same post-link remap.
+        // that test pins the *executable* `BI_call` renumbering, and its spec
+        // claims a property over its own universal slot only — no cross-call.
+        // This one adds the load-bearing half: an obligation whose `T_app` must
+        // resolve through the same post-link remap.
         //
         // Post-link function order is add_three=0, is_prime=1, spec `prop`=2,
         // merged `sum`=3. The spec function is OMITTED from the `.v` module record,

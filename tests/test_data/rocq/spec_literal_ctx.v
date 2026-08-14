@@ -48,8 +48,18 @@ Definition nonzero : module_func := {|
     nil;
 |}.
 
-Definition main : module_func := {|
+Definition threshold : module_func := {|
   modfunc_type := 2%N;
+  modfunc_locals := nil;
+  modfunc_body :=
+    BI_const_num (Vi64 4294967296) ::
+    BI_return ::
+    BI_unreachable ::
+    nil;
+|}.
+
+Definition main : module_func := {|
+  modfunc_type := 3%N;
   modfunc_locals := nil;
   modfunc_body :=
     BI_const_num (Vi64 4294967296) ::
@@ -66,10 +76,12 @@ Definition spec_literal_ctx : module := {|
     Tf (nil) (T_num T_i64 :: nil) ::
     Tf (nil) (T_num T_i64 :: nil) ::
     Tf (nil) (nil) ::
+    Tf (nil) (nil) ::
     nil;
   mod_funcs :=
     scaled ::
     nonzero ::
+    threshold ::
     main ::
     nil;
   mod_tables :=
@@ -86,12 +98,12 @@ Definition spec_literal_ctx : module := {|
   mod_imports :=
     nil;
   mod_exports :=
-    Me "main" (MED_func 2%N) ::
+    Me "main" (MED_func 3%N) ::
     nil;
 |}.
 
 Definition spec_literal_ctx__LiteralPositions_hspec1 : hassert :=
-  HA_true.
+  HA_not (term_eq (T_relop T_i64 (Relop_i ROI_eq) (T_app 2 nil) (T_const (Vi64 4294967296))) (T_const (Vi32 0))).
 Definition spec_literal_ctx__LiteralPositions_hspec2 : hassert :=
   Himpl (HA_and (HA_has_type (T_local 0%N) T_i64) (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi64 4294967296))) (T_const (Vi32 0))))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_gt SX_S)) (T_app 0 ((T_local 0%N) :: nil)) (T_binop T_i64 (Binop_i BOI_add) (T_local 0%N) (T_const (Vi64 1)))) (T_const (Vi32 0)))) (HA_not (term_eq (T_app 1 ((T_const (Vi64 (-1))) :: nil)) (T_const (Vi32 0))))).
 Definition spec_literal_ctx__LiteralPositions_specs : list hassert := (spec_literal_ctx__LiteralPositions_hspec1 :: spec_literal_ctx__LiteralPositions_hspec2 :: nil).

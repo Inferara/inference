@@ -2,11 +2,19 @@ pub fn main() -> i32 {
   return 0;
 }
 
+fn one() -> i32 {
+  return 1;
+}
+
+fn two() -> i32 {
+  return 2;
+}
+
 spec Witness {
-  fn witness_one() -> i32 {
-    return 1;
+  fn witness_one() forall {
+    assert(one() == 1);
   }
-  fn witness_two() -> i32 {
-    return 2;
+  fn witness_two() forall {
+    assert(two() == 2);
   }
 }
