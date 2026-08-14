@@ -1,0 +1,225 @@
+// The signedness and shift matrix, in the `hassert` term language.
+//
+// A specification's operators are printed by a different emitter than the
+// module record's instructions: `T_binop`/`T_relop` come from the obligation
+// printer, `BI_binop`/`BI_relop` from the instruction translator, and each has
+// its own per-operator arm. Coverage counts an arm only once it is elaborated
+// at *both* integer widths, because `T_i32` and `T_i64` select different arms
+// and the gate demands both: by that measure the corpus reached three of the
+// obligation printer's twenty-three arms, so twenty operator spellings could
+// have drifted in name or arity at one width or the other without `coqc`
+// noticing — sixteen of them at neither width (#401).
+//
+// The unsigned functions are what make the signedness half reachable at all:
+// `SX_U` is chosen from the *operand type*, never from the operator, so only a
+// `u32`/`u64` source expression can produce it. Every width is present for the
+// same reason — `T_i32` and `T_i64` select different arms of both printers.
+//
+// Each spec function asserts the executable function against the same
+// expression written inline, so the operator appears once as an instruction in
+// the module record and once as a term in the obligation.
+
+pub fn div_u32(a: u32, b: u32) -> u32 {
+    return a / b;
+}
+
+pub fn rem_u32(a: u32, b: u32) -> u32 {
+    return a % b;
+}
+
+pub fn shr_u32(x: u32, k: u32) -> u32 {
+    return x >> k;
+}
+
+pub fn div_u64(a: u64, b: u64) -> u64 {
+    return a / b;
+}
+
+pub fn rem_u64(a: u64, b: u64) -> u64 {
+    return a % b;
+}
+
+pub fn shr_u64(x: u64, k: u64) -> u64 {
+    return x >> k;
+}
+
+pub fn div_i64(a: i64, b: i64) -> i64 {
+    return a / b;
+}
+
+pub fn rem_i64(a: i64, b: i64) -> i64 {
+    return a % b;
+}
+
+pub fn shl_i64(x: i64, k: i64) -> i64 {
+    return x << k;
+}
+
+pub fn shr_i64(x: i64, k: i64) -> i64 {
+    return x >> k;
+}
+
+pub fn shl_i32(x: i32, k: i32) -> i32 {
+    return x << k;
+}
+
+pub fn shr_i32(x: i32, k: i32) -> i32 {
+    return x >> k;
+}
+
+pub fn scale_i32(a: i32, b: i32) -> i32 {
+    return a * b;
+}
+
+pub fn scale_i64(a: i64, b: i64) -> i64 {
+    return a * b;
+}
+
+pub fn le_i32(a: i32, b: i32) -> bool {
+    return a <= b;
+}
+
+pub fn ge_i32(a: i32, b: i32) -> bool {
+    return a >= b;
+}
+
+pub fn lt_u32(a: u32, b: u32) -> bool {
+    return a < b;
+}
+
+pub fn le_u32(a: u32, b: u32) -> bool {
+    return a <= b;
+}
+
+pub fn gt_u32(a: u32, b: u32) -> bool {
+    return a > b;
+}
+
+pub fn ge_u32(a: u32, b: u32) -> bool {
+    return a >= b;
+}
+
+pub fn lt_i64(a: i64, b: i64) -> bool {
+    return a < b;
+}
+
+pub fn le_i64(a: i64, b: i64) -> bool {
+    return a <= b;
+}
+
+pub fn ge_i64(a: i64, b: i64) -> bool {
+    return a >= b;
+}
+
+pub fn ne_i64(a: i64, b: i64) -> bool {
+    return a != b;
+}
+
+pub fn eq_i64(a: i64, b: i64) -> bool {
+    return a == b;
+}
+
+pub fn gt_i64(a: i64, b: i64) -> bool {
+    return a > b;
+}
+
+pub fn lt_u64(a: u64, b: u64) -> bool {
+    return a < b;
+}
+
+pub fn le_u64(a: u64, b: u64) -> bool {
+    return a <= b;
+}
+
+pub fn gt_u64(a: u64, b: u64) -> bool {
+    return a > b;
+}
+
+pub fn ge_u64(a: u64, b: u64) -> bool {
+    return a >= b;
+}
+
+spec OperatorMatrix {
+    // `assume` keeps the divisor away from zero, so the obligation is about the
+    // division the program actually performs.
+    fn unsigned_narrow_ops() forall {
+        let a: u32 = @;
+        let b: u32 = @;
+        assume {
+            assert(b > 0);
+        }
+        assert(div_u32(a, b) == a / b);
+        assert(rem_u32(a, b) == a % b);
+        assert(shr_u32(a, b) == a >> b);
+    }
+
+    fn unsigned_wide_ops() forall {
+        let a: u64 = @;
+        let b: u64 = @;
+        assume {
+            assert(b > 0);
+        }
+        assert(div_u64(a, b) == a / b);
+        assert(rem_u64(a, b) == a % b);
+        assert(shr_u64(a, b) == a >> b);
+    }
+
+    fn signed_wide_ops() forall {
+        let a: i64 = @;
+        let b: i64 = @;
+        assume {
+            assert(b > 0);
+        }
+        assert(div_i64(a, b) == a / b);
+        assert(rem_i64(a, b) == a % b);
+        assert(shl_i64(a, b) == a << b);
+        assert(shr_i64(a, b) == a >> b);
+        assert(scale_i64(a, b) == a * b);
+    }
+
+    fn signed_narrow_ops() forall {
+        let a: i32 = @;
+        let b: i32 = @;
+        assert(shl_i32(a, b) == a << b);
+        assert(shr_i32(a, b) == a >> b);
+        assert(scale_i32(a, b) == a * b);
+    }
+
+    // The comparison results are compared with `==`, which puts each ordering
+    // operator in term position on the right-hand side.
+    fn unsigned_narrow_order() forall {
+        let a: u32 = @;
+        let b: u32 = @;
+        assert(lt_u32(a, b) == (a < b));
+        assert(le_u32(a, b) == (a <= b));
+        assert(gt_u32(a, b) == (a > b));
+        assert(ge_u32(a, b) == (a >= b));
+    }
+
+    fn unsigned_wide_order() forall {
+        let a: u64 = @;
+        let b: u64 = @;
+        assert(lt_u64(a, b) == (a < b));
+        assert(le_u64(a, b) == (a <= b));
+        assert(gt_u64(a, b) == (a > b));
+        assert(ge_u64(a, b) == (a >= b));
+    }
+
+    fn signed_order() forall {
+        let a: i64 = @;
+        let b: i64 = @;
+        assert(lt_i64(a, b) == (a < b));
+        assert(le_i64(a, b) == (a <= b));
+        assert(ge_i64(a, b) == (a >= b));
+        assert(ne_i64(a, b) == (a != b));
+        assert(eq_i64(a, b) == (a == b));
+        assert(gt_i64(a, b) == (a > b));
+    }
+
+    fn signed_narrow_order() forall {
+        let a: i32 = @;
+        let b: i32 = @;
+        assert(le_i32(a, b) == (a <= b));
+        assert(ge_i32(a, b) == (a >= b));
+    }
+}

@@ -997,9 +997,13 @@ fn translate_module_import_desc(import: &Import) -> anyhow::Result<String> {
             let limits = translate_memory_type_limits(&memory_type)?;
             format!("MID_mem {limits}")
         }
+        // `MID_table` takes a whole `table_type`, not the `limits` its sibling
+        // `MID_mem` takes: the element type is a second field of that record and
+        // has to be spelled alongside the limits.
         TypeRef::Table(table_type) => {
-            let table_type_translated = translate_table_type_limits(&table_type)?;
-            format!("MID_table {table_type_translated}")
+            let tt_limits = translate_table_type_limits(&table_type)?;
+            let tt_elem_type = translate_ref_type(&table_type.element_type)?;
+            format!("MID_table {{|tt_limits := {tt_limits}; tt_elem_type := {tt_elem_type}|}}")
         }
         TypeRef::Tag(_) => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {

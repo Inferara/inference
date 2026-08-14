@@ -1,0 +1,81 @@
+// Subtraction and bitwise `|`/`^`, in executable bodies and in the obligations
+// about them.
+//
+// No other fixture subtracts at all, so `BOI_sub` had never been elaborated by
+// the `coqc` gate in either position — not as a `BI_binop` in a surviving
+// function body, nor as a `T_binop` in a `hassert` term. An arity or spelling
+// drift in that one constructor would have miscompiled the very code the proof
+// is about and still shipped green (#401). Bitwise `|` and `^` were in the same
+// state, and `&` was reachable only at `i32` via `spec_narrow_abi`.
+//
+// Each spec function pairs a call to the executable function with the same
+// expression written inline, so every operator appears on both sides of the
+// contract: the module record's instruction and the obligation's term.
+
+pub fn diff_i32(a: i32, b: i32) -> i32 {
+    return a - b;
+}
+
+pub fn diff_i64(a: i64, b: i64) -> i64 {
+    return a - b;
+}
+
+// Unary negation lowers to a constant zero minus the operand, a second
+// `BOI_sub` whose left operand is a literal rather than a local.
+pub fn negate_i32(a: i32) -> i32 {
+    return -a;
+}
+
+// Bitwise complement lowers to an exclusive-or against all-ones, a `BOI_xor`
+// that no `^` in the source spells.
+pub fn complement_i32(a: i32) -> i32 {
+    return ~a;
+}
+
+pub fn mix_i32(a: i32, b: i32) -> i32 {
+    return (a | b) ^ (a & b);
+}
+
+pub fn mix_i64(a: i64, b: i64) -> i64 {
+    return (a | b) ^ (a & b);
+}
+
+spec BitwiseArith {
+    fn diff_matches() forall {
+        let a: i32 = @;
+        let b: i32 = @;
+        assert(diff_i32(a, b) == a - b);
+    }
+
+    fn wide_diff_matches() forall {
+        let a: i64 = @;
+        let b: i64 = @;
+        assert(diff_i64(a, b) == a - b);
+    }
+
+    fn negate_matches() forall {
+        let a: i32 = @;
+        assert(negate_i32(a) == -a);
+    }
+
+    fn complement_matches() forall {
+        let a: i32 = @;
+        assert(complement_i32(a) == ~a);
+    }
+
+    // The parentheses around the right operand of `==` are load-bearing:
+    // `EQUALS` binds tighter than `XOR`/`OR`, so without them the comparison
+    // absorbs the left operand of `^` and the type checker sees a `bool` under
+    // a bitwise operator.
+    fn mix_is_xor() forall {
+        let a: i32 = @;
+        let b: i32 = @;
+        assert(mix_i32(a, b) == ((a | b) ^ (a & b)));
+    }
+
+    fn wide_mix_is_xor() forall {
+        let a: i64 = @;
+        let b: i64 = @;
+        assert(mix_i64(a, b) == ((a | b) ^ (a & b)));
+    }
+}

@@ -4,7 +4,7 @@ The `hassert` verification-obligation IR and its `inference.hspecs` custom-secti
 
 ## Why This Crate Exists
 
-A proof-mode Inference build turns each `forall`-quantified specification function into one logical obligation: a value of the `hassert` assertion type defined by wasm-verifier (a private Inferara repository; the vendored stub in `core/wasm-to-v/rocq-stub/` mirrors the interface in-repo). Three phases touch these obligations:
+A proof-mode Inference build turns each `forall`-quantified specification function into one logical obligation: a value of the `hassert` assertion type defined by wasm-verifier (a private Inferara repository; the vendored stub in `core/wasm-to-v/rocq-stub/` mirrors, in-repo, the subset of that interface the Rocq emitter can print). Three phases touch these obligations:
 
 - **`wasm-codegen`** *produces* them from the typed AST and embeds them in the `inference.hspecs` WASM custom section.
 - **`wasm-linker`** *carries* the section verbatim through a static merge.
