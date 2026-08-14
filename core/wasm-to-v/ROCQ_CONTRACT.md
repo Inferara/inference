@@ -522,7 +522,7 @@ entries are matched by name, not position.
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
   | P007 | A `forall` block nested inside an `exists` context (needs `Hall`, deferred past this milestone; lifting it must also restore the `Hall` `Definition` to `rocq-stub/wasm_verifier/Assertions.v`, which omits it as unemittable) |
   | P008 | `@` at a compound (array/struct) type |
-  | P009 | A specification *method* that carries a proof obligation the translation cannot deliver — quantified, or plain but stating a property. Never silently dropped, since a method has no free-function fallback path. A method that only computes stays a helper and is not reported |
+  | P009 | A specification *method* that carries a proof obligation the translation cannot deliver — quantified, or plain but carrying an `assert` at any depth. Never silently dropped, since a method has no free-function fallback path. A plain method that asserts nothing stays a helper and is not reported, a non-deterministic block that claims nothing included |
   | P010 | A specification function whose obligation collapses to the vacuous `HA_true`: an empty or assert-free body, a body that only computes (`return`, pure `let`/`const`), a trailing `assume` (`Imp(p, ⊤) = ⊤`), or an `if` whose branches all vacuate. An obligation any proof discharges without reading the program is indistinguishable from no verification at all, so a computing helper belongs at file scope, where a specification function can still apply it as a `T_app` |
 
 - **Non-det instructions in a surviving body** (`translator.rs`,

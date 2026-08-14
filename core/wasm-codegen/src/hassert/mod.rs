@@ -48,8 +48,8 @@
 //! A helper that only computes therefore cannot live in a `spec` block. It
 //! belongs at file scope, where a specification function can still apply it as a
 //! `T_app`. A plain specification *method* keeps its helper exemption — it
-//! produces no obligation either way — but one that *states* a property raises
-//! `P009` rather than being dropped silently.
+//! produces no obligation either way — but one that carries an `assert`, at any
+//! depth, raises `P009` rather than dropping that assertion silently.
 //!
 //! ## Obligation depth and the encoding cap
 //!
@@ -261,8 +261,16 @@ fn vacuous_obligation_diagnostic(
     )
 }
 
-/// A [`PCode::P009`] for a specification method that claims a property, or
-/// `None` for one that only computes.
+/// A [`PCode::P009`] for a specification method that carries an obligation the
+/// translation cannot deliver, or `None` for one that only computes or writes a
+/// non-deterministic block that asserts nothing.
+///
+/// What is at stake for a plain body is a *lost assertion*: the method's
+/// obligation is never emitted, so an `assert` the author wrote is silently
+/// dropped. Such a body is therefore reported only when it actually asserts
+/// something — an inline non-deterministic block that asserts nothing drops
+/// nothing. A quantified body is reported either way: the quantifier is a proof
+/// obligation on its own, whatever the body does with the values it binds.
 fn method_obligation_diagnostic(
     arena: &AstArena,
     method: &crate::EmittableSpecMethod,
@@ -276,11 +284,18 @@ fn method_obligation_diagnostic(
             method.struct_name,
             quantifier_word(kind)
         ),
-        Claim::NondetBlock(_) | Claim::Assert => format!(
-            "spec method `{}.{name}` states a property, but a spec method carries no verification \
-             obligation — move the property into a `forall` spec function",
-            method.struct_name
-        ),
+        Claim::NondetBlock(_) | Claim::Assert => {
+            // The walk is a foregone conclusion for a marker that already is an
+            // `assert`; asking it of both markers keeps the rule in one place.
+            if !claim::states_an_assertion(arena, method.def_id) {
+                return None;
+            }
+            format!(
+                "spec method `{}.{name}` states a property, but a spec method carries no \
+                 verification obligation — move the property into a `forall` spec function",
+                method.struct_name
+            )
+        }
     };
     Some(HassertDiagnostic::new(
         PCode::P009,

@@ -2129,29 +2129,83 @@ fn a_vacuous_sibling_does_not_take_a_real_obligation_with_it() {
     );
 }
 
-/// A specification method carries no obligation, so one that states a property
-/// is reported rather than silently dropped — whether it claims through an
-/// `assert` or through an inline non-deterministic block.
+/// Completes `spec S { struct T { x: i32; fn m(self) … } }` with `rest` — a
+/// body, optionally preceded by a return type or a quantifier — giving the
+/// method shape whose helper exemption the reports below delimit.
+fn spec_method(rest: &str) -> String {
+    format!("spec S {{ struct T {{ x: i32; fn m(self) {rest} }} }}")
+}
+
+/// The message a plain method that loses an assertion is reported with.
+const METHOD_STATES_A_PROPERTY: &str = "spec method `T.m` states a property, but a spec method \
+                                        carries no verification obligation — move the property \
+                                        into a `forall` spec function";
+
+/// Asserts that the method `T.m` written as `rest` is reported for losing an
+/// assertion.
+fn method_states_a_property(rest: &str) {
+    let rendered = err(&spec_method(rest));
+    assert!(
+        rendered.contains("error[P009]"),
+        "method `{rest}`: {rendered}"
+    );
+    assert!(
+        rendered.contains(METHOD_STATES_A_PROPERTY),
+        "method `{rest}`: {rendered}"
+    );
+}
+
+/// Asserts that the method `T.m` written as `rest` is left alone.
+fn method_is_a_silent_helper(rest: &str) {
+    let map = ok(&spec_method(rest));
+    assert!(
+        map.is_empty(),
+        "method `{rest}`: a spec method contributes no obligation, got {map:?}"
+    );
+}
+
+/// A specification method carries no obligation, so an `assert` written in one
+/// is dropped without a trace. It is reported instead, wherever the `assert`
+/// sits: at the top of the body, or inside a non-deterministic block within it.
 #[test]
 fn a_plain_spec_method_that_states_a_property_is_reported() {
-    for body in [
-        "{ assert(1 > 0); }",
-        "{ exists { let y: i32 = @; assert(y > 0); } }",
+    method_states_a_property("{ assert(1 > 0); }");
+    method_states_a_property("{ exists { let y: i32 = @; assert(y > 0); } }");
+}
+
+/// A plain method is reported only when an assertion is actually lost, so a
+/// non-deterministic block that asserts nothing is left alone — however it is
+/// written, wherever it sits, and whatever it binds. Writing `forall` is an
+/// intent marker for wording a message, never on its own a stated property.
+#[test]
+fn a_plain_spec_method_whose_nondet_block_asserts_nothing_is_not_reported() {
+    for rest in [
+        "{ forall { } }",
+        "{ exists { let y: i32 = @; } }",
+        "{ assume { } }",
+        "{ unique { } }",
+        "{ forall { exists { } } }",
+        "{ if self.x > 0 { forall { } } }",
     ] {
-        let rendered = err(&format!(
-            "spec S {{ struct T {{ x: i32; fn m(self) {body} }} }}"
-        ));
-        assert!(
-            rendered.contains("error[P009]"),
-            "body `{body}`: {rendered}"
-        );
-        assert!(
-            rendered.contains(
-                "spec method `T.m` states a property, but a spec method carries no verification \
-                 obligation — move the property into a `forall` spec function"
-            ),
-            "body `{body}`: {rendered}"
-        );
+        method_is_a_silent_helper(rest);
+    }
+}
+
+/// The exemption is the missing assertion, not the non-deterministic block: an
+/// `assert` the block encloses is reported however deeply it nests, and so is
+/// one that merely follows the block, or that sits in a block a branch guards —
+/// the shapes the first marker alone points away from.
+#[test]
+fn an_assert_around_a_nondet_block_in_a_plain_spec_method_is_reported() {
+    for rest in [
+        "{ forall { assert(self.x > 0); } }",
+        "{ forall { exists { assert(self.x > 0); } } }",
+        "{ assume { assert(self.x > 0); } }",
+        "{ forall { } assert(self.x > 0); }",
+        "{ if self.x > 0 { forall { assert(self.x > 0); } } }",
+        "{ if self.x > 0 { } else { forall { assert(self.x < 0); } } }",
+    ] {
+        method_states_a_property(rest);
     }
 }
 
@@ -2160,28 +2214,28 @@ fn a_plain_spec_method_that_states_a_property_is_reported() {
 /// and is left alone.
 #[test]
 fn a_spec_method_that_only_computes_stays_a_silent_helper() {
-    let map = ok("spec S { struct T { x: i32; fn m(self) -> i32 { return 1; } } }");
-    assert!(
-        map.is_empty(),
-        "a spec method contributes no obligation, got {map:?}"
-    );
+    method_is_a_silent_helper("-> i32 { return 1; }");
 }
 
 /// A quantified method keeps the report it always had, naming the quantifier —
 /// distinct wording from the one a plain method that claims a property gets, so
-/// the two cases stay tellable apart.
+/// the two cases stay tellable apart. The quantifier is the obligation, so the
+/// report does not wait for an `assert` the way a plain body's does.
 #[test]
 fn a_quantified_spec_method_keeps_its_own_report() {
-    let source =
-        "spec S { struct T { x: i32; fn m(self) forall { let y: i32 = @; assert(y > 0); } } }";
-    let rendered = err(source);
-    assert!(rendered.contains("error[P009]"), "{rendered}");
-    assert!(
-        rendered.contains(
-            "spec method `T.m` is `forall`-quantified; a quantified spec method carries a proof \
-             obligation that cannot yet be translated to a verification assertion — move the \
-             property into a `forall` spec function"
-        ),
-        "{rendered}"
-    );
+    for rest in ["forall { let y: i32 = @; assert(y > 0); }", "forall { }"] {
+        let rendered = err(&spec_method(rest));
+        assert!(
+            rendered.contains("error[P009]"),
+            "method `{rest}`: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "spec method `T.m` is `forall`-quantified; a quantified spec method carries a \
+                 proof obligation that cannot yet be translated to a verification assertion — \
+                 move the property into a `forall` spec function"
+            ),
+            "method `{rest}`: {rendered}"
+        );
+    }
 }
