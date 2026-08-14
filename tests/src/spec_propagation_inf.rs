@@ -192,11 +192,10 @@ mod fixture_spec_calls_top {
             "top-level main must also call helper at 0; observed: {main_call_target}"
         );
 
-        // Round-trip: `caller`'s body is a `return helper()`, which contributes
-        // no obligation term, so `caller` yields a trivial `HA_true` obligation
-        // gathered into Caller's `_specs`. The spec function itself is omitted
-        // from the module record (the WASM-level call index checked above is on
-        // the executable bytes, which retain it).
+        // Round-trip: `caller` asserts `helper() == 7`, so it contributes one
+        // obligation gathered into Caller's `_specs`. The spec function itself
+        // is omitted from the module record (the WASM-level call index checked
+        // above is on the executable bytes, which retain it).
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
             .expect("translate ok");
@@ -264,7 +263,7 @@ mod fixture_three_specs {
 
         // Gamma (empty) and Beta (methods only, no free-fn obligation) both
         // render their obligation lists as `(@nil hassert)`; Alpha's free fn
-        // yields a trivial obligation, so its list is non-empty.
+        // asserts a property, so its list is non-empty.
         assert!(
             v.contains("Definition threespecs__Gamma_specs : list hassert := (@nil hassert)."),
             "empty spec must emit `(@nil hassert)`:\n{v}"
@@ -530,10 +529,16 @@ mod over_long_spec_function_name_rejected {
     /// codegen error rather than letting the infallible encoder panic on a
     /// decode-rejected artifact. The name is sized off `MAX_NAME_LEN` so the
     /// test tracks the cap.
+    ///
+    /// The long-named function asserts a property so that it actually reaches
+    /// the pre-encode gate: a spec function that only computes contributes no
+    /// map entry at all, and the over-long symbol would never be encoded.
     #[test]
     fn over_long_spec_function_name_is_a_clean_codegen_error() {
         let long_name = "f".repeat(inference_hassert::MAX_NAME_LEN + 64);
-        let source = format!("spec S {{ fn {long_name}() -> i32 {{ return 1; }} }}");
+        let source = format!(
+            "fn one() -> i32 {{ return 1; }} spec S {{ fn {long_name}() {{ assert(one() == 1); }} }}"
+        );
         let arena = build_ast(source);
         let typed_context = TypeCheckerBuilder::build_typed_context(arena)
             .expect("a long identifier is legal source and must type-check")
@@ -548,7 +553,7 @@ mod over_long_spec_function_name_rejected {
                 features: inference_wasm_codegen::EmitFeatures::default(),
             },
         )
-        .expect_err("a 300-char spec function name overflows the inference.hspecs name cap");
+        .expect_err("a spec function name past MAX_NAME_LEN overflows the inference.hspecs cap");
         let msg = err.to_string();
         assert!(
             msg.contains("inference.hspecs") && msg.contains(&long_name),

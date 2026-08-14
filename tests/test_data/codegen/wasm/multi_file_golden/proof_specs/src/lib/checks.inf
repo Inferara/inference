@@ -1,5 +1,9 @@
+fn lib_value() -> i32 {
+    return 2;
+}
+
 spec LibSpec {
-    fn obligation() -> i32 {
-        return 2;
+    fn obligation() forall {
+        assert(lib_value() == 2);
     }
 }

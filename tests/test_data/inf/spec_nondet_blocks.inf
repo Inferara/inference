@@ -1,12 +1,18 @@
 // Inline non-deterministic blocks (`forall`/`exists`/`assume`) inside spec
 // functions. In proof mode every spec-function body is lowered, so this fixture
-// keeps the verifier-library block constructors and their arities covered by the
-// coqc gate via the inline-block (`lower_block`) lowering path:
-//   BI_forall : list basic_instruction -> _              (no block_type)
-//   BI_exists : list basic_instruction -> _              (no block_type)
-//   BI_assume : block_type -> list basic_instruction -> _ (keeps block_type)
+// keeps the inline-block (`lower_block`) lowering path covered:
+//   forall  -> 0xfc 0x3a
+//   exists  -> 0xfc 0x3b
+//   assume  -> 0xfc 0x3c
+//   uzumaki -> 0xfc 0x31
+// The spec bodies themselves are omitted from the `.v`, so those opcodes are
+// asserted on the WASM bytes rather than on any emitted constructor.
 // This is the spec-wrapped, analysis-legal counterpart of the negative fixture
 // `nondet_blocks.inf`.
+//
+// Every function claims something: an `assume` with nothing after it folds to
+// `Imp(p, ⊤) = ⊤`, which is the vacuous obligation `P010` rejects, so the filter
+// is followed by the property it guards.
 spec NondetBlocks {
   fn forall_fn() {
     forall {
@@ -21,9 +27,12 @@ spec NondetBlocks {
     }
   }
   fn assume_fn() {
-    assume {
+    forall {
       let z: i32 = @;
-      assert(z == z);
+      assume {
+        assert(z != 0);
+      }
+      assert(z > 0 || z < 0);
     }
   }
 }

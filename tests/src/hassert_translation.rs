@@ -190,21 +190,29 @@ fn with_spec_fixture_produces_the_expected_app_equality() {
     );
 }
 
-/// A plain (`Regular`) spec free function is kept as a trivially-true obligation
-/// so the fixture still translates and counts one obligation.
+/// A spec free function claiming a property *about a file-scope function* turns
+/// that call into a `T_app` over the compiled function, which is the only way an
+/// obligation can be about the program at all: the spec block holds the claim
+/// and the executable file scope holds the computation it constrains.
 #[test]
-fn spec_calls_top_fixture_emits_a_true_obligation() {
+fn spec_calls_top_fixture_applies_the_file_scope_function() {
     let map = proof_hspecs(&read_inf("spec_calls_top.inf"));
-    assert_eq!(sole_obligation(&map, "Caller"), HAssert::True);
+    assert_eq!(
+        sole_obligation(&map, "Caller"),
+        nz(rel(HRelop::Eq, app("helper", vec![]), i32c(7)))
+    );
 }
 
-/// Three specs of mixed shapes: only `Alpha` has a free function (a trivially
-/// true obligation); `Beta` (a struct method) and `Gamma` (empty) carry no
-/// obligation and so do not appear in the map.
+/// Three specs of mixed shapes: only `Alpha` has a free function, so only
+/// `Alpha` carries an obligation. `Beta` (a struct method that only computes)
+/// and `Gamma` (empty) contribute none and so do not appear in the map.
 #[test]
 fn three_specs_fixture_only_maps_the_free_function_spec() {
     let map = proof_hspecs(&read_inf("three_specs.inf"));
-    assert_eq!(sole_obligation(&map, "Alpha"), HAssert::True);
+    assert_eq!(
+        sole_obligation(&map, "Alpha"),
+        nz(rel(HRelop::Eq, app("one", vec![]), i32c(1)))
+    );
     assert!(
         !map.contains_key("Beta"),
         "Beta has only a method helper, no obligation"
@@ -289,11 +297,14 @@ spec MaxArg {
 }
 
 /// The `spec_literal_ctx.inf` fixture places `i64`/`u64` literals in the return,
-/// argument and operand positions of one specification. Proof-mode code
-/// generation succeeding at all is half the assertion: `threshold`'s
-/// `return 4294967296;` is a spec-inner body that code generation lowers, and
-/// that value has no `i32` reading — left at the default it would abort the
-/// lowering before any obligation existed. The rest is the obligation itself.
+/// argument and operand positions of one specification, and both of its
+/// obligations carry a value with no `i32` reading — left at the default, none of
+/// them could be spelled at all.
+///
+/// `threshold_is_i64` is the return position: the file-scope `threshold`'s
+/// declared `-> i64` is what types its `return 4294967296;`, and the obligation
+/// compares the `T_app` against a peer literal that has to come out at the same
+/// width for the claim to be about that function's result.
 #[test]
 fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
     let map = proof_hspecs(&read_inf("spec_literal_ctx.inf"));
@@ -314,9 +325,14 @@ fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
             .clone()
     };
 
-    // The `i64`-returning helper is a plain spec-inner function: it contributes
-    // no term, so its obligation is trivially true.
-    assert_eq!(by_symbol("LiteralPositions.threshold"), HAssert::True);
+    assert_eq!(
+        by_symbol("LiteralPositions.threshold_is_i64"),
+        nz(rel64(
+            HRelop::Eq,
+            app("threshold", vec![]),
+            i64c(4_294_967_296)
+        ))
+    );
 
     let n = || local(0);
     let expected = imp(

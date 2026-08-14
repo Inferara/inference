@@ -356,9 +356,13 @@ illustrates this:
 
 ```inference
 // lib/checks.inf
+fn lib_value() -> i32 {
+    return 2;
+}
+
 spec LibSpec {
-    fn obligation() -> i32 {
-        return 2;
+    fn obligation() forall {
+        assert(lib_value() == 2);
     }
 }
 ```
@@ -367,12 +371,22 @@ spec LibSpec {
 // main.inf
 use lib::checks;
 
+fn entry_value() -> i32 {
+    return 1;
+}
+
 spec EntrySpec {
-    fn obligation() -> i32 {
-        return 1;
+    fn obligation() forall {
+        assert(entry_value() == 1);
     }
 }
 ```
+
+The computing helpers sit at file scope rather than inside the `spec` block: a
+specification function must state a property, and one whose body only computes
+yields an obligation any proof discharges without reading the program, which
+code generation rejects as `P010`. A specification function still applies a
+file-scope function as a `T_app`, so the helper loses nothing by moving out.
 
 `EntrySpec` (entry file, empty path) keeps its name in the Rocq output; `LibSpec` (defined
 in `lib/checks.inf`) is rendered as `lib_checks_LibSpec`.

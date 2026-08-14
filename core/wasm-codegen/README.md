@@ -391,7 +391,7 @@ Detailed design documents live in `docs/`:
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
-- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation, read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator; `diag.rs`: the `P001`–`P009` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
+- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation, read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator; `diag.rs`: the `P001`–`P010` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
 
 ## Testing

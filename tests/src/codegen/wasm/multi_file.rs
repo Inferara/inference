@@ -332,21 +332,20 @@ pub fn add(a: i32, b: i32) -> i32 {
 fn proof_mode_specs_are_file_qualified_across_files() {
     // An entry-file spec keeps its bare name in the spec section; a spec in an
     // imported file is qualified by that file's module path, so the per-spec
-    // entries from different files stay distinct.
+    // entries from different files stay distinct. Each spec function claims a
+    // property over its own universal slot: a spec free function whose body only
+    // computes has no obligation to carry and is rejected outright, so there
+    // would be no per-spec entry left to key.
     let main = "\
 spec EntrySpec {
-    fn obligation() -> i32 {
-        return 1;
-    }
+    fn obligation() forall { let n: i32 = @; assert(n == n); }
 }
 
 pub fn main() {}
 ";
     let lib_checks = "\
 spec LibSpec {
-    fn obligation() -> i32 {
-        return 2;
-    }
+    fn obligation() forall { let n: i32 = @; assert(n == n); }
 }
 ";
 

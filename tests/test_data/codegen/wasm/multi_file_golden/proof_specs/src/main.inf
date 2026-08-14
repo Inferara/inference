@@ -1,8 +1,12 @@
 use lib::checks;
 
+fn entry_value() -> i32 {
+    return 1;
+}
+
 spec EntrySpec {
-    fn obligation() -> i32 {
-        return 1;
+    fn obligation() forall {
+        assert(entry_value() == 1);
     }
 }
 

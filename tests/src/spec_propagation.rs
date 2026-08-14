@@ -230,11 +230,14 @@ mod scenario_2_export_gating {
     use inference_wasm_codegen::CompilationMode;
     use wasmtime::{Engine, Module};
 
-    /// `pub fn p()` inside a `spec` block must NOT appear in WASM exports;
-    /// `pub fn y()` at top level must appear.
+    /// `pub fn x()` inside a `spec` block must NOT appear in WASM exports;
+    /// `pub fn y()` at top level must appear. `x` states a property about `y`
+    /// so proof-mode code generation accepts it; visibility, not the body, is
+    /// what this test is about.
     #[test]
     fn pub_inside_spec_not_exported_top_level_is_exported() {
-        let source = r#"pub fn y() -> i32 { return 7; } spec A { pub fn x() -> i32 { return 1; } }"#;
+        let source =
+            r#"pub fn y() -> i32 { return 7; } spec A { pub fn x() { assert(y() == 7); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
@@ -330,7 +333,7 @@ mod scenario_3_custom_section_round_trip {
     /// indices were recorded.
     #[test]
     fn proof_mode_embeds_spec_section() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
 
         assert!(
@@ -351,7 +354,7 @@ mod scenario_3_custom_section_round_trip {
     /// is sourced from the WASM `name` section, i.e. `output`).
     #[test]
     fn round_trip_with_empty_explicit_map_recovers_per_spec_defs() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
@@ -383,10 +386,13 @@ mod scenario_3b_hspecs_section {
     use inference_hassert::HSPECS_SECTION_NAME;
     use inference_wasm_codegen::CompilationMode;
 
-    /// A single regular-kind spec free function, which contributes one
-    /// trivially-true (`HA_true`) obligation — enough to make the obligation map
-    /// non-empty so the section is emitted.
-    const ONE_SPEC: &str = r#"spec S { fn obligation() -> i32 { return 1; } }"#;
+    /// A single regular-kind spec free function stating a property about a
+    /// top-level function. It contributes one obligation, which is what makes
+    /// the obligation map non-empty so the section is emitted; a spec function
+    /// that only computed would be rejected outright rather than contribute a
+    /// vacuous entry.
+    const ONE_SPEC: &str =
+        r#"fn one() -> i32 { return 1; } spec S { fn obligation() { assert(one() == 1); } }"#;
 
     /// Extracts the raw payload of the custom section named `name`, if present.
     fn custom_section(wasm: &[u8], name: &str) -> Option<Vec<u8>> {
@@ -451,8 +457,9 @@ mod scenario_3b_hspecs_section {
     #[test]
     fn embedded_section_round_trips_to_the_output_map() {
         let source = r#"
-            spec Alpha { fn a() -> i32 { return 1; } }
-            spec Beta { fn b() -> i32 { return 2; } fn c() -> i32 { return 3; } }
+            fn one() -> i32 { return 1; }
+            spec Alpha { fn a() { assert(one() == 1); } }
+            spec Beta { fn b() { assert(one() + 1 == 2); } fn c() { assert(one() + 2 == 3); } }
         "#;
         let output = compile(source, CompilationMode::Proof);
         let data = custom_section(output.wasm(), HSPECS_SECTION_NAME)
@@ -484,7 +491,7 @@ mod scenario_4_per_spec_emission {
     /// `"Mod"` to `wasm_to_v`, the generated `.v` references `output`.
     #[test]
     fn two_specs_yield_sorted_per_spec_definitions_and_theorems() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
 
         // Pass the in-memory map explicitly to bypass the binary embedding path.
@@ -516,10 +523,11 @@ mod scenario_4_per_spec_emission {
     /// is the positive counterpart to the assert inside
     /// `build_func_name_to_idx_with_spec_names`: both functions must register,
     /// both must lower, and the per-spec index map must contain one distinct
-    /// index per spec.
+    /// index per spec. Each `helper` states a property about its own top-level
+    /// function, which also keeps the two obligations distinguishable.
     #[test]
     fn two_specs_with_same_named_inner_fn_both_register_and_lower() {
-        let source = r#"spec A { fn helper() -> i32 { return 1; } } spec B { fn helper() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn helper() { assert(one() == 1); } } spec B { fn helper() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
@@ -563,9 +571,14 @@ mod scenario_4_per_spec_emission {
     /// `inference.spec_funcs` section; `S` would be rejected by
     /// `validate_rocq_identifier` (Peano successor constructor) if anyone
     /// later threads this binary through `wasm_to_v`.
+    ///
+    /// `helper` returns a value *and* states a property: a spec free function
+    /// that only computed would be rejected before it could be the callee, so
+    /// the only way to keep an intra-spec call under test is to have the callee
+    /// assert something of its own.
     #[test]
     fn intra_spec_call_lowers_to_correct_function_index() {
-        let source = r#"spec Sp { fn helper() -> i32 { return 99; } fn caller() -> i32 { return helper(); } }"#;
+        let source = r#"fn base() -> i32 { return 99; } spec Sp { fn helper() -> i32 { assert(base() == 99); return 99; } fn caller() { assert(helper() == 99); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
@@ -585,22 +598,24 @@ mod scenario_4_per_spec_emission {
         );
     }
 
-    /// Intra-spec call resolution must also work when a top-level function of
-    /// the same name exists. The call must resolve to the spec's own `helper`,
-    /// not the top-level one. We can verify this by giving the two definitions
-    /// Spec-inner calls resolve via the spec-mangled key, and after H3 the
-    /// distinct names (`helper` / `inner`) eliminate the prior ambiguity. The
+    /// Intra-spec call resolution must survive alongside a top-level function
+    /// of its own: spec-inner calls resolve via the spec-mangled key, and the
+    /// distinct names (`helper` / `inner`) keep the two candidates apart. The
     /// test confirms that codegen emits the call operand at the spec-inner
-    /// function's index, not the top-level function's index — a regression
-    /// in spec-aware lookup that pointed the operand at index 0 would not
-    /// surface in `top()` runtime checking.
+    /// function's index, not the top-level function's index — a regression in
+    /// spec-aware lookup that pointed the operand at index 0 would not surface
+    /// in `top()` runtime checking.
+    ///
+    /// `inner` returns a value *and* states a property, because a spec free
+    /// function that only computed would be rejected before it could be the
+    /// callee under test.
     #[test]
     fn intra_spec_call_resolves_to_spec_inner_definition() {
         // Spec is named `Sp` (not `S`) because the per-spec index map is
         // embedded into the WASM `inference.spec_funcs` section keyed by spec
         // name; `S` would collide with the Peano successor constructor that
         // `validate_rocq_identifier` rejects.
-        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn inner() -> i32 { return 99; } fn caller() -> i32 { return inner(); } }"#;
+        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn inner() -> i32 { assert(helper() == 1); return 99; } fn caller() { assert(inner() == 99); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
@@ -675,7 +690,7 @@ mod scenario_4_per_spec_emission {
     /// `core/wasm-to-v/src/lib.rs`; this test adds a multi-spec assertion.
     #[test]
     fn explicit_map_two_specs_via_inference_api() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
         // The explicit spec map must match the binary's embedded section (the
         // real indices), since a spec map now drives function omission; feed the
@@ -1439,13 +1454,13 @@ mod scenario_7_empty_spec {
     /// T1: mixing an empty spec with a non-empty one must produce both kinds
     /// of `Definition` line in the generated Rocq output, in alphabetical
     /// order. The empty spec's list renders as `(@nil hassert)`; the non-empty
-    /// spec's `fn f() -> i32 { return 1; }` translates to a trivial `HA_true`
-    /// obligation gathered into `(output__B_hspec1 :: nil)`. This guards a
+    /// spec's `fn f()` asserts a property about `one()` and so contributes one
+    /// obligation, gathered into `(output__B_hspec1 :: nil)`. This guards a
     /// regression where empty-spec handling could short-circuit the per-spec
     /// emission loop and drop the non-empty entry (or vice versa).
     #[test]
     fn mixed_empty_and_non_empty_specs_yield_both_kinds() {
-        let source = r#"pub fn main() -> i32 { return 0; } spec A { } spec B { fn f() -> i32 { return 1; } }"#;
+        let source = r#"pub fn main() -> i32 { return 0; } fn one() -> i32 { return 1; } spec A { } spec B { fn f() { assert(one() == 1); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let by_spec = output.spec_func_indices_by_spec();
         assert!(
@@ -1627,7 +1642,7 @@ mod scenario_9_explicit_vs_embedded {
     /// The WASM-embedded module name `"output"` overrides `mod_name`.
     #[test]
     fn explicit_map_matching_codegen_output_translates_ok() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let explicit = output.spec_func_indices_by_spec().clone();
         let v = inference::wasm_to_v(
@@ -1653,7 +1668,7 @@ mod scenario_9_explicit_vs_embedded {
     /// `WasmToVError::EmbeddedSpecMismatch { explicit, embedded }`.
     #[test]
     fn mismatched_explicit_map_returns_embedded_spec_mismatch() {
-        let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
+        let source = r#"fn one() -> i32 { return 1; } fn two() -> i32 { return 2; } spec A { fn p() { assert(one() == 1); } } spec B { fn q() { assert(two() == 2); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let embedded = output.spec_func_indices_by_spec().clone();
 
