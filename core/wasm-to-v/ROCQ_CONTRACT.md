@@ -194,6 +194,56 @@ index-oriented `ValidSpec` should look for `ValidSpecFI` instead.
 `list reachability_spec` directly — definitionally identical,
 syntactically plain standard-library `list`.
 
+### mathcomp consumers
+
+The emitted `.v` is vanilla-Rocq-first: it imports no mathcomp, and the
+standalone `coqc` gate elaborates it against plain standard-library
+context. A consumer that *does* import mathcomp — wasm-verifier's proof
+developments do — needs one accommodation, discovered while discharging
+the emitted reachability obligations downstream
+(Inference-Global-Software/wasm-verifier#42): re-delimit `%N` after the
+mathcomp imports. Every `N` literal in an emitted file is spelled with
+the standard-library scope key — `0%N`, `1%N` (indices, `reach_func`,
+`reach_visible_locs`, `Ma` arguments). mathcomp's `ssrnat` rebinds that
+key to `nat_scope` (keeping `%num` as its replacement key for `BinNat`'s
+`N_scope`), so once `ssrnat` is imported — directly or through
+`all_ssreflect`, `seq`, `div`, … — a `1%N` written to mean `1 : N`
+re-reads as `1 : nat` and fails with type errors at the record fields.
+The working recipe is one line, placed after the mathcomp imports and
+before the emitted definitions:
+
+```coq
+Local Delimit Scope N_scope with N.
+```
+
+Delimiting is last-writer-wins, which is why placement after the
+mathcomp imports matters, and why the line triggers Rocq's default-on
+`hiding-delimiting-key` warning (prefix `#[warning="-hiding-delimiting-key"]`
+to silence it). The trade is symmetrical: after the re-delimit,
+mathcomp's own `%N`-keyed `nat` notations no longer parse in that file
+— `%nat` and `%num` still do. `Local` also matters: a file-global
+`Delimit` leaks to every file that `Require`s the consumer and
+re-breaks `%N` there in the other direction. The emitter deliberately
+does not switch to `%num`: that key is *defined by `ssrnat`*, so it does
+not exist in the mathcomp-free context this contract targets, and
+emitting it would break both the standalone contract and this repo's
+own `coqc` gate. `%N` is the right key for what the emitter targets;
+the re-delimit line is the consumer's half of the bargain.
+
+The discharge originally needed a second accommodation, now gone.
+Emitted files once bound the `Ma` helper's offset argument as `of`,
+which ssreflect turns into a keyword (its anonymous-binder syntax,
+`of T` for `(_ : T)`), so the helper's `memarg_offset := of` field
+stopped parsing once ssreflect was loaded, and a consumer had to keep
+that one preamble line ahead of every ssreflect-importing line. The
+binder is `ofs` now (#412): current emissions parse with mathcomp
+loaded first, the re-delimit line above being the only accommodation
+left, and only a `.v` generated before the rename still needs the old
+ordering. The rename covers the fixed preamble, not names the source
+supplies — emitted definition names are user identifiers printed
+verbatim, so a source function named `of` would reintroduce the
+collision for its own `Definition` line.
+
 ## Emitted-file anatomy
 
 The following is the complete, unedited `.v` output for

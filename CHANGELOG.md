@@ -197,6 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add compilation targets matrix documentation (`book/compilation_targets.md`): Compile/Proof x Debug/Release x with/without non-det operations ([issue#97])
 - Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
 - Add arithmetic overflow in WASM codegen deep-dive (`book/arithmetic-overflow-in-wasm-codegen.md`) ([#146])
+- Add a "mathcomp consumers" note to `core/wasm-to-v/ROCQ_CONTRACT.md`: emitted `.v` spells `N` literals with the `%N` scope key, which mathcomp's `ssrnat` rebinds to `nat_scope`, so a consumer that imports mathcomp ahead of the emitted definitions must re-delimit with `Local Delimit Scope N_scope with N.` after its mathcomp imports (`Local` because a file-global `Delimit` leaks through `Require`); `%num` cannot be emitted instead without breaking the mathcomp-free standalone contract and the repo's `coqc` gate ([#413])
 
 ### Type Checker
 
@@ -590,3 +591,4 @@ Initial tagged release.
 [#402]: https://github.com/Inferara/inference/issues/402
 [#354]: https://github.com/Inferara/inference/issues/354
 [#412]: https://github.com/Inferara/inference/issues/412
+[#413]: https://github.com/Inferara/inference/issues/413
