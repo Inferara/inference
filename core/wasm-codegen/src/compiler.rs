@@ -58,6 +58,7 @@
 //! regular `end` instruction (0x0b).
 
 use crate::errors::CodegenError;
+use crate::hassert::reach::{ChoiceClass, ChoicePlan};
 use crate::target::EmitFeatures;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -359,6 +360,16 @@ pub(crate) struct Compiler {
     /// so two files defining a same-named type get distinct layouts.
     current_module_path: Vec<String>,
     // Per-function state (set in visit_function_definition, used by lowering methods)
+    /// The reachability lowering plan of the `exists`/`unique`-bodied
+    /// specification free function currently being compiled; `None` for every
+    /// other function. This is the per-function "reachability-lowered" flag:
+    /// it gates the body-wrapper suppression, the nested `exists`/`assume`
+    /// inlining, and the `@`-to-choice-parameter seam. Deliberately not
+    /// derived from `current_spec` (a `forall` spec function also has one and
+    /// must keep its `0xfc` wrappers). Set unconditionally on entry to
+    /// [`Self::visit_function_definition_body`] and cleared with the rest of
+    /// the per-function state.
+    current_reach: Option<ChoicePlan>,
     func: Option<Function>,
     locals_map: FxHashMap<String, (u32, ValType)>,
     frame_layout: Option<FrameLayout>,
@@ -524,6 +535,7 @@ impl Compiler {
             current_fn_key: None,
             current_spec: None,
             current_module_path: Vec::new(),
+            current_reach: None,
             func: None,
             locals_map: FxHashMap::default(),
             frame_layout: None,
@@ -1103,6 +1115,7 @@ impl Compiler {
     /// `&mut self` and forwards via `Deref`/`DerefMut`, which avoids the
     /// partial-borrow conflict that a `&mut self.current_spec` slot guard
     /// would have with `self.<method>(...)` calls inside the body.
+    #[allow(clippy::too_many_arguments)] // mirrors visit_function_definition_body's context set
     pub(crate) fn visit_function_definition(
         &mut self,
         def_id: DefId,
@@ -1111,16 +1124,25 @@ impl Compiler {
         method_struct_name: Option<&str>,
         module_path: &[String],
         origin: &FunctionOrigin,
+        reach_plan: Option<&ChoicePlan>,
     ) -> Result<(), CodegenError> {
         let spec = match origin {
             FunctionOrigin::SpecInner(name) => Some(name.clone()),
             FunctionOrigin::TopLevel => None,
         };
         let mut guard = SpecScopeGuard::enter(self, spec);
-        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, module_path, origin)
+        guard.visit_function_definition_body(
+            def_id,
+            arena,
+            ctx,
+            method_struct_name,
+            module_path,
+            origin,
+            reach_plan,
+        )
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn visit_function_definition_body(
         &mut self,
         def_id: DefId,
@@ -1129,6 +1151,7 @@ impl Compiler {
         method_struct_name: Option<&str>,
         module_path: &[String],
         origin: &FunctionOrigin,
+        reach_plan: Option<&ChoicePlan>,
     ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
@@ -1141,6 +1164,12 @@ impl Compiler {
             } => (*name, vis.clone(), args.clone(), *returns, *body),
             _ => return Ok(()),
         };
+
+        // The per-function reachability flag: `Some` only for an
+        // `exists`/`unique`-bodied spec free function the pre-scan planned.
+        // Assigned unconditionally so a previous function's plan can never
+        // leak into this one.
+        self.current_reach = reach_plan.cloned();
 
         let raw_name = arena[fn_name_id].name.clone();
         // Record which file this function belongs to so struct/enum metadata
@@ -1273,6 +1302,48 @@ impl Compiler {
             }
         }
 
+        // Reachability lowering: append one hidden trailing choice parameter
+        // per planned scalar `@`, after the declared parameters and before
+        // `param_count` is captured, so everything downstream that derives
+        // from `local_idx` — local declarations, scratch numbering, name
+        // entries — shifts with the suffix automatically. The k-th choice
+        // lands at local index `entry_arity + k`, the exact index the
+        // pre-scan recorded in `ChoicePlan::by_expr` and the `@` lowering
+        // reads back; the assert pins that the two sides agree before any
+        // index is handed out. An anonymous choice gets a `__choice{k}`
+        // name-section entry (debuggability only); a named one takes its
+        // `let` binding's own name via `locals_map` (see
+        // [`Self::pre_scan_locals`]).
+        let mut choice_name_entries: Vec<(u32, String)> = Vec::new();
+        if let Some(plan) = reach_plan {
+            assert_eq!(
+                local_idx, plan.entry_arity,
+                "reachability pre-scan and parameter registration disagree about the entry \
+                 arity of `{fn_name}`; the appended choice parameters would be misaligned \
+                 with the plan's recorded slot indices",
+            );
+            if !plan.choices.is_empty() {
+                cov_mark::hit!(wasm_codegen_reach_choice_suffix);
+            }
+            for (k, choice) in plan.choices.iter().enumerate() {
+                debug_assert_eq!(
+                    plan.by_expr.get(&choice.expr),
+                    Some(&local_idx),
+                    "the plan's positional and by-expression views disagree; both consumers \
+                     key off `by_expr`, so a skew here would misalign every choice slot",
+                );
+                let vt = match choice.class {
+                    ChoiceClass::I32 => ValType::I32,
+                    ChoiceClass::I64 => ValType::I64,
+                };
+                params.push(vt);
+                if !choice.named {
+                    choice_name_entries.push((local_idx, format!("__choice{k}")));
+                }
+                local_idx += 1;
+            }
+        }
+
         let param_count = local_idx;
         let has_return_value = is_sret || !results.is_empty();
 
@@ -1308,7 +1379,14 @@ impl Compiler {
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
 
-        Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
+        Self::pre_scan_locals(
+            arena,
+            body_id,
+            ctx,
+            &mut self.locals_map,
+            &mut local_idx,
+            reach_plan,
+        );
 
         self.frame_layout = Self::compute_frame_layout(&FrameLayoutInput {
             arena,
@@ -1513,12 +1591,24 @@ impl Compiler {
         // discharged by the verifier's `C_forall` + `instance_elem` machinery.
         let block = &arena[body_id];
         let body_kind = block.block_kind;
-        let body_nondet_op = match body_kind {
-            BlockKind::Forall => Some(FORALL_OPCODE),
-            BlockKind::Exists => Some(EXISTS_OPCODE),
-            BlockKind::Assume => Some(ASSUME_OPCODE),
-            BlockKind::Unique => Some(UNIQUE_OPCODE),
-            BlockKind::Regular => None,
+        // A reachability-lowered body compiles to vanilla WASM: the verifier
+        // discharges its obligation by reducing the retained body under the
+        // plain WebAssembly semantics, where a `0xfc` wrapper has no reduction
+        // rule, so the quantifier is carried by the obligation's kind instead
+        // of a body wrapper. The branch keys on the per-function reachability
+        // flag, never on `current_spec` — a `forall` spec function keeps its
+        // wrapper.
+        let body_nondet_op = if self.current_reach.is_some() {
+            cov_mark::hit!(wasm_codegen_reach_body_wrapper_suppressed);
+            None
+        } else {
+            match body_kind {
+                BlockKind::Forall => Some(FORALL_OPCODE),
+                BlockKind::Exists => Some(EXISTS_OPCODE),
+                BlockKind::Assume => Some(ASSUME_OPCODE),
+                BlockKind::Unique => Some(UNIQUE_OPCODE),
+                BlockKind::Regular => None,
+            }
         };
         let body_stmts: Vec<StmtId> = block.stmts.clone();
         if let Some(op) = body_nondet_op {
@@ -1567,6 +1657,11 @@ impl Compiler {
         if let Some(ref layout) = self.frame_layout {
             local_name_entries.push((layout.frame_ptr_local, "__frame_ptr".to_string()));
         }
+        // Anonymous choice parameters get their `__choice{k}` entries here; a
+        // named choice already appears under its `let` binding's name via
+        // `locals_map` (the two sets are disjoint by construction, so no
+        // index is named twice).
+        local_name_entries.extend(choice_name_entries);
         local_name_entries.sort_by_key(|(idx, _)| *idx);
         if !local_name_entries.is_empty() {
             self.local_names.push((self.func_idx, local_name_entries));
@@ -1575,6 +1670,7 @@ impl Compiler {
         let completed_func = self.take_completed_function();
         self.bodies.push(completed_func);
         self.frame_layout = None;
+        self.current_reach = None;
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
@@ -1649,12 +1745,20 @@ impl Compiler {
     /// Each declaration is assigned the next monotonically increasing WASM local
     /// index; the arms of an `if` do not reuse indices, so the pure enumeration
     /// of [`Self::walk_statements`] reproduces the intended numbering directly.
+    ///
+    /// In a reachability-lowered body (`reach_plan` is `Some`), a
+    /// `let x: T = @;` whose `@` the plan covers binds `x` to its appended
+    /// choice *parameter* instead of a fresh local: the parameter slot IS the
+    /// binding — the initializer lowering normalizes it in place — so the
+    /// source name, the name-section entry, and the value the activation
+    /// frame holds all coincide on one index.
     fn pre_scan_locals(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         locals_map: &mut FxHashMap<String, (u32, ValType)>,
         local_idx: &mut u32,
+        reach_plan: Option<&ChoicePlan>,
     ) {
         Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
             match &arena[stmt_id].kind {
@@ -1680,7 +1784,7 @@ impl Compiler {
                         *local_idx += 1;
                     }
                 }
-                Stmt::VarDef { name, .. } => {
+                Stmt::VarDef { name, value, .. } => {
                     let var_name = arena[*name].name.clone();
                     let val_type = match ctx
                         .get_node_typeinfo(NodeId::Stmt(stmt_id))
@@ -1691,6 +1795,24 @@ impl Compiler {
                         // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                         _ => ValType::I32,
                     };
+                    // A named reachability choice aliases its appended choice
+                    // parameter; no fresh local is allocated and the index
+                    // counter does not advance.
+                    if let Some(plan) = reach_plan
+                        && let Some(value) = *value
+                        && matches!(arena[value].kind, Expr::Uzumaki)
+                        && let Some(&choice_local) = plan.by_expr.get(&value)
+                    {
+                        cov_mark::hit!(wasm_codegen_reach_named_choice_binding);
+                        let prev = locals_map.insert(var_name.clone(), (choice_local, val_type));
+                        assert!(
+                            prev.is_none(),
+                            "local `{var_name}` collides with an existing entry in locals_map; \
+                             analysis rule A041 rejects duplicate function-local names before \
+                             codegen (each name maps to exactly one WebAssembly local)",
+                        );
+                        return;
+                    }
                     let prev = locals_map.insert(var_name.clone(), (*local_idx, val_type));
                     assert!(
                         prev.is_none(),
@@ -3002,13 +3124,27 @@ impl Compiler {
         fn_name: &str,
     ) {
         let block = &arena[block_id];
-        let opcode = match block.block_kind {
+        let mut opcode = match block.block_kind {
             BlockKind::Forall => Some(FORALL_OPCODE),
             BlockKind::Exists => Some(EXISTS_OPCODE),
             BlockKind::Assume => Some(ASSUME_OPCODE),
             BlockKind::Unique => Some(UNIQUE_OPCODE),
             BlockKind::Regular => None,
         };
+
+        // Nested `exists`/`assume` blocks inside a reachability-lowered body
+        // lower inline: their statements already carry the semantics under the
+        // vanilla reduction (an `assert` traps on the filtered-out paths), and
+        // a `0xfc` wrapper would make the retained body irreducible. Nested
+        // `forall` and `unique` blocks keep their wrappers — they have no
+        // reachability encoding and the obligation pass rejects them
+        // (P007/P002) before any artifact is emitted.
+        if self.current_reach.is_some()
+            && matches!(block.block_kind, BlockKind::Exists | BlockKind::Assume)
+        {
+            cov_mark::hit!(wasm_codegen_reach_nested_block_inlined);
+            opcode = None;
+        }
 
         if let Some(op) = opcode {
             match block.block_kind {
@@ -3199,6 +3335,23 @@ impl Compiler {
                 let type_info = ctx
                     .get_node_typeinfo(node_id)
                     .expect("Uzumaki expression must have type info");
+                // A planned reachability choice reads its appended parameter
+                // instead of drawing through the `0xfc` opcode. The domain
+                // normalization is the exact sequence a draw performs
+                // (sub-word wrap, bool `&1`, enum `rem_u N`; a no-op for the
+                // full-width classes), so the value the body observes stays
+                // inside the declared type's value set. Compound `@`s are
+                // never planned and fall through to the aggregate arms below.
+                let reach_choice = self
+                    .current_reach
+                    .as_ref()
+                    .and_then(|plan| plan.by_expr.get(&expr_id).copied());
+                if let Some(choice_local) = reach_choice {
+                    cov_mark::hit!(wasm_codegen_reach_choice_param_load);
+                    self.func().instruction(&Instruction::LocalGet(choice_local));
+                    self.emit_uzumaki_domain_constraint(&type_info.kind, ctx);
+                    return;
+                }
                 match &type_info.kind {
                     TypeInfoKind::Bool
                     | TypeInfoKind::Number(

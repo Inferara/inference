@@ -168,14 +168,23 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
 /// Validates that joining `mod_name` and `spec_name` into the emitted Rocq
 /// grammar does not fabricate the reserved `__` separator at a join boundary.
 ///
-/// The translator emits `<mod_name>__<spec_name>_specs` and
-/// `valid_<mod_name>__<spec_name>`. Each component already passed
-/// [`validate_rocq_identifier`], so neither carries an internal `__` and neither
-/// starts with `_`. The remaining hazard is a component that *ends* with `_`: the
-/// module name then abuts the `__` separator (`app_` -> `app___Foo`), and the
-/// spec name abuts the trailing `_specs` (`Spec_` -> `main__Spec__specs`). Both
-/// produce a `__` run inside the joined name, which the `<module>__<spec>` split
-/// reserves.
+/// The translator joins the two names into one grammar family: the obligation
+/// definitions `<mod_name>__<spec_name>_specs` (with its per-entry
+/// `_hspec{k}` members) and, for reachability partitions,
+/// `<mod_name>__<spec_name>_ex_specs` / `_uq_specs` (with `_exspec{k}` /
+/// `_uqspec{k}` members), plus the theorem names
+/// `valid_<mod_name>__<spec_name>`, `valid_exists_<mod_name>__<spec_name>`,
+/// and `valid_unique_<mod_name>__<spec_name>`. Every member of the family
+/// contains the same `<mod_name>__<spec_name>` join, so one check covers all
+/// of them. Each component already passed [`validate_rocq_identifier`], so
+/// neither carries an internal `__` and neither starts with `_`. The remaining
+/// hazard is a component that *ends* with `_`: the module name then abuts the
+/// `__` separator (`app_` -> `app___Foo`), and the spec name abuts a trailing
+/// `_`-led suffix (`Spec_` -> `main__Spec__specs`, and identically
+/// `main__Spec__ex_specs` or `valid_exists_main__Spec_`-adjacent forms). Both
+/// produce a `__` run inside the joined name, which the `<module>__<spec>`
+/// split reserves. The diagnostic shows the `_specs` member as the
+/// representative fabricated name.
 ///
 /// This is the boundary the per-component validation is blind to. It applies
 /// uniformly whether the module name is the entry file stem or an imported file's

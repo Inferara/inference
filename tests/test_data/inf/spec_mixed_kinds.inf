@@ -1,0 +1,58 @@
+// All three quantifier kinds side by side, plus a method-only universal
+// surface — the partition interactions most likely to break if the emitter's
+// definition and theorem loops ever stop sharing one classification.
+//
+// `MixedKinds` holds a forall, an exists, and a unique spec function in ONE
+// spec block, so a single spec name carries all three grammars at once: a
+// non-empty `_specs : list hassert` under `ValidSpec`, a non-empty
+// `_ex_specs` under `ValidExistsSpec`, and a non-empty `_uq_specs` under
+// `ValidUniqueSpec`. `Observed` holds a spec method (no obligation channel)
+// next to exists/unique functions, so one spec name pairs the explicitly
+// typed EMPTY universal list — `(@nil hassert)` — with both non-empty
+// reachability partitions; a classification bug that let the reachability
+// entries leak into the universal list would break exactly this shape.
+//
+// Kept analysis-clean for the corpus (no extern calls, every obligation
+// non-vacuous, no `return` in any reachability body); the callee `bump` is a
+// defined executable function.
+fn bump(n: i32) -> i32 {
+    return n + 1;
+}
+
+spec MixedKinds {
+    fn all_bump() forall {
+        let a: i32 = @;
+        assert(bump(a) == a + 1);
+    }
+    fn some_bump() exists {
+        let b: i32 = @;
+        assert(bump(b) == b + 1);
+    }
+    fn one_bump() unique {
+        let c: i32 = @;
+        assume {
+            assert(c == 41);
+        }
+        assert(bump(c) == 42);
+    }
+}
+
+spec Observed {
+    struct Sample {
+        raw: i32;
+        fn shifted(self) -> i32 {
+            return self.raw + 1;
+        }
+    }
+    fn some_sample() exists {
+        let s: i32 = @;
+        assert(bump(s) > s);
+    }
+    fn one_sample() unique {
+        let t: i32 = @;
+        assume {
+            assert(t == 0);
+        }
+        assert(bump(t) == 1);
+    }
+}

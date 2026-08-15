@@ -212,7 +212,7 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::AnalysisDiagnostic;
+    use crate::errors::{AnalysisDiagnostic, NonDetBlockKind};
     use inference_ast::nodes::Location;
 
     fn dummy_location() -> Location {
@@ -223,10 +223,10 @@ mod tests {
     fn rule_ids_match_diagnostic_rule_ids() {
         let diagnostics: Vec<AnalysisDiagnostic> = vec![
             AnalysisDiagnostic::BreakOutsideLoop { location: dummy_location() },
-            AnalysisDiagnostic::BreakInsideNonDetBlock { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::BreakInsideNonDetBlock { location: dummy_location(), block_kind: NonDetBlockKind::Forall },
             AnalysisDiagnostic::ReturnInsideLoop { location: dummy_location() },
             AnalysisDiagnostic::InfiniteLoopWithoutBreak { location: dummy_location() },
-            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: dummy_location(), block_kind: NonDetBlockKind::Forall },
             AnalysisDiagnostic::UzumakiOutsideNonDetBlock { location: dummy_location() },
             AnalysisDiagnostic::MissingReturn { function_name: "f".to_string(), location: dummy_location() },
             AnalysisDiagnostic::StandaloneUzumaki { location: dummy_location() },
@@ -260,7 +260,7 @@ mod tests {
             AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundArrayElement { ty: "Point".to_string(), location: dummy_location() },
             AnalysisDiagnostic::DuplicateLocalName { name: "x".to_string(), location: dummy_location(), first_location: dummy_location() },
-            AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::NonDetOutsideSpec { location: dummy_location(), block_kind: NonDetBlockKind::Forall },
             AnalysisDiagnostic::ReservedExportName { name: "memory".to_string(), location: dummy_location() },
             AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
             AnalysisDiagnostic::FieldLessStructValue { name: "E".to_string(), position: "a struct literal", location: dummy_location() },

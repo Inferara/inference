@@ -3,21 +3,23 @@
 //!
 //! In `Proof` mode, after every function body has been compiled to WASM, this
 //! pass reads the typed AST and the emittable-function buckets — never the
-//! compiler's byte output — and turns each `forall`-quantified (or plain)
-//! specification *free* function into one [`inference_hassert::HAssert`]. The
-//! obligations are grouped by folded specification name into an
-//! [`inference_hassert::HSpecMap`], which code generation attaches to its
-//! [`CodegenOutput`](crate::CodegenOutput). Because the pass is read-only over
-//! the AST and type information, proof-mode WASM bytes are unchanged by
-//! construction.
+//! compiler's byte output — and turns each specification *free* function into
+//! one [`inference_hassert::HAssert`]: a `forall`-quantified (or plain) body
+//! becomes a universal (`ValidSpec`) obligation, an `exists`/`unique` body a
+//! reachability obligation whose entry carries its [`inference_hassert::SpecKind`]
+//! and [`inference_hassert::ReachMeta`]. The obligations are grouped by folded
+//! specification name into an [`inference_hassert::HSpecMap`], which code
+//! generation attaches to its [`CodegenOutput`](crate::CodegenOutput). Because
+//! the pass is read-only over the AST and type information, proof-mode WASM
+//! bytes are unchanged by construction.
 //!
 //! The translation scheme lives in [`translate`]; the diagnostics registry in
 //! [`diag`].
 //!
 //! ## Untranslatable specifications are fatal
 //!
-//! A specification function that cannot be encoded as an obligation (a
-//! quantified body modifier, a struct or method value, an `external` call, …)
+//! A specification function that cannot be encoded as an obligation (an
+//! `assume` body modifier, a struct or method value, an `external` call, …)
 //! contributes *no* obligation and records `P0xx` diagnostics. Those
 //! diagnostics are collected here but surfaced by the caller
 //! ([`crate::codegen`]) as a hard code-generation error: the obligation is a
@@ -74,6 +76,7 @@
 
 mod claim;
 mod diag;
+pub(crate) mod reach;
 mod translate;
 
 #[cfg(test)]
@@ -81,9 +84,9 @@ mod tests;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::BlockKind;
+use inference_ast::nodes::{BlockKind, Def};
 use inference_fn_key::FnKey;
-use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap};
+use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
@@ -161,9 +164,18 @@ impl CalleeIndex {
 /// contributes none either (it raises `P010` instead). The pass itself keeps
 /// going so it can collect every diagnostic in one pass, and the caller
 /// ([`crate::codegen`]) turns a non-empty diagnostic list into a hard error.
+///
+/// `reach_plans` carries the per-function reachability choice plans the
+/// pre-scan ([`reach::plan_reachability_specs`]) built and the compiler
+/// consumed for its signature suffix and body lowering. An `exists`/`unique`
+/// body translates its payload against the same plan — both consumers read
+/// one `ExprId`-keyed map, so a payload slot index equals the compiled frame
+/// index of the same choice by construction — and its entry carries the
+/// [`SpecKind`] and [`ReachMeta`] the downstream reachability judgment needs.
 pub(crate) fn translate_spec_fns(
     ctx: &TypedContext,
     buckets: &EmittableFunctions,
+    reach_plans: &reach::ReachPlans,
 ) -> (HSpecMap, Vec<HassertDiagnostic>) {
     let arena = ctx.arena();
     let callee = CalleeIndex::build(arena, buckets);
@@ -171,9 +183,10 @@ pub(crate) fn translate_spec_fns(
     let mut diagnostics = Vec::new();
 
     for entry in &buckets.spec_funcs {
+        let plan = reach_plans.get(entry.def_id);
         let mut translator =
             translate::SpecFnTranslator::new(ctx, &entry.module_path, &entry.spec_name, &callee);
-        let hassert = translator.translate_fn(entry.def_id);
+        let hassert = translator.translate_fn(entry.def_id, plan);
         let fn_diagnostics = translator.take_diagnostics();
         if !fn_diagnostics.is_empty() {
             // An untranslatable spec function yields no obligation rather than a
@@ -195,9 +208,11 @@ pub(crate) fn translate_spec_fns(
         )
         .to_string();
         let spec_key = inference_fn_key::fold_spec_name(&entry.module_path, &entry.spec_name);
-        map.entry(spec_key)
-            .or_default()
-            .push(HSpecEntry::new(HFnRef(symbol), hassert));
+        map.entry(spec_key).or_default().push(HSpecEntry::new(
+            HFnRef(symbol),
+            hassert,
+            spec_kind(arena, entry.def_id, plan),
+        ));
     }
 
     // A specification *method* never yields an obligation. Flagging one that
@@ -210,6 +225,30 @@ pub(crate) fn translate_spec_fns(
     }
 
     (map, diagnostics)
+}
+
+/// The wire kind of one obligation: [`SpecKind::Forall`] for a universal
+/// (`forall`/plain) body, the reachability kinds — carrying the entry arity
+/// and source-visible slots the downstream judgment needs — for an
+/// `exists`/`unique` body, which is planned iff `plan` is `Some`.
+fn spec_kind(arena: &AstArena, def_id: DefId, plan: Option<&reach::ChoicePlan>) -> SpecKind {
+    let Some(plan) = plan else {
+        return SpecKind::Forall;
+    };
+    let meta = ReachMeta {
+        entry_arity: plan.entry_arity,
+        visible_locs: plan.visible_locs(),
+    };
+    let Def::Function { body, .. } = &arena[def_id].kind else {
+        unreachable!("only functions are planned by the reachability pre-scan");
+    };
+    match arena[*body].block_kind {
+        BlockKind::Exists => SpecKind::Exists(meta),
+        BlockKind::Unique => SpecKind::Unique(meta),
+        other => unreachable!(
+            "the reachability pre-scan plans only exists/unique bodies, found {other:?}"
+        ),
+    }
 }
 
 /// A [`PCode::P010`] for a specification function whose obligation collapsed to

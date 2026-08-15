@@ -19,9 +19,9 @@
 mod extern_link_tests {
     use std::path::{Path, PathBuf};
 
+    use inf_wasmparser::{Parser, Payload, TypeRef};
     use inference::wasm_link::{resolve_external_modules, SearchPath};
     use inference::{codegen, link, parse, type_check, wasm_to_v, FxHashMap};
-    use inf_wasmparser::{Parser, Payload, TypeRef};
     use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
 
     /// Compiles `source` to a `.wasm` with the default settings, skipping the
@@ -625,8 +625,8 @@ pub fn probe_named_array() -> i32 {
 
         let mut search_path = SearchPath::new();
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
-        let externals = resolve_external_modules(&typed, &search_path, None)
-            .expect("external modules resolve");
+        let externals =
+            resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
         let external_bytes: Vec<(&str, &[u8])> = externals
             .iter()
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
@@ -716,8 +716,8 @@ pub fn probe_named_array() -> i32 {
 
         let mut search_path = SearchPath::new();
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
-        let externals = resolve_external_modules(&typed, &search_path, None)
-            .expect("external modules resolve");
+        let externals =
+            resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
         let external_bytes: Vec<(&str, &[u8])> = externals
             .iter()
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
@@ -763,6 +763,183 @@ pub fn probe_named_array() -> i32 {
         assert!(
             rocq.contains("BI_relop T_i32 (Relop_i (ROI_gt SX_S))"),
             "the `is_prime` body must survive into the module record; .v was:\n{rocq}"
+        );
+    }
+
+    /// The exists-kind sibling of the two forall tests above: post-link index
+    /// arithmetic shifts DIFFERENTLY per kind, because an exists spec function
+    /// is RETAINED in the `.v` module record where a forall one is omitted.
+    ///
+    /// Post-link function order is add_three=0, is_pos=1, spec `witness`=2,
+    /// merged `sum`=3. In the forall companion the spec function's omission
+    /// pulled every later index down by one; here nothing is omitted, so
+    /// `add_three`'s executable call to the merged `sum` keeps the unshifted
+    /// `BI_call 3%N`, the retained `witness` appears as an ordinary
+    /// `module_func` definition, and its obligation names it by the unshifted
+    /// `reach_func := 2%N`. The obligation's `is_pos` cross-call still
+    /// resolves through the post-link name section to `T_app 1` — the same
+    /// numbering the executable bodies use, now with a retained spec function
+    /// sitting between the callee and the merged extern.
+    #[test]
+    fn proof_mode_exists_retention_keeps_the_post_link_numbering_unshifted() {
+        let lib_wasm = compile_wasm(
+            "pub fn sum(a: i32, b: i32) -> i32 { return a + b; }",
+            "arith",
+        );
+        let lib_dir = TempLibDir::new("exists_retention");
+        lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
+
+        // The exists body claims `is_pos` of its named choice under a filter —
+        // a defined callee (an extern callee would be P005) and a non-vacuous
+        // claim (a collapsed obligation would be P010). `add_three`
+        // (executable) carries the extern call whose operand retention leaves
+        // unshifted.
+        let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
+             use { sum } from arith;\n\
+             pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
+             fn is_pos(n: i32) -> bool { return n > 0; }\n\
+             spec MySpec {\n\
+                 fn witness() exists {\n\
+                     let n: i32 = @;\n\
+                     assume { assert(n > 3); }\n\
+                     assert(is_pos(n));\n\
+                 }\n\
+             }";
+
+        let arena = parse(main_source).expect("main parses");
+        let typed = type_check(arena).expect("main type-checks");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let externals =
+            resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
+        let external_bytes: Vec<(&str, &[u8])> = externals
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+
+        let codegen_output = inference_wasm_codegen::codegen(
+            &typed,
+            "exprog",
+            inference_wasm_codegen::CodegenOptions {
+                mode: inference_wasm_codegen::CompilationMode::Proof,
+                ..Default::default()
+            },
+        )
+        .expect("proof-mode codegen succeeds");
+
+        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+
+        // Empty explicit maps: the post-link embedded sections are the source
+        // of truth (the pre-link codegen indices are stale after the merge).
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let rocq = wasm_to_v("exprog", &unified, &empty, &inference::HSpecMap::default())
+            .expect("wasm-to-v succeeds");
+
+        assert!(
+            rocq.contains("Definition witness : module_func :="),
+            "the exists spec function must be retained in the module record; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("BI_call 3%N"),
+            "with the spec function retained, add_three's call to the merged \
+             `sum` must keep the unshifted post-link index 3; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("reach_func := 2%N; reach_entry_arity := 0%nat"),
+            "the obligation must name the retained function's unshifted \
+             `mod_funcs` index; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("(T_app 1 ((T_local 0%N) :: nil))"),
+            "the obligation's `is_pos` call must resolve to the unshifted \
+             post-link index 1; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains(
+                "Theorem valid_exists_exprog__MySpec : ValidExistsSpec exprog \
+                 exprog__MySpec_ex_specs."
+            ),
+            "the exists partition must survive the link and select \
+             `ValidExistsSpec`; .v was:\n{rocq}"
+        );
+    }
+
+    /// The unique-kind entry survives the link too: the linker round-trips
+    /// `inference.hspecs` opaquely, so the kind and its metadata must come out
+    /// the other side selecting `ValidUniqueSpec` over the retained body.
+    /// Lowering and index arithmetic are byte-for-byte the exists sibling's —
+    /// only the selected predicate differs — so this pins the kind tag's
+    /// round-trip rather than re-deriving the numbering.
+    #[test]
+    fn proof_mode_unique_kind_survives_the_link() {
+        let lib_wasm = compile_wasm(
+            "pub fn sum(a: i32, b: i32) -> i32 { return a + b; }",
+            "arith",
+        );
+        let lib_dir = TempLibDir::new("unique_retention");
+        lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
+
+        let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
+             use { sum } from arith;\n\
+             pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
+             spec MySpec {\n\
+                 fn sole() unique {\n\
+                     let n: i32 = @;\n\
+                     assume { assert(n == 7); }\n\
+                     assert(n > 0);\n\
+                 }\n\
+             }";
+
+        let arena = parse(main_source).expect("main parses");
+        let typed = type_check(arena).expect("main type-checks");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let externals =
+            resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
+        let external_bytes: Vec<(&str, &[u8])> = externals
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+
+        let codegen_output = inference_wasm_codegen::codegen(
+            &typed,
+            "uqprog",
+            inference_wasm_codegen::CodegenOptions {
+                mode: inference_wasm_codegen::CompilationMode::Proof,
+                ..Default::default()
+            },
+        )
+        .expect("proof-mode codegen succeeds");
+
+        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let rocq = wasm_to_v("uqprog", &unified, &empty, &inference::HSpecMap::default())
+            .expect("wasm-to-v succeeds");
+
+        assert!(
+            rocq.contains("Definition sole : module_func :="),
+            "the unique spec function must be retained in the module record; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("Definition uqprog__MySpec_uq_specs : list reachability_spec :="),
+            "the unique partition must survive the link; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains(
+                "Theorem valid_unique_uqprog__MySpec : ValidUniqueSpec uqprog \
+                 uqprog__MySpec_uq_specs."
+            ),
+            "the unique kind must select `ValidUniqueSpec` post-link; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("reach_visible_locs := (0%N :: nil)"),
+            "the named choice must stay the one source-visible slot after the \
+             round-trip; .v was:\n{rocq}"
         );
     }
 }

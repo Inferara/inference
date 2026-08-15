@@ -22,7 +22,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use inference_ast::nodes::Location;
+use inference_ast::nodes::{BlockKind, Location};
 use inference_type_checker::errors::TypeMismatchContext;
 use thiserror::Error;
 
@@ -55,16 +55,69 @@ impl Display for Severity {
     }
 }
 
+/// A block kind that carries non-deterministic semantics, and so can be named by
+/// a diagnostic. [`BlockKind::Regular`] has no counterpart here on purpose: a
+/// regular block is never the subject of these findings, so no message can ask
+/// for a spelling that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NonDetBlockKind {
+    Forall,
+    Exists,
+    Assume,
+    Unique,
+}
+
+impl NonDetBlockKind {
+    /// The non-deterministic counterpart of `kind`, or `None` for a regular
+    /// block. Call sites use this in place of a separate `is_non_det` test, so
+    /// the guard and the reported kind cannot disagree.
+    #[must_use]
+    pub fn from_block_kind(kind: BlockKind) -> Option<Self> {
+        match kind {
+            BlockKind::Forall => Some(NonDetBlockKind::Forall),
+            BlockKind::Exists => Some(NonDetBlockKind::Exists),
+            BlockKind::Assume => Some(NonDetBlockKind::Assume),
+            BlockKind::Unique => Some(NonDetBlockKind::Unique),
+            BlockKind::Regular => None,
+        }
+    }
+
+    /// The indefinite article preceding this kind's spelling: "an" before the
+    /// vowel-initial `exists` and `assume`, "a" before `forall` and `unique`
+    /// (which begins with a consonant sound). The match is exhaustive so that a
+    /// kind added later cannot silently inherit the wrong article.
+    fn article(self) -> &'static str {
+        match self {
+            NonDetBlockKind::Exists | NonDetBlockKind::Assume => "an",
+            NonDetBlockKind::Forall | NonDetBlockKind::Unique => "a",
+        }
+    }
+}
+
+impl Display for NonDetBlockKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            NonDetBlockKind::Forall => "forall",
+            NonDetBlockKind::Exists => "exists",
+            NonDetBlockKind::Assume => "assume",
+            NonDetBlockKind::Unique => "unique",
+        })
+    }
+}
+
 /// Represents a control flow analysis error with source location.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalysisDiagnostic {
     #[error("break statement is only valid inside a loop body; if you intended to exit the function, use 'return'")]
     BreakOutsideLoop { location: Location },
 
-    #[error("break statement is not allowed inside a '{block_kind}' block; break would interfere with the path exploration required for formal verification; move the break outside the '{block_kind}' block")]
+    #[error(
+        "break statement is not allowed inside {article} '{block_kind}' block; break would interfere with the path exploration required for formal verification; move the break outside the '{block_kind}' block",
+        article = .block_kind.article()
+    )]
     BreakInsideNonDetBlock {
         location: Location,
-        block_kind: &'static str,
+        block_kind: NonDetBlockKind,
     },
 
     #[error(
@@ -75,10 +128,13 @@ pub enum AnalysisDiagnostic {
     #[error("infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop does not count)")]
     InfiniteLoopWithoutBreak { location: Location },
 
-    #[error("return statement is not allowed inside a '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block")]
+    #[error(
+        "return statement is not allowed inside {article} '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block",
+        article = .block_kind.article()
+    )]
     ReturnInsideNonDetBlock {
         location: Location,
-        block_kind: &'static str,
+        block_kind: NonDetBlockKind,
     },
 
     #[error("uzumaki (@) is only valid inside a non-deterministic block (forall, exists, unique, assume); move it inside a non-deterministic block")]
@@ -239,7 +295,7 @@ pub enum AnalysisDiagnostic {
     #[error("non-deterministic '{block_kind}' block is only valid inside a spec declaration; non-deterministic constructs (forall, exists, assume, unique) describe specifications and cannot appear in executable code; move this logic into a function inside a `spec` declaration")]
     NonDetOutsideSpec {
         location: Location,
-        block_kind: &'static str,
+        block_kind: NonDetBlockKind,
     },
 
     #[error("entry-file `pub fn {name}` collides with the reserved export name `{name}`; the compiled module reserves `memory` for its linear memory export and `__stack_pointer` for its stack pointer global, which WebAssembly hosts rely on; rename the function, or remove `pub` if it does not need to be exported")]
@@ -715,7 +771,7 @@ mod tests {
     fn display_break_inside_nondet_block() {
         let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
             location: test_location(),
-            block_kind: "forall",
+            block_kind: NonDetBlockKind::Forall,
         };
         assert_eq!(
             err.to_string(),
@@ -749,7 +805,7 @@ mod tests {
     fn display_return_inside_nondet_block() {
         let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
-            block_kind: "forall",
+            block_kind: NonDetBlockKind::Forall,
         };
         assert_eq!(
             err.to_string(),
@@ -757,40 +813,104 @@ mod tests {
         );
     }
 
+    /// The vowel-initial kinds take "an"; the message stays otherwise
+    /// identical to the consonant form pinned above.
     #[test]
-    fn display_break_inside_exists_block() {
-        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
-            location: test_location(),
-            block_kind: "exists",
-        };
-        assert!(err.to_string().contains("'exists' block"));
-    }
-
-    #[test]
-    fn display_return_inside_unique_block() {
+    fn display_return_inside_exists_block_uses_an() {
         let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
-            block_kind: "unique",
+            block_kind: NonDetBlockKind::Exists,
         };
-        assert!(err.to_string().contains("'unique' block"));
+        assert_eq!(
+            err.to_string(),
+            "return statement is not allowed inside an 'exists' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the 'exists' block"
+        );
     }
 
     #[test]
-    fn display_break_inside_assume_block() {
-        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
-            location: test_location(),
-            block_kind: "assume",
-        };
-        assert!(err.to_string().contains("'assume' block"));
-    }
-
-    #[test]
-    fn display_return_inside_exists_block() {
+    fn display_return_inside_assume_block_uses_an() {
         let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
-            block_kind: "exists",
+            block_kind: NonDetBlockKind::Assume,
         };
-        assert!(err.to_string().contains("'exists' block"));
+        assert_eq!(
+            err.to_string(),
+            "return statement is not allowed inside an 'assume' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the 'assume' block"
+        );
+    }
+
+    /// "unique" begins with a consonant sound, so it keeps "a".
+    #[test]
+    fn display_return_inside_unique_block_uses_a() {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
+            location: test_location(),
+            block_kind: NonDetBlockKind::Unique,
+        };
+        assert!(
+            err.to_string()
+                .starts_with("return statement is not allowed inside a 'unique' block"),
+            "got: {err}"
+        );
+    }
+
+    /// The vowel-initial kinds take "an" in the break diagnostic too; the
+    /// consonant form is pinned by `display_break_inside_nondet_block`.
+    #[test]
+    fn display_break_inside_exists_block_uses_an() {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+            location: test_location(),
+            block_kind: NonDetBlockKind::Exists,
+        };
+        assert_eq!(
+            err.to_string(),
+            "break statement is not allowed inside an 'exists' block; break would interfere with the path exploration required for formal verification; move the break outside the 'exists' block"
+        );
+    }
+
+    #[test]
+    fn display_break_inside_assume_block_uses_an() {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+            location: test_location(),
+            block_kind: NonDetBlockKind::Assume,
+        };
+        assert_eq!(
+            err.to_string(),
+            "break statement is not allowed inside an 'assume' block; break would interfere with the path exploration required for formal verification; move the break outside the 'assume' block"
+        );
+    }
+
+    /// The spelling a message interpolates is the source keyword, so each kind
+    /// is pinned rather than left to the variant name's casing.
+    #[test]
+    fn non_det_block_kind_spells_the_source_keyword() {
+        assert_eq!(NonDetBlockKind::Forall.to_string(), "forall");
+        assert_eq!(NonDetBlockKind::Exists.to_string(), "exists");
+        assert_eq!(NonDetBlockKind::Assume.to_string(), "assume");
+        assert_eq!(NonDetBlockKind::Unique.to_string(), "unique");
+    }
+
+    /// A regular block has no counterpart, which is what lets the call sites
+    /// use this conversion as their guard instead of testing `is_non_det` and
+    /// then translating the kind separately.
+    #[test]
+    fn non_det_block_kind_maps_every_block_kind() {
+        assert_eq!(
+            NonDetBlockKind::from_block_kind(BlockKind::Forall),
+            Some(NonDetBlockKind::Forall)
+        );
+        assert_eq!(
+            NonDetBlockKind::from_block_kind(BlockKind::Exists),
+            Some(NonDetBlockKind::Exists)
+        );
+        assert_eq!(
+            NonDetBlockKind::from_block_kind(BlockKind::Assume),
+            Some(NonDetBlockKind::Assume)
+        );
+        assert_eq!(
+            NonDetBlockKind::from_block_kind(BlockKind::Unique),
+            Some(NonDetBlockKind::Unique)
+        );
+        assert_eq!(NonDetBlockKind::from_block_kind(BlockKind::Regular), None);
     }
 
     #[test]
@@ -807,7 +927,7 @@ mod tests {
             "A001"
         );
         assert_eq!(
-            AnalysisDiagnostic::BreakInsideNonDetBlock { location: test_location(), block_kind: "forall" }.rule_id(),
+            AnalysisDiagnostic::BreakInsideNonDetBlock { location: test_location(), block_kind: NonDetBlockKind::Forall }.rule_id(),
             "A002"
         );
         assert_eq!(
@@ -819,7 +939,7 @@ mod tests {
             "A004"
         );
         assert_eq!(
-            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: test_location(), block_kind: "forall" }.rule_id(),
+            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: test_location(), block_kind: NonDetBlockKind::Forall }.rule_id(),
             "A005"
         );
         assert_eq!(
@@ -1346,7 +1466,7 @@ mod tests {
     fn display_non_det_outside_spec() {
         let err = AnalysisDiagnostic::NonDetOutsideSpec {
             location: test_location(),
-            block_kind: "forall",
+            block_kind: NonDetBlockKind::Forall,
         };
         let text = err.to_string();
         assert!(
@@ -1366,7 +1486,12 @@ mod tests {
 
     #[test]
     fn display_non_det_outside_spec_names_each_kind() {
-        for kind in ["forall", "exists", "assume", "unique"] {
+        for kind in [
+            NonDetBlockKind::Forall,
+            NonDetBlockKind::Exists,
+            NonDetBlockKind::Assume,
+            NonDetBlockKind::Unique,
+        ] {
             let err = AnalysisDiagnostic::NonDetOutsideSpec {
                 location: test_location(),
                 block_kind: kind,

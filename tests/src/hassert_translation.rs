@@ -351,6 +351,76 @@ fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
     assert_eq!(by_symbol("LiteralPositions.scaled_grows"), expected);
 }
 
+/// An `exists`-bodied spec function survives the whole pipeline: proof-mode
+/// codegen succeeds (the P001 rejection is lifted), the obligation binds the
+/// entry parameter and both choices to their frame slots — the named `let`
+/// choice at 1, the anonymous call-argument choice at 2 — with no `HA_ex`
+/// binder and no typing guard, and the entry carries the exists kind whose
+/// `visible_locs` include the named choice but not the anonymous one.
+#[test]
+fn exists_spec_end_to_end_reads_frame_slots_under_its_kind() {
+    let source = "\
+fn g(v: i32) -> i32 {
+  return v;
+}
+
+spec Reach {
+  fn f(x: i32) exists {
+    let n: i32 = @;
+    assume { assert(n > 0); }
+    assert(g(@) == x + n);
+  }
+}
+";
+    let map = proof_hspecs(source);
+    let entries = map.get("Reach").expect("spec Reach");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].fn_symbol, HFnRef("Reach.f".to_string()));
+    let add =
+        |l: HTerm, r: HTerm| HTerm::Binop(HNumType::I32, HBinop::Add, Box::new(l), Box::new(r));
+    assert_eq!(
+        entries[0].hassert,
+        and(
+            nz(rel(HRelop::GtS, local(1), i32c(0))),
+            teq(app("g", vec![local(2)]), add(local(0), local(1))),
+        )
+    );
+    assert_eq!(
+        entries[0].kind,
+        inference_hassert::SpecKind::Exists(inference_hassert::ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0, 1],
+        })
+    );
+}
+
+/// A `unique`-bodied spec function takes the same pipeline under its own kind:
+/// identical statement semantics (`==` is the strict `term_eq`), the named
+/// choice in `visible_locs` — the projection the uniqueness judgment compares
+/// exit states through.
+#[test]
+fn unique_spec_end_to_end_reads_frame_slots_under_its_kind() {
+    let source = "\
+spec Reach {
+  fn f(x: i32) unique {
+    let n: i32 = @;
+    assert(n == x);
+  }
+}
+";
+    let map = proof_hspecs(source);
+    let entries = map.get("Reach").expect("spec Reach");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].hassert, teq(local(1), local(0)));
+    assert_eq!(
+        entries[0].kind,
+        inference_hassert::SpecKind::Unique(inference_hassert::ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0, 1],
+        })
+    );
+}
+
 /// Compile mode strips specs, so no obligation is ever attached.
 #[test]
 fn compile_mode_carries_no_obligations() {

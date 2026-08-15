@@ -11,25 +11,17 @@ use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
+use crate::errors::NonDetBlockKind;
+
 /// Context passed to visitor callbacks during AST walking.
 pub(crate) struct WalkContext {
     pub loop_depth: u32,
     pub nondet_depth: u32,
-    pub nondet_block_kind: Option<&'static str>,
+    pub nondet_block_kind: Option<NonDetBlockKind>,
     /// Module path of the file whose body is currently being walked (empty for
     /// the entry file). A rule pairs each finding with this so the report names
     /// the file it belongs to.
     pub module_path: Vec<String>,
-}
-
-pub(crate) fn block_kind_label(kind: BlockKind) -> &'static str {
-    match kind {
-        BlockKind::Forall => "forall",
-        BlockKind::Exists => "exists",
-        BlockKind::Assume => "assume",
-        BlockKind::Unique => "unique",
-        BlockKind::Regular => unreachable!("called only for non-det blocks"),
-    }
 }
 
 /// Walks all function bodies and calls `visitor` for every statement.
@@ -471,9 +463,9 @@ fn walk_block(
     visitor: &mut dyn FnMut(StmtId, &WalkContext),
 ) {
     let block = &arena[block_id];
-    if block.block_kind.is_non_det() {
+    if let Some(kind) = NonDetBlockKind::from_block_kind(block.block_kind) {
         let prev_kind = ctx.nondet_block_kind;
-        ctx.nondet_block_kind = Some(block_kind_label(block.block_kind));
+        ctx.nondet_block_kind = Some(kind);
         ctx.nondet_depth += 1;
         walk_statements(arena, &block.stmts, ctx, visitor);
         ctx.nondet_depth -= 1;

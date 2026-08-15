@@ -27,10 +27,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId};
 use inference_ast::nodes::{Def, Stmt};
 
-use crate::{
-    errors::{AnalysisDiagnostic, LabeledDiagnostic},
-    walker::block_kind_label,
-};
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic, NonDetBlockKind};
 
 crate::rule! {
     /// Non-deterministic blocks and body modifiers (forall/exists/assume/unique)
@@ -89,12 +86,12 @@ fn scan_child_block(
     errors: &mut Vec<LabeledDiagnostic>,
 ) {
     let block = &arena[block_id];
-    if block.block_kind.is_non_det() {
+    if let Some(kind) = NonDetBlockKind::from_block_kind(block.block_kind) {
         errors.push(LabeledDiagnostic::new(
             module_path.to_vec(),
             AnalysisDiagnostic::NonDetOutsideSpec {
                 location: block.location,
-                block_kind: block_kind_label(block.block_kind),
+                block_kind: kind,
             },
         ));
         return;

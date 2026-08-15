@@ -1,0 +1,51 @@
+// An `exists`-bodied spec function, shaped for the `coqc` gate's corpus: the
+// body is reachability-lowered (vanilla WASM, each scalar `@` a hidden trailing
+// choice parameter) and its obligation is emitted as a `reachability_spec`
+// record consumed by a `ValidExistsSpec` theorem — this fixture is the corpus
+// producer for that grammar.
+//
+// Shaped the way it is because the corpus runs parse → type-check → codegen
+// with NO analysis, so every constraint is carried by the fixture itself:
+// the obligation is non-vacuous (each `assert` states a real property, so
+// nothing collapses to the vacuous `HA_true` — P010 rejects the collapse);
+// the cross-call target `double` is a DEFINED executable function (a call to
+// an extern would be rejected as P005 — an external body cannot be verified);
+// and the body neither declares a return type nor contains `return` (the
+// verifier reduces the retained body without an enclosing activation frame,
+// so a `return` could never take a step — the pre-scan rejects both shapes).
+//
+// The obligation must also be TRUE, and the verifier's contract quantifies the
+// entry parameters universally: `exists_spec_holds_at` demands a successful
+// choice vector for EVERY typed entry value, so every filter must stay
+// satisfiable at every entry. That is why the first filter is `n >= lo` (its
+// witness `n := lo` exists for every `lo`; a strict `n > lo` has no witness at
+// `lo = i32::MAX` and would make the theorem false) and why the final claim
+// compares against a constant rather than against `lo` (a `>= lo` bound on
+// `double`'s even result is unsatisfiable at `lo = i32::MAX`). An `assume`
+// over an entry parameter alone can never carve out entries — it can only
+// falsify the spec at the entries it rejects.
+//
+// The three `@`s span the choice surface: a named i32 choice (source-visible,
+// so it joins `reach_visible_locs` after the entry parameter), a named i64
+// choice (the other WASM scalar class, a distinct parameter type in the type
+// section), and an anonymous call-argument choice (legal in an `exists` body,
+// where hiding it from `reach_visible_locs` cannot change whether the
+// observation set is non-empty; a `unique` body must name every choice).
+fn double(n: i32) -> i32 {
+    return n + n;
+}
+
+spec ReachableDouble {
+    fn ex_double(lo: i32) exists {
+        let n: i32 = @;
+        assume {
+            assert(n >= lo);
+        }
+        let wide: i64 = @;
+        assume {
+            assert(wide >= 0);
+        }
+        assert(double(n) == n + n);
+        assert(double(@) == 0);
+    }
+}

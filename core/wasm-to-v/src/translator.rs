@@ -146,9 +146,11 @@
 //! Require Import String.
 //! Require Import BinNat.
 //! Require Import ZArith.
-//! From Wasm Require Import bytes.
-//! From Wasm Require Import numerics.
-//! From Wasm Require Import datatypes.
+//! From Wasm Require Import bytes numerics datatypes host.
+//! From WasmVerifier Require Import Assertions Verifier.
+//! (* The proof-contract import line gains ` Exists` when the module carries a
+//!    reachability (`exists`/`unique`) obligation, and `Open Scope byte_scope.`
+//!    follows when the module carries a data segment. *)
 //!
 //! (* Helper definitions *)
 //! Definition Vi32 i := ...
@@ -181,7 +183,7 @@ use inf_wasmparser::{
     FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
     RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
-use inference_hassert::HSpecMap;
+use inference_hassert::{HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errors::WasmToVError;
@@ -195,31 +197,50 @@ const LIST_EXT: &str = " ::\n";
 const LIST_SEAL: &str = "nil";
 
 /// The function-index renumbering the spec-function omission forces on the
-/// emitted module.
+/// emitted module, together with the retention set the reachability kinds add.
 ///
-/// A `spec` function is a downstream contract obligation, not part of the
-/// executable module, so it is dropped from the `.v` module record. Dropping a
-/// function at absolute index `s` shifts every later function down by one, so
-/// every surviving reference — `BI_call` operands, export/element/start
-/// descriptors, and `T_app` targets — must be renumbered. Imports are never
-/// spec functions (codegen records only local functions), so imported indices
-/// are stable.
+/// A `forall`/plain `spec` function is a downstream contract obligation, not
+/// part of the executable module, so it is dropped from the `.v` module
+/// record. Dropping a function at absolute index `s` shifts every later
+/// function down by one, so every surviving reference — `BI_call` operands,
+/// export/element/start descriptors, and `T_app` targets — must be renumbered.
+/// Imports are never spec functions (codegen records only local functions), so
+/// imported indices are stable.
+///
+/// An `exists`/`unique` spec function is different: its obligation is a
+/// reachability judgment that looks the function up **in the emitted module**
+/// and reduces its body under vanilla semantics, so its body must be
+/// *retained* in the module record. Retained functions shift nothing (they
+/// keep their place in `mod_funcs`), but the protection omission used to
+/// provide accidentally — no executable construct can reach a spec function —
+/// must now be provided deliberately: the reference sites reject a retained
+/// target through [`Self::referenced_instantiated`], while the obligation
+/// emitter computes the retained function's own `reach_func` index through
+/// [`Self::mod_funcs_index`] directly, bypassing that reference guard.
 struct FuncRemap {
-    /// Absolute WASM indices of the omitted spec functions, sorted ascending
-    /// and de-duplicated.
+    /// Absolute WASM indices of the omitted (forall/plain) spec functions,
+    /// sorted ascending and de-duplicated.
     spec_abs: Vec<u32>,
+    /// Absolute WASM indices of the retained (`exists`/`unique`) spec
+    /// functions, sorted ascending and de-duplicated. Disjoint from
+    /// `spec_abs`.
+    retained_abs: Vec<u32>,
     /// Number of imported functions, occupying the lowest function indices.
     func_import_count: u32,
 }
 
 impl FuncRemap {
-    /// Builds the remap from the spec-index map and the function-import count.
-    fn new(spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>, func_import_count: u32) -> Self {
-        let mut spec_abs: Vec<u32> = spec_funcs_by_spec.values().flatten().copied().collect();
-        spec_abs.sort_unstable();
-        spec_abs.dedup();
+    /// Builds the remap from the classified omit and retain sets and the
+    /// function-import count. The caller has already split the spec-function
+    /// union by obligation kind; both sets are normalized here.
+    fn new(mut omitted: Vec<u32>, mut retained: Vec<u32>, func_import_count: u32) -> Self {
+        omitted.sort_unstable();
+        omitted.dedup();
+        retained.sort_unstable();
+        retained.dedup();
         Self {
-            spec_abs,
+            spec_abs: omitted,
+            retained_abs: retained,
             func_import_count,
         }
     }
@@ -227,6 +248,12 @@ impl FuncRemap {
     /// Whether the function at absolute index `abs` is an omitted spec function.
     fn is_omitted(&self, abs: u32) -> bool {
         self.spec_abs.binary_search(&abs).is_ok()
+    }
+
+    /// Whether the function at absolute index `abs` is a retained
+    /// (`exists`/`unique`) spec function.
+    fn is_retained(&self, abs: u32) -> bool {
+        self.retained_abs.binary_search(&abs).is_ok()
     }
 
     /// The number of omitted spec functions strictly below `abs`.
@@ -238,21 +265,48 @@ impl FuncRemap {
     }
 
     /// Renumbers a function index into the emitted module's instantiated
-    /// function space (imports first, then surviving defined functions). This
-    /// is the operand form for `BI_call`, exports, elements, and `mod_start`.
+    /// function space (imports first, then surviving defined functions).
     /// Fail-closed: a reference to an omitted spec function is an error.
+    ///
+    /// This is the raw index arithmetic; it accepts a retained spec function,
+    /// because the reachability obligation's own `reach_func` lookup needs
+    /// exactly that. Reference sites go through
+    /// [`Self::referenced_instantiated`] instead, which rejects retained
+    /// targets first.
     fn instantiated(&self, abs: u32) -> anyhow::Result<u32> {
         if self.is_omitted(abs) {
             return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
-                "a surviving construct references function {abs}, which is an omitted \
-                 spec function"
+                "a construct retained in the emitted module references function {abs}, \
+                 which is an omitted specification function"
             ))));
         }
         Ok(abs - self.below(abs))
     }
 
+    /// The operand form for `BI_call`, `BI_ref_func`, exports, element items,
+    /// and `mod_start`: [`Self::instantiated`] plus the retained-spec-function
+    /// rejection. A retained `exists`/`unique` spec function stays in the
+    /// module record only as the subject of its reachability obligation — its
+    /// signature carries hidden choice parameters and its body traps on
+    /// filtered paths, so it is not a callable and no executable construct may
+    /// reference it.
+    fn referenced_instantiated(&self, abs: u32) -> anyhow::Result<u32> {
+        if self.is_retained(abs) {
+            return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                "a surviving construct references function {abs}, which is a retained \
+                 `exists`/`unique` specification function; its body stays in the emitted \
+                 module only as the subject of its reachability obligation, not as a \
+                 callable"
+            ))));
+        }
+        self.instantiated(abs)
+    }
+
     /// The index of a defined function into `mod_funcs` (imports excluded), the
-    /// form `T_app` uses. Fail-closed on an omitted or imported function.
+    /// form `T_app` and `reach_func` use. Fail-closed on an omitted or
+    /// imported function; a retained function is accepted (the `reach_func`
+    /// computation is the reason this method must not carry the reference
+    /// guard).
     fn mod_funcs_index(&self, abs: u32) -> anyhow::Result<u32> {
         let instantiated = self.instantiated(abs)?;
         instantiated
@@ -264,6 +318,54 @@ impl FuncRemap {
                 )))
             })
     }
+}
+
+/// One spec's obligations split by quantifier kind. Built by
+/// [`partition_entries`] — the single classification helper both the
+/// definition emitter and the theorem emitter consume, so the two can never
+/// disagree about which partition a spec's entries fall into.
+struct SpecPartition<'e> {
+    /// Universal obligations, consumed by the `_specs : list hassert` /
+    /// `ValidSpec` grammar.
+    forall: Vec<&'e HSpecEntry>,
+    /// `exists`-kind obligations, consumed by the `_ex_specs : list
+    /// reachability_spec` / `ValidExistsSpec` grammar.
+    exists: Vec<(&'e HSpecEntry, &'e ReachMeta)>,
+    /// `unique`-kind obligations, consumed by the `_uq_specs : list
+    /// reachability_spec` / `ValidUniqueSpec` grammar.
+    unique: Vec<(&'e HSpecEntry, &'e ReachMeta)>,
+}
+
+/// Splits one spec's entries by quantifier kind, preserving source order
+/// within each partition.
+fn partition_entries(entries: &[HSpecEntry]) -> SpecPartition<'_> {
+    let mut partition = SpecPartition {
+        forall: Vec::new(),
+        exists: Vec::new(),
+        unique: Vec::new(),
+    };
+    for entry in entries {
+        match &entry.kind {
+            SpecKind::Forall => partition.forall.push(entry),
+            SpecKind::Exists(meta) => partition.exists.push((entry, meta)),
+            SpecKind::Unique(meta) => partition.unique.push((entry, meta)),
+        }
+    }
+    partition
+}
+
+/// Renders a `reach_visible_locs` value: `nil` when empty, `(a%N :: b%N ::
+/// nil)` otherwise, matching the emitted `seq`-literal style elsewhere.
+fn visible_locs_list(locs: &[u32]) -> String {
+    if locs.is_empty() {
+        return "nil".to_string();
+    }
+    let mut out = String::from("(");
+    for loc in locs {
+        out.push_str(&format!("{loc}%N :: "));
+    }
+    out.push_str("nil)");
+    out
 }
 
 /// Structured representation of a parsed WASM module.
@@ -326,12 +428,17 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
     /// WASM function indices that originated from `spec` blocks, keyed by spec
-    /// name. These functions are OMITTED from the emitted module record (they
-    /// are downstream contract obligations, not part of the executable module),
-    /// and their union drives the [`FuncRemap`] that renumbers every surviving
-    /// function reference. Each spec also materializes a
-    /// `<mod>__<SpecName>_specs : list hassert` definition and a
-    /// `ValidSpec` theorem.
+    /// name. A spec function whose obligation is universal (or that carries no
+    /// obligation — a method) is OMITTED from the emitted module record: it is
+    /// a downstream contract obligation, not part of the executable module. A
+    /// spec function with an `exists`/`unique` obligation is RETAINED instead —
+    /// its reachability judgment reduces the emitted body — and the split
+    /// drives the [`FuncRemap`] that renumbers every surviving function
+    /// reference. Each spec also materializes a
+    /// `<mod>__<SpecName>_specs : list hassert` definition and a `ValidSpec`
+    /// theorem, plus `_ex_specs`/`_uq_specs : list reachability_spec`
+    /// definitions and `ValidExistsSpec`/`ValidUniqueSpec` theorems for its
+    /// non-empty reachability partitions.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
     /// Per-spec `hassert` verification obligations decoded from the
     /// `inference.hspecs` custom section (or supplied explicitly). A subset of
@@ -441,13 +548,39 @@ impl WasmParseData<'_> {
             crate::rocq_names::validate_spec_join_boundary(&self.mod_name, spec_name)?;
         }
 
+        // One shared symbol->index inversion of the raw name section, feeding
+        // both the reachability-target classification below and `T_app` symbol
+        // resolution later, so the two can never resolve one symbol
+        // differently.
+        let by_name = self.invert_raw_func_names();
+
+        // Classify the reachability (`exists`/`unique`) obligations up front:
+        // each must resolve to the defined spec function it judges, and that
+        // function is RETAINED in the module record while every other spec
+        // function stays omitted. Classification is fail-closed — an
+        // unresolvable or inconsistent reachability target rejects the module
+        // before any output is built.
+        let reach_targets = self.classify_reachability_targets(&by_name)?;
+        let mut retained: Vec<u32> = reach_targets.values().copied().collect();
+        retained.sort_unstable();
+        retained.dedup();
+        let mut omitted: Vec<u32> = self
+            .spec_funcs_by_spec
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        omitted.sort_unstable();
+        omitted.dedup();
+        omitted.retain(|abs| retained.binary_search(abs).is_err());
+
         // The renumbering forced by omitting spec functions from the module
         // record. Built once here and threaded through every function-index
         // site (function bodies, exports, elements, `mod_start`, and `T_app`
         // resolution).
         let func_import_count =
             u32::try_from(self.func_import_count()).expect("import count exceeds u32");
-        let remap = FuncRemap::new(&self.spec_funcs_by_spec, func_import_count);
+        let remap = FuncRemap::new(omitted, retained, func_import_count);
 
         let mut res = String::new();
         res.push_str("Require Import List.\n");
@@ -455,7 +588,17 @@ impl WasmParseData<'_> {
         res.push_str("Require Import BinNat.\n");
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import bytes numerics datatypes host.\n");
-        res.push_str("From WasmVerifier Require Import Assertions Verifier.\n");
+        // The reachability grammar (`reachability_spec` records and the
+        // `ValidExistsSpec`/`ValidUniqueSpec` predicates) lives in the
+        // wasm-verifier `Exists` module. The import joins the line only when a
+        // reachability obligation exists, so a forall-only module's preamble is
+        // byte-identical to what it was before reachability emission existed
+        // (the same keying discipline as `Open Scope byte_scope.` below).
+        if self.has_reachability_entries() {
+            res.push_str("From WasmVerifier Require Import Assertions Verifier Exists.\n");
+        } else {
+            res.push_str("From WasmVerifier Require Import Assertions Verifier.\n");
+        }
         // A data segment's bytes are mostly written in the hex notations the
         // `Wasm.bytes` module declares in `byte_scope`, and those parse only
         // while that scope is open. Whether an `Import` chain leaves it open is
@@ -649,7 +792,7 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_elems :=\n{created_elements};\n").as_str());
         res.push_str(format!("  mod_datas :=\n{created_data_segments};\n").as_str());
         if let Some(start_function) = self.start_function {
-            let start = remap.instantiated(start_function)?;
+            let start = remap.referenced_instantiated(start_function)?;
             res.push_str(
                 format!("  mod_start := Some {{|modstart_func := {start}%N|}};\n").as_str(),
             );
@@ -668,10 +811,198 @@ impl WasmParseData<'_> {
             return Err(first);
         }
 
-        self.emit_spec_definitions(&mut res, &remap)?;
+        self.emit_spec_definitions(&mut res, &remap, &by_name, &reach_targets)?;
         self.emit_theorems(&mut res);
 
         Ok(res)
+    }
+
+    /// Whether any obligation in the module is a reachability
+    /// (`exists`/`unique`) obligation. Keys the conditional ` Exists`
+    /// preamble import and nothing else — emission itself is driven per spec by
+    /// [`partition_entries`].
+    fn has_reachability_entries(&self) -> bool {
+        self.hspecs_by_spec
+            .values()
+            .flatten()
+            .any(|entry| !matches!(entry.kind, SpecKind::Forall))
+    }
+
+    /// Inverts the RAW name-section map: symbol → absolute indices of the
+    /// functions carrying it. The single inversion both
+    /// [`Self::classify_reachability_targets`] and
+    /// [`Self::resolve_app_symbols`] consume, so a symbol can never resolve to
+    /// different indices on the two paths.
+    fn invert_raw_func_names(&self) -> HashMap<String, Vec<u32>> {
+        let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
+        if let Some(raw) = &self.raw_func_names_map {
+            for (idx, name) in raw {
+                by_name.entry(name.clone()).or_default().push(*idx);
+            }
+        }
+        by_name
+    }
+
+    /// Parameter count of the defined function at absolute index `abs`, read
+    /// from its type-section entry. `None` when the function or its type
+    /// cannot be located (a malformed module; callers fail closed).
+    fn defined_func_param_count(&self, abs: u32) -> Option<u32> {
+        let defined = (abs as usize).checked_sub(self.func_import_count())?;
+        let type_idx = *self.function_type_indexes.get(defined)? as usize;
+        // The type index space flattens recursion groups in section order.
+        let ty = self
+            .function_types
+            .iter()
+            .flat_map(inf_wasmparser::RecGroup::types)
+            .nth(type_idx)?;
+        match &ty.composite_type.inner {
+            CompositeInnerType::Func(ft) => u32::try_from(ft.params().len()).ok(),
+            _ => None,
+        }
+    }
+
+    /// Declared-local count (locals section, parameters excluded) of the
+    /// defined function at absolute index `abs`. `None` when the body cannot
+    /// be located or its locals cannot be read.
+    fn defined_func_local_count(&self, abs: u32) -> Option<u32> {
+        let defined = (abs as usize).checked_sub(self.func_import_count())?;
+        let body = self.function_bodies.get(defined)?;
+        let mut count: u32 = 0;
+        for local in body.get_locals_reader().ok()? {
+            let (reps, _) = local.ok()?;
+            count = count.checked_add(reps)?;
+        }
+        Some(count)
+    }
+
+    /// Resolves every reachability (`exists`/`unique`) obligation to the
+    /// absolute index of the defined spec function it judges, fail-closed.
+    ///
+    /// The obligation's own symbol is the spec-folded `FnKey` display,
+    /// `<folded_spec>.<name>` — but the name section stores the bare `<name>`
+    /// (spec membership travels separately in `inference.spec_funcs`), so
+    /// resolution strips the spec qualifier when present and then
+    /// disambiguates through the spec's own index list: the retained target
+    /// is the one function that both carries the bare name and is listed
+    /// under the obligation's spec.
+    ///
+    /// The reachability judgment looks its function up in the emitted module
+    /// (`reach_func`) and evaluates its payload against the frame an actual
+    /// execution reaches, so an obligation whose target cannot be located —
+    /// or whose frame metadata does not fit the located function — would be
+    /// silently unprovable downstream. Every such inconsistency is rejected
+    /// here instead, where it can name the offender:
+    ///
+    /// * the module carries no name section (symbols are name-section
+    ///   strings, so reachability translation hard-depends on it);
+    /// * no defined function carries the symbol's name;
+    /// * none of the carriers is listed under the obligation's spec in
+    ///   `inference.spec_funcs`, or several are (ambiguous);
+    /// * `entry_arity` exceeds the function's parameter count (the choice
+    ///   suffix can only extend the source parameters, never shrink them);
+    /// * a `visible_locs` slot falls outside the function's frame
+    ///   (parameters + declared locals).
+    ///
+    /// Spec names are visited in sorted order so the reported offender is
+    /// deterministic.
+    fn classify_reachability_targets(
+        &self,
+        by_name: &HashMap<String, Vec<u32>>,
+    ) -> anyhow::Result<FxHashMap<String, u32>> {
+        let mut targets = FxHashMap::default();
+        let mut spec_names: Vec<&String> = self.hspecs_by_spec.keys().collect();
+        spec_names.sort_unstable();
+        for spec_name in spec_names {
+            for entry in &self.hspecs_by_spec[spec_name] {
+                let (kind, meta) = match &entry.kind {
+                    SpecKind::Forall => continue,
+                    SpecKind::Exists(meta) => ("exists", meta),
+                    SpecKind::Unique(meta) => ("unique", meta),
+                };
+                let sym = entry.fn_symbol.0.as_str();
+                if self.raw_func_names_map.is_none() {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` must resolve to its retained function through the \
+                         WASM `name` section, but the module carries no function names"
+                    ))));
+                }
+                let bare = sym.strip_prefix(&format!("{spec_name}.")).unwrap_or(sym);
+                let name_matches = by_name.get(bare).map_or(&[][..], Vec::as_slice);
+                if name_matches.is_empty() {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` names a function symbol that no defined \
+                         function in the module carries"
+                    ))));
+                }
+                let spec_indices = self
+                    .spec_funcs_by_spec
+                    .get(spec_name)
+                    .map_or(&[][..], Vec::as_slice);
+                let candidates: Vec<u32> = name_matches
+                    .iter()
+                    .copied()
+                    .filter(|abs| spec_indices.contains(abs))
+                    .collect();
+                let abs = match candidates[..] {
+                    [one] => one,
+                    [] => {
+                        return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                            "the `{kind}`-quantified obligation for `{sym}` in spec \
+                             `{spec_name}` resolves only to functions \
+                             `inference.spec_funcs` does not list under that spec"
+                        ))));
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                            "the `{kind}`-quantified obligation for `{sym}` in spec \
+                             `{spec_name}` names a function symbol that {} defined \
+                             functions of its spec share; the retained target is \
+                             ambiguous",
+                            candidates.len()
+                        ))));
+                    }
+                };
+                let Some(params) = self.defined_func_param_count(abs) else {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` resolves to function {abs}, whose type cannot be \
+                         read from the module"
+                    ))));
+                };
+                if meta.entry_arity > params {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` declares entry arity {}, but the retained \
+                         function's parameter count is {params}",
+                        meta.entry_arity
+                    ))));
+                }
+                let Some(locals) = self.defined_func_local_count(abs) else {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` resolves to function {abs}, whose locals cannot \
+                         be read from the module"
+                    ))));
+                };
+                let frame = u64::from(params) + u64::from(locals);
+                if let Some(loc) = meta
+                    .visible_locs
+                    .iter()
+                    .find(|&&loc| u64::from(loc) >= frame)
+                {
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                        "the `{kind}`-quantified obligation for `{sym}` in spec \
+                         `{spec_name}` declares source-visible slot {loc}, but the \
+                         retained function's frame size (parameters + locals) \
+                         is {frame}"
+                    ))));
+                }
+                targets.insert(sym.to_string(), abs);
+            }
+        }
+        Ok(targets)
     }
 
     /// Spec names, sorted, so the `list hassert` definitions and the theorems
@@ -686,9 +1017,17 @@ impl WasmParseData<'_> {
     }
 
     /// Resolves every function symbol any obligation applies to its `mod_funcs`
-    /// index, up front, so a missing / ambiguous / imported / omitted target
-    /// fails before a line of output is built.
-    fn resolve_app_symbols(&self, remap: &FuncRemap) -> anyhow::Result<FxHashMap<String, u32>> {
+    /// index, up front, so a missing / ambiguous / imported / spec-function
+    /// target fails before a line of output is built.
+    ///
+    /// `by_name` is the shared raw name-section inversion built once in
+    /// [`Self::translate`]. A `T_app` names exactly one defined function, so
+    /// zero or several matches is a hard error.
+    fn resolve_app_symbols(
+        &self,
+        by_name: &HashMap<String, Vec<u32>>,
+        remap: &FuncRemap,
+    ) -> anyhow::Result<FxHashMap<String, u32>> {
         let mut symbols: Vec<&str> = Vec::new();
         for entries in self.hspecs_by_spec.values() {
             for entry in entries {
@@ -699,16 +1038,6 @@ impl WasmParseData<'_> {
         symbols.dedup();
         if symbols.is_empty() {
             return Ok(FxHashMap::default());
-        }
-
-        // Invert the RAW name-section map: a symbol resolves to the absolute
-        // index of the defined function carrying it. A `T_app` names exactly
-        // one defined function, so zero or several matches is a hard error.
-        let mut by_name: HashMap<&str, Vec<u32>> = HashMap::new();
-        if let Some(raw) = &self.raw_func_names_map {
-            for (idx, name) in raw {
-                by_name.entry(name.as_str()).or_default().push(*idx);
-            }
         }
 
         let mut resolved = FxHashMap::default();
@@ -729,6 +1058,17 @@ impl WasmParseData<'_> {
                     ))));
                 }
             };
+            // A retained `exists`/`unique` spec function is the subject of its
+            // own reachability obligation, not an interpretable symbol: no
+            // payload may apply it. Rejected explicitly, because the retained
+            // function passes the omitted/imported arithmetic below.
+            if remap.is_retained(abs) {
+                return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                    "obligation applies function symbol `{sym}`, which is a retained \
+                     `exists`/`unique` specification function; a specification function \
+                     is the subject of its own obligation, not an interpretable symbol"
+                ))));
+            }
             // Rejects an imported or omitted (spec) target: a `T_app` may only
             // name a module-defined, non-spec function.
             let idx = remap.mod_funcs_index(abs)?;
@@ -737,57 +1077,154 @@ impl WasmParseData<'_> {
         Ok(resolved)
     }
 
-    /// Appends the per-spec `hassert` obligation definitions to `out`: one
+    /// Appends the per-spec obligation definitions to `out`, partitioned by
+    /// quantifier kind through [`partition_entries`].
+    ///
+    /// The universal partition keeps its grammar unconditionally: one
     /// `<mod>__<Spec>_hspec{k} : hassert` per obligation (source order,
-    /// 1-based), then a `<mod>__<Spec>_specs : list hassert` gathering them.
+    /// 1-based), then a `<mod>__<Spec>_specs : list hassert` gathering them —
+    /// or the explicitly-typed `(@nil hassert)` when the partition is empty (a
+    /// spec with only methods, an empty `spec { }`, or only reachability
+    /// obligations). The `exists` and `unique` partitions each add
+    /// `reachability_spec` record definitions and an
+    /// `_ex_specs`/`_uq_specs : list reachability_spec` list, but only when
+    /// non-empty, so a forall-only module's output is byte-identical to what
+    /// it was before reachability emission existed.
     ///
     /// Spec names were validated against the Rocq identifier rules at the top
-    /// of `translate()` so that `<mod>__<Spec>_specs` is always a syntactically
-    /// legal Rocq identifier.
-    fn emit_spec_definitions(&self, out: &mut String, remap: &FuncRemap) -> anyhow::Result<()> {
-        let resolved = self.resolve_app_symbols(remap)?;
+    /// of `translate()` so that every joined definition name is a
+    /// syntactically legal Rocq identifier.
+    fn emit_spec_definitions(
+        &self,
+        out: &mut String,
+        remap: &FuncRemap,
+        by_name: &HashMap<String, Vec<u32>>,
+        reach_targets: &FxHashMap<String, u32>,
+    ) -> anyhow::Result<()> {
+        let resolved = self.resolve_app_symbols(by_name, remap)?;
         let module_name = &self.mod_name;
         for spec_name in self.sorted_spec_names() {
             out.push('\n');
-            match self.hspecs_by_spec.get(spec_name) {
-                Some(entries) if !entries.is_empty() => {
-                    let mut hspec_names = Vec::with_capacity(entries.len());
-                    for (k, entry) in entries.iter().enumerate() {
-                        let def_name = format!("{module_name}__{spec_name}_hspec{}", k + 1);
-                        let body = hassert_print::print_assert(&entry.hassert, &resolved);
-                        out.push_str(
-                            format!("Definition {def_name} : hassert :=\n  {body}.\n").as_str(),
-                        );
-                        hspec_names.push(def_name);
-                    }
-                    let joined = hspec_names.join(" :: ");
+            let entries = self
+                .hspecs_by_spec
+                .get(spec_name)
+                .map_or(&[][..], Vec::as_slice);
+            let partition = partition_entries(entries);
+            if partition.forall.is_empty() {
+                // No universal free-function obligations: an explicitly-typed
+                // empty list, scope- and Require-order-independent.
+                out.push_str(
+                    format!(
+                        "Definition {module_name}__{spec_name}_specs : list hassert := (@nil hassert).\n"
+                    )
+                    .as_str(),
+                );
+            } else {
+                let mut hspec_names = Vec::with_capacity(partition.forall.len());
+                for (k, entry) in partition.forall.iter().enumerate() {
+                    let def_name = format!("{module_name}__{spec_name}_hspec{}", k + 1);
+                    let body = hassert_print::print_assert(&entry.hassert, &resolved);
                     out.push_str(
-                        format!(
-                            "Definition {module_name}__{spec_name}_specs : list hassert := ({joined} :: nil).\n"
-                        )
-                        .as_str(),
+                        format!("Definition {def_name} : hassert :=\n  {body}.\n").as_str(),
                     );
+                    hspec_names.push(def_name);
                 }
-                // A spec with no free-function obligations (only methods, or an
-                // empty `spec { }`): an explicitly-typed empty list, scope- and
-                // Require-order-independent.
-                _ => {
-                    out.push_str(
-                        format!(
-                            "Definition {module_name}__{spec_name}_specs : list hassert := (@nil hassert).\n"
-                        )
-                        .as_str(),
-                    );
-                }
+                let joined = hspec_names.join(" :: ");
+                out.push_str(
+                    format!(
+                        "Definition {module_name}__{spec_name}_specs : list hassert := ({joined} :: nil).\n"
+                    )
+                    .as_str(),
+                );
             }
+            self.emit_reachability_partition(
+                out,
+                remap,
+                &resolved,
+                reach_targets,
+                spec_name,
+                &partition.exists,
+                "exspec",
+                "ex_specs",
+            )?;
+            self.emit_reachability_partition(
+                out,
+                remap,
+                &resolved,
+                reach_targets,
+                spec_name,
+                &partition.unique,
+                "uqspec",
+                "uq_specs",
+            )?;
         }
         Ok(())
     }
 
+    /// Appends one reachability partition's definitions: one
+    /// `<mod>__<Spec>_{def_suffix}{k} : reachability_spec` record per
+    /// obligation (source order, 1-based), then the gathering
+    /// `<mod>__<Spec>_{list_suffix} : list reachability_spec`. An empty
+    /// partition emits nothing.
+    ///
+    /// `reach_func` is computed through the direct index arithmetic
+    /// ([`FuncRemap::mod_funcs_index`]) rather than the reference-guarded
+    /// path: the retained function is the obligation's own subject, and the
+    /// downstream predicate looks it up in `mod_funcs` (imports excluded).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reachability_partition(
+        &self,
+        out: &mut String,
+        remap: &FuncRemap,
+        resolved: &FxHashMap<String, u32>,
+        reach_targets: &FxHashMap<String, u32>,
+        spec_name: &str,
+        entries: &[(&HSpecEntry, &ReachMeta)],
+        def_suffix: &str,
+        list_suffix: &str,
+    ) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let module_name = &self.mod_name;
+        let mut def_names = Vec::with_capacity(entries.len());
+        for (k, (entry, meta)) in entries.iter().enumerate() {
+            let def_name = format!("{module_name}__{spec_name}_{def_suffix}{}", k + 1);
+            let abs = reach_targets
+                .get(&entry.fn_symbol.0)
+                .copied()
+                .expect("every reachability obligation is classified before emission");
+            let reach_func = remap.mod_funcs_index(abs)?;
+            let payload = hassert_print::print_assert(&entry.hassert, resolved);
+            let locs = visible_locs_list(&meta.visible_locs);
+            out.push_str(
+                format!(
+                    "Definition {def_name} : reachability_spec :=\n  \
+                     {{| reach_func := {reach_func}%N; reach_entry_arity := {}%nat;\n     \
+                     reach_visible_locs := {locs}; reach_payload := {payload} |}}.\n",
+                    meta.entry_arity
+                )
+                .as_str(),
+            );
+            def_names.push(def_name);
+        }
+        let joined = def_names.join(" :: ");
+        out.push_str(
+            format!(
+                "Definition {module_name}__{spec_name}_{list_suffix} : list reachability_spec := ({joined} :: nil).\n"
+            )
+            .as_str(),
+        );
+        Ok(())
+    }
+
     /// Appends the `Section Host` block: the always-emitted 1-ary
-    /// `ValidModule` theorem, then one `ValidSpec` theorem per spec, consuming
-    /// the `<mod>__<Spec>_specs` definitions emitted by
-    /// [`Self::emit_spec_definitions`].
+    /// `ValidModule` theorem, then per spec the `ValidSpec` theorem over its
+    /// universal obligations, plus a `ValidExistsSpec`/`ValidUniqueSpec`
+    /// theorem for each non-empty reachability partition — consuming the
+    /// definitions emitted by [`Self::emit_spec_definitions`]. Both emitters
+    /// partition through [`partition_entries`], so a theorem can never name a
+    /// list the definitions did not emit.
     fn emit_theorems(&self, out: &mut String) {
         let module_name = &self.mod_name;
         out.push('\n');
@@ -811,6 +1248,35 @@ impl WasmParseData<'_> {
             out.push_str("Proof.\n");
             out.push_str("  (* TODO: fill the proof *)\n");
             out.push_str("Qed.\n");
+            let entries = self
+                .hspecs_by_spec
+                .get(spec_name)
+                .map_or(&[][..], Vec::as_slice);
+            let partition = partition_entries(entries);
+            if !partition.exists.is_empty() {
+                out.push('\n');
+                out.push_str(
+                    format!(
+                        "Theorem valid_exists_{module_name}__{spec_name} : ValidExistsSpec {module_name} {module_name}__{spec_name}_ex_specs.\n"
+                    )
+                    .as_str(),
+                );
+                out.push_str("Proof.\n");
+                out.push_str("  (* TODO: fill the proof *)\n");
+                out.push_str("Qed.\n");
+            }
+            if !partition.unique.is_empty() {
+                out.push('\n');
+                out.push_str(
+                    format!(
+                        "Theorem valid_unique_{module_name}__{spec_name} : ValidUniqueSpec {module_name} {module_name}__{spec_name}_uq_specs.\n"
+                    )
+                    .as_str(),
+                );
+                out.push_str("Proof.\n");
+                out.push_str("  (* TODO: fill the proof *)\n");
+                out.push_str("Qed.\n");
+            }
         }
         out.push('\n');
         out.push_str("End Host.\n");
@@ -853,11 +1319,15 @@ impl WasmParseData<'_> {
         for (index, function_body) in self.function_bodies.iter().enumerate() {
             let modfunc_type = *self.function_type_indexes.get(index).unwrap_or(&0);
             let abs_index = (func_import_base + index) as u32;
-            // A spec function is a downstream contract obligation, not part of
-            // the executable module: omit its body and its `mod_funcs` entry.
-            // `mod_types` stays complete (its now-unused type is still legal),
-            // so `modfunc_type` above needs no adjustment; the `remap` renumbers
-            // every surviving reference to the functions that remain.
+            // A forall/plain spec function is a downstream contract
+            // obligation, not part of the executable module: omit its body and
+            // its `mod_funcs` entry. `mod_types` stays complete (its
+            // now-unused type is still legal), so `modfunc_type` above needs
+            // no adjustment; the `remap` renumbers every surviving reference
+            // to the functions that remain. A retained `exists`/`unique` spec
+            // function is not skipped: its reachability obligation reduces the
+            // emitted body, so it flows through the ordinary emission below
+            // (its lowering is vanilla WASM by construction).
             if remap.is_omitted(abs_index) {
                 continue;
             }
@@ -1076,10 +1546,14 @@ fn translate_module_export_desc(export: &Export, remap: &FuncRemap) -> anyhow::R
     let res = match export.kind {
         // A function export's index shifts down past every omitted spec
         // function; no export is ever dropped (spec functions are not
-        // exportable). Table/memory/global indices are not function indices, so
-        // they pass through unchanged.
+        // exportable, so an exported spec function — omitted or retained — is
+        // a fail-closed error). Table/memory/global indices are not function
+        // indices, so they pass through unchanged.
         inf_wasmparser::ExternalKind::Func => {
-            format!("MED_func {}%N", remap.instantiated(export.index)?)
+            format!(
+                "MED_func {}%N",
+                remap.referenced_instantiated(export.index)?
+            )
         }
         inf_wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
         inf_wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
@@ -1412,7 +1886,7 @@ fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<Str
             let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, index) = result?;
-                let target = remap.instantiated(index)?;
+                let target = remap.referenced_instantiated(index)?;
                 expr_list.push_str(format!("(BI_ref_func {target}%N :: nil)").as_str());
                 expr_list.push_str(" ::\n");
             }
@@ -1533,12 +2007,14 @@ fn translate_basic_operator(
             format!("BI_if ({blockty})")
         }
         // Non-deterministic instructions have no counterpart in the vanilla
-        // WasmCert proof model the wasm-verifier library targets. With spec
-        // functions omitted from the module record, these lowerings are
-        // reachable only from a *surviving* (executable, non-spec) body. The
-        // language rule (analysis A042) already bars non-det outside a spec, so
-        // this path is unreachable from Inference-compiled code; the rejection
-        // is defense-in-depth for foreign or hand-crafted `.wasm`.
+        // WasmCert proof model the wasm-verifier library targets. The bodies
+        // the emitted module record keeps are executable (non-spec) functions —
+        // where the language rule (analysis A042) bars non-det — and retained
+        // `exists`/`unique` spec functions, whose reachability lowering is
+        // vanilla WASM by construction (each `@` arrives as a hidden trailing
+        // choice parameter, filters trap). Neither can carry one of these
+        // opcodes from Inference-compiled code, so this rejection is
+        // defense-in-depth for foreign or hand-crafted `.wasm`.
         Operator::Forall { .. }
         | Operator::Exists { .. }
         | Operator::Assume { .. }
@@ -1546,8 +2022,9 @@ fn translate_basic_operator(
         | Operator::I32Uzumaki { .. }
         | Operator::I64Uzumaki { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-                description: "non-deterministic instruction outside a spec function cannot be \
-                             represented in the vanilla WasmCert proof model"
+                description: "non-deterministic instruction in a function body the emitted \
+                             module retains cannot be represented in the vanilla WasmCert \
+                             proof model"
                     .into(),
             }));
         }
@@ -1578,10 +2055,12 @@ fn translate_basic_operator(
         Operator::Return => "BI_return".to_string(),
         Operator::Call { function_index } => {
             // A `BI_call` operand indexes the emitted module's instantiated
-            // function space; renumber it past every omitted spec function. A
-            // surviving body never calls a spec function (they are not
-            // executable), so an omitted target here is a fail-closed error.
-            let target = remap.instantiated(*function_index)?;
+            // function space; renumber it past every omitted spec function. No
+            // body kept in the module — executable or retained — may call a
+            // spec function (omitted ones are not executable; retained ones
+            // are obligation subjects), so either target is a fail-closed
+            // error.
+            let target = remap.referenced_instantiated(*function_index)?;
             format!("BI_call {target}%N")
         }
         Operator::CallIndirect {
@@ -1947,9 +2426,8 @@ fn translate_basic_operator(
         }
         Operator::TypedSelect { .. } => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
-                description:
-                    "typed select (WasmCert supports it; no translator lowering is wired)"
-                        .into(),
+                description: "typed select (WasmCert supports it; no translator lowering is wired)"
+                    .into(),
             }));
         }
         Operator::RefNull { .. } => {
@@ -1962,8 +2440,8 @@ fn translate_basic_operator(
             // A `ref.func` operand indexes the instantiated function space, the
             // same space `BI_call` and the desugared element items index, so it
             // is renumbered past every omitted spec function and is fail-closed
-            // on a reference to one.
-            let target = remap.instantiated(*function_index)?;
+            // on a reference to a spec function, omitted or retained.
+            let target = remap.referenced_instantiated(*function_index)?;
             format!("BI_ref_func {target}%N")
         }
         Operator::TableFill { table } => format!("BI_table_fill {table}%N"),
@@ -2614,7 +3092,13 @@ mod tests {
     use super::*;
 
     fn mem(memory64: bool, shared: bool, page_size_log2: Option<u32>) -> MemoryType {
-        MemoryType { memory64, shared, initial: 1, maximum: Some(1), page_size_log2 }
+        MemoryType {
+            memory64,
+            shared,
+            initial: 1,
+            maximum: Some(1),
+            page_size_log2,
+        }
     }
 
     fn assert_unsupported(result: anyhow::Result<String>, needle: &str) {
@@ -2624,7 +3108,10 @@ mod tests {
         else {
             panic!("expected UnsupportedFeature, got {err:?}");
         };
-        assert!(description.contains(needle), "description names the feature: {description}");
+        assert!(
+            description.contains(needle),
+            "description names the feature: {description}"
+        );
     }
 
     #[test]
@@ -2640,13 +3127,19 @@ mod tests {
     fn a_memory64_memory_is_rejected() {
         // C-4: the translator must never silently encode a 64-bit machine as the
         // 32-bit `Mm` record, which has no memory64 field.
-        assert_unsupported(translate_memory_type_limits(&mem(true, false, None)), "memory64");
+        assert_unsupported(
+            translate_memory_type_limits(&mem(true, false, None)),
+            "memory64",
+        );
     }
 
     #[test]
     fn a_shared_memory_is_rejected() {
         // L-1: a shared memory has no representable flag in the target model.
-        assert_unsupported(translate_memory_type_limits(&mem(false, true, None)), "shared");
+        assert_unsupported(
+            translate_memory_type_limits(&mem(false, true, None)),
+            "shared",
+        );
     }
 
     #[test]

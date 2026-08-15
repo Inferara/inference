@@ -49,15 +49,18 @@ pub enum WasmToVError {
     RocqStdlibShadow { name: String },
 
     /// Joining the output module name and a spec name into the emitted
-    /// `<module>__<spec>_specs` / `valid_<module>__<spec>` grammar would
-    /// fabricate Rocq's reserved `__` separator. Each component is individually a
-    /// legal identifier (no internal `__`), but a component that *ends* with `_`
-    /// abuts the join separator — the module name abuts `__` (yielding `___`), the
-    /// spec name abuts the trailing `_specs` (yielding `__`). The `__` run is
-    /// reserved so the `<module>__<spec>` split stays unambiguous, so the name is
-    /// rejected with a rename hint rather than auto-escaped: proof-mode names
-    /// appear verbatim in the generated `.v`, and escaping would make them
-    /// unreadable.
+    /// `<module>__<spec>_specs` / `valid_<module>__<spec>` grammar (and its
+    /// reachability siblings `_ex_specs` / `_uq_specs` /
+    /// `valid_exists_<module>__<spec>` / `valid_unique_<module>__<spec>`,
+    /// which contain the same join) would fabricate Rocq's reserved `__`
+    /// separator. Each component is individually a legal identifier (no
+    /// internal `__`), but a component that *ends* with `_` abuts the join
+    /// separator — the module name abuts `__` (yielding `___`), the spec name
+    /// abuts a trailing `_`-led suffix such as `_specs` (yielding `__`). The
+    /// `__` run is reserved so the `<module>__<spec>` split stays unambiguous,
+    /// so the name is rejected with a rename hint rather than auto-escaped:
+    /// proof-mode names appear verbatim in the generated `.v`, and escaping
+    /// would make them unreadable.
     #[error(
         "the {offender_kind} `{offender}` ends with `_`, so joining it into the Rocq proof name \
          `{joined}` fabricates the reserved `__` separator; rename it to `{fix_hint}`"
@@ -106,9 +109,13 @@ pub enum WasmToVError {
 
     /// A hspec obligation names, or a spec-name set disagrees with, something
     /// the emitted module cannot represent: a spec name absent from
-    /// `inference.spec_funcs`, or a `T_app`/`HA_app_ok` symbol that resolves to
-    /// zero, more than one, an imported, or an omitted (spec) function. A
-    /// corrupt or inconsistent proof artifact, rejected fail-closed.
+    /// `inference.spec_funcs`; a `T_app`/`HA_app_ok` symbol that resolves to
+    /// zero, more than one, an imported, or a spec (omitted or retained)
+    /// function; a reachability (`exists`/`unique`) obligation whose target
+    /// cannot be resolved through the name section or whose frame metadata
+    /// (entry arity, source-visible slots) does not fit the retained function;
+    /// or an executable construct referencing a spec function. A corrupt or
+    /// inconsistent proof artifact, rejected fail-closed.
     #[error("inconsistent `inference.hspecs` obligations: {0}")]
     HspecInconsistent(String),
 

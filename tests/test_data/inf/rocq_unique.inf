@@ -1,10 +1,13 @@
-// Negative proof-mode fixture: the `unique` non-deterministic block has no
-// `hassert` encoding, so proof-mode codegen rejects the spec with a fatal
+// Negative proof-mode fixture: a nested `unique` non-deterministic BLOCK has
+// no `hassert` encoding, so proof-mode codegen rejects the spec with a fatal
 // `P002` diagnostic before any artifact is written — the construct never
-// reaches `wasm-to-v` or the emitted `.v`. Compile mode is unaffected (specs
-// are stripped from codegen). The `unique` block lives inside a `spec` because
-// non-deterministic constructs are valid only there (analysis rule A042).
-// Pinned by `p002_rejects_constructs_without_an_encoding` in
+// reaches `wasm-to-v` or the emitted `.v`. This is deliberately distinct from
+// a `unique`-quantified spec-function BODY (`fn f() unique { … }`), which is
+// reachability-lowered and emits a `ValidUniqueSpec` obligation — see
+// rocq_unique_spec.inf for that positive shape. Compile mode is unaffected
+// (specs are stripped from codegen). The `unique` block lives inside a `spec`
+// because non-deterministic constructs are valid only there (analysis rule
+// A042). Pinned by `p002_rejects_constructs_without_an_encoding` in
 // core/wasm-codegen/src/hassert/tests.rs and end-to-end by
 // `build_v_rejects_unique_block_with_p002` in apps/infs.
 spec UniqueSpec {

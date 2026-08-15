@@ -42,12 +42,19 @@ mod gate {
     /// the issue calls out: inline and function-body-modifier `forall`/`exists`/
     /// `assume`, cross-function calls (`BI_call`), comparisons, `assert`,
     /// structured control flow (`if`/`loop`), and negative integer constants at
-    /// every width. The `unique` block and the `exists`-kind spec function are
-    /// deliberately absent — neither has a `hassert` encoding, so proof-mode
-    /// codegen rejects them with fatal `P002`/`P001` diagnostics (pinned by the
-    /// unit tests in `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
-    /// `build_v_rejects_unique_block_with_p002` in `apps/infs`) rather than by a
-    /// corpus entry that would compile against the stub.
+    /// every width. The reachability kinds are covered by the last three
+    /// entries: `rocq_exists_spec.inf` and `rocq_unique_spec.inf` are the
+    /// corpus producers of the `ValidExistsSpec` and `ValidUniqueSpec`
+    /// grammars respectively (each kind needs its own producer — the two
+    /// select different predicates), and `spec_mixed_kinds.inf` puts all
+    /// three kinds plus a spec method behind one module so the partitioned
+    /// emission — the explicitly typed empty `(@nil hassert)` universal list
+    /// next to non-empty `_ex_specs`/`_uq_specs` partitions — elaborates
+    /// under `coqc`. Still deliberately absent is the nested `unique` *block*:
+    /// it has no `hassert` encoding, so proof-mode codegen rejects it with a
+    /// fatal `P002` (pinned by the unit tests in
+    /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
+    /// `build_v_rejects_unique_block_with_p002` in `apps/infs`).
     ///
     /// The last two entries exist for operator coverage rather than for a proof
     /// shape: between them they put every arithmetic, bitwise, shift and
@@ -71,6 +78,9 @@ mod gate {
         ("spec_negative_consts.inf", "spec_negative_consts"),
         ("spec_bitwise_arith.inf", "spec_bitwise_arith"),
         ("spec_operator_matrix.inf", "spec_operator_matrix"),
+        ("rocq_exists_spec.inf", "rocq_exists_spec"),
+        ("rocq_unique_spec.inf", "rocq_unique_spec"),
+        ("spec_mixed_kinds.inf", "spec_mixed_kinds"),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -78,11 +88,13 @@ mod gate {
     /// *executable* function bodies (`BI_*`), and the `hassert` obligation shapes
     /// (`ValidSpec`, `term_eq`, `Himpl`, `T_app`, `T_local`, `HA_ex`, …). The
     /// fork-only non-deterministic constructors (`BI_forall`/`BI_exists`/
-    /// `BI_assume`/`BI_unique`/`BI_uzumaki_num`) are deliberately ABSENT — spec
-    /// functions are omitted from the module record and non-det is rejected in
-    /// surviving bodies, so a regression that reintroduced one would fail the
-    /// stub compile, not this needle set. Asserting these keeps the `coqc` gate
-    /// meaningful even if a future change stops emitting one of them.
+    /// `BI_assume`/`BI_unique`/`BI_uzumaki_num`) are deliberately ABSENT —
+    /// forall/plain spec functions are omitted from the module record, retained
+    /// exists/unique bodies are reachability-lowered to vanilla WASM, and
+    /// non-det is rejected in any body the record keeps, so a regression that
+    /// reintroduced one would fail the stub compile, not this needle set.
+    /// Asserting these keeps the `coqc` gate meaningful even if a future change
+    /// stops emitting one of them.
     ///
     /// [`every_stub_declaration_has_a_producer`] now audits constructor
     /// coverage mechanically, which makes this list narrower than it used to be
@@ -125,6 +137,15 @@ mod gate {
         "HA_ex",
         "HA_has_type ",
         "BT_valtype (Some",
+        // The reachability grammar, in its applied forms: the kind-selected
+        // theorems, the partition list's type ascription, and a record field
+        // (one stands in for all four — a record literal spells them
+        // together). Absent needles here would let the kind branch in the
+        // emitter rot while every forall-only fixture stayed green.
+        "ValidExistsSpec ",
+        "ValidUniqueSpec ",
+        "list reachability_spec",
+        "reach_payload",
     ];
 
     /// Every `Binop_i` spelling the obligation printer can write, in the order
@@ -320,6 +341,7 @@ mod gate {
         ModuleSurface,
         InstructionSurface,
         Obligations,
+        Reachability,
     }
 
     impl HandbuiltModule {
@@ -329,6 +351,7 @@ mod gate {
             Self::ModuleSurface,
             Self::InstructionSurface,
             Self::Obligations,
+            Self::Reachability,
         ];
 
         /// The name the translator is given; also the `.v` basename and the
@@ -339,6 +362,7 @@ mod gate {
                 Self::ModuleSurface => "module_surface",
                 Self::InstructionSurface => "instruction_surface",
                 Self::Obligations => "handbuilt_obligations",
+                Self::Reachability => "handbuilt_reachability",
             }
         }
 
@@ -352,6 +376,7 @@ mod gate {
                 Self::ModuleSurface => translate_wat(module, MODULE_SURFACE_WAT),
                 Self::InstructionSurface => translate_wat(module, &instruction_surface_wat()),
                 Self::Obligations => handbuilt_obligations_v(module),
+                Self::Reachability => handbuilt_reachability_v(module),
             };
             GatedModule {
                 source: module,
@@ -411,6 +436,7 @@ mod gate {
         ("wasm", "host"),
         ("wasm_verifier", "Assertions"),
         ("wasm_verifier", "Verifier"),
+        ("wasm_verifier", "Exists"),
     ];
 
     /// Physical path of the vendored stub directory, relative to this crate.
@@ -1241,7 +1267,7 @@ mod gate {
     /// with a `$` and why the module itself must stay anonymous — a name-section
     /// module name would override the module name passed in.
     fn handbuilt_obligations_v(module_name: &str) -> String {
-        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HTerm};
+        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HTerm, SpecKind};
 
         let bytes = wat::parse_str("(module (func $probe (param i32) (result i32) local.get 0))")
             .expect("obligation-probe fixture assembles");
@@ -1271,7 +1297,10 @@ mod gate {
         let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         spec_funcs.insert("Probe".to_string(), Vec::new());
         let mut hspecs = inference::HSpecMap::default();
-        hspecs.insert("Probe".to_string(), vec![HSpecEntry::new(probe(), body)]);
+        hspecs.insert(
+            "Probe".to_string(),
+            vec![HSpecEntry::new(probe(), body, SpecKind::Forall)],
+        );
 
         inference::wasm_to_v(module_name, &bytes, &spec_funcs, &hspecs)
             .unwrap_or_else(|e| panic!("wasm_to_v failed for the obligation probe: {e}"))
@@ -1348,6 +1377,106 @@ mod gate {
             &module,
             "Obligation probe generated and its `HA_true`, `HA_false`, \
              `HA_defined` and `HA_app_ok` shapes verified",
+        );
+    }
+
+    /// A hand-built reachability obligation map carrying both kinds at once,
+    /// with explicitly chosen indices, arities and visible-locs lists.
+    ///
+    /// The corpus's `exists`/`unique` fixtures reach the same grammar through
+    /// the real pipeline; this map exists to pin the *translator's* half in
+    /// isolation — the record literal's `%N`/`%nat` scoping, the partition
+    /// lists, the kind-selected theorems, and the conditional `Exists`
+    /// preamble import — against inputs no codegen accident can drift.
+    ///
+    /// The obligation symbols are spelled in the producer's spec-folded form
+    /// (`Probe.ex_probe`): the name section carries the bare function name and
+    /// spec membership travels in `inference.spec_funcs`, so this also pins
+    /// the translator's qualifier-stripping resolution against exactly the
+    /// symbols codegen writes.
+    fn handbuilt_reachability_v(module_name: &str) -> String {
+        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HTerm, ReachMeta, SpecKind};
+
+        let bytes = wat::parse_str(
+            "(module (func $ex_probe (param i32 i32)) (func $uq_probe (param i32) (local i32)))",
+        )
+        .expect("reachability-probe fixture assembles");
+
+        let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        spec_funcs.insert("Probe".to_string(), vec![0, 1]);
+        let mut hspecs = inference::HSpecMap::default();
+        hspecs.insert(
+            "Probe".to_string(),
+            vec![
+                HSpecEntry::new(
+                    HFnRef("Probe.ex_probe".to_string()),
+                    HAssert::TermEq(HTerm::Local(1), HTerm::Local(0)),
+                    SpecKind::Exists(ReachMeta {
+                        entry_arity: 1,
+                        visible_locs: vec![0, 1],
+                    }),
+                ),
+                HSpecEntry::new(
+                    HFnRef("Probe.uq_probe".to_string()),
+                    HAssert::Defined(HTerm::Local(0)),
+                    SpecKind::Unique(ReachMeta {
+                        entry_arity: 0,
+                        visible_locs: vec![0],
+                    }),
+                ),
+            ],
+        );
+
+        inference::wasm_to_v(module_name, &bytes, &spec_funcs, &hspecs)
+            .unwrap_or_else(|e| panic!("wasm_to_v failed for the reachability probe: {e}"))
+    }
+
+    /// The hand-built reachability map pins the kind-selected emission
+    /// grammar: the `reachability_spec` record literal (with its `%N`/`%nat`
+    /// scopes), the per-partition gathering lists, the `ValidExistsSpec`/
+    /// `ValidUniqueSpec` theorems, the conditional `Exists` preamble import,
+    /// and the retained bodies in the module record.
+    #[test]
+    fn handbuilt_reachability_obligations_pin_the_kind_selected_grammar() {
+        let module = HandbuiltModule::Reachability.build();
+        let v = &module.v;
+
+        for needle in [
+            "From WasmVerifier Require Import Assertions Verifier Exists.\n",
+            "Definition handbuilt_reachability__Probe_exspec1 : reachability_spec :=",
+            "reach_func := 0%N; reach_entry_arity := 1%nat",
+            "reach_visible_locs := (0%N :: 1%N :: nil); \
+             reach_payload := term_eq (T_local 1%N) (T_local 0%N)",
+            "Definition handbuilt_reachability__Probe_ex_specs : list reachability_spec := \
+             (handbuilt_reachability__Probe_exspec1 :: nil).",
+            "Theorem valid_exists_handbuilt_reachability__Probe : ValidExistsSpec \
+             handbuilt_reachability handbuilt_reachability__Probe_ex_specs.",
+            "Definition handbuilt_reachability__Probe_uqspec1 : reachability_spec :=",
+            "reach_func := 1%N; reach_entry_arity := 0%nat",
+            "reach_visible_locs := (0%N :: nil); reach_payload := HA_defined (T_local 0%N)",
+            "Definition handbuilt_reachability__Probe_uq_specs : list reachability_spec := \
+             (handbuilt_reachability__Probe_uqspec1 :: nil).",
+            "Theorem valid_unique_handbuilt_reachability__Probe : ValidUniqueSpec \
+             handbuilt_reachability handbuilt_reachability__Probe_uq_specs.",
+            // The universal grammar stays, with the explicitly-typed empty
+            // list: no entry here is universal.
+            "Definition handbuilt_reachability__Probe_specs : list hassert := (@nil hassert).",
+            "Theorem valid_handbuilt_reachability__Probe : ValidSpec handbuilt_reachability \
+             handbuilt_reachability__Probe_specs.",
+            // Both retained bodies are ordinary `module_func` definitions.
+            "Definition ex_probe : module_func :=",
+            "Definition uq_probe : module_func :=",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the reachability probe must emit `{needle}`; got:\n{v}"
+            );
+        }
+
+        type_check_with_coqc(
+            &module,
+            "Reachability probe generated and its record-literal, partition \
+             and kind-selected theorem shapes verified",
         );
     }
 
@@ -2289,6 +2418,173 @@ Definition a_definition (x : nat) : nat := x.
         );
     }
 
+    /// Committed `.v` golden for the `exists`-kind reachability fixture.
+    /// Regenerate with the `#[ignore]`d [`regenerate::regenerate_exists_spec_v`]
+    /// after an intentional emitter change.
+    fn exists_spec_golden_path() -> PathBuf {
+        get_test_data_path().join("rocq").join("rocq_exists_spec.v")
+    }
+
+    /// The proof-mode `.v` for the `exists`-kind fixture must match a committed
+    /// golden byte-for-byte, and the golden must carry the reachability
+    /// contract shape: the spec function is RETAINED in the module record with
+    /// a vanilla body and a choice-suffixed type, the obligation is a
+    /// `reachability_spec` record whose payload reads the real frame slots,
+    /// the visible-locs list carries the entry parameter and both NAMED
+    /// choices while excluding the anonymous one, and the kind selects
+    /// `ValidExistsSpec` — never `ValidSpec` — over the payload.
+    #[test]
+    fn exists_spec_matches_committed_v_golden() {
+        let generated = generate_v("rocq_exists_spec.inf", "rocq_exists_spec");
+        let golden_path = exists_spec_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_exists_spec_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for rocq_exists_spec.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_exists_spec_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder a reachability regression into
+        // the golden.
+        assert!(
+            golden.contains("From WasmVerifier Require Import Assertions Verifier Exists.\n"),
+            "a reachability-bearing module must import the `Exists` contract:\n{golden}"
+        );
+        assert!(
+            golden.contains("Definition ex_double : module_func :="),
+            "the exists spec function must be RETAINED in the module record — \
+             the obligation's `reach_func` looks it up there:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i64 :: T_num T_i32 :: nil) (nil)"
+            ),
+            "the retained function's type must carry the hidden choice suffix \
+             (entry i32, then the i32/i64/i32 choices), with no result:\n{golden}"
+        );
+        assert!(
+            golden.contains("reach_func := 1%N; reach_entry_arity := 1%nat"),
+            "the record must name the retained function's `mod_funcs` index and \
+             the declared-parameter count ahead of the suffix:\n{golden}"
+        );
+        assert!(
+            golden.contains("reach_visible_locs := (0%N :: 1%N :: 2%N :: nil)"),
+            "visible locs must be the entry parameter plus the two NAMED \
+             choices — the anonymous call-argument choice at slot 3 has no \
+             source-visible face and must be excluded:\n{golden}"
+        );
+        assert!(
+            golden.contains("(T_app 0 ((T_local 3%N) :: nil))"),
+            "the payload must still READ the anonymous choice through its \
+             frame slot — excluded from the observation, not from the \
+             claim:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Definition rocq_exists_spec__ReachableDouble_specs : list hassert := \
+                 (@nil hassert)."
+            ),
+            "the universal list must stay, explicitly typed and empty — the \
+             exists payload must NOT be emitted under `ValidSpec`:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Theorem valid_exists_rocq_exists_spec__ReachableDouble : \
+                 ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_ex_specs."
+            ),
+            "the exists partition must be consumed by a `ValidExistsSpec` \
+             theorem:\n{golden}"
+        );
+        assert!(
+            !golden.contains("HA_has_type"),
+            "a reachability payload denotes against the real reached frame, \
+             where every slot already carries its runtime type — the universal \
+             slot guards must not appear:\n{golden}"
+        );
+        assert!(
+            !golden.contains("BI_forall") && !golden.contains("BI_exists"),
+            "the retained body must be vanilla WASM — no non-det constructor \
+             may survive:\n{golden}"
+        );
+    }
+
+    /// Committed `.v` golden for the `unique`-kind reachability fixture.
+    /// Regenerate with the `#[ignore]`d [`regenerate::regenerate_unique_spec_v`]
+    /// after an intentional emitter change.
+    fn unique_spec_golden_path() -> PathBuf {
+        get_test_data_path().join("rocq").join("rocq_unique_spec.v")
+    }
+
+    /// The proof-mode `.v` for the `unique`-kind fixture must match a committed
+    /// golden byte-for-byte, and the golden must carry the unique half of the
+    /// reachability contract: the same retention and record grammar as
+    /// `exists`, gathered into `_uq_specs` under `ValidUniqueSpec`, with the
+    /// named choice in the visible-locs list — the projection `unique`
+    /// compares exit states through. Nothing else in the repository
+    /// distinguishes the named-choice rule from a params-only projection at
+    /// the emitted-text level, so this golden is that rule's regression pin.
+    #[test]
+    fn unique_spec_matches_committed_v_golden() {
+        let generated = generate_v("rocq_unique_spec.inf", "rocq_unique_spec");
+        let golden_path = unique_spec_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_unique_spec_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for rocq_unique_spec.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_unique_spec_v -- --ignored`",
+            golden_path.display()
+        );
+
+        assert!(
+            golden.contains("Definition uq_parity : module_func :="),
+            "the unique spec function must be RETAINED in the module record:\n{golden}"
+        );
+        assert!(
+            golden.contains("reach_visible_locs := (0%N :: 1%N :: nil)"),
+            "visible locs must be the entry parameter AND the named choice — a \
+             params-only projection would silently weaken `unique` to \
+             `exists`:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Theorem valid_unique_rocq_unique_spec__UniqueParity : \
+                 ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity_uq_specs."
+            ),
+            "the unique partition must be consumed by a `ValidUniqueSpec` \
+             theorem:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "Definition rocq_unique_spec__UniqueParity_specs : list hassert := \
+                 (@nil hassert)."
+            ),
+            "the unique payload must NOT be emitted under `ValidSpec`:\n{golden}"
+        );
+        assert!(
+            !golden.contains("HA_ex"),
+            "the choices are quantified operationally by the predicate — no \
+             `HA_ex` binder may double-quantify them in the payload:\n{golden}"
+        );
+    }
+
     /// Regeneration helpers for the committed `.v` goldens. `#[ignore]`d by
     /// design (per CONTRIBUTING.md): they are not behavioral tests but rewrite a
     /// golden from current emitter output. Run explicitly after an intentional
@@ -2296,7 +2592,10 @@ Definition a_definition (x : nat) : nat := x.
     /// `cargo test -p inference-tests regenerate_prime_example_v -- --ignored`.
     #[cfg(test)]
     mod regenerate {
-        use super::{generate_v, literal_ctx_golden_path, prime_golden_path};
+        use super::{
+            exists_spec_golden_path, generate_v, literal_ctx_golden_path, prime_golden_path,
+            unique_spec_golden_path,
+        };
         use std::path::Path;
 
         fn write_golden(v: &str, path: &Path) {
@@ -2320,6 +2619,20 @@ Definition a_definition (x : nat) : nat := x.
         fn regenerate_literal_ctx_v() {
             let v = generate_v("spec_literal_ctx.inf", "spec_literal_ctx");
             write_golden(&v, &literal_ctx_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_exists_spec_v() {
+            let v = generate_v("rocq_exists_spec.inf", "rocq_exists_spec");
+            write_golden(&v, &exists_spec_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_unique_spec_v() {
+            let v = generate_v("rocq_unique_spec.inf", "rocq_unique_spec");
+            write_golden(&v, &unique_spec_golden_path());
         }
     }
 }

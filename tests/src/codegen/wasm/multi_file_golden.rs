@@ -310,6 +310,86 @@ mod multi_file_golden_codegen_tests {
         }
     }
 
+    /// Proof-mode byte golden for the `exists`-kind reachability lowering.
+    /// The spec function's WASM type carries its hidden trailing choice
+    /// parameters (i32, i64, i32 after the declared i32), which changes the
+    /// module's TYPE section — the one artifact surface nothing else
+    /// byte-pins — so this golden is the byte-level regression pin for the
+    /// choice suffix. Like `proof_specs`, the WAT (tier 2) and Wasmtime
+    /// (tier 4) tiers are skipped: the module still carries 0xfc proof
+    /// scaffolding in general, and the choice parameters have no caller.
+    ///
+    /// The embedded `inference.hspecs` entry is decoded and asserted on
+    /// beyond the byte compare, for the same reason `proof_specs_test`
+    /// decodes its payload: a golden regenerated from a kind regression
+    /// (say, the entry silently reverting to `Forall`) would pass its own
+    /// byte compare.
+    #[test]
+    fn proof_exists_test() {
+        let actual = proof_wasm_codegen_project(module_path!(), "proof_exists");
+        let expected = read_project_golden_wasm(module_path!(), "proof_exists");
+        assert_wasms_modules_equivalence(&expected, &actual);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("validate failed for proof_exists: {e}"));
+
+        let payload = custom_section(&actual, inference_hassert::HSPECS_SECTION_NAME)
+            .expect("the exists golden must embed inference.hspecs");
+        let hspecs =
+            inference_hassert::decode(&payload).expect("the embedded hspecs section must decode");
+        let entries = hspecs
+            .get("ReachExists")
+            .expect("the spec must carry an obligation entry");
+        assert_eq!(entries.len(), 1, "one obligation for the one spec function");
+        match &entries[0].kind {
+            inference_hassert::SpecKind::Exists(meta) => {
+                assert_eq!(meta.entry_arity, 1, "one declared parameter");
+                assert_eq!(
+                    meta.visible_locs,
+                    vec![0, 1, 2],
+                    "entry parameter + the two named choices; the anonymous \
+                     call-argument choice at slot 3 is excluded"
+                );
+            }
+            other => panic!("the entry must be exists-kind, got {other:?}"),
+        }
+    }
+
+    /// Proof-mode byte golden for the `unique`-kind reachability lowering —
+    /// the unique sibling of [`proof_exists_test`], byte-pinning the same
+    /// choice-suffix lowering under the other kind tag. The decoded entry is
+    /// where the two goldens genuinely differ: a unique-kind entry whose
+    /// visible locs dropped the named choice would weaken the judgment to
+    /// agreement-on-parameters, and nothing but this metadata pins that.
+    #[test]
+    fn proof_unique_test() {
+        let actual = proof_wasm_codegen_project(module_path!(), "proof_unique");
+        let expected = read_project_golden_wasm(module_path!(), "proof_unique");
+        assert_wasms_modules_equivalence(&expected, &actual);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("validate failed for proof_unique: {e}"));
+
+        let payload = custom_section(&actual, inference_hassert::HSPECS_SECTION_NAME)
+            .expect("the unique golden must embed inference.hspecs");
+        let hspecs =
+            inference_hassert::decode(&payload).expect("the embedded hspecs section must decode");
+        let entries = hspecs
+            .get("ReachUnique")
+            .expect("the spec must carry an obligation entry");
+        assert_eq!(entries.len(), 1, "one obligation for the one spec function");
+        match &entries[0].kind {
+            inference_hassert::SpecKind::Unique(meta) => {
+                assert_eq!(meta.entry_arity, 1, "one declared parameter");
+                assert_eq!(
+                    meta.visible_locs,
+                    vec![0, 1],
+                    "entry parameter + the named choice — the projection \
+                     `unique` compares exit states through"
+                );
+            }
+            other => panic!("the entry must be unique-kind, got {other:?}"),
+        }
+    }
+
     /// The payload of the named custom section, or `None` when the module
     /// carries no such section.
     fn custom_section(wasm: &[u8], name: &str) -> Option<Vec<u8>> {
@@ -404,19 +484,36 @@ mod multi_file_golden_codegen_tests {
             regen("single_via_project");
         }
 
+        /// Proof mode: byte golden only, no WAT (non-det/spec opcodes).
+        fn regen_proof(test_name: &str) {
+            let wasm = proof_wasm_codegen_project(parent_module_path(), test_name);
+            let dir = crate::utils::get_project_test_dir(parent_module_path(), test_name);
+            let wasm_path = dir.join(format!("{test_name}.wasm"));
+            std::fs::write(&wasm_path, &wasm)
+                .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+            println!(
+                "Regenerated: {} ({} bytes)",
+                wasm_path.display(),
+                wasm.len()
+            );
+        }
+
         #[test]
         #[ignore]
         fn regenerate_proof_specs() {
-            // Proof mode: byte golden only, no WAT (non-det/spec opcodes).
-            let wasm = proof_wasm_codegen_project(parent_module_path(), "proof_specs");
-            let dir = crate::utils::get_project_test_dir(
-                parent_module_path(),
-                "proof_specs",
-            );
-            let wasm_path = dir.join("proof_specs.wasm");
-            std::fs::write(&wasm_path, &wasm)
-                .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
-            println!("Regenerated: {} ({} bytes)", wasm_path.display(), wasm.len());
+            regen_proof("proof_specs");
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_proof_exists() {
+            regen_proof("proof_exists");
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_proof_unique() {
+            regen_proof("proof_unique");
         }
     }
 }

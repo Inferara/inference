@@ -122,7 +122,9 @@ mod fixture_spec_method {
             "top-level pub fn `main` must be exported; got {exports:?}"
         );
         assert!(
-            !exports.iter().any(|n| n.contains("sum_coords") || n.contains("doubled_x")),
+            !exports
+                .iter()
+                .any(|n| n.contains("sum_coords") || n.contains("doubled_x")),
             "spec-inner struct methods must not be exported; got {exports:?}"
         );
 
@@ -171,7 +173,11 @@ mod fixture_spec_calls_top {
         let caller_list = by_spec
             .get("Caller")
             .expect("spec Caller should have a per-spec index list");
-        assert_eq!(caller_list.len(), 1, "spec Caller has one inner fn; got {caller_list:?}");
+        assert_eq!(
+            caller_list.len(),
+            1,
+            "spec Caller has one inner fn; got {caller_list:?}"
+        );
         let caller_idx = caller_list[0];
         assert_eq!(caller_idx, 2, "caller should land at index 2");
 
@@ -299,10 +305,8 @@ mod fixture_mixed_compile_proof {
     ///   4. Compile-mode in-memory spec map is empty; proof-mode is not.
     #[test]
     fn compile_mode_strictly_smaller_and_lacks_spec_section() {
-        let compile_out =
-            compile_inf("mixed_compile_proof.inf", CompilationMode::Compile, "mixed");
-        let proof_out =
-            compile_inf("mixed_compile_proof.inf", CompilationMode::Proof, "mixed");
+        let compile_out = compile_inf("mixed_compile_proof.inf", CompilationMode::Compile, "mixed");
+        let proof_out = compile_inf("mixed_compile_proof.inf", CompilationMode::Proof, "mixed");
 
         let compile_wasm = compile_out.wasm();
         let proof_wasm = proof_out.wasm();
@@ -464,26 +468,152 @@ mod fixture_nondet_block_lowering {
 }
 
 // ============================================================================
-// Fixture 7: spec_nondet_body_modifiers.inf — exists/assume body modifiers reject
+// Fixture 7: spec_nondet_body_modifiers.inf — forall/exists body modifiers
 // ============================================================================
 #[cfg(test)]
-mod fixture_nondet_body_modifier_rejected {
+mod fixture_nondet_body_modifiers {
+    use super::helpers::{compile_inf, wasm_contains};
+    use inference_hassert::SpecKind;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// The two accepted body modifiers lower differently in proof mode: the
+    /// `forall` body keeps its `0xfc 0x3a` wrapper and `0xfc 0x31` draw, while
+    /// the `exists` body is reachability-lowered — no `0xfc 0x3b` wrapper,
+    /// exactly one draw in the whole module (the forall body's), and its
+    /// obligation travels as an exists-kind `inference.hspecs` entry whose
+    /// named choice is source-visible.
+    #[test]
+    fn forall_keeps_its_wrapper_and_exists_lowers_as_a_reachability_entry() {
+        let output = compile_inf(
+            "spec_nondet_body_modifiers.inf",
+            CompilationMode::Proof,
+            "nbm",
+        );
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+
+        assert!(
+            wasm_contains(wasm, &[0xfc, 0x3a]),
+            "the forall body wrapper must survive"
+        );
+        assert!(
+            !wasm_contains(wasm, &[0xfc, 0x3b]),
+            "the exists body wrapper must be suppressed by the reachability lowering"
+        );
+
+        let entries = output
+            .hspecs()
+            .get("NondetBodyModifiers")
+            .expect("the spec must carry obligations");
+        assert_eq!(entries.len(), 2, "one obligation per free function");
+        let kind_of = |name: &str| {
+            &entries
+                .iter()
+                .find(|e| e.fn_symbol.0 == name)
+                .unwrap_or_else(|| panic!("no obligation `{name}`"))
+                .kind
+        };
+        assert_eq!(
+            *kind_of("NondetBodyModifiers.forall_fn"),
+            SpecKind::Forall,
+            "the forall body stays a universal obligation"
+        );
+        match kind_of("NondetBodyModifiers.exists_fn") {
+            SpecKind::Exists(meta) => {
+                assert_eq!(meta.entry_arity, 0);
+                assert_eq!(
+                    meta.visible_locs,
+                    vec![0],
+                    "the named choice parameter is the source-visible face"
+                );
+            }
+            other => panic!("exists_fn must carry an exists-kind entry, got {other:?}"),
+        }
+    }
+
+    /// End to end through the embedded `inference.hspecs` section: the
+    /// exists-kind entry selects the reachability grammar in the emitted `.v` —
+    /// the exists spec function's vanilla body is RETAINED in the module
+    /// record (`reach_func` looks it up there), its obligation becomes a
+    /// `reachability_spec` record consumed by a `ValidExistsSpec` theorem, and
+    /// the preamble imports the `Exists` module. The forall sibling keeps the
+    /// universal grammar: its body stays omitted and its obligation stays a
+    /// plain `hassert` under `ValidSpec`.
+    #[test]
+    fn wasm_to_v_emits_the_reachability_grammar_for_the_exists_kind_entry() {
+        let output = compile_inf(
+            "spec_nondet_body_modifiers.inf",
+            CompilationMode::Proof,
+            "nbm",
+        );
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v(
+            "Ignored",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("an exists-kind obligation emits the reachability grammar");
+
+        for needle in [
+            "From WasmVerifier Require Import Assertions Verifier Exists.\n",
+            // The retained exists body: the sole surviving function, so its
+            // `reach_func` is `mod_funcs` index 0 (the omitted forall sibling
+            // shifts it down past itself). Its named choice parameter is the
+            // one source-visible slot. The `Definition` name is the bare
+            // name-section name; spec membership travels in
+            // `inference.spec_funcs`, not in the function name.
+            "Definition exists_fn : module_func :=",
+            "Definition nbm__NondetBodyModifiers_exspec1 : reachability_spec :=",
+            "reach_func := 0%N; reach_entry_arity := 0%nat",
+            "reach_visible_locs := (0%N :: nil)",
+            "Definition nbm__NondetBodyModifiers_ex_specs : list reachability_spec := \
+             (nbm__NondetBodyModifiers_exspec1 :: nil).",
+            "Theorem valid_exists_nbm__NondetBodyModifiers : ValidExistsSpec nbm \
+             nbm__NondetBodyModifiers_ex_specs.",
+            // The forall sibling keeps the universal grammar.
+            "Definition nbm__NondetBodyModifiers_hspec1 : hassert :=",
+            "Theorem valid_nbm__NondetBodyModifiers : ValidSpec nbm \
+             nbm__NondetBodyModifiers_specs.",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the reachability emission must contain `{needle}`:\n{v}"
+            );
+        }
+
+        // The forall body stays omitted, and the retained exists body is
+        // vanilla — no non-det constructor may reach the `.v`.
+        assert!(
+            !v.contains("Definition forall_fn"),
+            "the forall spec function's body must stay omitted:\n{v}"
+        );
+        assert!(
+            !v.contains("BI_forall") && !v.contains("BI_exists"),
+            "no non-det constructor may reach the `.v`:\n{v}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture 7b: spec_assume_body_modifier.inf — assume body modifier rejects
+// ============================================================================
+#[cfg(test)]
+mod fixture_assume_body_modifier_rejected {
     use crate::utils::build_ast;
     use inference_type_checker::TypeCheckerBuilder;
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
-    /// A spec function whose *body modifier* is `exists`/`assume`
-    /// (`fn f() exists { … }`) carries a proof obligation with no milestone-1
-    /// `hassert` encoding — only `forall`-quantified (or plain) spec functions
-    /// translate. Proof-mode codegen must reject it with `P001`, naming both the
-    /// `exists`- and `assume`-modified functions. (Previously this fixture rode
-    /// the coqc corpus while the obligation pass was additive; the flip to fatal
-    /// makes it a hard error, so it is a negative test now.)
+    /// A spec function whose *body modifier* is `assume` (`fn f() assume
+    /// { … }`) states no property — `assume` is not a quantifier, so with no
+    /// enclosing `forall` there is no claim to prove. Proof-mode codegen must
+    /// reject it with `P001` naming the function.
     #[test]
-    fn exists_and_assume_body_modifiers_are_rejected() {
+    fn an_assume_body_modifier_is_rejected() {
         let path = crate::utils::get_test_data_path()
             .join("inf")
-            .join("spec_nondet_body_modifiers.inf");
+            .join("spec_assume_body_modifier.inf");
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let arena = build_ast(source);
@@ -492,7 +622,7 @@ mod fixture_nondet_body_modifier_rejected {
             .typed_context();
         let err = inference_wasm_codegen::codegen(
             &typed_context,
-            "nbm",
+            "abm",
             inference_wasm_codegen::CodegenOptions {
                 target: Target::Wasm32,
                 mode: CompilationMode::Proof,
@@ -500,11 +630,143 @@ mod fixture_nondet_body_modifier_rejected {
                 features: inference_wasm_codegen::EmitFeatures::default(),
             },
         )
-        .expect_err("exists/assume body-modifier specs have no assertion encoding");
+        .expect_err("an assume body-modifier spec states no property");
         let msg = err.to_string();
         assert!(
-            msg.contains("P001") && msg.contains("exists_fn") && msg.contains("assume_fn"),
-            "expected a P001 rejection naming both body-modifier functions; got:\n{msg}"
+            msg.contains("P001") && msg.contains("assume_fn"),
+            "expected a P001 rejection naming the assume-bodied function; got:\n{msg}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture 7c: spec_mixed_kinds.inf — partitioned emission across all kinds
+// ============================================================================
+#[cfg(test)]
+mod fixture_mixed_kinds {
+    use super::helpers::compile_inf;
+    use inference_hassert::SpecKind;
+    use inference_wasm_codegen::CompilationMode;
+    use rustc_hash::FxHashMap;
+
+    /// Every obligation entry carries the kind its body modifier declared:
+    /// `MixedKinds` holds all three kinds in one spec block, `Observed` pairs
+    /// a spec method (no obligation channel — it contributes no entry at all)
+    /// with an exists and a unique function. The kind is what selects the
+    /// emitted grammar downstream, so a silent reversion to `Forall` here
+    /// would emit a reachability payload under `ValidSpec` — the exact
+    /// mis-judgment the kind channel exists to prevent.
+    #[test]
+    fn every_entry_carries_its_declared_kind() {
+        let output = compile_inf("spec_mixed_kinds.inf", CompilationMode::Proof, "mixedkinds");
+        inf_wasmparser::validate(output.wasm()).expect("WASM must validate");
+
+        let hspecs = output.hspecs();
+        let kind_of = |spec: &str, name: &str| {
+            &hspecs
+                .get(spec)
+                .unwrap_or_else(|| panic!("no obligations for `{spec}`"))
+                .iter()
+                .find(|e| e.fn_symbol.0 == name)
+                .unwrap_or_else(|| panic!("no obligation `{name}`"))
+                .kind
+        };
+        assert_eq!(
+            *kind_of("MixedKinds", "MixedKinds.all_bump"),
+            SpecKind::Forall
+        );
+        assert!(matches!(
+            kind_of("MixedKinds", "MixedKinds.some_bump"),
+            SpecKind::Exists(_)
+        ));
+        assert!(matches!(
+            kind_of("MixedKinds", "MixedKinds.one_bump"),
+            SpecKind::Unique(_)
+        ));
+        let observed = hspecs
+            .get("Observed")
+            .expect("Observed must carry obligations");
+        assert_eq!(
+            observed.len(),
+            2,
+            "one entry per free function; the method contributes none"
+        );
+        assert!(matches!(
+            kind_of("Observed", "Observed.some_sample"),
+            SpecKind::Exists(_)
+        ));
+        assert!(matches!(
+            kind_of("Observed", "Observed.one_sample"),
+            SpecKind::Unique(_)
+        ));
+    }
+
+    /// End to end through the embedded sections: the emitted `.v` partitions
+    /// each spec's obligations by kind, with definitions and theorems that
+    /// cannot disagree — `MixedKinds` gets all three non-empty forms at once,
+    /// while `Observed` pairs the explicitly typed EMPTY universal list with
+    /// both non-empty reachability partitions. A classification bug that let a
+    /// reachability entry leak into the universal list would surface as a
+    /// non-empty `Observed_specs` here.
+    #[test]
+    fn wasm_to_v_partitions_each_spec_by_kind() {
+        let output = compile_inf("spec_mixed_kinds.inf", CompilationMode::Proof, "mixedkinds");
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v = inference::wasm_to_v(
+            "Ignored",
+            output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("mixed-kind obligations translate");
+
+        for needle in [
+            "From WasmVerifier Require Import Assertions Verifier Exists.\n",
+            // MixedKinds: all three partitions non-empty under one spec name.
+            "Definition mixedkinds__MixedKinds_specs : list hassert := \
+             (mixedkinds__MixedKinds_hspec1 :: nil).",
+            "Definition mixedkinds__MixedKinds_ex_specs : list reachability_spec := \
+             (mixedkinds__MixedKinds_exspec1 :: nil).",
+            "Definition mixedkinds__MixedKinds_uq_specs : list reachability_spec := \
+             (mixedkinds__MixedKinds_uqspec1 :: nil).",
+            "Theorem valid_mixedkinds__MixedKinds : ValidSpec mixedkinds \
+             mixedkinds__MixedKinds_specs.",
+            "Theorem valid_exists_mixedkinds__MixedKinds : ValidExistsSpec mixedkinds \
+             mixedkinds__MixedKinds_ex_specs.",
+            "Theorem valid_unique_mixedkinds__MixedKinds : ValidUniqueSpec mixedkinds \
+             mixedkinds__MixedKinds_uq_specs.",
+            // Observed: the empty universal form next to both partitions.
+            "Definition mixedkinds__Observed_specs : list hassert := (@nil hassert).",
+            "Definition mixedkinds__Observed_ex_specs : list reachability_spec := \
+             (mixedkinds__Observed_exspec1 :: nil).",
+            "Definition mixedkinds__Observed_uq_specs : list reachability_spec := \
+             (mixedkinds__Observed_uqspec1 :: nil).",
+            // Retained reachability bodies; the forall body and the method
+            // stay omitted (asserted below).
+            "Definition some_bump : module_func :=",
+            "Definition one_bump : module_func :=",
+            "Definition some_sample : module_func :=",
+            "Definition one_sample : module_func :=",
+        ] {
+            assert!(
+                v.contains(needle),
+                "the partitioned emission must contain `{needle}`:\n{v}"
+            );
+        }
+
+        assert!(
+            !v.contains("Definition all_bump"),
+            "the forall spec function's body must stay omitted:\n{v}"
+        );
+        assert!(
+            !v.contains("Definition shifted"),
+            "the spec method's body must stay omitted:\n{v}"
+        );
+        let pos_mixed = v.find("Definition mixedkinds__MixedKinds_specs").unwrap();
+        let pos_observed = v.find("Definition mixedkinds__Observed_specs").unwrap();
+        assert!(
+            pos_mixed < pos_observed,
+            "per-spec emission stays alphabetical across kinds:\n{v}"
         );
     }
 }

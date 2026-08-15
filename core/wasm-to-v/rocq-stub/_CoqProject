@@ -7,3 +7,4 @@ wasm/datatypes.v
 wasm/host.v
 wasm_verifier/Assertions.v
 wasm_verifier/Verifier.v
+wasm_verifier/Exists.v

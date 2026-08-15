@@ -1,12 +1,16 @@
 //! The `hassert` verification-obligation IR and its `inference.hspecs`
 //! custom-section codec.
 //!
-//! A proof-mode Inference build turns each `forall`-quantified specification
-//! function into one logical obligation: a value of the wasm-verifier
-//! `hassert` assertion type (theories/`Assertions.v`). [`HAssert`] and
-//! [`HTerm`] are the Rust mirror of that inductive, and [`encode`]/[`decode`]
-//! serialize a whole program's obligations into the `inference.hspecs` WASM
-//! custom section so they survive linking and reach the Rocq translator.
+//! A proof-mode Inference build turns each specification free function into
+//! one logical obligation: a value of the wasm-verifier `hassert` assertion
+//! type (theories/`Assertions.v`). [`HAssert`] and [`HTerm`] are the Rust
+//! mirror of that inductive; each obligation entry additionally carries its
+//! quantifier kind ([`SpecKind`]) — `Forall` for a universal (`ValidSpec`)
+//! payload, `Exists`/`Unique` for a reachability payload whose [`ReachMeta`]
+//! records the entry arity and source-visible frame slots the downstream
+//! `reachability_spec` record needs. [`encode`]/[`decode`] serialize a whole
+//! program's obligations into the `inference.hspecs` WASM custom section so
+//! they survive linking and reach the Rocq translator.
 //!
 //! ## Why a separate leaf crate
 //!
@@ -51,6 +55,9 @@ mod ir;
 
 pub use codec::{
     DecodeError, HSPECS_SECTION_NAME, HSPECS_SECTION_VERSION, MAX_NAME_LEN, MAX_TREE_DEPTH,
-    PayloadError, decode, encode, validate,
+    MAX_VISIBLE_LOCS, PayloadError, decode, encode, validate,
 };
-pub use ir::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm};
+pub use ir::{
+    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm, ReachMeta,
+    SpecKind,
+};

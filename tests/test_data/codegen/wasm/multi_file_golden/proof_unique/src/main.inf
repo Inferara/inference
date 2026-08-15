@@ -1,0 +1,22 @@
+// Proof-mode byte golden for the `unique`-kind reachability lowering: the
+// same vanilla-body, choice-suffix lowering as the exists golden, carried as
+// a unique-kind `inference.hspecs` v2 entry. The single choice is NAMED —
+// `unique` compares source-visible exit states, so the choice must have a
+// visible-locs slot (an anonymous `@` in a `unique` body is rejected as
+// P012) — and the `assume` pins it to `parity(seed)`, so exactly one choice
+// survives per entry value: the shape `ValidUniqueSpec` states.
+fn parity(n: i32) -> i32 {
+    return n % 2;
+}
+
+spec ReachUnique {
+    fn uq_choice(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == parity(seed));
+        }
+        assert(bit * bit == bit);
+    }
+}
+
+pub fn main() {}
