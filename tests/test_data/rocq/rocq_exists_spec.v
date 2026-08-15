@@ -44,7 +44,7 @@ Definition ex_double : module_func := {|
     BI_local_set 1%N (*n*) ::
     BI_local_get 1%N (*n*) ::
     BI_local_get 0%N (*lo*) ::
-    BI_relop T_i32 (Relop_i (ROI_gt SX_S)) ::
+    BI_relop T_i32 (Relop_i (ROI_ge SX_S)) ::
     BI_testop T_i32 TO_eqz ::
     BI_if (BT_valtype None) (
       BI_unreachable ::
@@ -73,8 +73,8 @@ Definition ex_double : module_func := {|
       nil) ::
     BI_local_get 3%N (*__choice2*) ::
     BI_call 0%N ::
-    BI_local_get 0%N (*lo*) ::
-    BI_relop T_i32 (Relop_i (ROI_ge SX_S)) ::
+    BI_const_num (Vi32 0) ::
+    BI_relop T_i32 (Relop_i ROI_eq) ::
     BI_testop T_i32 TO_eqz ::
     BI_if (BT_valtype None) (
       BI_unreachable ::
@@ -112,7 +112,7 @@ Definition rocq_exists_spec : module := {|
 Definition rocq_exists_spec__ReachableDouble_specs : list hassert := (@nil hassert).
 Definition rocq_exists_spec__ReachableDouble_exspec1 : reachability_spec :=
   {| reach_func := 1%N; reach_entry_arity := 1%nat;
-     reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_app 0 ((T_local 3%N) :: nil)) (T_local 0%N)) (T_const (Vi32 0)))))) |}.
+     reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (term_eq (T_app 0 ((T_local 3%N) :: nil)) (T_const (Vi32 0))))) |}.
 Definition rocq_exists_spec__ReachableDouble_ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
 
 Section Host.

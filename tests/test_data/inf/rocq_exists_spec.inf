@@ -14,6 +14,17 @@
 // verifier reduces the retained body without an enclosing activation frame,
 // so a `return` could never take a step — the pre-scan rejects both shapes).
 //
+// The obligation must also be TRUE, and the verifier's contract quantifies the
+// entry parameters universally: `exists_spec_holds_at` demands a successful
+// choice vector for EVERY typed entry value, so every filter must stay
+// satisfiable at every entry. That is why the first filter is `n >= lo` (its
+// witness `n := lo` exists for every `lo`; a strict `n > lo` has no witness at
+// `lo = i32::MAX` and would make the theorem false) and why the final claim
+// compares against a constant rather than against `lo` (a `>= lo` bound on
+// `double`'s even result is unsatisfiable at `lo = i32::MAX`). An `assume`
+// over an entry parameter alone can never carve out entries — it can only
+// falsify the spec at the entries it rejects.
+//
 // The three `@`s span the choice surface: a named i32 choice (source-visible,
 // so it joins `reach_visible_locs` after the entry parameter), a named i64
 // choice (the other WASM scalar class, a distinct parameter type in the type
@@ -28,13 +39,13 @@ spec ReachableDouble {
     fn ex_double(lo: i32) exists {
         let n: i32 = @;
         assume {
-            assert(n > lo);
+            assert(n >= lo);
         }
         let wide: i64 = @;
         assume {
             assert(wide >= 0);
         }
         assert(double(n) == n + n);
-        assert(double(@) >= lo);
+        assert(double(@) == 0);
     }
 }

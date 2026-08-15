@@ -398,7 +398,7 @@ Definition ex_double : module_func := {|
     BI_local_set 1%N (*n*) ::
     BI_local_get 1%N (*n*) ::
     BI_local_get 0%N (*lo*) ::
-    BI_relop T_i32 (Relop_i (ROI_gt SX_S)) ::
+    BI_relop T_i32 (Relop_i (ROI_ge SX_S)) ::
     BI_testop T_i32 TO_eqz ::
     BI_if (BT_valtype None) (
       BI_unreachable ::
@@ -427,8 +427,8 @@ Definition ex_double : module_func := {|
       nil) ::
     BI_local_get 3%N (*__choice2*) ::
     BI_call 0%N ::
-    BI_local_get 0%N (*lo*) ::
-    BI_relop T_i32 (Relop_i (ROI_ge SX_S)) ::
+    BI_const_num (Vi32 0) ::
+    BI_relop T_i32 (Relop_i ROI_eq) ::
     BI_testop T_i32 TO_eqz ::
     BI_if (BT_valtype None) (
       BI_unreachable ::
@@ -466,7 +466,7 @@ Definition rocq_exists_spec : module := {|
 Definition rocq_exists_spec__ReachableDouble_specs : list hassert := (@nil hassert).
 Definition rocq_exists_spec__ReachableDouble_exspec1 : reachability_spec :=
   {| reach_func := 1%N; reach_entry_arity := 1%nat;
-     reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_app 0 ((T_local 3%N) :: nil)) (T_local 0%N)) (T_const (Vi32 0)))))) |}.
+     reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (term_eq (T_app 0 ((T_local 3%N) :: nil)) (T_const (Vi32 0))))) |}.
 Definition rocq_exists_spec__ReachableDouble_ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
 
 Section Host.
@@ -778,6 +778,26 @@ bans `return` inside quantified blocks; A007 rejects a declared return
 type whose paths don't all return), and the codegen pre-scan carries its
 own hard error for both clauses so an analysis-skipping pipeline cannot
 emit an unprovable obligation.
+
+### Entry parameters are universally quantified — filters cannot carve out entries
+
+`exists_spec_holds_at`/`unique_spec_holds_at` fix an *arbitrary* typed
+entry vector and only then let the choices range: the obligation demands
+a successful choice for **every** entry value (`unique` demands a
+non-empty singleton per entry). An `assume` over an entry parameter
+alone therefore never restricts the theorem to "nice" entries — at every
+entry it rejects, all choices trap, the observation set is empty, and
+the whole theorem is **false**, not narrowed. A spec author must write
+`exists`/`unique` bodies whose filters stay satisfiable at every typed
+entry (e.g. `n >= lo` admits the witness `n := lo` everywhere, where a
+strict `n > lo` has no witness at `lo = i32::MAX`; a claim `f(@) >= lo`
+over an even-valued `f` fails at `lo = i32::MAX` even without filters,
+where `f(@) == 0` does not). Both corpus fixtures were redesigned to
+satisfy this after their original obligations were formally refuted at
+boundary entries — and both corrected obligations (`ValidExistsSpec`
+and `ValidUniqueSpec`) were then discharged end to end against the
+real verifier with `Qed`, which is what fixed the constraint's exact
+shape.
 
 ### Obligations only an import-free module can discharge
 

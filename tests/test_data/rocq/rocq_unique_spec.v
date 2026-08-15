@@ -24,27 +24,16 @@ Definition Me n d := {|
 
 Definition Ma of al := {|memarg_offset := of; memarg_align := al|}.
 
-Definition parity : module_func := {|
-  modfunc_type := 0%N;
-  modfunc_locals := nil;
-  modfunc_body :=
-    BI_local_get 0%N (*n*) ::
-    BI_const_num (Vi32 2) ::
-    BI_binop T_i32 (Binop_i (BOI_rem SX_S)) ::
-    BI_return ::
-    BI_unreachable ::
-    nil;
-|}.
-
 Definition uq_parity : module_func := {|
-  modfunc_type := 1%N;
+  modfunc_type := 0%N;
   modfunc_locals := nil;
   modfunc_body :=
     BI_local_get 1%N (*bit*) ::
     BI_local_set 1%N (*bit*) ::
     BI_local_get 1%N (*bit*) ::
     BI_local_get 0%N (*seed*) ::
-    BI_call 0%N ::
+    BI_const_num (Vi32 2) ::
+    BI_binop T_i32 (Binop_i (BOI_rem SX_S)) ::
     BI_relop T_i32 (Relop_i ROI_eq) ::
     BI_testop T_i32 TO_eqz ::
     BI_if (BT_valtype None) (
@@ -52,6 +41,8 @@ Definition uq_parity : module_func := {|
       nil) (
       nil) ::
     BI_local_get 1%N (*bit*) ::
+    BI_local_get 1%N (*bit*) ::
+    BI_binop T_i32 (Binop_i BOI_mul) ::
     BI_local_get 1%N (*bit*) ::
     BI_binop T_i32 (Binop_i BOI_mul) ::
     BI_local_get 1%N (*bit*) ::
@@ -66,11 +57,9 @@ Definition uq_parity : module_func := {|
 
 Definition rocq_unique_spec : module := {|
   mod_types :=
-    Tf (T_num T_i32 :: nil) (T_num T_i32 :: nil) ::
     Tf (T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
     nil;
   mod_funcs :=
-    parity ::
     uq_parity ::
     nil;
   mod_tables :=
@@ -92,8 +81,8 @@ Definition rocq_unique_spec : module := {|
 
 Definition rocq_unique_spec__UniqueParity_specs : list hassert := (@nil hassert).
 Definition rocq_unique_spec__UniqueParity_uqspec1 : reachability_spec :=
-  {| reach_func := 1%N; reach_entry_arity := 1%nat;
-     reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_and (term_eq (T_local 1%N) (T_app 0 ((T_local 0%N) :: nil))) (term_eq (T_binop T_i32 (Binop_i BOI_mul) (T_local 1%N) (T_local 1%N)) (T_local 1%N)) |}.
+  {| reach_func := 0%N; reach_entry_arity := 1%nat;
+     reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_and (term_eq (T_local 1%N) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_const (Vi32 2)))) (term_eq (T_binop T_i32 (Binop_i BOI_mul) (T_binop T_i32 (Binop_i BOI_mul) (T_local 1%N) (T_local 1%N)) (T_local 1%N)) (T_local 1%N)) |}.
 Definition rocq_unique_spec__UniqueParity_uq_specs : list reachability_spec := (rocq_unique_spec__UniqueParity_uqspec1 :: nil).
 
 Section Host.
