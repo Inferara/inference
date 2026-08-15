@@ -93,7 +93,7 @@ mod analysis_rules_tests {
                 "inline `{kind}` block in a top-level fn must fire exactly one A042, got: {diags:?}"
             );
             assert!(
-                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == kind),
                 "A042 must name the `{kind}` block kind, got: {:?}",
                 diags[0]
             );
@@ -119,7 +119,7 @@ mod analysis_rules_tests {
                 "`{kind}` body modifier on a top-level fn must fire exactly one A042, got: {diags:?}"
             );
             assert!(
-                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == kind),
                 "A042 must name the `{kind}` body-modifier kind, got: {:?}",
                 diags[0]
             );
@@ -246,7 +246,7 @@ mod analysis_rules_tests {
         let diags = a042_diags(source);
         assert_eq!(diags.len(), 1, "an `else exists` arm outside a spec must fire A042");
         assert!(
-            matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == "exists"),
+            matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == "exists"),
             "A042 must name the `exists` else-arm kind, got: {:?}",
             diags[0]
         );
@@ -277,7 +277,7 @@ mod analysis_rules_tests {
                 "a kind-annotated `if c {kind}` arm outside a spec must fire exactly one A042, got: {diags:?}"
             );
             assert!(
-                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == kind),
                 "A042 must name the `{kind}` if-arm kind, got: {:?}",
                 diags[0]
             );
@@ -311,7 +311,7 @@ mod analysis_rules_tests {
                 "a kind-annotated `loop i < 3 {kind}` body outside a spec must fire exactly one A042, got: {diags:?}"
             );
             assert!(
-                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == kind),
+                matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == kind),
                 "A042 must name the `{kind}` loop-body kind, got: {:?}",
                 diags[0]
             );
@@ -343,7 +343,7 @@ mod analysis_rules_tests {
             "nested non-det outside a spec must report only the outermost block, got: {diags:?}"
         );
         assert!(
-            matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if *block_kind == "forall"),
+            matches!(&diags[0], AnalysisDiagnostic::NonDetOutsideSpec { block_kind, .. } if block_kind.to_string() == "forall"),
             "the single diagnostic must be for the outermost `forall`, got: {:?}",
             diags[0]
         );
