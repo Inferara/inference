@@ -15,7 +15,7 @@
 //! ## Payload format (LEB128 throughout; `varu32` = unsigned LEB128)
 //!
 //! ```text
-//! version      varu32 = 1
+//! version      varu32 = 2
 //! sym_count    varu32
 //!   repeated sym_count times, STRICTLY ASCENDING and unique:
 //!     name_len   varu32
@@ -27,11 +27,21 @@
 //!     entry_count varu32
 //!     repeated entry_count times, in source order:
 //!       symbol_idx varu32           -- into the symbol table: the entry's fn symbol
+//!       kind       u8               -- 0x00 Forall | 0x01 Exists | 0x02 Unique
+//!       reach_meta                  -- present iff kind != 0x00:
+//!         entry_arity varu32
+//!         locs_count  varu32        -- at most MAX_VISIBLE_LOCS
+//!         loc         varu32 * locs_count
+//!                                   -- STRICTLY ASCENDING and unique, each
+//!                                   -- at most MAX_VISIBLE_LOCS
 //!       hassert                     -- preorder, tag-prefixed (see below)
 //! ```
 //!
 //! Both `App`/`AppOk` inside a tree and each entry's own function symbol are
-//! stored as a `varu32` index into the single shared symbol table.
+//! stored as a `varu32` index into the single shared symbol table. The kind
+//! byte follows [`crate::ir::SpecKind`]'s declaration order; a `Forall` entry
+//! carries no reachability metadata, so the universal common case costs one
+//! byte.
 //!
 //! ### Tree tags
 //!
@@ -71,7 +81,10 @@
 //! The tag values are stable and part of the format: they follow each enum's
 //! declaration order in [`crate::ir`].
 
-use crate::ir::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm};
+use crate::ir::{
+    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm, ReachMeta,
+    SpecKind,
+};
 
 /// Name of the custom WASM section carrying the per-program obligation map.
 ///
@@ -80,9 +93,11 @@ use crate::ir::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, H
 pub const HSPECS_SECTION_NAME: &str = "inference.hspecs";
 
 /// Wire-format version emitted at the head of the payload. [`decode`] rejects
-/// any other value, so a future format revision breaks compatibility loudly
-/// instead of silently misparsing.
-pub const HSPECS_SECTION_VERSION: u32 = 1;
+/// any other value — including the superseded version 1, whose entries carried
+/// no quantifier kind — so a format revision breaks compatibility loudly
+/// instead of silently misparsing. The section is proof-mode intermediate
+/// data; recompilation, not migration, is the compatibility story.
+pub const HSPECS_SECTION_VERSION: u32 = 2;
 
 /// Upper bound, in bytes, on a single name in the payload — a spec-name key or,
 /// chiefly, a function symbol.
@@ -111,6 +126,15 @@ pub const MAX_NAME_LEN: usize = 1024;
 /// small (2 MiB) thread stack would be exhausted. The value matches
 /// `wasm-to-v`'s `MAX_EXPRESSION_DEPTH`.
 pub const MAX_TREE_DEPTH: usize = 256;
+
+/// Sanity cap on a reachability entry's `visible_locs`: both the number of
+/// listed slots and every slot index must be at most this value.
+///
+/// A visible slot indexes a WASM local of one function frame, and no function
+/// codegen emits approaches 65 536 locals — the cap only rejects payloads no
+/// producer writes, keeping an adversarial section from advertising an absurd
+/// projection list while leaving every real obligation untouched.
+pub const MAX_VISIBLE_LOCS: u32 = 65_536;
 
 /// Encodes an [`HSpecMap`] into the canonical `inference.hspecs` payload bytes.
 ///
@@ -174,6 +198,7 @@ pub fn encode(map: &HSpecMap) -> Vec<u8> {
         write_u32(&mut out, count(entries.len()));
         for entry in entries {
             write_u32(&mut out, sym_index(&symbols, &entry.fn_symbol.0));
+            encode_kind(&entry.kind, &mut out);
             encode_assert(&entry.hassert, &symbols, &mut out);
         }
     }
@@ -190,7 +215,10 @@ pub fn encode(map: &HSpecMap) -> Vec<u8> {
 ///   every `App`/`AppOk` symbol inside its tree) is non-empty and at most
 ///   [`MAX_NAME_LEN`] bytes;
 /// - every obligation's assertion/term tree nests at most [`MAX_TREE_DEPTH`]
-///   deep, measured exactly as the decoder counts it.
+///   deep, measured exactly as the decoder counts it;
+/// - every reachability entry's `visible_locs` are strictly ascending (which
+///   also rejects duplicates), with the count and every value at most
+///   [`MAX_VISIBLE_LOCS`].
 ///
 /// Specs are visited in sorted-name order, so the first reported violation is
 /// deterministic. The tree walk is depth-limited — it stops descending past the
@@ -220,6 +248,7 @@ pub fn validate(map: &HSpecMap) -> Result<(), PayloadError> {
                     len: symbol.len(),
                 });
             }
+            validate_kind(spec, symbol, &entry.kind)?;
             validate_assert(spec, symbol, &entry.hassert, 1)?;
         }
     }
@@ -230,6 +259,41 @@ pub fn validate(map: &HSpecMap) -> Result<(), PayloadError> {
 /// requires (`read_name` rejects both empty and over-cap names).
 fn name_len_ok(name: &str) -> bool {
     (1..=MAX_NAME_LEN).contains(&name.len())
+}
+
+/// Validates one entry's quantifier kind: for the reachability kinds, the
+/// `visible_locs` rules `decode_reach_meta` enforces — strictly ascending
+/// (which also rejects duplicates), count and every value within
+/// [`MAX_VISIBLE_LOCS`]. A `Forall` kind carries nothing to check.
+fn validate_kind(spec: &str, function: &str, kind: &SpecKind) -> Result<(), PayloadError> {
+    let (SpecKind::Exists(meta) | SpecKind::Unique(meta)) = kind else {
+        return Ok(());
+    };
+    if meta.visible_locs.len() > MAX_VISIBLE_LOCS as usize {
+        return Err(PayloadError::TooManyVisibleLocs {
+            spec: spec.to_string(),
+            function: function.to_string(),
+            count: meta.visible_locs.len(),
+        });
+    }
+    let mut prev: Option<u32> = None;
+    for &loc in &meta.visible_locs {
+        if loc > MAX_VISIBLE_LOCS {
+            return Err(PayloadError::VisibleLocOutOfRange {
+                spec: spec.to_string(),
+                function: function.to_string(),
+                loc,
+            });
+        }
+        if prev.is_some_and(|prev| loc <= prev) {
+            return Err(PayloadError::VisibleLocsNotAscending {
+                spec: spec.to_string(),
+                function: function.to_string(),
+            });
+        }
+        prev = Some(loc);
+    }
+    Ok(())
 }
 
 /// Validates one obligation's assertion tree in a single depth-limited pass:
@@ -319,8 +383,10 @@ fn check_symbol(spec: &str, symbol: &str) -> Result<(), PayloadError> {
 /// truncation, a bad LEB128 or over-`u32` integer, an over-advertised count,
 /// an over-long or non-UTF-8 name, an empty name, a non-ascending symbol table
 /// or spec list (which also rejects duplicates), an out-of-range symbol index,
-/// an unknown tag, an out-of-range constant, nesting past [`MAX_TREE_DEPTH`],
-/// or trailing bytes after the declared payload.
+/// an unknown tag (including a spec-kind tag), reachability `visible_locs`
+/// that are non-ascending or past [`MAX_VISIBLE_LOCS`] in count or value, an
+/// out-of-range constant, nesting past [`MAX_TREE_DEPTH`], or trailing bytes
+/// after the declared payload.
 pub fn decode(data: &[u8]) -> Result<HSpecMap, DecodeError> {
     let mut r = Reader::new(data);
 
@@ -359,8 +425,13 @@ pub fn decode(data: &[u8]) -> Result<HSpecMap, DecodeError> {
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
             let fn_symbol = resolve_symbol(&symbols, r.read_u32()?)?;
+            let kind = decode_kind(&mut r)?;
             let hassert = decode_assert(&mut r, &symbols, 1)?;
-            entries.push(HSpecEntry { fn_symbol, hassert });
+            entries.push(HSpecEntry {
+                fn_symbol,
+                hassert,
+                kind,
+            });
         }
 
         map.insert(name.clone(), entries);
@@ -390,6 +461,52 @@ fn decode_symbol_table(r: &mut Reader) -> Result<Vec<String>, DecodeError> {
         symbols.push(name);
     }
     Ok(symbols)
+}
+
+/// Decodes an entry's kind byte and, for the reachability kinds, the
+/// metadata block that follows it.
+fn decode_kind(r: &mut Reader) -> Result<SpecKind, DecodeError> {
+    match r.read_u8()? {
+        0x00 => Ok(SpecKind::Forall),
+        0x01 => Ok(SpecKind::Exists(decode_reach_meta(r)?)),
+        0x02 => Ok(SpecKind::Unique(decode_reach_meta(r)?)),
+        other => Err(DecodeError::UnknownSpecKindTag(other)),
+    }
+}
+
+/// Decodes a reachability entry's metadata, enforcing the `visible_locs`
+/// rules [`validate`] mirrors: count within [`MAX_VISIBLE_LOCS`] (checked
+/// before the allocation bound so an absurd advertisement is rejected either
+/// way), values strictly ascending and within the cap.
+fn decode_reach_meta(r: &mut Reader) -> Result<ReachMeta, DecodeError> {
+    let entry_arity = r.read_u32()?;
+    let locs_count = r.read_u32()?;
+    if locs_count > MAX_VISIBLE_LOCS {
+        return Err(DecodeError::TooManyVisibleLocs(locs_count));
+    }
+    // Each visible local is at least a one-byte varu32; bound before
+    // allocating.
+    if locs_count as usize > r.remaining() {
+        return Err(DecodeError::CountExceedsPayload {
+            kind: "visible-local",
+            count: locs_count,
+        });
+    }
+    let mut visible_locs = Vec::with_capacity(locs_count as usize);
+    for _ in 0..locs_count {
+        let loc = r.read_u32()?;
+        if loc > MAX_VISIBLE_LOCS {
+            return Err(DecodeError::VisibleLocOutOfRange(loc));
+        }
+        if visible_locs.last().is_some_and(|&prev| loc <= prev) {
+            return Err(DecodeError::VisibleLocsNotAscending);
+        }
+        visible_locs.push(loc);
+    }
+    Ok(ReachMeta {
+        entry_arity,
+        visible_locs,
+    })
 }
 
 fn decode_assert(r: &mut Reader, symbols: &[String], depth: usize) -> Result<HAssert, DecodeError> {
@@ -590,6 +707,30 @@ fn collect_term_symbols<'a>(t: &'a HTerm, acc: &mut Vec<&'a str>) {
             collect_term_symbols(l, acc);
             collect_term_symbols(r, acc);
         }
+    }
+}
+
+/// Writes an entry's kind byte (the [`SpecKind`] declaration-order tag) and,
+/// for the reachability kinds, the metadata block that follows it.
+fn encode_kind(kind: &SpecKind, out: &mut Vec<u8>) {
+    match kind {
+        SpecKind::Forall => out.push(0x00),
+        SpecKind::Exists(meta) => {
+            out.push(0x01);
+            encode_reach_meta(meta, out);
+        }
+        SpecKind::Unique(meta) => {
+            out.push(0x02);
+            encode_reach_meta(meta, out);
+        }
+    }
+}
+
+fn encode_reach_meta(meta: &ReachMeta, out: &mut Vec<u8>) {
+    write_u32(out, meta.entry_arity);
+    write_u32(out, count(meta.visible_locs.len()));
+    for &loc in &meta.visible_locs {
+        write_u32(out, loc);
     }
 }
 
@@ -869,6 +1010,34 @@ pub enum PayloadError {
         "the obligation for {function:?} in spec {spec:?} nests past the inference.hspecs depth cap"
     )]
     TreeTooDeep { spec: String, function: String },
+    /// A reachability entry lists more `visible_locs` than
+    /// [`MAX_VISIBLE_LOCS`].
+    #[error(
+        "the reachability metadata for {function:?} in spec {spec:?} lists {count} visible \
+         locals, past the inference.hspecs cap"
+    )]
+    TooManyVisibleLocs {
+        spec: String,
+        function: String,
+        count: usize,
+    },
+    /// A reachability entry names a visible local past [`MAX_VISIBLE_LOCS`].
+    #[error(
+        "the reachability metadata for {function:?} in spec {spec:?} names visible local {loc}, \
+         past the inference.hspecs cap"
+    )]
+    VisibleLocOutOfRange {
+        spec: String,
+        function: String,
+        loc: u32,
+    },
+    /// A reachability entry's `visible_locs` are not strictly ascending
+    /// (which also rejects duplicates).
+    #[error(
+        "the reachability metadata for {function:?} in spec {spec:?} has visible locals out of \
+         strictly ascending order"
+    )]
+    VisibleLocsNotAscending { spec: String, function: String },
 }
 
 /// Every way an `inference.hspecs` payload can be malformed.
@@ -896,6 +1065,14 @@ pub enum DecodeError {
     SpecNamesNotAscending,
     #[error("symbol index {0} is out of range of the symbol table")]
     SymbolIndexOutOfRange(u32),
+    #[error("unknown spec-kind tag {0:#04x}")]
+    UnknownSpecKindTag(u8),
+    #[error("reachability metadata lists {0} visible locals, past the inference.hspecs cap")]
+    TooManyVisibleLocs(u32),
+    #[error("reachability metadata names visible local {0}, past the inference.hspecs cap")]
+    VisibleLocOutOfRange(u32),
+    #[error("reachability visible locals are not strictly ascending")]
+    VisibleLocsNotAscending,
     #[error("unknown hassert tag {0:#04x}")]
     UnknownHassertTag(u8),
     #[error("unknown term tag {0:#04x}")]
@@ -929,6 +1106,18 @@ mod tests {
             .into_iter()
             .map(|(name, es)| (name.to_string(), es))
             .collect()
+    }
+
+    /// A universally quantified entry — the common case throughout the suite.
+    fn forall(name: &str, hassert: HAssert) -> HSpecEntry {
+        HSpecEntry::new(href(name), hassert, SpecKind::Forall)
+    }
+
+    fn reach(entry_arity: u32, visible_locs: &[u32]) -> ReachMeta {
+        ReachMeta {
+            entry_arity,
+            visible_locs: visible_locs.to_vec(),
+        }
     }
 
     /// A tree exercising every `HAssert`, `HTerm`, `HConst`, binop, relop, and
@@ -1035,8 +1224,8 @@ mod tests {
     fn empty_map_round_trips_to_a_minimal_payload() {
         let map = HSpecMap::default();
         let bytes = encode(&map);
-        // version=1, sym_count=0, spec_count=0
-        assert_eq!(bytes, vec![1, 0, 0]);
+        // version=2, sym_count=0, spec_count=0
+        assert_eq!(bytes, vec![2, 0, 0]);
         assert_eq!(decode(&bytes).unwrap(), map);
     }
 
@@ -1044,18 +1233,29 @@ mod tests {
     fn empty_spec_list_round_trips() {
         let map = map_of(vec![("S", vec![])]);
         let bytes = encode(&map);
-        // version=1, sym_count=0, spec_count=1, name_len=1 'S', entry_count=0
-        assert_eq!(bytes, vec![1, 0, 1, 1, b'S', 0]);
+        // version=2, sym_count=0, spec_count=1, name_len=1 'S', entry_count=0
+        assert_eq!(bytes, vec![2, 0, 1, 1, b'S', 0]);
         assert_eq!(decode(&bytes).unwrap(), map);
     }
 
     #[test]
     fn kitchen_sink_round_trips() {
+        // The two exhaustive trees under all three quantifier kinds, so every
+        // tag table round-trips under every kind byte.
         let map = map_of(vec![(
             "props",
             vec![
-                HSpecEntry::new(href("first"), kitchen_sink()),
-                HSpecEntry::new(href("second"), every_operator()),
+                forall("first", kitchen_sink()),
+                HSpecEntry::new(
+                    href("second"),
+                    every_operator(),
+                    SpecKind::Exists(reach(0, &[])),
+                ),
+                HSpecEntry::new(
+                    href("third"),
+                    kitchen_sink(),
+                    SpecKind::Unique(reach(2, &[0, 1, 5])),
+                ),
             ],
         )]);
         assert_eq!(decode(&encode(&map)).unwrap(), map);
@@ -1067,11 +1267,11 @@ mod tests {
             (
                 "alpha",
                 vec![
-                    HSpecEntry::new(
-                        href("a_fn"),
+                    forall(
+                        "a_fn",
                         HAssert::nz(HTerm::App(href("z_fn"), vec![HTerm::Local(0)])),
                     ),
-                    HSpecEntry::new(href("b_fn"), HAssert::True),
+                    forall("b_fn", HAssert::True),
                 ],
             ),
             (
@@ -1079,6 +1279,7 @@ mod tests {
                 vec![HSpecEntry::new(
                     href("c_fn"),
                     HAssert::AppOk(href("a_fn"), vec![]),
+                    SpecKind::Exists(reach(1, &[0])),
                 )],
             ),
         ]);
@@ -1087,8 +1288,14 @@ mod tests {
 
     #[test]
     fn encoding_is_deterministic_across_insertion_order() {
-        let entry =
-            |s: &str| HSpecEntry::new(href(s), HAssert::nz(HTerm::App(href("shared"), vec![])));
+        // A reachability kind, so canonicality covers the metadata block too.
+        let entry = |s: &str| {
+            HSpecEntry::new(
+                href(s),
+                HAssert::nz(HTerm::App(href("shared"), vec![])),
+                SpecKind::Unique(reach(1, &[0, 3])),
+            )
+        };
         let mut forward = HSpecMap::default();
         forward.insert("aaa".to_string(), vec![entry("m1")]);
         forward.insert("zzz".to_string(), vec![entry("m2")]);
@@ -1106,8 +1313,8 @@ mod tests {
         // only inside a tree. The table must be sorted and hold each once.
         let map = map_of(vec![(
             "s",
-            vec![HSpecEntry::new(
-                href("beta"),
+            vec![forall(
+                "beta",
                 HAssert::And(
                     Box::new(HAssert::AppOk(href("alpha"), vec![])),
                     Box::new(HAssert::AppOk(href("beta"), vec![])),
@@ -1115,8 +1322,8 @@ mod tests {
             )],
         )]);
         let bytes = encode(&map);
-        // version=1, sym_count=2, len=5 "alpha", len=4 "beta", ...
-        let mut expected = vec![1u8, 2, 5];
+        // version=2, sym_count=2, len=5 "alpha", len=4 "beta", ...
+        let mut expected = vec![2u8, 2, 5];
         expected.extend_from_slice(b"alpha");
         expected.push(4);
         expected.extend_from_slice(b"beta");
@@ -1126,20 +1333,17 @@ mod tests {
 
     #[test]
     fn accepts_a_tree_at_the_depth_cap() {
-        let map = map_of(vec![(
-            "s",
-            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH))],
-        )]);
+        let map = map_of(vec![("s", vec![forall("f", nest(MAX_TREE_DEPTH))])]);
         assert_eq!(decode(&encode(&map)).unwrap(), map);
     }
 
     #[test]
     fn rejects_a_tree_beyond_the_depth_cap() {
-        // Hand-built payload: spec "s", entry symbol "f" (table index 0), then a
-        // `Not` spine one level past the cap. Built directly rather than via
-        // `encode`, which now refuses an over-deep tree by contract (see
-        // `encode_panics_on_a_tree_beyond_the_depth_cap`).
-        let mut bytes = vec![1, 1, 1, b'f', 1, 1, b's', 1, 0];
+        // Hand-built payload: spec "s", entry symbol "f" (table index 0), the
+        // Forall kind byte, then a `Not` spine one level past the cap. Built
+        // directly rather than via `encode`, which now refuses an over-deep
+        // tree by contract (see `encode_panics_on_a_tree_beyond_the_depth_cap`).
+        let mut bytes = vec![2, 1, 1, b'f', 1, 1, b's', 1, 0, 0x00];
         bytes.resize(bytes.len() + MAX_TREE_DEPTH, 0x02); // MAX_TREE_DEPTH `Not` tags
         bytes.push(0x00); // a `True` leaf: total depth MAX_TREE_DEPTH + 1
         assert_eq!(decode(&bytes), Err(DecodeError::TreeTooDeep));
@@ -1147,7 +1351,17 @@ mod tests {
 
     #[test]
     fn rejects_an_unsupported_version() {
-        assert_eq!(decode(&[2, 0, 0]), Err(DecodeError::UnsupportedVersion(2)));
+        // The sentinel must stay one past the current version: when the format
+        // is bumped again, a stale sentinel equal to the new version would
+        // invert this test into a false green.
+        assert_eq!(decode(&[3, 0, 0]), Err(DecodeError::UnsupportedVersion(3)));
+    }
+
+    #[test]
+    fn rejects_the_superseded_version_one() {
+        // A v1 payload (no per-entry kind byte) must be rejected loudly, not
+        // misparsed: strict version equality is the compatibility story.
+        assert_eq!(decode(&[1, 0, 0]), Err(DecodeError::UnsupportedVersion(1)));
     }
 
     #[test]
@@ -1158,7 +1372,7 @@ mod tests {
     #[test]
     fn rejects_truncation_mid_tree() {
         // A valid prefix whose final entry's tree tag is missing.
-        let map = map_of(vec![("s", vec![HSpecEntry::new(href("f"), HAssert::True)])]);
+        let map = map_of(vec![("s", vec![forall("f", HAssert::True)])]);
         let mut bytes = encode(&map);
         bytes.pop(); // drop the `True` tag byte
         assert_eq!(decode(&bytes), Err(DecodeError::Truncated));
@@ -1166,9 +1380,9 @@ mod tests {
 
     #[test]
     fn rejects_an_over_advertised_symbol_count() {
-        // version=1, sym_count=255 in a payload with far fewer bytes.
+        // version=2, sym_count=255 in a payload with far fewer bytes.
         assert_eq!(
-            decode(&[1, 255, 1]),
+            decode(&[2, 255, 1]),
             Err(DecodeError::CountExceedsPayload {
                 kind: "symbol",
                 count: 255
@@ -1178,9 +1392,9 @@ mod tests {
 
     #[test]
     fn rejects_an_over_advertised_spec_count() {
-        // version=1, sym_count=0, spec_count=255, then nothing.
+        // version=2, sym_count=0, spec_count=255, then nothing.
         assert_eq!(
-            decode(&[1, 0, 255, 1]),
+            decode(&[2, 0, 255, 1]),
             Err(DecodeError::CountExceedsPayload {
                 kind: "spec",
                 count: 255
@@ -1190,9 +1404,9 @@ mod tests {
 
     #[test]
     fn rejects_an_over_advertised_entry_count() {
-        // version=1, sym_count=0, spec_count=1, name "S", entry_count=255.
+        // version=2, sym_count=0, spec_count=1, name "S", entry_count=255.
         assert_eq!(
-            decode(&[1, 0, 1, 1, b'S', 255, 1]),
+            decode(&[2, 0, 1, 1, b'S', 255, 1]),
             Err(DecodeError::CountExceedsPayload {
                 kind: "entry",
                 count: 255
@@ -1206,8 +1420,8 @@ mod tests {
         // value larger than the remaining payload.
         let map = map_of(vec![(
             "s",
-            vec![HSpecEntry::new(
-                href("f"),
+            vec![forall(
+                "f",
                 HAssert::AppOk(href("g"), vec![HTerm::Local(0)]),
             )],
         )]);
@@ -1230,17 +1444,17 @@ mod tests {
 
     #[test]
     fn rejects_invalid_utf8_in_a_name() {
-        // version=1, sym_count=1, name_len=1, 0xFF (not valid UTF-8).
-        assert_eq!(decode(&[1, 1, 1, 0xFF]), Err(DecodeError::InvalidUtf8));
+        // version=2, sym_count=1, name_len=1, 0xFF (not valid UTF-8).
+        assert_eq!(decode(&[2, 1, 1, 0xFF]), Err(DecodeError::InvalidUtf8));
     }
 
     #[test]
     fn rejects_an_over_long_name() {
-        // version=1, sym_count=1, then an advertised name length one past the
+        // version=2, sym_count=1, then an advertised name length one past the
         // cap (LEB-encoded, so the test tracks the constant) with no bytes: the
         // cap is checked before the payload-length bound, so no name body is
         // needed.
-        let mut bytes = vec![1, 1];
+        let mut bytes = vec![2, 1];
         leb128::write::unsigned(&mut bytes, (MAX_NAME_LEN + 1) as u64)
             .expect("writing to a Vec is infallible");
         assert_eq!(
@@ -1251,24 +1465,24 @@ mod tests {
 
     #[test]
     fn rejects_an_empty_name() {
-        // version=1, sym_count=1, name_len=0.
-        assert_eq!(decode(&[1, 1, 0]), Err(DecodeError::EmptyName));
+        // version=2, sym_count=1, name_len=0.
+        assert_eq!(decode(&[2, 1, 0]), Err(DecodeError::EmptyName));
     }
 
     #[test]
     fn rejects_an_unsorted_symbol_table() {
-        // version=1, sym_count=2, "b" then "a" — descending.
+        // version=2, sym_count=2, "b" then "a" — descending.
         assert_eq!(
-            decode(&[1, 2, 1, b'b', 1, b'a']),
+            decode(&[2, 2, 1, b'b', 1, b'a']),
             Err(DecodeError::SymbolsNotAscending)
         );
     }
 
     #[test]
     fn rejects_a_duplicate_symbol() {
-        // version=1, sym_count=2, "a" then "a" — not strictly ascending.
+        // version=2, sym_count=2, "a" then "a" — not strictly ascending.
         assert_eq!(
-            decode(&[1, 2, 1, b'a', 1, b'a']),
+            decode(&[2, 2, 1, b'a', 1, b'a']),
             Err(DecodeError::SymbolsNotAscending)
         );
     }
@@ -1277,7 +1491,7 @@ mod tests {
     fn rejects_unsorted_spec_names() {
         // sym_count=0, spec_count=2, "b"/0 entries then "a"/0 entries.
         assert_eq!(
-            decode(&[1, 0, 2, 1, b'b', 0, 1, b'a', 0]),
+            decode(&[2, 0, 2, 1, b'b', 0, 1, b'a', 0]),
             Err(DecodeError::SpecNamesNotAscending)
         );
     }
@@ -1286,7 +1500,7 @@ mod tests {
     fn rejects_a_duplicate_spec_name() {
         // sym_count=0, spec_count=2, "a"/0 entries twice.
         assert_eq!(
-            decode(&[1, 0, 2, 1, b'a', 0, 1, b'a', 0]),
+            decode(&[2, 0, 2, 1, b'a', 0, 1, b'a', 0]),
             Err(DecodeError::SpecNamesNotAscending)
         );
     }
@@ -1294,18 +1508,19 @@ mod tests {
     #[test]
     fn rejects_an_out_of_range_symbol_index() {
         // sym_count=0, spec_count=1, "S", entry_count=1, symbol_idx=0 (empty
-        // table).
+        // table); the index is read before the kind byte, so none is needed.
         assert_eq!(
-            decode(&[1, 0, 1, 1, b'S', 1, 0]),
+            decode(&[2, 0, 1, 1, b'S', 1, 0]),
             Err(DecodeError::SymbolIndexOutOfRange(0))
         );
     }
 
     #[test]
     fn rejects_an_unknown_hassert_tag() {
-        // one symbol "f", one spec "S", one entry -> symbol_idx=0, tree tag=0x7F.
+        // one symbol "f", one spec "S", one entry -> symbol_idx=0, kind=Forall,
+        // tree tag=0x7F.
         assert_eq!(
-            decode(&[1, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x7F]),
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x7F]),
             Err(DecodeError::UnknownHassertTag(0x7F))
         );
     }
@@ -1314,7 +1529,7 @@ mod tests {
     fn rejects_an_unknown_term_tag() {
         // ... entry tree = Defined(<term tag 0x7F>).
         assert_eq!(
-            decode(&[1, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x09, 0x7F]),
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x09, 0x7F]),
             Err(DecodeError::UnknownTermTag(0x7F))
         );
     }
@@ -1323,7 +1538,7 @@ mod tests {
     fn rejects_an_unknown_const_tag() {
         // ... tree = Defined(Const(<const tag 0x7F>)).
         assert_eq!(
-            decode(&[1, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x09, 0x00, 0x7F]),
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x09, 0x00, 0x7F]),
             Err(DecodeError::UnknownConstTag(0x7F))
         );
     }
@@ -1332,7 +1547,9 @@ mod tests {
     fn rejects_an_unknown_binop_tag() {
         // ... tree = Defined(Binop(I32, <binop 0x7F>, ...)).
         assert_eq!(
-            decode(&[1, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x09, 0x04, 0x00, 0x7F]),
+            decode(&[
+                2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x09, 0x04, 0x00, 0x7F
+            ]),
             Err(DecodeError::UnknownBinop(0x7F))
         );
     }
@@ -1341,14 +1558,25 @@ mod tests {
     fn rejects_an_unknown_numtype_tag() {
         // ... tree = HasType(Local 0, <numtype 0x7F>).
         assert_eq!(
-            decode(&[1, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x08, 0x02, 0x00, 0x7F]),
+            decode(&[
+                2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x08, 0x02, 0x00, 0x7F
+            ]),
             Err(DecodeError::UnknownNumType(0x7F))
         );
     }
 
     #[test]
+    fn rejects_an_unknown_spec_kind_tag() {
+        // ... symbol_idx=0, then a kind byte past the known range.
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x7F]),
+            Err(DecodeError::UnknownSpecKindTag(0x7F))
+        );
+    }
+
+    #[test]
     fn rejects_trailing_bytes() {
-        let map = map_of(vec![("s", vec![HSpecEntry::new(href("f"), HAssert::True)])]);
+        let map = map_of(vec![("s", vec![forall("f", HAssert::True)])]);
         let mut bytes = encode(&map);
         bytes.extend_from_slice(&[0xAA, 0xBB]);
         assert_eq!(decode(&bytes), Err(DecodeError::TrailingBytes(2)));
@@ -1368,18 +1596,152 @@ mod tests {
         let map = map_of(vec![(
             "s",
             vec![
-                HSpecEntry::new(href("f"), HAssert::eqz(HTerm::Const(HConst::I32(i32::MIN)))),
-                HSpecEntry::new(
-                    href("g"),
-                    HAssert::Defined(HTerm::Const(HConst::I64(i64::MAX))),
-                ),
-                HSpecEntry::new(
-                    href("h"),
-                    HAssert::Defined(HTerm::Const(HConst::I64(i64::MIN))),
-                ),
+                forall("f", HAssert::eqz(HTerm::Const(HConst::I32(i32::MIN)))),
+                forall("g", HAssert::Defined(HTerm::Const(HConst::I64(i64::MAX)))),
+                forall("h", HAssert::Defined(HTerm::Const(HConst::I64(i64::MIN)))),
             ],
         )]);
         assert_eq!(decode(&encode(&map)).unwrap(), map);
+    }
+
+    // -- reachability kinds: wire shape, round-trips, rejections -----------
+
+    /// Pins the exact byte layout of a reachability entry: kind byte between
+    /// the symbol index and the tree, then `entry_arity`, `locs_count`, and
+    /// the ascending locs.
+    #[test]
+    fn reach_entry_wire_shape_is_exact() {
+        let map = map_of(vec![(
+            "S",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::True,
+                SpecKind::Exists(reach(2, &[0, 1, 5])),
+            )],
+        )]);
+        let bytes = encode(&map);
+        // version=2, sym_count=1, "f", spec_count=1, "S", entry_count=1,
+        // symbol_idx=0, kind=Exists, entry_arity=2, locs_count=3, locs 0 1 5,
+        // tree=True.
+        assert_eq!(
+            bytes,
+            vec![2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x01, 2, 3, 0, 1, 5, 0x00]
+        );
+        assert_eq!(decode(&bytes).unwrap(), map);
+    }
+
+    /// The metadata matrix: `entry_arity` 0 and the full `u32` range (it is
+    /// carried, never derived, so the wire must not narrow it), empty and
+    /// non-empty `visible_locs`, and a loc at the cap — under both
+    /// reachability kinds.
+    #[test]
+    fn reachability_metadata_round_trips_across_the_matrix() {
+        let map = map_of(vec![(
+            "s",
+            vec![
+                HSpecEntry::new(href("a"), HAssert::False, SpecKind::Exists(reach(0, &[]))),
+                HSpecEntry::new(
+                    href("b"),
+                    HAssert::Defined(HTerm::Local(0)),
+                    SpecKind::Exists(reach(u32::MAX, &[MAX_VISIBLE_LOCS])),
+                ),
+                HSpecEntry::new(
+                    href("c"),
+                    HAssert::nz(HTerm::Local(2)),
+                    SpecKind::Unique(reach(3, &[0, 1, 2, 7])),
+                ),
+                HSpecEntry::new(href("d"), HAssert::False, SpecKind::Unique(reach(1, &[]))),
+            ],
+        )]);
+        assert_eq!(decode(&encode(&map)).unwrap(), map);
+    }
+
+    /// The linker's carry path decodes the main module's payload and re-encodes
+    /// it; canonical encoding makes that byte-identical, and the kind byte and
+    /// metadata block must round-trip inside that identity.
+    #[test]
+    fn reencoding_a_decoded_kind_bearing_payload_is_byte_identical() {
+        let map = map_of(vec![(
+            "s",
+            vec![
+                forall("f", HAssert::nz(HTerm::Local(0))),
+                HSpecEntry::new(
+                    href("g"),
+                    HAssert::eqz(HTerm::Local(1)),
+                    SpecKind::Unique(reach(2, &[0, 1])),
+                ),
+            ],
+        )]);
+        let bytes = encode(&map);
+        let reencoded = encode(&decode(&bytes).expect("canonical payload decodes"));
+        assert_eq!(reencoded, bytes);
+    }
+
+    #[test]
+    fn rejects_unsorted_visible_locs() {
+        // ... kind=Exists, arity=0, locs_count=2, locs 5 then 3 — descending.
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x01, 0, 2, 5, 3]),
+            Err(DecodeError::VisibleLocsNotAscending)
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_visible_locs() {
+        // ... kind=Unique, arity=0, locs_count=2, locs 4 4 — not strictly
+        // ascending.
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x02, 0, 2, 4, 4]),
+            Err(DecodeError::VisibleLocsNotAscending)
+        );
+    }
+
+    #[test]
+    fn rejects_a_visible_locs_count_past_the_cap() {
+        // ... kind=Unique, arity=0, then a locs count one past the cap
+        // (LEB-encoded so the test tracks the constant). The cap is checked
+        // before the payload-length bound, so no locs bytes are needed.
+        let mut bytes = vec![2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x02, 0];
+        leb128::write::unsigned(&mut bytes, u64::from(MAX_VISIBLE_LOCS) + 1)
+            .expect("writing to a Vec is infallible");
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::TooManyVisibleLocs(MAX_VISIBLE_LOCS + 1))
+        );
+    }
+
+    #[test]
+    fn rejects_a_visible_loc_past_the_cap() {
+        // ... kind=Exists, arity=0, locs_count=1, then a loc one past the cap.
+        let mut bytes = vec![2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x01, 0, 1];
+        leb128::write::unsigned(&mut bytes, u64::from(MAX_VISIBLE_LOCS) + 1)
+            .expect("writing to a Vec is infallible");
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::VisibleLocOutOfRange(MAX_VISIBLE_LOCS + 1))
+        );
+    }
+
+    #[test]
+    fn rejects_an_over_advertised_visible_locs_count() {
+        // ... kind=Exists, arity=0, locs_count=255 (two LEB bytes) with no
+        // bytes left: within the cap, but past the remaining payload.
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x01, 0, 255, 1]),
+            Err(DecodeError::CountExceedsPayload {
+                kind: "visible-local",
+                count: 255
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_reach_metadata_truncated_after_the_kind_byte() {
+        // The payload ends where `entry_arity` should begin.
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x01]),
+            Err(DecodeError::Truncated)
+        );
     }
 
     // -- validate: the encode-side contract -------------------------------
@@ -1389,8 +1751,12 @@ mod tests {
         let map = map_of(vec![(
             "props",
             vec![
-                HSpecEntry::new(href("first"), kitchen_sink()),
-                HSpecEntry::new(href("second"), every_operator()),
+                forall("first", kitchen_sink()),
+                HSpecEntry::new(
+                    href("second"),
+                    every_operator(),
+                    SpecKind::Exists(reach(2, &[0, 1])),
+                ),
             ],
         )]);
         assert_eq!(validate(&map), Ok(()));
@@ -1405,6 +1771,7 @@ mod tests {
             vec![HSpecEntry::new(
                 HFnRef(name.clone()),
                 HAssert::AppOk(HFnRef(name), vec![]),
+                SpecKind::Forall,
             )],
         );
         assert_eq!(validate(&map), Ok(()));
@@ -1415,10 +1782,7 @@ mod tests {
     #[test]
     fn validate_rejects_an_over_long_spec_name() {
         let name = "a".repeat(MAX_NAME_LEN + 1);
-        let map = map_of(vec![(
-            name.as_str(),
-            vec![HSpecEntry::new(href("f"), HAssert::True)],
-        )]);
+        let map = map_of(vec![(name.as_str(), vec![forall("f", HAssert::True)])]);
         assert_eq!(
             validate(&map),
             Err(PayloadError::SpecName {
@@ -1430,7 +1794,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_an_empty_spec_name() {
-        let map = map_of(vec![("", vec![HSpecEntry::new(href("f"), HAssert::True)])]);
+        let map = map_of(vec![("", vec![forall("f", HAssert::True)])]);
         assert_eq!(
             validate(&map),
             Err(PayloadError::SpecName {
@@ -1445,7 +1809,11 @@ mod tests {
         let symbol = "z".repeat(MAX_NAME_LEN + 1);
         let map = map_of(vec![(
             "s",
-            vec![HSpecEntry::new(HFnRef(symbol.clone()), HAssert::True)],
+            vec![HSpecEntry::new(
+                HFnRef(symbol.clone()),
+                HAssert::True,
+                SpecKind::Forall,
+            )],
         )]);
         assert_eq!(
             validate(&map),
@@ -1459,7 +1827,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_an_empty_entry_symbol() {
-        let map = map_of(vec![("s", vec![HSpecEntry::new(href(""), HAssert::True)])]);
+        let map = map_of(vec![("s", vec![forall("", HAssert::True)])]);
         assert_eq!(
             validate(&map),
             Err(PayloadError::FunctionSymbol {
@@ -1478,8 +1846,8 @@ mod tests {
         let callee = "c".repeat(MAX_NAME_LEN + 1);
         let map = map_of(vec![(
             "s",
-            vec![HSpecEntry::new(
-                href("f"),
+            vec![forall(
+                "f",
                 HAssert::nz(HTerm::App(HFnRef(callee.clone()), vec![HTerm::Local(0)])),
             )],
         )]);
@@ -1495,19 +1863,13 @@ mod tests {
 
     #[test]
     fn validate_accepts_a_tree_at_the_depth_cap() {
-        let map = map_of(vec![(
-            "s",
-            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH))],
-        )]);
+        let map = map_of(vec![("s", vec![forall("f", nest(MAX_TREE_DEPTH))])]);
         assert_eq!(validate(&map), Ok(()));
     }
 
     #[test]
     fn validate_rejects_a_tree_beyond_the_depth_cap() {
-        let map = map_of(vec![(
-            "s",
-            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH + 1))],
-        )]);
+        let map = map_of(vec![("s", vec![forall("f", nest(MAX_TREE_DEPTH + 1))])]);
         assert_eq!(
             validate(&map),
             Err(PayloadError::TreeTooDeep {
@@ -1517,13 +1879,110 @@ mod tests {
         );
     }
 
+    /// Both caps are inclusive boundaries: a locs list at the count cap (whose
+    /// values sit below it) and a single loc at the value cap must validate
+    /// and round-trip.
+    #[test]
+    fn validate_accepts_reach_metadata_at_the_caps() {
+        let full: Vec<u32> = (0..MAX_VISIBLE_LOCS).collect();
+        let map = map_of(vec![(
+            "s",
+            vec![
+                HSpecEntry::new(href("f"), HAssert::False, SpecKind::Exists(reach(0, &full))),
+                HSpecEntry::new(
+                    href("g"),
+                    HAssert::False,
+                    SpecKind::Unique(reach(0, &[MAX_VISIBLE_LOCS])),
+                ),
+            ],
+        )]);
+        assert_eq!(validate(&map), Ok(()));
+        assert_eq!(decode(&encode(&map)).unwrap(), map);
+    }
+
+    #[test]
+    fn validate_rejects_unsorted_visible_locs() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::False,
+                SpecKind::Exists(reach(1, &[5, 3])),
+            )],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::VisibleLocsNotAscending {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_visible_locs() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::False,
+                SpecKind::Unique(reach(1, &[4, 4])),
+            )],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::VisibleLocsNotAscending {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_visible_locs_count_past_the_cap() {
+        let over: Vec<u32> = (0..=MAX_VISIBLE_LOCS).collect();
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::False,
+                SpecKind::Unique(reach(0, &over)),
+            )],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::TooManyVisibleLocs {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+                count: MAX_VISIBLE_LOCS as usize + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_visible_loc_past_the_cap() {
+        let map = map_of(vec![(
+            "s",
+            vec![HSpecEntry::new(
+                href("f"),
+                HAssert::False,
+                SpecKind::Exists(reach(0, &[MAX_VISIBLE_LOCS + 1])),
+            )],
+        )]);
+        assert_eq!(
+            validate(&map),
+            Err(PayloadError::VisibleLocOutOfRange {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+                loc: MAX_VISIBLE_LOCS + 1,
+            })
+        );
+    }
+
     #[test]
     #[should_panic(expected = "depth cap")]
     fn encode_panics_on_a_tree_beyond_the_depth_cap() {
-        let map = map_of(vec![(
-            "s",
-            vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH + 1))],
-        )]);
+        let map = map_of(vec![("s", vec![forall("f", nest(MAX_TREE_DEPTH + 1))])]);
         let _ = encode(&map);
     }
 
@@ -1531,10 +1990,7 @@ mod tests {
     #[should_panic(expected = "invalid length")]
     fn encode_panics_on_an_over_long_name() {
         let name = "a".repeat(MAX_NAME_LEN + 1);
-        let map = map_of(vec![(
-            name.as_str(),
-            vec![HSpecEntry::new(href("f"), HAssert::True)],
-        )]);
+        let map = map_of(vec![(name.as_str(), vec![forall("f", HAssert::True)])]);
         let _ = encode(&map);
     }
 
@@ -1551,17 +2007,29 @@ mod tests {
             map_of(vec![(
                 "props",
                 vec![
-                    HSpecEntry::new(href("first"), kitchen_sink()),
-                    HSpecEntry::new(href("second"), every_operator()),
+                    forall("first", kitchen_sink()),
+                    forall("second", every_operator()),
                 ],
             )]),
-            map_of(vec![(
-                "s",
-                vec![HSpecEntry::new(href("f"), nest(MAX_TREE_DEPTH))],
-            )]),
+            map_of(vec![("s", vec![forall("f", nest(MAX_TREE_DEPTH))])]),
             map_of(vec![(
                 name_at_cap.as_str(),
-                vec![HSpecEntry::new(HFnRef(name_at_cap.clone()), HAssert::True)],
+                vec![HSpecEntry::new(
+                    HFnRef(name_at_cap.clone()),
+                    HAssert::True,
+                    SpecKind::Forall,
+                )],
+            )]),
+            map_of(vec![(
+                "kinds",
+                vec![
+                    HSpecEntry::new(href("e"), kitchen_sink(), SpecKind::Exists(reach(0, &[]))),
+                    HSpecEntry::new(
+                        href("u"),
+                        every_operator(),
+                        SpecKind::Unique(reach(2, &[0, 1, MAX_VISIBLE_LOCS])),
+                    ),
+                ],
             )]),
         ];
         for map in corpus {

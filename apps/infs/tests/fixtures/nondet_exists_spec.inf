@@ -1,0 +1,24 @@
+// An `exists`-BODIED spec function (`fn f() exists { … }`). Unlike the nested
+// `exists` block in `nondet.inf`, a proof-mode build (`-v`) reachability-lowers
+// this body: vanilla WASM, the named `@` appended as a hidden trailing choice
+// parameter, and the obligation emitted into the `.v` as a
+// `reachability_spec` record consumed by a `ValidExistsSpec` theorem — the
+// spec function itself is RETAINED in the emitted module record. A
+// compile-mode build strips the proof-only spec; `main` is the only export.
+pub fn main() -> i32 {
+    return 0;
+}
+
+fn twice(n: i32) -> i32 {
+    return n + n;
+}
+
+spec ExDemo {
+    fn ex_witness() exists {
+        let n: i32 = @;
+        assume {
+            assert(n > 0);
+        }
+        assert(twice(n) == n + n);
+    }
+}

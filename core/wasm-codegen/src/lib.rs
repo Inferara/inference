@@ -61,6 +61,8 @@ mod hassert;
 mod hspecs_section;
 mod memory;
 pub mod output;
+#[cfg(test)]
+mod reach_lowering_tests;
 mod spec_section;
 pub mod target;
 
@@ -71,7 +73,8 @@ pub use target::{CodegenOptions, CompilationMode, EmitFeatures, OptLevel, Target
 /// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
 /// separate dependency on `inference-hassert`.
 pub use inference_hassert::{
-    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm,
+    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm, ReachMeta,
+    SpecKind,
 };
 
 /// Single source of truth for the custom WASM section name that carries
@@ -171,8 +174,22 @@ pub fn codegen(
     // traps; the `emit_index_offset` choke point is the seam where it hooks in.
     compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
 
+    // Reachability pre-scan (proof mode only): plan the hidden trailing choice
+    // parameters of every `exists`/`unique`-bodied specification free function
+    // before any body is compiled. The plan set feeds both consumers — the
+    // compiler (signature suffix and body lowering) and the obligation pass —
+    // by reference, so both read one `ExprId`-keyed map and can never drift
+    // apart on slot indices. The pre-scan is a pure function of the typed AST
+    // and fails here, before a single byte is emitted, when a planned function
+    // declares a return type or contains a `return` statement.
+    let reach_plans = if mode == CompilationMode::Proof {
+        hassert::reach::plan_reachability_specs(typed_context)?
+    } else {
+        hassert::reach::ReachPlans::default()
+    };
+
     let hspecs = if typed_context.source_files().next().is_some() {
-        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?
+        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode, &reach_plans)?
     } else {
         HSpecMap::default()
     };
@@ -247,6 +264,7 @@ fn traverse_t_ast_with_compiler(
     typed_context: &TypedContext,
     compiler: &mut Compiler,
     mode: CompilationMode,
+    reach_plans: &hassert::reach::ReachPlans,
 ) -> Result<HSpecMap, CodegenError> {
     let arena = typed_context.arena();
 
@@ -293,7 +311,10 @@ fn traverse_t_ast_with_compiler(
 
     register_function_indices(arena, compiler, typed_context, &buckets)?;
 
-    // Stage 2: Compile bodies in the same order as registration.
+    // Stage 2: Compile bodies in the same order as registration. Only a spec
+    // free function can carry a reachability plan (the pre-scan plans nothing
+    // else), so the other buckets pass `None` rather than performing a lookup
+    // that can never hit.
     for entry in &buckets.funcs {
         compiler.visit_function_definition(
             entry.def_id,
@@ -302,6 +323,7 @@ fn traverse_t_ast_with_compiler(
             None,
             &entry.module_path,
             &FunctionOrigin::TopLevel,
+            None,
         )?;
     }
     for entry in &buckets.methods {
@@ -312,6 +334,7 @@ fn traverse_t_ast_with_compiler(
             Some(&entry.struct_name),
             &entry.module_path,
             &FunctionOrigin::TopLevel,
+            None,
         )?;
     }
     for entry in &buckets.spec_funcs {
@@ -322,6 +345,7 @@ fn traverse_t_ast_with_compiler(
             None,
             &entry.module_path,
             &FunctionOrigin::SpecInner(entry.spec_name.clone()),
+            reach_plans.get(entry.def_id),
         )?;
     }
     for entry in &buckets.spec_methods {
@@ -332,6 +356,7 @@ fn traverse_t_ast_with_compiler(
             Some(&entry.struct_name),
             &entry.module_path,
             &FunctionOrigin::SpecInner(entry.spec_name.clone()),
+            None,
         )?;
     }
 
@@ -347,7 +372,8 @@ fn traverse_t_ast_with_compiler(
     // Every diagnostic is collected first, so a spec with several mistakes
     // surfaces them all at once.
     if mode == CompilationMode::Proof {
-        let (hspecs, diagnostics) = hassert::translate_spec_fns(typed_context, &buckets);
+        let (hspecs, diagnostics) =
+            hassert::translate_spec_fns(typed_context, &buckets, reach_plans);
         if !diagnostics.is_empty() {
             let rendered = diagnostics
                 .iter()

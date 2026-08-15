@@ -61,8 +61,10 @@ pub enum AnalysisDiagnostic {
     #[error("break statement is only valid inside a loop body; if you intended to exit the function, use 'return'")]
     BreakOutsideLoop { location: Location },
 
-    #[error("break statement is not allowed inside a '{block_kind}' block; break would interfere with the path exploration required for formal verification; move the break outside the '{block_kind}' block")]
-    BreakInsideNonDetBlock {
+    #[error(
+        "break statement is not allowed inside {article} '{block_kind}' block; break would interfere with the path exploration required for formal verification; move the break outside the '{block_kind}' block",
+        article = indefinite_article(.block_kind)
+    )]    BreakInsideNonDetBlock {
         location: Location,
         block_kind: &'static str,
     },
@@ -75,8 +77,10 @@ pub enum AnalysisDiagnostic {
     #[error("infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop does not count)")]
     InfiniteLoopWithoutBreak { location: Location },
 
-    #[error("return statement is not allowed inside a '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block")]
-    ReturnInsideNonDetBlock {
+    #[error(
+        "return statement is not allowed inside {article} '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block",
+        article = indefinite_article(.block_kind)
+    )]    ReturnInsideNonDetBlock {
         location: Location,
         block_kind: &'static str,
     },
@@ -269,6 +273,16 @@ pub enum AnalysisDiagnostic {
         "the minus sign is separated from the numeric literal `{value}`; a unary minus applied to a numeric literal must be written against the digits, so write `-{value}`; the sign is part of the literal token, and separating it leaves a negation of the bare `{value}`, which is then measured against the target type on its own — that is why the same value would otherwise compile or fail depending on the whitespace"
     )]
     SpacedNegativeLiteral { value: String, location: Location },
+}
+
+/// The indefinite article for a non-deterministic block-kind word: "an" before
+/// the vowel-initial `exists` and `assume`, "a" before `forall` and `unique`
+/// (which begins with a consonant sound).
+fn indefinite_article(block_kind: &str) -> &'static str {
+    match block_kind {
+        "exists" | "assume" => "an",
+        _ => "a",
+    }
 }
 
 impl AnalysisDiagnostic {
@@ -757,40 +771,70 @@ mod tests {
         );
     }
 
+    /// The vowel-initial kinds take "an"; the message stays otherwise
+    /// identical to the consonant form pinned above.
     #[test]
-    fn display_break_inside_exists_block() {
-        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+    fn display_return_inside_exists_block_uses_an() {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
             block_kind: "exists",
         };
-        assert!(err.to_string().contains("'exists' block"));
+        assert_eq!(
+            err.to_string(),
+            "return statement is not allowed inside an 'exists' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the 'exists' block"
+        );
     }
 
     #[test]
-    fn display_return_inside_unique_block() {
+    fn display_return_inside_assume_block_uses_an() {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "assume",
+        };
+        assert_eq!(
+            err.to_string(),
+            "return statement is not allowed inside an 'assume' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the 'assume' block"
+        );
+    }
+
+    /// "unique" begins with a consonant sound, so it keeps "a".
+    #[test]
+    fn display_return_inside_unique_block_uses_a() {
         let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
             block_kind: "unique",
         };
-        assert!(err.to_string().contains("'unique' block"));
+        assert!(
+            err.to_string()
+                .starts_with("return statement is not allowed inside a 'unique' block"),
+            "got: {err}"
+        );
+    }
+
+    /// The vowel-initial kinds take "an" in the break diagnostic too; the
+    /// consonant form is pinned by `display_break_inside_nondet_block`.
+    #[test]
+    fn display_break_inside_exists_block_uses_an() {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "exists",
+        };
+        assert_eq!(
+            err.to_string(),
+            "break statement is not allowed inside an 'exists' block; break would interfere with the path exploration required for formal verification; move the break outside the 'exists' block"
+        );
     }
 
     #[test]
-    fn display_break_inside_assume_block() {
+    fn display_break_inside_assume_block_uses_an() {
         let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
             location: test_location(),
             block_kind: "assume",
         };
-        assert!(err.to_string().contains("'assume' block"));
-    }
-
-    #[test]
-    fn display_return_inside_exists_block() {
-        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
-            location: test_location(),
-            block_kind: "exists",
-        };
-        assert!(err.to_string().contains("'exists' block"));
+        assert_eq!(
+            err.to_string(),
+            "break statement is not allowed inside an 'assume' block; break would interfere with the path exploration required for formal verification; move the break outside the 'assume' block"
+        );
     }
 
     #[test]

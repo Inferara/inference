@@ -41,7 +41,7 @@ Two logical namespaces, mapped by `_CoqProject`:
 | Directory | Namespace | Mirrors |
 | --- | --- | --- |
 | `wasm/` | `Wasm.*` | Vanilla **WasmCert-Coq v2.2.0** — the WASM datatypes, no fork extensions |
-| `wasm_verifier/` | `WasmVerifier.*` | wasm-verifier (a private Inferara repository; this stub declares, in-repo, the subset of its interface the emitter can print) — the `hassert` assertion language and the two proof-obligation predicates |
+| `wasm_verifier/` | `WasmVerifier.*` | wasm-verifier (a private Inferara repository; this stub declares, in-repo, the subset of its interface the emitter can print) — the `hassert` assertion language and the proof-obligation predicates (`ValidModule`/`ValidSpec`, plus the `ValidExistsSpec`/`ValidUniqueSpec` reachability pair) |
 
 | File | Provides | Mirrors |
 | --- | --- | --- |
@@ -50,7 +50,8 @@ Two logical namespaces, mapped by `_CoqProject`:
 | `wasm/datatypes.v` | Value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive, and the module/section records | Vanilla WasmCert |
 | `wasm/host.v` | The `host` typeclass every emitted theorem is stated under (`Class host := {}`) | Vanilla WasmCert |
 | `wasm_verifier/Assertions.v` | The `term`/`hassert` inductives and the `term_eq`/`Himpl`/`Hor` sugar — the emittable subset of wasm-verifier's `Assertions.v`, see [Narrowed to what the emitter can print](#narrowed-to-what-the-emitter-can-print) | wasm-verifier, `Assertions.v` |
-| `wasm_verifier/Verifier.v` | `Parameter ValidModule : module -> Prop` and `Parameter ValidSpec : forall `{ho:host}, module -> list hassert -> Prop`, the two predicates emitted theorems reference | wasm-verifier, `Verifier.v` |
+| `wasm_verifier/Verifier.v` | `Parameter ValidModule : module -> Prop` and `Parameter ValidSpec : forall `{ho:host}, module -> list hassert -> Prop`, the two predicates every emitted module's theorems reference (the reachability pair lives in `Exists.v`) | wasm-verifier, `Verifier.v` |
+| `wasm_verifier/Exists.v` | The concrete `Record reachability_spec` (a `Parameter` type has no fields to elaborate the emitted `{| … |}` literals against) and the `ValidExistsSpec`/`ValidUniqueSpec` predicates the kind-selected theorems for `exists`/`unique`-bodied spec functions reference | wasm-verifier, `theories/Exists.v` |
 | `_CoqProject` | Maps both physical directories to their logical library names | — |
 
 Compile manually, `Wasm` first (`WasmVerifier` imports it):
@@ -62,6 +63,7 @@ coqc -Q . Wasm wasm/datatypes.v
 coqc -Q . Wasm wasm/host.v
 coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Assertions.v
 coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Verifier.v
+coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Exists.v
 ```
 
 (`tests/src/rocq_typecheck.rs` does this in dependency order into a
@@ -70,11 +72,15 @@ scratch directory automatically; see [How the gate uses it](#how-the-gate-uses-i
 ## Scope: what is and isn't covered
 
 The stub covers the **scalar + non-deterministic-free** instruction
-surface Inference's proof-mode codegen actually emits into a *surviving*
-(executable) function body — integer arithmetic and comparisons,
-memory/local/global access, structured control flow (`if`/`loop`/`br`),
-calls — plus every module and section record, plus the emittable subset
-of the `hassert` term/assertion language for `spec`-derived obligations.
+surface Inference's proof-mode codegen actually emits into a body the
+emitted module record keeps — executable functions and retained
+`exists`/`unique` spec functions, the latter vanilla by construction —
+integer arithmetic and comparisons, memory/local/global access,
+structured control flow (`if`/`loop`/`br`), calls — plus every module
+and section record, plus the emittable subset of the `hassert`
+term/assertion language for `spec`-derived obligations and the
+`reachability_spec` record those obligations are wrapped in for the
+`exists`/`unique` kinds.
 That subset is strictly smaller than wasm-verifier's own `Assertions.v`,
 and deliberately so: see
 [Narrowed to what the emitter can print](#narrowed-to-what-the-emitter-can-print)
@@ -106,18 +112,20 @@ the relevant inductive here together.
 `BI_forall`, `BI_exists`, `BI_assume`, `BI_unique`, or
 `BI_uzumaki_num` — the `WasmCert-Coq-Essence` fork's non-deterministic
 extensions this crate previously targeted. Their absence is intentional
-and is itself the regression guard for the module-omission design: a
-`spec` function's WASM body is no longer translated at all (the function
-is omitted from `mod_funcs`; its logical content becomes a `hassert`
-instead), and any non-deterministic instruction surviving into an
-*executable* body is rejected as `WasmToVError::UnsupportedFeature`
-before reaching the printer (defense-in-depth behind analysis rule A042,
-which already makes non-det syntax outside a `spec` declaration a
-compile-time error for any Inference-compiled program). Should a
-non-deterministic instruction ever leak into the module record again —
-an emitter regression, or a hand-crafted `.wasm` bypassing A042 — it
-becomes an "unbound constructor" `coqc` error against this stub rather
-than a silently type-checking term.
+and is itself the regression guard for the omission/retention design: a
+`forall`/plain `spec` function's WASM body is not translated at all (the
+function is omitted from `mod_funcs`; its logical content becomes a
+`hassert` instead), a retained `exists`/`unique` body is
+reachability-lowered to vanilla WASM before it ever reaches this crate,
+and any non-deterministic instruction surviving into a body the module
+record keeps is rejected as `WasmToVError::UnsupportedFeature` before
+reaching the printer (defense-in-depth behind analysis rule A042, which
+already makes non-det syntax outside a `spec` declaration a compile-time
+error for any Inference-compiled program). Should a non-deterministic
+instruction ever leak into the module record again — an emitter
+regression, or a hand-crafted `.wasm` bypassing A042 — it becomes an
+"unbound constructor" `coqc` error against this stub rather than a
+silently type-checking term.
 
 ## Proofs are not closed here (`Qed.` → `Admitted.`)
 
@@ -214,7 +222,10 @@ yields one. `core/wasm-to-v/src/hassert_print.rs` matches both IR enums
 exhaustively and has no arm that could write one of these names. The
 `P002`/`P007` rejections in the table are the *fourth* line of defense,
 not the load-bearing one: they explain why the IR was designed without
-the variants in the first place.
+the variants in the first place. Both rejections are mode-independent —
+a memory construct in an `exists`/`unique` (reachability) body is the
+same `P002`, and a `forall` block nested in one the same `P007` — so
+the reachability kinds opened no path to any of the seven.
 
 `HA_pred` and `pred_eq` stay, even though the printer never writes
 either name. `term_eq`, which it writes constantly, is defined as
@@ -265,6 +276,7 @@ The authoritative targets are the real `WasmCert-Coq` (v2.2.0) and
 available at build time (a checkout + `.vo` build, or a prebuilt image)
 and is intentionally left as a follow-up. When it lands, point the gate's
 `-Q` flags at the real libraries' `theories` directories instead of this
-one, pin the same wasm-verifier commit this stub was verified against
-(`0c5d525e`) so codegen and the proof target cannot drift, and delete
+one, pin the wasm-verifier commit this stub was verified against
+(`0c5d525e`; the reachability declarations in `Exists.v` against
+`cf39c4f`) so codegen and the proof target cannot drift, and delete
 this stub. The corpus and the test harness carry over unchanged.

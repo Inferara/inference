@@ -5003,6 +5003,158 @@ fn build_compiles_unique_block_without_v() {
     );
 }
 
+/// Verify a `-v` build of an `exists`-BODIED spec function succeeds end to end
+/// and the emitted `.v` carries the reachability grammar: the obligation is
+/// gathered into an `_ex_specs : list reachability_spec` partition consumed by
+/// a `ValidExistsSpec` theorem (the reachability analog of the `_specs` /
+/// `valid_` universal grammar), and the spec function is retained in the
+/// module record.
+///
+/// **Expected behavior**: Exit code 0, both artifacts written, reachability
+/// strings present in the `.v`.
+#[test]
+fn build_v_emits_reachability_for_exists_bodied_spec() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_exists_spec.inf");
+    let dest = temp.child("nondet_exists_spec.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    let v_output = temp.child("out").child("nondet_exists_spec.v");
+    assert!(
+        temp.child("out")
+            .child("nondet_exists_spec.wasm")
+            .path()
+            .exists(),
+        "Expected WASM file at out/nondet_exists_spec.wasm"
+    );
+    let v = std::fs::read_to_string(v_output.path())
+        .expect("an exists-bodied spec build must write out/nondet_exists_spec.v");
+    for needle in [
+        "Definition ex_witness : module_func :=",
+        "Definition nondet_exists_spec__ExDemo_ex_specs : list reachability_spec :=",
+        "Theorem valid_exists_nondet_exists_spec__ExDemo : ValidExistsSpec \
+         nondet_exists_spec nondet_exists_spec__ExDemo_ex_specs.",
+    ] {
+        assert!(
+            v.contains(needle),
+            "the emitted .v must contain `{needle}`; got:\n{v}"
+        );
+    }
+}
+
+/// Verify a `-v` build of a `unique`-BODIED spec function succeeds — the
+/// nested `unique` BLOCK in `build_v_rejects_unique_block_with_p002` stays a
+/// fatal P002; a unique body is the supported top-level form — and the
+/// emitted `.v` selects the `ValidUniqueSpec` theorem over a `_uq_specs`
+/// partition.
+///
+/// **Expected behavior**: Exit code 0, both artifacts written, unique-kind
+/// reachability strings present in the `.v`.
+#[test]
+fn build_v_emits_reachability_for_unique_bodied_spec() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_unique_spec.inf");
+    let dest = temp.child("nondet_unique_spec.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    let v_output = temp.child("out").child("nondet_unique_spec.v");
+    assert!(
+        temp.child("out")
+            .child("nondet_unique_spec.wasm")
+            .path()
+            .exists(),
+        "Expected WASM file at out/nondet_unique_spec.wasm"
+    );
+    let v = std::fs::read_to_string(v_output.path())
+        .expect("a unique-bodied spec build must write out/nondet_unique_spec.v");
+    for needle in [
+        "Definition uq_witness : module_func :=",
+        "Definition nondet_unique_spec__UqDemo_uq_specs : list reachability_spec :=",
+        "Theorem valid_unique_nondet_unique_spec__UqDemo : ValidUniqueSpec \
+         nondet_unique_spec nondet_unique_spec__UqDemo_uq_specs.",
+    ] {
+        assert!(
+            v.contains(needle),
+            "the emitted .v must contain `{needle}`; got:\n{v}"
+        );
+    }
+}
+
+/// Verify a `-v` build of an `assume`-BODIED spec function is rejected with a
+/// fatal P001. The stderr pin matches the diagnostic CODE and the offending
+/// FUNCTION NAME only — never the message prose, which is free to improve —
+/// and a fatal codegen error must leave no partial artifact behind.
+///
+/// **Expected behavior**: Non-zero exit, stderr names `P001` and
+/// `assume_probe`, and neither a `.v` nor a `.wasm` is written.
+#[test]
+fn build_v_rejects_assume_bodied_spec_with_p001() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("nondet_assume_spec.inf");
+    let dest = temp.child("nondet_assume_spec.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("P001").and(predicate::str::contains("assume_probe")));
+
+    let v_output = temp.child("out").child("nondet_assume_spec.v");
+    let wasm_output = temp.child("out").child("nondet_assume_spec.wasm");
+    assert!(
+        !v_output.path().exists(),
+        "a rejected proof-mode build must write no V file, found: {:?}",
+        v_output.path()
+    );
+    assert!(
+        !wasm_output.path().exists(),
+        "a rejected proof-mode build must write no WASM file, found: {:?}",
+        wasm_output.path()
+    );
+}
+
 /// QA: TC-1.6 - Verify graceful error on unknown subcommand.
 ///
 /// **Expected behavior**: Exit code non-zero, error message indicates unknown subcommand.

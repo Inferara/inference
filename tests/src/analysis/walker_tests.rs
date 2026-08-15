@@ -852,6 +852,121 @@ mod walker_traversal_tests {
         );
     }
 
+    // --- The A005/A007 pincer over quantified body modifiers ---
+    //
+    // An `exists`/`unique`-bodied spec function can never carry a declared
+    // return type past analysis: with a `return` in the body A005 fires
+    // (return inside a non-deterministic block — the body modifier IS the
+    // block), and without one A007 fires (declared return type with a
+    // non-returning path). Codegen's reachability lowering depends on that
+    // closure — its slot arithmetic assumes no sret parameter and its
+    // obligation contract cannot express a `return` — and carries only a
+    // defensive backstop for analysis-skipping pipelines. If A005 is ever
+    // relaxed for quantified bodies, these tests fail loudly and the
+    // relaxation must first account for the reachability contract.
+
+    #[test]
+    fn pincer_a005_fires_for_a_scalar_return_in_an_exists_body() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn f() -> i32 exists {
+                    let n: i32 = @;
+                    return n;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. })),
+            "a `return` in an exists body must fire A005: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn pincer_a007_fires_for_a_missing_return_in_an_exists_body() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn f() -> i32 exists {
+                    let n: i32 = @;
+                    assert(n > 0);
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. })),
+            "a declared return type with no return in an exists body must fire A007: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn pincer_a005_fires_for_a_compound_return_in_an_exists_body() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn f() -> [i32; 2] exists {
+                    let n: i32 = @;
+                    let arr: [i32; 2] = [n, n];
+                    return arr;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. })),
+            "a compound return in an exists body must fire A005: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn pincer_a007_fires_for_a_missing_compound_return_in_an_exists_body() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn f() -> [i32; 2] exists {
+                    let n: i32 = @;
+                    assert(n > 0);
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. })),
+            "a declared compound return type with no return in an exists body must fire A007: \
+             {errors:?}"
+        );
+    }
+
+    #[test]
+    fn pincer_a005_fires_for_a_return_in_a_unique_body() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec S {
+                fn f() -> i32 unique {
+                    let n: i32 = @;
+                    return n;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. })),
+            "a `return` in a unique body must fire A005: {errors:?}"
+        );
+    }
+
     #[test]
     fn valid_return_outside_nondet_block() {
         let source = r#"

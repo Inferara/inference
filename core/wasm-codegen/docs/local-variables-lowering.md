@@ -159,7 +159,9 @@ local.set 1   ; y is at index 1
 ### Uzumaki (`@`)
 
 Non-deterministic value generation. The compiler emits the custom `0xfc`-prefixed uzumaki
-instruction for the appropriate WASM type, then `local.set`.
+instruction for the appropriate WASM type, then `local.set`. (The one exception is a
+reachability-lowered `exists`/`unique` spec-function body, where a `@` is instead a
+`local.get` of its hidden trailing choice parameter — see `hassert/reach.rs`.)
 
 ```inference
 let a: i32 = @;

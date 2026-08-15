@@ -93,19 +93,41 @@ fn payload_error_to_codegen(err: PayloadError) -> CodegenError {
             len,
             max: inference_hassert::MAX_NAME_LEN,
         },
+        ref err @ (PayloadError::TooManyVisibleLocs {
+            ref spec,
+            ref function,
+            ..
+        }
+        | PayloadError::VisibleLocOutOfRange {
+            ref spec,
+            ref function,
+            ..
+        }
+        | PayloadError::VisibleLocsNotAscending {
+            ref spec,
+            ref function,
+        }) => CodegenError::HspecReachMetaInvalid {
+            spec: spec.clone(),
+            function: function.clone(),
+            detail: err.to_string(),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inference_hassert::{HAssert, HFnRef, HSpecEntry, MAX_NAME_LEN, MAX_TREE_DEPTH};
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, MAX_NAME_LEN, MAX_TREE_DEPTH, SpecKind};
 
     fn map_with(spec: &str, function: &str, hassert: HAssert) -> HSpecMap {
         let mut map = HSpecMap::default();
         map.insert(
             spec.to_string(),
-            vec![HSpecEntry::new(HFnRef(function.to_string()), hassert)],
+            vec![HSpecEntry::new(
+                HFnRef(function.to_string()),
+                hassert,
+                SpecKind::Forall,
+            )],
         );
         map
     }
@@ -171,6 +193,7 @@ mod tests {
             vec![HSpecEntry::new(
                 HFnRef("z".to_string()),
                 assert_spine(MAX_TREE_DEPTH + 1),
+                SpecKind::Forall,
             )],
         );
         map.insert(
@@ -178,6 +201,7 @@ mod tests {
             vec![HSpecEntry::new(
                 HFnRef("a".to_string()),
                 assert_spine(MAX_TREE_DEPTH + 1),
+                SpecKind::Forall,
             )],
         );
         let err = check_payload(&map).expect_err("both specs are over-deep");

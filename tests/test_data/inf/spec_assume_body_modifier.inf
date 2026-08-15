@@ -1,0 +1,12 @@
+// An `assume` function-body MODIFIER (`fn f() assume { … }`) inside a spec.
+// `assume` is not a quantifier — it only reinterprets a failing path as a
+// filtered-out one for an enclosing `forall` — so a spec function whose whole
+// body is `assume` states no property and proof-mode codegen rejects it with
+// P001. Kept as its own negative fixture so the accepted body modifiers
+// (`spec_nondet_body_modifiers.inf`) can compile.
+spec AssumeBodyModifier {
+  fn assume_fn() assume {
+    let z: i32 = @;
+    assert(z == z);
+  }
+}

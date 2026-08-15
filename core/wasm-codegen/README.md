@@ -163,7 +163,19 @@ of the opcodes is unverified.
 
 ## Non-Deterministic Extensions
 
-Inference supports non-deterministic constructs for formal verification through custom WebAssembly instructions in the `0xfc` prefix space, emitted via `wasm_encoder::Function::raw()`:
+Inference supports non-deterministic constructs for formal verification through custom WebAssembly instructions in the `0xfc` prefix space, emitted via `wasm_encoder::Function::raw()`.
+
+One family of proof-mode bodies deliberately emits none of them: an
+`exists`/`unique`-quantified spec function is *reachability-lowered* to
+vanilla WASM — each scalar `@` becomes a hidden trailing choice parameter
+(name-section label `__choice{k}`) read with `local.get` (the narrow-type
+domain sequence below is kept, applied to the loaded choice), nested
+`exists`/`assume` block wrappers are suppressed, and `assume`/`assert`
+filters compile to trap-on-false checks — because the downstream
+reachability judgment reduces the retained body under vanilla WASM
+semantics (see `hassert/reach.rs` and
+[`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md)). The
+opcode encodings below cover every other non-det position:
 
 ### Uzumaki (`@`)
 
@@ -391,7 +403,7 @@ Detailed design documents live in `docs/`:
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
-- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation, read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator; `diag.rs`: the `P001`–`P010` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
+- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`Exist`/`Reach` modes; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `diag.rs`: the `P001`–`P012` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
 
 ## Testing

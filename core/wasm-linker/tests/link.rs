@@ -2082,7 +2082,7 @@ fn two_spec_funcs_sections_in_main_are_a_clean_error_not_a_silent_overwrite() {
 /// symbol therefore appears both as the entry owner and inside the tree, so the
 /// merge must carry it through untouched for the reference to stay resolvable.
 fn one_hspec_referencing(symbol: &str) -> inference_hassert::HSpecMap {
-    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm};
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
     let mut map = HSpecMap::default();
     map.insert(
         "S".to_string(),
@@ -2092,6 +2092,7 @@ fn one_hspec_referencing(symbol: &str) -> inference_hassert::HSpecMap {
                 HFnRef(symbol.to_string()),
                 vec![HTerm::Local(0), HTerm::Local(1)],
             )),
+            SpecKind::Forall,
         )],
     );
     map
@@ -2241,9 +2242,11 @@ fn external_hspecs_section_is_stripped_when_building_an_executable() {
 fn corrupt_main_hspecs_section_is_a_clean_link_error() {
     // A main `inference.hspecs` section is a verification deliverable: a corrupt
     // payload must fail the link with a clean error, never a corrupt artifact the
-    // Rocq translator later chokes on. Version byte 2 is past the codec's
-    // supported version 1, so the shared decoder rejects it.
-    let corrupt = [2u8, 0, 0];
+    // Rocq translator later chokes on. Version byte 3 is past the codec's
+    // supported version 2, so the shared decoder rejects it — the sentinel must
+    // stay one past the current version, or a format bump would turn these bytes
+    // into a valid empty payload and this test into a false green.
+    let corrupt = [3u8, 0, 0];
     let mut main = main_importing_sum();
     use wasm_encoder::Section as _;
     wasm_encoder::CustomSection {

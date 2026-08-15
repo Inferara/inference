@@ -1,10 +1,14 @@
 // Function-body non-deterministic MODIFIERS (`fn f() forall { … }`) inside spec
 // functions. A modifier records its kind on the function's body block, lowered
 // by a different codegen path (`visit_function_definition_body`) than an inline
-// block. In proof mode every spec-function body is lowered, so keeping this
-// covered pins the wrapper arity for `exists`/`assume`, not just `forall`.
-// This is the spec-wrapped, analysis-legal counterpart of the negative fixture
-// `nondet_body_modifiers.inf`.
+// block. In proof mode every spec-function body is lowered, and the two kinds
+// here lower differently: a `forall` body keeps its 0xfc wrapper and draw,
+// while an `exists` body is reachability-lowered — vanilla WASM, its `@`
+// hoisted into a hidden trailing choice parameter, its obligation carried as
+// an exists-kind `inference.hspecs` entry. This is the spec-wrapped,
+// analysis-legal counterpart of the negative fixture
+// `nondet_body_modifiers.inf`; the `assume` body modifier, which stays a
+// P001 rejection, lives in `spec_assume_body_modifier.inf`.
 spec NondetBodyModifiers {
   fn forall_fn() forall {
     let x: i32 = @;
@@ -13,9 +17,5 @@ spec NondetBodyModifiers {
   fn exists_fn() exists {
     let y: i32 = @;
     assert(y == y);
-  }
-  fn assume_fn() assume {
-    let z: i32 = @;
-    assert(z == z);
   }
 }

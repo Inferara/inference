@@ -195,8 +195,51 @@ impl HAssert {
     }
 }
 
+/// Frame metadata of a reachability obligation — an `exists`- or
+/// `unique`-quantified specification function whose body is retained in the
+/// emitted module and reduced under vanilla semantics.
+///
+/// Mirrors the non-payload fields of wasm-verifier's `reachability_spec`
+/// record (its `theories/Exists.v`): `reach_entry_arity` and
+/// `reach_visible_locs`. The function reference itself stays symbolic (the
+/// enclosing [`HSpecEntry::fn_symbol`]); `wasm-to-v` resolves it to the
+/// record's `reach_func` index.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ReachMeta {
+    /// Number of source-declared parameters, before the hidden trailing
+    /// choice parameters codegen appends for each scalar `@`. Carried on the
+    /// wire rather than re-derived from the function type, so producer drift
+    /// surfaces as a loud consistency error downstream instead of an
+    /// unprovable theorem.
+    pub entry_arity: u32,
+    /// The producer-declared source-visible frame slots, strictly ascending.
+    /// `unique` compares exit states projected through this list; hidden
+    /// choice parameters and compiler temporaries are deliberately excluded.
+    pub visible_locs: Vec<u32>,
+}
+
+/// The quantifier kind of one obligation: which downstream judgment consumes
+/// the entry's assertion.
+///
+/// A `Forall` payload is a free logical formula discharged denotationally
+/// (`ValidSpec`, over unconstrained valuations); an `Exists`/`Unique` payload
+/// is evaluated against the frame an actual execution reaches
+/// (`ValidExistsSpec`/`ValidUniqueSpec`), so those kinds carry the
+/// [`ReachMeta`] that judgment needs — and only those kinds can: a universal
+/// entry with stray reachability metadata is unrepresentable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SpecKind {
+    /// A universally quantified obligation (`ValidSpec`).
+    Forall,
+    /// An at-least-one-path reachability obligation (`ValidExistsSpec`).
+    Exists(ReachMeta),
+    /// An exactly-one-observation reachability obligation
+    /// (`ValidUniqueSpec`).
+    Unique(ReachMeta),
+}
+
 /// One specification function's translated obligation: the function's own
-/// symbol paired with its assertion.
+/// symbol paired with its assertion and its quantifier kind.
 ///
 /// The symbol lets `wasm-to-v` align an obligation with its emitted function
 /// without depending on position — a spec block may also contain methods, so
@@ -207,12 +250,19 @@ pub struct HSpecEntry {
     pub fn_symbol: HFnRef,
     /// The translated assertion.
     pub hassert: HAssert,
+    /// The quantifier kind selecting the downstream judgment, with the
+    /// reachability metadata for the non-universal kinds.
+    pub kind: SpecKind,
 }
 
 impl HSpecEntry {
     #[must_use = "constructs an entry"]
-    pub fn new(fn_symbol: HFnRef, hassert: HAssert) -> Self {
-        Self { fn_symbol, hassert }
+    pub fn new(fn_symbol: HFnRef, hassert: HAssert, kind: SpecKind) -> Self {
+        Self {
+            fn_symbol,
+            hassert,
+            kind,
+        }
     }
 }
 

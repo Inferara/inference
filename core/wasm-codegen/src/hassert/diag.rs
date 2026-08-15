@@ -26,7 +26,8 @@ use inference_ast::nodes::{Location, file_label};
 /// (many carry a construct name or a reason that only the site knows).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PCode {
-    /// Spec function body is `exists`/`unique`/`assume`-quantified.
+    /// Spec function body is `assume`-quantified. `assume` is not a
+    /// quantifier — with no enclosing `forall` there is no claim to prove.
     P001,
     /// A construct with no assertion encoding (`loop`, `break`, `unique` block,
     /// `**`, a literal that is not a scalar, memory access).
@@ -50,6 +51,17 @@ pub(crate) enum PCode {
     P009,
     /// A specification function whose obligation is vacuous (`HA_true`).
     P010,
+    /// A call from a specification body to an `exists`/`unique`-quantified
+    /// spec function. Such a function is the subject of a reachability
+    /// judgment about running its own body with its own choices — not a
+    /// callable predicate — and its compiled form carries hidden trailing
+    /// choice parameters no call site supplies.
+    P011,
+    /// An anonymous `@` (call-argument position) in a `unique`-bodied spec
+    /// function. `unique` compares source-visible exit states, and a choice
+    /// nothing names is excluded from that face, which would silently weaken
+    /// the judgment; binding it first (`let c: i32 = @;`) makes it count.
+    P012,
 }
 
 impl fmt::Display for PCode {
@@ -65,6 +77,8 @@ impl fmt::Display for PCode {
             PCode::P008 => "P008",
             PCode::P009 => "P009",
             PCode::P010 => "P010",
+            PCode::P011 => "P011",
+            PCode::P012 => "P012",
         };
         f.write_str(code)
     }

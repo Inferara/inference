@@ -9,18 +9,34 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `0c5d525e` — and the vendored
-signature stub in `rocq-stub/` type-checks the emittable subset of it
-locally), built on **vanilla WasmCert-Coq v2.2.0** — not the
+verified against wasm-verifier commit `0c5d525e`, the reachability
+additions in its `theories/Exists.v` against `cf39c4f` — and the
+vendored signature stub in `rocq-stub/` type-checks the emittable subset
+of it locally), built on **vanilla WasmCert-Coq v2.2.0** — not the
 `WasmCert-Coq-Essence` fork this crate previously targeted. The fork's
 non-deterministic constructors (`BI_forall`, `BI_exists`, `BI_assume`,
 `BI_unique`, `BI_uzumaki_num`) do not exist in vanilla WasmCert, so a
-`spec` function's logical content can no longer be represented as WASM
-instructions in the emitted module — it is translated instead into a
-value of wasm-verifier's `hassert` assertion type and the `spec` function
-itself is **omitted** from the module record entirely. This document
-covers both halves of that change: the (unchanged) executable module
-translation and the (new) `hassert` obligation translation.
+`spec` function's logical content can no longer be represented as
+non-deterministic WASM instructions in the emitted module. What replaces
+them depends on the function's quantifier kind:
+
+- a `forall`-quantified (or plain) `spec` function is translated into a
+  value of wasm-verifier's `hassert` assertion type and the function
+  itself is **omitted** from the module record entirely;
+- an `exists`- or `unique`-quantified `spec` function is **retained** in
+  the module record with a vanilla (non-deterministic-free) body — each
+  scalar `@` arrives as a hidden trailing *choice parameter*, and every
+  `assume`/`assert` compiles to a trap-on-false filter — and its
+  obligation is a `reachability_spec` record pairing that function with
+  an `hassert` payload, consumed by the `ValidExistsSpec`/
+  `ValidUniqueSpec` reachability predicates. The retained body is what
+  the downstream judgment actually reduces, which is why it must stay in
+  `mod_funcs` (see
+  [Two judgments](#two-judgments-validspec-versus-the-reachability-predicates)).
+
+This document covers all three: the (unchanged) executable module
+translation, the universal `hassert` obligation translation, and the
+reachability retention and emission.
 
 This contract supersedes two earlier states, neither of which is emitted
 any more:
@@ -49,8 +65,21 @@ From Wasm Require Import bytes numerics datatypes host.
 From WasmVerifier Require Import Assertions Verifier.
 ```
 
-One further preamble line is conditional: a module carrying at least one
-data segment also emits
+Two parts of the preamble are conditional on module content. The
+`From WasmVerifier` import gains a trailing ` Exists` —
+
+```coq
+From WasmVerifier Require Import Assertions Verifier Exists.
+```
+
+— exactly when the module carries at least one `exists`/`unique`
+(reachability) obligation, because `reachability_spec` and the two
+reachability predicates live in wasm-verifier's `theories/Exists.v` and
+a forall-only module names nothing from it. (Coq's standard `List` also
+exports an inductive named `Exists`; the two occupy separate namespaces
+— one is a module, the other a term — and no emitted term spells bare
+`Exists`, so the combination is unambiguous.) And a module carrying at
+least one data segment also emits
 
 ```coq
 Open Scope byte_scope.
@@ -133,6 +162,24 @@ Within that context, the translator depends on:
 - A `ValidSpec : forall `{ho : host}, module -> list hassert -> Prop` —
   the per-spec obligation, now **hassert-valued** rather than an index
   list.
+- Only under the conditional ` Exists` import: the `reachability_spec`
+  record —
+
+  ```coq
+  Record reachability_spec : Type := {
+    reach_func : N;            (* index into mod_funcs of the emitted module *)
+    reach_entry_arity : nat;   (* source parameters, before the choice suffix *)
+    reach_visible_locs : seq N;(* producer-declared source-visible frame slots *)
+    reach_payload : hassert
+  }.
+  ```
+
+  — and the two predicates
+  ``ValidExistsSpec : forall `{ho : host}, module -> list reachability_spec -> Prop``
+  and `ValidUniqueSpec` at the same type (wasm-verifier
+  `theories/Exists.v`). The library proves `ValidUniqueSpec` implies
+  `ValidExistsSpec`, but the emitter selects exactly one predicate per
+  obligation kind and never leans on that lemma.
 
 wasm-verifier's own naming note (in its `theories/Verifier.v`) is worth
 carrying forward: the *old* external-contract name (indexed by a WASM
@@ -143,9 +190,9 @@ reconcile on this side, but a downstream proof that expects
 index-oriented `ValidSpec` should look for `ValidSpecFI` instead.
 
 `seq` in the real library is a mathcomp notation for `list`. The emitted
-`.v` imports no mathcomp and spells the payload type `list hassert`
-directly — definitionally identical, syntactically plain standard-library
-`list`.
+`.v` imports no mathcomp and spells the payload types `list hassert` and
+`list reachability_spec` directly — definitionally identical,
+syntactically plain standard-library `list`.
 
 ## Emitted-file anatomy
 
@@ -267,8 +314,11 @@ Notes on the shape, in emission order:
   before this contract.
 - **Per-function `Definition`s**: one `module_func` per *executable*
   (non-spec) function, `check` and `main` here. `shape_prop`, the sole
-  function inside `spec Shapes`, contributes no `Definition` at all — it
-  is not part of the executable module.
+  function inside `spec Shapes`, is `forall`-quantified and contributes
+  no `Definition` at all — it is not part of the executable module. (An
+  `exists`/`unique`-quantified spec function *would* keep its
+  `Definition`; see
+  [Reachability additions to the anatomy](#reachability-additions-to-the-anatomy).)
 - **Module record**: `mod_types` stays **complete** — all three function
   types are present even though `shape_prop`'s type is now unused by any
   `mod_funcs` entry — but `mod_funcs` lists only `check` and `main`. See
@@ -288,45 +338,269 @@ Notes on the shape, in emission order:
   (`tests/src/rocq_typecheck.rs`) rewrites `Qed.` to `Admitted.` before
   compiling so it can assert *type-checking*, not proof closure.
 
+### Reachability additions to the anatomy
+
+The following is the complete, unedited `.v` output for
+`tests/test_data/inf/rocq_exists_spec.inf`, generated the same way (it
+is also committed byte-for-byte as the golden
+`tests/test_data/rocq/rocq_exists_spec.v`, which a regression test
+compares against regenerated output). The source declares one executable
+function (`double`) and one `spec` block (`ReachableDouble`) with a
+single `exists`-quantified function (`ex_double`) that draws two named
+choices (`let n: i32 = @`, `let wide: i64 = @`) and one anonymous
+call-argument choice, filters them through `assume` blocks, and
+cross-calls `double`:
+
+```coq
+Require Import List.
+Require Import String.
+Require Import BinNat.
+Require Import ZArith.
+From Wasm Require Import bytes numerics datatypes host.
+From WasmVerifier Require Import Assertions Verifier Exists.
+
+Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).
+Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).
+Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.
+Definition Mm l := {|modmem_type := l|}.
+Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.
+
+Definition Mi m n d := {|
+  imp_module := list_byte_of_string m;
+  imp_name := list_byte_of_string n;
+  imp_desc := d;
+|}.
+
+Definition Me n d := {|
+  modexp_name := list_byte_of_string n;
+  modexp_desc := d;
+|}.
+
+Definition Ma of al := {|memarg_offset := of; memarg_align := al|}.
+
+Definition double : module_func := {|
+  modfunc_type := 0%N;
+  modfunc_locals := nil;
+  modfunc_body :=
+    BI_local_get 0%N (*n*) ::
+    BI_local_get 0%N (*n*) ::
+    BI_binop T_i32 (Binop_i BOI_add) ::
+    BI_return ::
+    BI_unreachable ::
+    nil;
+|}.
+
+Definition ex_double : module_func := {|
+  modfunc_type := 1%N;
+  modfunc_locals := nil;
+  modfunc_body :=
+    BI_local_get 1%N (*n*) ::
+    BI_local_set 1%N (*n*) ::
+    BI_local_get 1%N (*n*) ::
+    BI_local_get 0%N (*lo*) ::
+    BI_relop T_i32 (Relop_i (ROI_gt SX_S)) ::
+    BI_testop T_i32 TO_eqz ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    BI_local_get 2%N (*wide*) ::
+    BI_local_set 2%N (*wide*) ::
+    BI_local_get 2%N (*wide*) ::
+    BI_const_num (Vi64 0) ::
+    BI_relop T_i64 (Relop_i (ROI_ge SX_S)) ::
+    BI_testop T_i32 TO_eqz ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    BI_local_get 1%N (*n*) ::
+    BI_call 0%N ::
+    BI_local_get 1%N (*n*) ::
+    BI_local_get 1%N (*n*) ::
+    BI_binop T_i32 (Binop_i BOI_add) ::
+    BI_relop T_i32 (Relop_i ROI_eq) ::
+    BI_testop T_i32 TO_eqz ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    BI_local_get 3%N (*__choice2*) ::
+    BI_call 0%N ::
+    BI_local_get 0%N (*lo*) ::
+    BI_relop T_i32 (Relop_i (ROI_ge SX_S)) ::
+    BI_testop T_i32 TO_eqz ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    nil;
+|}.
+
+Definition rocq_exists_spec : module := {|
+  mod_types :=
+    Tf (T_num T_i32 :: nil) (T_num T_i32 :: nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i64 :: T_num T_i32 :: nil) (nil) ::
+    nil;
+  mod_funcs :=
+    double ::
+    ex_double ::
+    nil;
+  mod_tables :=
+    nil;
+  mod_mems :=
+    nil;
+  mod_globals :=
+    nil;
+  mod_elems :=
+    nil;
+  mod_datas :=
+    nil;
+  mod_start := None;
+  mod_imports :=
+    nil;
+  mod_exports :=
+    nil;
+|}.
+
+Definition rocq_exists_spec__ReachableDouble_specs : list hassert := (@nil hassert).
+Definition rocq_exists_spec__ReachableDouble_exspec1 : reachability_spec :=
+  {| reach_func := 1%N; reach_entry_arity := 1%nat;
+     reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_app 0 ((T_local 3%N) :: nil)) (T_local 0%N)) (T_const (Vi32 0)))))) |}.
+Definition rocq_exists_spec__ReachableDouble_ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
+
+Section Host.
+Context `{ho: host}.
+
+Theorem valid_rocq_exists_spec : ValidModule rocq_exists_spec.
+Proof.
+  (* TODO: fill the proof *)
+Qed.
+
+Theorem valid_rocq_exists_spec__ReachableDouble : ValidSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_specs.
+Proof.
+  (* TODO: fill the proof *)
+Qed.
+
+Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_ex_specs.
+Proof.
+  (* TODO: fill the proof *)
+Qed.
+
+End Host.
+```
+
+Notes on what reachability adds, in emission order:
+
+- **Preamble**: the proof-contract import line reads
+  `… Assertions Verifier Exists.` (the conditional trailing import).
+- **The retained function**: `ex_double` is emitted as an ordinary
+  `module_func` `Definition` and listed in `mod_funcs`. Its body is
+  vanilla WASM: each `@` reads a hidden trailing choice parameter —
+  `mod_types` entry 1 is
+  `Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i64 :: T_num T_i32 :: nil) (nil)`,
+  one source parameter (`lo`) followed by the three choices in source
+  order, the anonymous one under the name-section label `__choice2` —
+  and every `assume`/`assert` compiles to a trap-on-false
+  `BI_if … BI_unreachable` filter. The body has no result and no
+  `BI_return`; it exits by falling off the end (see
+  [Two judgments](#two-judgments-validspec-versus-the-reachability-predicates)
+  for why both are contract-forced).
+- **The universal grammar is untouched**: `_specs : list hassert` and
+  its `ValidSpec` theorem are still emitted for every spec name — here
+  in the explicitly-typed empty form `(@nil hassert)`, since
+  `ReachableDouble` has no `forall`/plain obligations. A forall-only
+  module's output is byte-identical to what it was before reachability
+  emission existed.
+- **Per-obligation records**: one
+  `<mod>__<Spec>_exspec{k} : reachability_spec` per `exists` obligation
+  in source order (1-based), then a gathering
+  `<mod>__<Spec>_ex_specs : list reachability_spec`. `reach_func` is the
+  retained function's `mod_funcs` index (`%N`), `reach_entry_arity` the
+  source parameter count (`%nat`), `reach_visible_locs` the ascending
+  source-visible slot list (`%N`), and `reach_payload` the body's
+  `hassert` — whose `T_local` indices are *frame* indices of the
+  compiled function, entry parameters and choice parameters alike (the
+  anonymous choice's slot `3` appears inside the payload but not in
+  `reach_visible_locs`). A `unique` obligation is emitted identically
+  under `_uqspec{k}`/`_uq_specs` (see the committed golden
+  `tests/test_data/rocq/rocq_unique_spec.v`).
+- **Theorems**: the `Section Host` block gains one
+  `Theorem valid_exists_<mod>__<Spec> : ValidExistsSpec <mod>
+  <mod>__<Spec>_ex_specs` per spec whose `exists` partition is
+  non-empty, and one `valid_unique_<mod>__<Spec>` over `ValidUniqueSpec`
+  per non-empty `unique` partition. An empty partition emits nothing —
+  no empty `list reachability_spec`, no vacuous theorem — which is what
+  keeps forall-only output byte-identical.
+
 ## Spec-function omission and index remap
 
-A `spec` function is a downstream contract obligation, not part of the
-executable module, so it is dropped from the `.v` module record — but
-WASM function indices are dense and positional, so removing one shifts
-every later function down by one. Every surviving reference to a
-function index must be renumbered accordingly. This is `FuncRemap`
-(`src/translator.rs`):
+What a `spec` function contributes to the `.v` depends on its quantifier
+kind:
+
+- A `forall`-quantified (or plain) spec function is a downstream
+  contract obligation, not part of the executable module, so it is
+  **omitted** from the `.v` module record — but WASM function indices
+  are dense and positional, so removing one shifts every later function
+  down by one. Every surviving reference to a function index must be
+  renumbered accordingly.
+- An `exists`/`unique`-quantified spec function is **retained**: its
+  reachability judgment looks the function up in `mod_funcs` of the
+  emitted module and reduces its (vanilla) body, so it keeps its
+  `Definition` and its `mod_funcs` entry. Retained functions shift
+  nothing — only omitted indices count toward the remap — but they must
+  stay *unreferenceable* from executable constructs: the signature
+  carries hidden choice parameters and the body traps on filtered
+  paths, so it is not a callable.
+
+Both concerns are `FuncRemap` (`src/translator.rs`):
 
 ```text
 remap(i) = i - |{ omitted spec-function indices strictly below i }|
 ```
 
 `FuncRemap` is built once per module from the (already-merged)
-`inference.spec_funcs` map and the function-import count, and offers two
+`inference.spec_funcs` map, the hspecs kind classification (which
+indices are retained), and the function-import count, and offers three
 forms:
 
 - `instantiated(abs)` — the renumbered index into the emitted module's
-  function space (imports, then surviving locals). Used for `BI_call`
+  function space (imports, then surviving locals). The raw index
+  arithmetic: it rejects an omitted spec function but *accepts* a
+  retained one, because the `reach_func` computation needs exactly that.
+- `referenced_instantiated(abs)` — `instantiated(abs)` behind a
+  retained-spec-function rejection. This is the operand form: `BI_call`
   and `BI_ref_func` operands, export/element/start descriptors.
 - `mod_funcs_index(abs)` — `instantiated(abs)` minus the import count,
-  the `mod_funcs`-relative index `T_app`/`HA_app_ok` need.
+  the `mod_funcs`-relative index `T_app`/`HA_app_ok` and `reach_func`
+  need. Rejects an imported function.
 
-Both are **fail-closed**: `instantiated` rejects a reference to an
-omitted spec function (`HspecInconsistent`, "a surviving construct
-references function N, which is an omitted spec function"), and
-`mod_funcs_index` additionally rejects an imported function
-("… only module-defined functions can be applied").
+All three are **fail-closed** (`HspecInconsistent`): `instantiated`
+rejects a reference to an omitted spec function ("a construct retained
+in the emitted module references function N, which is an omitted
+specification function"), `referenced_instantiated` additionally rejects
+a retained one ("a surviving construct references function N, which is a
+retained `exists`/`unique` specification function; its body stays in the
+emitted module only as the subject of its reachability obligation, not
+as a callable"), and `mod_funcs_index` additionally rejects an imported
+function ("… only module-defined functions can be applied"). The split
+is deliberate: the reference guard cannot live inside `instantiated`
+itself, because the reachability obligation's own `reach_func` lookup
+goes through the same index arithmetic for the retained function — the
+guard sits at the reference sites, and the `reach_func` computation
+bypasses it.
 
 | Site | Renumbered how |
 | --- | --- |
-| Function bodies / `mod_funcs` list | `translate_functions` skips any absolute index `remap.is_omitted` reports; the omitted function contributes no `Definition` and no `mod_funcs` entry |
+| Function bodies / `mod_funcs` list | `translate_functions` skips any absolute index `remap.is_omitted` reports; the omitted function contributes no `Definition` and no `mod_funcs` entry. A retained index is not skipped — its vanilla body translates through the normal path |
 | `mod_types` (positional type indices) | **Unchanged** — kept complete. The type section itself is untouched, so a surviving function's `modfunc_type` needs no adjustment even though its own type index may now be unused by any function |
-| `BI_call` operands | `translate_basic_operator`'s `Operator::Call` arm, via `remap.instantiated` |
-| Export descriptors (`MED_func`) | `translate_module_export_desc`, via `remap.instantiated` |
-| Element segments (function-index items) | `translate_element`, via `remap.instantiated`, before each index is wrapped in its `BI_ref_func` initializer expression |
-| `BI_ref_func` operands | `translate_basic_operator`'s `Operator::RefFunc` arm, via `remap.instantiated`. An element segment's other item form spells its reference as this instruction directly, and a body may too, so both forms land on the same renumbered index |
-| `mod_start` | via `remap.instantiated` |
-| `T_app` / `HA_app_ok` targets | via `remap.mod_funcs_index` (see [T_app resolution discipline](#t_app-resolution-discipline)) |
+| `BI_call` operands | `translate_basic_operator`'s `Operator::Call` arm, via `remap.referenced_instantiated` |
+| Export descriptors (`MED_func`) | `translate_module_export_desc`, via `remap.referenced_instantiated` |
+| Element segments (function-index items) | `translate_element`, via `remap.referenced_instantiated`, before each index is wrapped in its `BI_ref_func` initializer expression |
+| `BI_ref_func` operands | `translate_basic_operator`'s `Operator::RefFunc` arm, via `remap.referenced_instantiated`. An element segment's other item form spells its reference as this instruction directly, and a body may too, so both forms land on the same renumbered index |
+| `mod_start` | via `remap.referenced_instantiated` |
+| `T_app` / `HA_app_ok` targets | via `remap.mod_funcs_index`, behind an explicit is-retained rejection (see [T_app resolution discipline](#t_app-resolution-discipline)) |
+| `reach_func` fields | via `remap.mod_funcs_index` directly — the one consumer that must accept a retained index |
 
 Imports are never spec functions (codegen records only local functions
 in `inference.spec_funcs`), so imported indices are always stable under
@@ -335,14 +609,17 @@ translator never even sees an import (the static-merge linker satisfies
 every import before `-v` runs), but the offset is still applied
 correctly when a pre-link or third-party module is translated directly.
 
-A regression test in `src/lib.rs`
-(`omitting_a_spec_function_renumbers_a_surviving_cross_call` —
-`func 0` calls `func 2` while `func 1` is the omitted spec function)
-pins the exact-operand behavior: the emitted body must read `BI_call
-1%N`, not `BI_call 2%N`, and the omitted function must contribute no
-`Definition`. The `coqc` gate catches shape errors (a mis-aritied
-constructor) but not a wrong index, so this exact-operand assertion is
-the load-bearing check for remap correctness.
+Regression tests in `src/lib.rs` pin the exact-operand behavior:
+`omitting_a_spec_function_renumbers_a_surviving_cross_call` (`func 0`
+calls `func 2` while `func 1` is the omitted spec function — the emitted
+body must read `BI_call 1%N`, not `BI_call 2%N`, and the omitted
+function must contribute no `Definition`),
+`retaining_a_spec_function_preserves_surviving_operands` (a retained
+function shifts nothing), and
+`omission_and_retention_renumber_independently` (mixed kinds: only the
+omitted index moves the remap). The `coqc` gate catches shape errors (a
+mis-aritied constructor) but not a wrong index, so these exact-operand
+assertions are the load-bearing check for remap correctness.
 
 ## T_app resolution discipline
 
@@ -358,16 +635,25 @@ symbol any obligation applies, up front, before any output is built:
 
 1. Collect every `T_app`/`HA_app_ok` symbol referenced anywhere in
    `hspecs_by_spec` (`hassert_print::collect_symbols`).
-2. Invert the **raw**, unsanitized name-section map (`raw_func_names_map`
-   — kept separate from the Rocq-sanitized `func_names_map` used for
-   `Definition` names, because a symbol like `Struct.method` is a valid
-   WASM name-section string but not a valid Rocq identifier on its own).
+2. Look each symbol up in one shared inversion of the **raw**,
+   unsanitized name-section map (`raw_func_names_map` — kept separate
+   from the Rocq-sanitized `func_names_map` used for `Definition` names,
+   because a symbol like `Struct.method` is a valid WASM name-section
+   string but not a valid Rocq identifier on its own). The inversion is
+   built once per `translate()` and also feeds the reachability target
+   classification (see
+   [The name section is load-bearing](#the-name-section-is-load-bearing-for-reachability)),
+   so the two resolutions cannot disagree about what a symbol names.
 3. Each symbol must resolve to **exactly one** defined function: zero
    matches is `HspecInconsistent` ("… which no defined function in the
    module carries"); more than one is `HspecInconsistent` ("… which N
    defined functions share; the target is ambiguous").
-4. The resolved absolute index passes through `remap.mod_funcs_index`,
-   which fails closed on an omitted (spec) or imported target.
+4. A retained `exists`/`unique` spec function is rejected explicitly ("a
+   specification function is the subject of its own obligation, not an
+   interpretable symbol") — necessary because a retained index passes
+   the arithmetic below. The resolved absolute index then passes through
+   `remap.mod_funcs_index`, which fails closed on an omitted (spec) or
+   imported target.
 
 This mirrors wasm-verifier's soundness discipline for the obligation
 language:
@@ -393,6 +679,141 @@ language:
   result, if any, discarded) instead becomes `HA_app_ok f τs`, at any
   result arity including void.
 
+## Two judgments: `ValidSpec` versus the reachability predicates
+
+A `forall` obligation and an `exists`/`unique` obligation are not two
+flavors of one predicate — they are different *kinds of statement*, and
+the asymmetry runs through everything this contract emits.
+
+`ValidSpec` is **denotational**: the payload is a logical formula
+evaluated over valuations the predicate constrains in no way, and the
+spec function's compiled body plays no part in the judgment at all —
+which is why the function can be omitted from the module record, why
+every slot readout must carry its own `HA_has_type` guard, and why a
+slot-index skew there would be inert (an unconstrained valuation has no
+"right" index to disagree with).
+
+`ValidExistsSpec`/`ValidUniqueSpec` are **operational**: the predicate
+looks `reach_func` up in `mod_funcs` of the emitted module and *reduces
+the retained body* under vanilla WASM semantics. Entry arguments range
+over the first `reach_entry_arity` parameters; the predicate itself
+quantifies the trailing choice parameters (existentially — at least one
+choice vector must reach a non-trapping exit; `unique` additionally
+compares the exits). The payload is evaluated against the frame the
+reduction actually reaches, where every slot carries its runtime value
+and type. Three consequences:
+
+- **No `HA_has_type` slot guards and no `HA_ex` binders for `@`** in a
+  reachability payload: the frame supplies the typing, and the predicate
+  already quantifies the choices operationally — an `HA_ex` binder would
+  double-quantify and detach the payload from the frame. (`HA_ex` still
+  appears for short-circuit `&&`/`||` witnesses, whose machinery is
+  mode-independent.)
+- **Slot indices are load-bearing**: a payload `T_local i` must equal
+  the actual frame index of the compiled function — codegen and the
+  obligation translator consume one shared pre-scan plan keyed by
+  expression identity, so the payload slot of the k-th `@` equals its
+  appended parameter index by construction, not by parallel counting.
+- **Theorem selection is either/or**: an `exists`/`unique` payload is
+  never emitted under `ValidSpec` (a purely logical encoding of
+  reachability is tautological — nothing ties it to execution), and a
+  `forall` payload is never wrapped in a `reachability_spec`. The
+  `_specs : list hassert` grammar stays unconditional per spec name;
+  the reachability partitions appear only when non-empty.
+
+### The source-visible face of `unique`
+
+`reach_visible_locs` is the producer's declaration of which frame slots
+count as *source-visible* when `ValidUniqueSpec` compares exits. The
+compiler's rule, which a spec author needs to know because it decides
+what "exactly one exiting state" distinguishes:
+
+- every **entry parameter** is visible;
+- a **named choice** (`let x: i32 = @;`) is visible — hiding it would
+  collapse distinct named outcomes into one observation and quietly
+  degrade `unique` toward `exists`;
+- an **anonymous choice** (`f(@)`) and every compiler temporary are
+  hidden; a `let` bound to a pure expression occupies no payload slot at
+  all (its value is a function of the visible slots).
+
+For `exists` the list is inert — projecting locals cannot change whether
+the observation set is non-empty — so its consequences land on `unique`
+alone. That is also why an anonymous `@` is *rejected* in a `unique`
+body (`P012`: a choice nothing names cannot distinguish exit states —
+bind it first so it participates in uniqueness) while remaining legal in
+an `exists` body.
+
+### What `unique` compares
+
+`ValidUniqueSpec` compares, for each entry state, every non-trapping
+exit's *observation*: the *whole* linear store, the module instance, the
+result values (none — bodies are void), and the locals projected through
+`reach_visible_locs`. Several succeeding choice vectors are permitted
+when they converge to one observation. Two practical consequences:
+
+- "the whole linear store" includes shadow-stack residue left by calls
+  into memory-using functions, which the producer cannot project out —
+  so a `unique` obligation over a body that calls a memory-using
+  function is practically unprovable today. The verifier owns the
+  observation; narrowing it is a verifier-side follow-up.
+- entry-state quantification means *every argument vector at one fixed
+  instantiation store* (the freshly instantiated module's store), not
+  "for every store".
+
+One more scope note: the language specification currently defines
+`unique` only as a block form nested inside `exists`; a top-level
+`unique`-quantified *body* (`fn f(...) unique { … }`) is this compiler's
+deliberate extension, ahead of the pending specification amendment.
+Nested `unique` *blocks* remain rejected (`P002`).
+
+### Reachability bodies are void-only and `return`-free
+
+Contract-forced, not a style choice: the reachability judgment reduces
+the retained body *frameless* — `to_e_list (modfunc_body f)` directly,
+with no enclosing activation frame — and WasmCert's `rs_return` rule
+fires only under an `AI_frame`, so a `BI_return` in a retained body can
+never take a step and the obligation is silently unprovable. A body must
+exit by falling off its end. Analysis already closes both doors (A005
+bans `return` inside quantified blocks; A007 rejects a declared return
+type whose paths don't all return), and the codegen pre-scan carries its
+own hard error for both clauses so an analysis-skipping pipeline cannot
+emit an unprovable obligation.
+
+### Obligations only an import-free module can discharge
+
+`ValidExistsSpec`/`ValidUniqueSpec` existentially quantify a module
+*runtime* whose construction requires typing and allocating the module
+with an **empty import list**. `ValidSpec` needs no runtime, so this
+constraint is new with reachability: a module that still carries
+imports and one `exists`/`unique` obligation gets a well-formed but
+undischargeable theorem. The linked pipeline's always-link invariant
+removes imports before `-v` runs, so the normal path is unaffected; it
+bites only direct translation of pre-link or third-party modules.
+
+### The name section is load-bearing for reachability
+
+An `exists`/`unique` obligation must name its retained function, and
+obligations reference functions **symbolically** (name-section strings).
+`classify_reachability_targets` (`src/translator.rs`) resolves each
+reachability entry's own `fn_symbol` through the same shared
+name-section inversion `T_app` resolution uses — stripping the
+`<folded_spec>.` qualifier the symbol carries (the name section stores
+the bare function name; spec membership travels in
+`inference.spec_funcs`) and disambiguating through the spec's own index
+list — and fails closed (`HspecInconsistent`) when the module carries no
+name section, no defined function carries the name, none of the carriers
+is listed under the obligation's spec, or several are. It also
+cross-checks the wire metadata against the located function:
+`entry_arity` must not exceed the function's parameter count, and every
+`visible_locs` slot must fall inside the frame (parameters + declared
+locals) — a bad record here would otherwise surface only as an
+unprovable theorem at the paid prover.
+
+This is a hard dependency a forall-only module does not have: a module
+whose obligations apply no symbols translates without any name section,
+but a stripped or rewritten name section turns a reachability-bearing
+module into a clean `HspecInconsistent` error.
+
 ## Custom WASM sections
 
 Two custom sections carry proof-mode metadata through codegen → linker →
@@ -414,15 +835,15 @@ repeated `count` times:
     func_idx       : varuint32
 ```
 
-### `inference.hspecs` (new)
+### `inference.hspecs` (wire v2)
 
-Per-spec `hassert` obligations, owned by the `inference-hassert` crate
-(`core/hassert/src/codec.rs`) so the encoder (codegen) and both decoders
-(linker, `wasm-to-v`) share one implementation. LEB128 throughout;
-`varu32` = unsigned LEB128:
+Per-spec `hassert` obligations, each tagged with its quantifier kind,
+owned by the `inference-hassert` crate (`core/hassert/src/codec.rs`) so
+the encoder (codegen) and both decoders (linker, `wasm-to-v`) share one
+implementation. LEB128 throughout; `varu32` = unsigned LEB128:
 
 ```text
-version      varu32 = 1
+version      varu32 = 2
 sym_count    varu32
   repeated sym_count times, STRICTLY ASCENDING and unique:
     name_len   varu32
@@ -434,8 +855,24 @@ spec_count   varu32
     entry_count varu32
     repeated entry_count times, in source order:
       symbol_idx varu32           -- into the symbol table
+      kind       u8               -- 0x00 Forall | 0x01 Exists | 0x02 Unique
+      reach_meta                  -- present iff kind != 0x00:
+        entry_arity varu32
+        locs_count  varu32
+        loc         varu32 * locs_count
+                                  -- STRICTLY ASCENDING and unique
       hassert                     -- preorder, tag-prefixed
 ```
+
+The kind byte follows the Rust `SpecKind` enum's declaration order; a
+`Forall` entry carries no reachability metadata, so the universal common
+case costs one byte. `entry_arity` and `visible_locs` are *carried* on
+the wire rather than re-derived from the module's bytes — the producer
+alone knows which parameters are choices — and the emitter cross-checks
+them against the located function (see
+[The name section is load-bearing](#the-name-section-is-load-bearing-for-reachability)),
+so producer drift is a loud `HspecInconsistent` instead of an unprovable
+theorem.
 
 Both a spec entry's own `fn_symbol` and any `App`/`AppOk` symbol inside
 its tree are indices into one shared, sorted symbol table — the union of
@@ -445,12 +882,16 @@ codec's own module doc (`core/hassert/src/codec.rs`); the tag values
 follow each Rust enum's declaration order and are part of the wire
 format.
 
+Version 1 (no kind byte, no reachability metadata) is superseded and
+**rejected on decode**: the section is proof-mode intermediate data, so
+recompilation, not migration, is the compatibility story.
+
 **Determinism**: `encode` sorts the symbol table and the spec list, so
 two `HSpecMap`s that are equal (regardless of insertion or map-iteration
 order) encode to identical bytes.
 
 **Decoder hardening**: both the leading `version` (rejecting anything but
-`1`), and, specific to `inference.hspecs`: a 1024-byte sanity cap on any
+`2`), and, specific to `inference.hspecs`: a 1024-byte sanity cap on any
 symbol or spec-name key (`MAX_NAME_LEN` — deliberately larger than
 `inference.spec_funcs`' 255-byte spec-name cap, because an hspecs function
 symbol combines a spec name with function identifiers and so is a longer
@@ -458,9 +899,11 @@ kind of string), a 256-level cap on assertion/term nesting
 (`MAX_TREE_DEPTH`, matching `wasm-to-v`'s unrelated
 `MAX_EXPRESSION_DEPTH` WASM-body-nesting cap only by coincidence of
 value), strict-ascending-and-thus-unique ordering on both the symbol
-table and the spec list, bounds-checked counts (an advertised count is
-rejected before any allocation it would drive), and full UTF-8/trailing-byte
-validation. Because [`encode`] is infallible but [`decode`] enforces the
+table and the spec list, a kind-tag range check plus
+strict-ascending-and-thus-unique `visible_locs` capped in count and
+value (`MAX_VISIBLE_LOCS`, 65 536), bounds-checked counts (an advertised
+count is rejected before any allocation it would drive), and full
+UTF-8/trailing-byte validation. Because [`encode`] is infallible but [`decode`] enforces the
 depth cap and a non-empty, capped-length name contract, codegen runs its
 own pre-encode check (`hspecs_section::check_payload`, delegating to the
 shared `inference_hassert::validate`) so an over-deep obligation or an
@@ -505,7 +948,7 @@ entries are matched by name, not position.
   declaration. The check is purely lexical (mode-independent) and fires
   in both compile and proof modes, so no Inference-compiled program can
   reach the codegen stage with non-det syntax outside a spec.
-- **P001–P010** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
+- **P001–P012** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
   specification function that cannot be encoded as an obligation — or
   whose obligation says nothing — aborts code generation
   (`CodegenError::UntranslatableSpec`) rather than silently emitting an
@@ -514,25 +957,39 @@ entries are matched by name, not position.
 
   | Code | Condition |
   | --- | --- |
-  | P001 | Body is `exists`/`unique`/`assume`-quantified (this milestone translates `forall`-quantified and plain bodies only; nested `exists` is supported) |
-  | P002 | A construct with no assertion encoding: `loop`, `break`, a `unique` block, `**`, array indexing, struct field access, a struct/array/string literal |
+  | P001 | Body is `assume`-quantified. `assume` is not a quantifier — it only reinterprets a failing path as a filtered-out one for an enclosing `forall` — so a standalone `assume` body states no property. (`forall`/plain bodies translate to `ValidSpec` obligations; `exists`/`unique` bodies to reachability obligations; nested `exists`/`assume` blocks are supported in every translatable body) |
+  | P002 | A construct with no assertion encoding: `loop`, `break`, a nested `unique` *block*, `**`, array indexing, struct field access, a struct/array/string literal |
   | P003 | Reassignment (`Stmt::Assign`) in a specification body |
   | P004 | A non-scalar type in a term, parameter, or `@` position (only bool, integer, and enum values are representable) |
   | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an external function, an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
-  | P007 | A `forall` block nested inside an `exists` context (needs `Hall`, deferred past this milestone; lifting it must also restore the `Hall` `Definition` to `rocq-stub/wasm_verifier/Assertions.v`, which omits it as unemittable) |
-  | P008 | `@` at a compound (array/struct) type |
-  | P009 | A specification *method* that carries a proof obligation the translation cannot deliver — quantified, or plain but carrying an `assert` at any depth. Never silently dropped, since a method has no free-function fallback path. A plain method that asserts nothing stays a helper and is not reported, a non-deterministic block that claims nothing included |
-  | P010 | A specification function whose obligation collapses to the vacuous `HA_true`: an empty or assert-free body, a body that only computes (`return`, pure `let`/`const`), a trailing `assume` (`Imp(p, ⊤) = ⊤`), or an `if` whose branches all vacuate. An obligation any proof discharges without reading the program is indistinguishable from no verification at all, so a computing helper belongs at file scope, where a specification function can still apply it as a `T_app` |
+  | P007 | A `forall` block nested inside an `exists` context — an `exists`/`unique` body included (needs `Hall`, deferred past this milestone; lifting it must also restore the `Hall` `Definition` to `rocq-stub/wasm_verifier/Assertions.v`, which omits it as unemittable) |
+  | P008 | `@` at a compound (array/struct) type. In an `exists`/`unique` body the message explains the reachability-specific reason: a choice arrives as one scalar WASM parameter, and a compound value lives in linear memory — quantify its scalar components individually |
+  | P009 | A specification *method* that carries a proof obligation the translation cannot deliver — quantified (any kind, `exists`/`unique` included: a method has no obligation channel), or plain but carrying an `assert` at any depth. Never silently dropped, since a method has no free-function fallback path. A plain method that asserts nothing stays a helper and is not reported, a non-deterministic block that claims nothing included |
+  | P010 | A specification function whose obligation collapses to the vacuous `HA_true`: an empty or assert-free body, a body that only computes (`return`, pure `let`/`const`), a trailing `assume` (`Imp(p, ⊤) = ⊤`), or an `if` whose branches all vacuate. An obligation any proof discharges without reading the program is indistinguishable from no verification at all, so a computing helper belongs at file scope, where a specification function can still apply it as a `T_app`. Applies to every kind — an `exists`/`unique` body that asserts nothing is P010, not P001 |
+  | P011 | A call from any specification body to an `exists`/`unique`-quantified spec function. Such a function is the subject of a reachability judgment about running its own body with its own choices — not a callable predicate — and its compiled form carries hidden trailing choice parameters no call site supplies. State the property directly, or move the shared part into an ordinary function both spec functions can call |
+  | P012 | An anonymous (call-argument) `@` in a `unique`-quantified body: a choice nothing names has no source-visible face, so it cannot distinguish exit states — bind it first (`let c: i32 = @;`). Legal in `exists` bodies, where the visible-locals projection is inert |
 
-- **Non-det instructions in a surviving body** (`translator.rs`,
+- **The reachability pre-scan's no-return rule** (fatal,
+  `core/wasm-codegen/src/hassert/reach.rs`): an `exists`/`unique` body
+  may neither declare a return type nor contain a `return` statement —
+  the downstream judgment reduces the retained body without an enclosing
+  activation frame, so a `BI_return` could never take a step (see
+  [Two judgments](#two-judgments-validspec-versus-the-reachability-predicates)).
+  Analysis rules A005/A007 already reject both shapes; the pre-scan
+  carries its own hard error because codegen can run without analysis.
+
+- **Non-det instructions in a retained body** (`translator.rs`,
   `translate_basic_operator`'s `Operator::Forall | Exists | Assume |
   Unique | I32Uzumaki | I64Uzumaki` arm): rejected as
-  `WasmToVError::UnsupportedFeature`. With A042 in place and spec
-  functions omitted from the module record, this path is unreachable
-  from Inference-compiled code; it is defense-in-depth against a foreign
-  or hand-crafted `.wasm` that reintroduces one of these opcodes into an
-  executable body.
+  `WasmToVError::UnsupportedFeature` ("non-deterministic instruction in
+  a function body the emitted module retains cannot be represented in
+  the vanilla WasmCert proof model"). The bodies the module record keeps
+  are executable functions — where A042 bars non-det — and retained
+  `exists`/`unique` spec functions, whose reachability lowering is
+  vanilla WASM by construction; neither can carry one of these opcodes
+  from Inference-compiled code, so this is defense-in-depth against a
+  foreign or hand-crafted `.wasm` that reintroduces one.
 
 - **Float, SIMD/vector, and conversion constructs** (`translator.rs`,
   the three grouped operator arms plus `translate_value_type`): rejected
@@ -590,7 +1047,10 @@ today:
    `CHANGELOG.md` but never implemented in `translator.rs`.
 3. **Current**: a 1-ary `ValidModule : module -> Prop`, always emitted,
    plus `ValidSpec : module -> list hassert -> Prop`, hassert-**valued**
-   rather than index-valued.
+   rather than index-valued — and, per spec with `exists`/`unique`
+   obligations, `ValidExistsSpec`/`ValidUniqueSpec` over
+   `list reachability_spec` (purely additive: a forall-only module's
+   output is unchanged).
 
 If a downstream proof consumed either of the earlier shapes:
 
@@ -610,10 +1070,18 @@ If a downstream proof consumed either of the earlier shapes:
 
 ## Translation scheme summary
 
-Each `forall`-quantified (or plain) specification free function
-translates to one `hassert` via a right-folded statement translator with
-two polarities, universal (`Mode::Univ`) and existential (`Mode::Exist`)
-(`core/wasm-codegen/src/hassert/translate.rs`):
+Each specification free function translates to one `hassert` via a
+right-folded statement translator with three modes
+(`core/wasm-codegen/src/hassert/translate.rs`): universal
+(`Mode::Univ`, a `forall`/plain body's own statements), existential
+(`Mode::Exist`, statements inside a nested `exists` block), and
+reachability (`Mode::Reach`, the whole body of an `exists`/`unique`
+function). `Mode::Reach` reuses `Mode::Exist`'s statement semantics —
+an `assume` block is a conjunct, an `if` a strict disjunction of guarded
+conjunctions — but binds every `@` to the `T_local` slot of its own
+choice parameter (no `HA_ex` binder, no `HA_has_type` guard; see
+[Two judgments](#two-judgments-validspec-versus-the-reachability-predicates)).
+The table below shows the two payload polarities:
 
 | Source construct | Universal mode | Existential mode |
 | --- | --- | --- |

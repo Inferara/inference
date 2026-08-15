@@ -13,7 +13,7 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 - **Complete WASM module translation**: Functions, types, imports, exports, tables, memory, globals, data segments, and elements
 - **Custom name section support**: Preserves function and local variable names from WASM debug information
 - **Expression tree reconstruction**: Converts linear WASM instructions into structured Rocq expressions
-- **Specification-to-`hassert` translation**: A `spec` block's WASM body is never translated as instructions — the function is omitted from the module record entirely, and its logical content becomes a `hassert` verification obligation (see [Non-Deterministic Instructions](#non-deterministic-instructions) and [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md))
+- **Specification-to-obligation translation**: A `forall`/plain `spec` function is omitted from the module record entirely and its logical content becomes a `hassert` verification obligation; an `exists`/`unique` spec function is retained with a vanilla body and its obligation is a `reachability_spec` record consumed by the `ValidExistsSpec`/`ValidUniqueSpec` predicates (see [Non-Deterministic Instructions](#non-deterministic-instructions) and [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md))
 - **Fail-closed translation**: a section entry that cannot be translated fails the whole module rather than being dropped from the output — a `.v` is a proof artifact, so a partial one must never be returned as success (see [Rejection Policy](#rejection-policy))
 - **Zero-copy parsing**: Efficiently processes WASM bytecode using streaming parser
 
@@ -293,7 +293,7 @@ Accumulating before failing is deliberate: translating every section first means
 
 Recoverable `WasmToVError`s the translator returns:
 
-- **`UnsupportedFeature`**: a construct outside the subset the wasm-verifier proof contract covers — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction outside a spec function; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the contract does not cover. See [Rejection Policy](#rejection-policy).
+- **`UnsupportedFeature`**: a construct outside the subset the wasm-verifier proof contract covers — any floating-point, SIMD/vector, or conversion instruction; an `f32`/`f64`/`v128` value type in any position; a non-deterministic instruction in any body the emitted module retains; `memory64`, shared, or custom-page-size memories; atomics; and the proposal families (GC, exception handling, stack switching, tail calls, wide arithmetic, typed references) the contract does not cover. See [Rejection Policy](#rejection-policy).
 - **`WasmParse`**: malformed bytes, surfaced by the parser phase
 - **Identifier errors**: a module or function name that cannot be rendered as a legal Rocq identifier
 
@@ -340,30 +340,44 @@ sits on vanilla WasmCert-Coq, which has no
 `BI_forall`/`BI_exists`/`BI_assume`/`BI_unique`/`BI_uzumaki_num`
 counterparts to translate into.
 
-Instead, translation is a two-part split, both enforced fail-closed:
+Instead, translation is a kind-dependent split, all parts enforced
+fail-closed:
 
-1. **A `spec` function's body is never emitted as instructions at all.**
-   Every WASM function index codegen recorded as originating inside a
-   `spec` block is omitted from the module record — no `Definition`, no
-   `mod_funcs` entry — and every surviving reference (calls, exports,
-   elements, the start function) is renumbered past the gap. Its logical
-   content is instead carried, out of band, as one `hassert` value per
-   `forall`-quantified (or plain) spec function, built AST-side during
-   codegen (`core/wasm-codegen/src/hassert/`) and serialized into the
-   `inference.hspecs` custom section. `wasm-to-v` reads that section,
-   resolves each obligation's applied function symbols against the final
-   (post-link) module layout, and prints one
+1. **A `forall`-quantified (or plain) `spec` function's body is never
+   emitted as instructions at all.** Its WASM function index is omitted
+   from the module record — no `Definition`, no `mod_funcs` entry — and
+   every surviving reference (calls, exports, elements, the start
+   function) is renumbered past the gap. Its logical content is instead
+   carried, out of band, as one `hassert` value per function, built
+   AST-side during codegen (`core/wasm-codegen/src/hassert/`) and
+   serialized into the `inference.hspecs` custom section. `wasm-to-v`
+   reads that section, resolves each obligation's applied function
+   symbols against the final (post-link) module layout, and prints one
    `Definition <mod>__<Spec>_hspec{k} : hassert := …` per obligation plus
    a `Theorem valid_<mod>__<Spec> : ValidSpec <mod> <mod>__<Spec>_specs`.
-   See [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md) for the full translation
-   scheme and a complete worked example.
-2. **A non-deterministic instruction reaching a *surviving* (executable,
-   non-spec) function body is a translate error**
+2. **An `exists`/`unique`-quantified `spec` function is retained in the
+   module record** with a vanilla body — codegen appends one hidden
+   trailing *choice parameter* per scalar `@` and compiles
+   `assume`/`assert` to trap-on-false filters, so the body carries no
+   non-deterministic opcode. Its obligation arrives through the same
+   `inference.hspecs` section, kind-tagged, and is printed as a
+   `Definition <mod>__<Spec>_exspec{k} : reachability_spec` (or
+   `_uqspec{k}`) record plus a
+   `Theorem valid_exists_<mod>__<Spec> : ValidExistsSpec …` (or
+   `valid_unique_…`/`ValidUniqueSpec`) — the downstream judgment reduces
+   the retained body, so the function must stay in `mod_funcs`, while
+   the reference sites (calls, exports, elements, start) reject it: a
+   retained spec function is the subject of its obligation, not a
+   callable. See [`ROCQ_CONTRACT.md`](./ROCQ_CONTRACT.md) for the full
+   translation scheme and complete worked examples of both shapes.
+3. **A non-deterministic instruction reaching any body the emitted
+   module retains is a translate error**
    (`WasmToVError::UnsupportedFeature`). Inference's own analysis rule
-   A042 already rejects non-det syntax anywhere outside a `spec`
-   declaration at compile time, so this path is unreachable from
-   Inference-compiled code; the rejection is defense-in-depth against a
-   foreign or hand-crafted `.wasm`.
+   A042 rejects non-det syntax anywhere outside a `spec` declaration at
+   compile time, and the reachability lowering is vanilla WASM by
+   construction, so this path is unreachable from Inference-compiled
+   code; the rejection is defense-in-depth against a foreign or
+   hand-crafted `.wasm`.
 
 ### Narrow-Typed Domain Constraints
 
@@ -372,13 +386,16 @@ declared type is narrower — `i8`/`u8`/`i16`/`u16`/`bool`/an enum — codegen
 emits a short domain-mapping sequence between the draw and the `local.set` in
 the *WASM* instruction stream (mask for `u8`/`u16`, `shl`+`shr_s` for
 `i8`/`i16`, `and 1` for `bool`, `rem_u <variant count>` for a non-empty enum;
-see the `wasm-codegen` README). Because a draw can only occur inside a `spec`
-function, that sequence never reaches the emitted `.v` — the spec body is
-omitted from the module record. The corresponding `hassert` obligation
-currently binds the drawn variable as an unconstrained universal slot or
-existential binder; carrying the declared type's domain into the obligation
-(`HA_has_type`-style antecedents) is a tracked follow-up of the wasm-verifier
-contract work.
+see the `wasm-codegen` README). In a `forall`/plain spec function that
+sequence never reaches the emitted `.v` — the body is omitted from the module
+record. In a retained `exists`/`unique` body the draw is instead a read of the
+`@`'s choice parameter, and the same domain-mapping sequence *does* appear in
+the emitted `.v`, keeping the choice in its declared domain during the
+reachability reduction. The corresponding `hassert` obligation currently binds
+the drawn variable as an unconstrained universal slot, existential binder, or
+(reachability) frame slot; carrying the declared type's domain into the
+*universal* obligation (`HA_has_type`-style range antecedents) is a tracked
+follow-up of the wasm-verifier contract work.
 
 ## Testing
 

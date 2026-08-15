@@ -171,6 +171,49 @@ pub(crate) enum CodegenError {
         max: usize,
     },
 
+    /// A reachability obligation's metadata (`entry_arity`/`visible_locs`)
+    /// falls outside the `inference.hspecs` codec's contract — visible locals
+    /// out of strictly ascending order, or a count or slot index past the
+    /// section's cap. The encoder is infallible, so such metadata would
+    /// serialize into a section the codec's own decoder — in the linker and
+    /// the Rocq translator — rejects as corrupt. Codegen refuses to write the
+    /// artifact; the detail is the codec's own report. Reaching this indicates
+    /// a compiler bug: the metadata is computed, never user-authored.
+    #[error(
+        "the verification obligation for function '{function}' in spec '{spec}' carries \
+         reachability metadata the inference.hspecs section rejects: {detail}"
+    )]
+    HspecReachMetaInvalid {
+        spec: String,
+        function: String,
+        detail: String,
+    },
+
+    /// An `exists`/`unique`-quantified specification function declares a
+    /// return type or contains a `return` statement. Its obligation is
+    /// discharged by running the compiled body under the verifier's vanilla
+    /// reduction, which observes only a body that exits by falling off its
+    /// end: a `return` instruction can never take a reduction step there, so
+    /// the obligation would be silently unprovable, and a declared compound
+    /// result would introduce an sret pointer parameter that shifts every
+    /// slot index the obligation's payload depends on. Analysis rules A005
+    /// and A007 reject both shapes with source locations when analysis runs;
+    /// this error is the defense for pipelines that go straight from type
+    /// checking to code generation, so a misaligned or unprovable obligation
+    /// can never be emitted silently.
+    #[error(
+        "spec function '{function}' in spec '{spec}' is '{kind}'-quantified and {offense}; \
+         an '{kind}'-quantified specification is proven by running its compiled body, whose \
+         only supported exit is falling off the end — make the function void, let the body \
+         end by falling through, and state the property with an `assert` inside the body"
+    )]
+    ReachabilitySpecReturns {
+        spec: String,
+        function: String,
+        kind: &'static str,
+        offense: &'static str,
+    },
+
     /// One or more specification functions could not be translated into a
     /// `hassert` verification obligation: a construct with no assertion
     /// encoding (`loop`, `break`, a `unique` block, `**`, memory access), an

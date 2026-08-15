@@ -130,16 +130,19 @@
 //! | `forall` | `0xfc 0x3a` | Begin universal quantification block |
 //! | `exists` | `0xfc 0x3b` | Begin existential quantification block |
 //! | `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
-//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists — rejected in proof mode (no `hassert` encoding; fatal `P002` at codegen) |
+//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists — as a nested *block*, rejected in proof mode (no `hassert` encoding; fatal `P002` at codegen); a `unique`-quantified spec-function *body* is reachability-lowered instead and never emits this opcode |
 //! | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
 //! | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 //!
 //! These instructions are parsed by the forked [`inf-wasmparser`] dependency, but
-//! they never appear in the emitted Rocq: spec-function bodies are omitted from the
-//! module record entirely (their logical content arrives separately as `hassert`
-//! obligations via the `inference.hspecs` custom section), and a non-deterministic
-//! instruction in any surviving (non-spec) body is a translation error — the
-//! vanilla WasmCert proof model has no constructors for them.
+//! they never appear in the emitted Rocq: `forall`/plain spec-function bodies are
+//! omitted from the module record entirely (their logical content arrives
+//! separately as `hassert` obligations via the `inference.hspecs` custom section),
+//! `exists`/`unique` spec-function bodies are retained but reachability-lowered to
+//! vanilla WASM (each `@` a hidden trailing choice parameter, filters trap), and a
+//! non-deterministic instruction in any body the emitted module retains is a
+//! translation error — the vanilla WasmCert proof model has no constructors for
+//! them.
 //!
 //! See the [WASM codegen documentation](../wasm-codegen/README.md) for details on
 //! how these instructions are generated from Inference source code.
@@ -1901,6 +1904,786 @@ mod unsupported_surface {
         assert!(
             v.contains("BI_data_drop"),
             "data.drop must lower to `BI_data_drop`:\n{v}"
+        );
+    }
+}
+
+/// Reachability (`exists`/`unique`) obligation emission: kind-aware retention
+/// in the module record, the kind-selected `reachability_spec` /
+/// `ValidExistsSpec` / `ValidUniqueSpec` grammar, the conditional ` Exists`
+/// preamble import, and every fail-closed consistency arm the retention adds.
+///
+/// These tests pin the emitted text against hand-built obligation maps, so a
+/// grammar change shows up here as a diff rather than as a downstream `coqc`
+/// error; the `inference-tests` gate elaborates the same grammar for real
+/// against the vendored stub's `Exists.v`.
+#[cfg(test)]
+mod reachability_emission {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, ReachMeta, SpecKind};
+    use rustc_hash::FxHashMap;
+
+    fn exists_entry(symbol: &str, entry_arity: u32, visible_locs: Vec<u32>) -> HSpecEntry {
+        HSpecEntry::new(
+            HFnRef(symbol.to_string()),
+            HAssert::Defined(HTerm::Local(0)),
+            SpecKind::Exists(ReachMeta {
+                entry_arity,
+                visible_locs,
+            }),
+        )
+    }
+
+    fn unique_entry(symbol: &str, entry_arity: u32, visible_locs: Vec<u32>) -> HSpecEntry {
+        HSpecEntry::new(
+            HFnRef(symbol.to_string()),
+            HAssert::Defined(HTerm::Local(0)),
+            SpecKind::Unique(ReachMeta {
+                entry_arity,
+                visible_locs,
+            }),
+        )
+    }
+
+    fn spec_maps(
+        spec: &str,
+        indices: Vec<u32>,
+        entries: Vec<HSpecEntry>,
+    ) -> (FxHashMap<String, Vec<u32>>, HSpecMap) {
+        let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        spec_funcs.insert(spec.to_string(), indices);
+        let mut hspecs = HSpecMap::default();
+        hspecs.insert(spec.to_string(), entries);
+        (spec_funcs, hspecs)
+    }
+
+    fn translate(
+        wat: &str,
+        spec_funcs: &FxHashMap<String, Vec<u32>>,
+        hspecs: &HSpecMap,
+    ) -> anyhow::Result<String> {
+        let bytes = wat::parse_str(wat).expect("reachability fixture WAT assembles");
+        translate_bytes("Prog", &bytes, spec_funcs, hspecs)
+    }
+
+    /// The omitted-reference rejection stays alongside the retained one: a
+    /// surviving call to an omitted (forall/plain) spec function — including
+    /// one from a retained `exists` body, the newly reachable context — is a
+    /// fail-closed error naming the omission.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn references_to_an_omitted_spec_function_stay_rejected() {
+        // `omitted_fn` is a plain spec function (no obligation); the retained
+        // `ex_fn` body calls it.
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![1, 2], vec![exists_entry("ex_fn", 0, vec![0])]);
+        let err = translate(
+            r#"
+            (module
+              (func $exec)
+              (func $omitted_fn (param i32) (result i32) local.get 0)
+              (func $ex_fn (param i32) local.get 0 call $omitted_fn drop))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("a retained body calling an omitted spec function must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("which is an omitted specification function"),
+            "the rejection must name the omitted-function rule; got: {msg}",
+        );
+    }
+
+    /// One spec carrying an `exists` and a `unique` obligation emits the full
+    /// kind-selected grammar: a `reachability_spec` record and gathering list
+    /// per non-empty partition, the partition-selected theorems, the retained
+    /// bodies as ordinary `Definition`s, the ` Exists` preamble import — and
+    /// the universal grammar stays present with its explicitly-typed empty
+    /// list, since no entry is universal.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mixed_kind_entries_emit_the_kind_selected_grammar() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Reach",
+            vec![1, 2],
+            vec![
+                HSpecEntry::new(
+                    HFnRef("ex_probe".to_string()),
+                    HAssert::Defined(HTerm::Local(1)),
+                    SpecKind::Exists(ReachMeta {
+                        entry_arity: 1,
+                        visible_locs: vec![0, 1],
+                    }),
+                ),
+                unique_entry("uq_probe", 0, vec![0]),
+            ],
+        );
+        let output = translate(
+            r#"
+            (module
+              (func $exec (result i32) i32.const 7)
+              (func $ex_probe (param i32 i32))
+              (func $uq_probe (param i32) (local i32)))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("a module with reachability obligations translates");
+
+        for needle in [
+            "From WasmVerifier Require Import Assertions Verifier Exists.\n",
+            // The exists partition: record, gathering list, theorem.
+            "Definition Prog__Reach_exspec1 : reachability_spec :=",
+            "reach_func := 1%N; reach_entry_arity := 1%nat",
+            "reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_defined (T_local 1%N)",
+            "Definition Prog__Reach_ex_specs : list reachability_spec := (Prog__Reach_exspec1 :: nil).",
+            "Theorem valid_exists_Prog__Reach : ValidExistsSpec Prog Prog__Reach_ex_specs.",
+            // The unique partition, analogous.
+            "Definition Prog__Reach_uqspec1 : reachability_spec :=",
+            "reach_func := 2%N; reach_entry_arity := 0%nat",
+            "reach_visible_locs := (0%N :: nil); reach_payload := HA_defined (T_local 0%N)",
+            "Definition Prog__Reach_uq_specs : list reachability_spec := (Prog__Reach_uqspec1 :: nil).",
+            "Theorem valid_unique_Prog__Reach : ValidUniqueSpec Prog Prog__Reach_uq_specs.",
+            // The universal grammar is unconditional; with no universal entry
+            // it is the explicitly-typed empty list.
+            "Definition Prog__Reach_specs : list hassert := (@nil hassert).",
+            "Theorem valid_Prog__Reach : ValidSpec Prog Prog__Reach_specs.",
+            // Retained bodies are ordinary `module_func` definitions listed in
+            // `mod_funcs`.
+            "Definition ex_probe : module_func :=",
+            "Definition uq_probe : module_func :=",
+            "ex_probe ::",
+            "uq_probe ::",
+        ] {
+            assert!(
+                output.contains(needle),
+                "reachability emission must contain `{needle}`; got:\n{output}",
+            );
+        }
+
+        // No reachability payload may leak into the universal list.
+        assert!(
+            !output.contains("_hspec1"),
+            "no universal obligation exists, so no `_hspec` definition may be emitted:\n{output}",
+        );
+    }
+
+    /// A forall-only module keeps its pre-reachability output: the preamble
+    /// import line without ` Exists`, and none of the reachability grammar.
+    /// Empty partitions emit nothing.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn forall_only_module_emits_no_reachability_grammar() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Only",
+            vec![0],
+            vec![HSpecEntry::new(
+                HFnRef("forall_probe".to_string()),
+                HAssert::Defined(HTerm::Local(0)),
+                SpecKind::Forall,
+            )],
+        );
+        let output = translate(
+            "(module (func $forall_probe (param i32)))",
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("a forall-only module translates");
+
+        assert!(
+            output.contains("From WasmVerifier Require Import Assertions Verifier.\n"),
+            "a forall-only preamble must not import the reachability module:\n{output}",
+        );
+        for absent in [
+            "Exists",
+            "reachability_spec",
+            "_ex_specs",
+            "_uq_specs",
+            "ValidUniqueSpec",
+            "reach_func",
+        ] {
+            assert!(
+                !output.contains(absent),
+                "`{absent}` must not appear in a forall-only module's output:\n{output}",
+            );
+        }
+        assert!(
+            output.contains("Definition Prog__Only_hspec1 : hassert :=")
+                && output.contains("Theorem valid_Prog__Only : ValidSpec Prog Prog__Only_specs."),
+            "the universal grammar must be unchanged:\n{output}",
+        );
+    }
+
+    /// Retention does not renumber: a retained `exists` spec function keeps
+    /// its place in `mod_funcs`, so a cross-call and both element item forms
+    /// referencing a function ABOVE it keep their original operands — the
+    /// kind-aware sibling of `omitting_a_spec_function_renumbers_a_surviving_
+    /// cross_call`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn retaining_a_spec_function_preserves_surviving_operands() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Between",
+            vec![1],
+            vec![exists_entry("spec_fn", 0, vec![0])],
+        );
+        let output = translate(
+            r#"
+            (module
+              (table (;0;) 2 2 funcref)
+              (elem (;0;) (i32.const 0) func $f2)
+              (elem (;1;) funcref (item ref.func $f2))
+              (func $f0 (result i32) call $f2)
+              (func $spec_fn (param i32))
+              (func $f2 (result i32) i32.const 7))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("a module retaining its only spec function translates");
+
+        assert!(
+            output.contains("BI_call 2%N") && !output.contains("BI_call 1%N"),
+            "a retained spec function shifts nothing, so the cross-call keeps \
+             its operand; got:\n{output}",
+        );
+        assert_eq!(
+            output.matches("BI_ref_func 2%N").count(),
+            2,
+            "both element item forms keep their original operand past a \
+             retained spec function; got:\n{output}",
+        );
+        assert!(
+            output.contains("Definition spec_fn : module_func :="),
+            "the retained spec function must contribute its `Definition`; got:\n{output}",
+        );
+        assert!(
+            output.contains("reach_func := 1%N"),
+            "the retained function's own record indexes it at its unshifted \
+             `mod_funcs` position; got:\n{output}",
+        );
+    }
+
+    /// Renumbering in both directions at once: an omitted forall spec function
+    /// below a retained exists spec function shifts both the retained
+    /// function's `reach_func` and a surviving cross-call down by one, while
+    /// the retained function itself shifts nothing.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn omission_and_retention_renumber_independently() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Mix",
+            vec![1, 2],
+            vec![
+                HSpecEntry::new(
+                    HFnRef("forall_fn".to_string()),
+                    HAssert::Defined(HTerm::Local(0)),
+                    SpecKind::Forall,
+                ),
+                exists_entry("ex_fn", 0, vec![0]),
+            ],
+        );
+        let output = translate(
+            r#"
+            (module
+              (func $exec0 (result i32) call $exec3)
+              (func $forall_fn (param i32))
+              (func $ex_fn (param i32))
+              (func $exec3 (result i32) i32.const 7))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("a mixed-kind module translates");
+
+        assert!(
+            output.contains("BI_call 2%N") && !output.contains("BI_call 3%N"),
+            "the cross-call renumbers past the omitted forall spec function \
+             only; got:\n{output}",
+        );
+        assert!(
+            output.contains("reach_func := 1%N"),
+            "the retained function's `reach_func` shifts down past the omitted \
+             function below it; got:\n{output}",
+        );
+        assert!(
+            !output.contains("Definition forall_fn"),
+            "the forall spec function stays omitted; got:\n{output}",
+        );
+        assert!(
+            output.contains("Definition ex_fn : module_func :="),
+            "the exists spec function must be retained; got:\n{output}",
+        );
+        assert!(
+            output.contains("Definition Prog__Mix_hspec1 : hassert :=")
+                && output.contains("Definition Prog__Mix_ex_specs : list reachability_spec :=")
+                && output.contains("Theorem valid_Prog__Mix : ValidSpec Prog Prog__Mix_specs.")
+                && output.contains(
+                    "Theorem valid_exists_Prog__Mix : ValidExistsSpec Prog Prog__Mix_ex_specs."
+                ),
+            "both partitions must emit side by side; got:\n{output}",
+        );
+    }
+
+    /// `reach_func` indexes `mod_funcs` — the defined-function (`T_app`)
+    /// space, which excludes imports — not the instantiated space that counts
+    /// them. With one function import, the retained function's absolute index
+    /// 2 must emit as `reach_func := 1`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn reach_func_indexes_the_defined_space_under_a_function_import() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![2], vec![exists_entry("ex_fn", 0, vec![0])]);
+        let output = translate(
+            r#"
+            (module
+              (import "env" "host" (func (param i32) (result i32)))
+              (func $exec (result i32) i32.const 7)
+              (func $ex_fn (param i32)))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("an import-bearing module with a reachability obligation translates");
+
+        assert!(
+            output.contains("reach_func := 1%N"),
+            "`reach_func` must count defined functions only (abs 2 minus one \
+             import), never the instantiated index 2; got:\n{output}",
+        );
+        assert!(
+            !output.contains("reach_func := 2%N"),
+            "the instantiated index must not leak into `reach_func`; got:\n{output}",
+        );
+    }
+
+    /// An empty `visible_locs` renders as the bare `nil`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn empty_visible_locs_render_as_nil() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![unique_entry("uq_fn", 0, vec![])]);
+        let output = translate("(module (func $uq_fn (param i32)))", &spec_funcs, &hspecs)
+            .expect("translates");
+        assert!(
+            output.contains("reach_visible_locs := nil; reach_payload :="),
+            "an empty projection list must render as `nil`; got:\n{output}",
+        );
+    }
+
+    /// Every executable reference to a retained spec function is rejected: its
+    /// body stays in the module record only as the subject of its reachability
+    /// obligation. One arm per reference site — `BI_call`, export, element
+    /// item, `mod_start`, `BI_ref_func` — plus the `T_app` symbol arm below.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn references_to_a_retained_spec_function_are_rejected() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![1], vec![exists_entry("ex_fn", 0, vec![0])]);
+        let (start_spec_funcs, start_hspecs) =
+            spec_maps("Reach", vec![1], vec![exists_entry("ex_fn", 0, vec![])]);
+
+        for (site, wat, sf, hs) in [
+            (
+                "BI_call",
+                r#"
+                (module
+                  (func $exec i32.const 0 call $ex_fn)
+                  (func $ex_fn (param i32)))
+                "#,
+                &spec_funcs,
+                &hspecs,
+            ),
+            (
+                "export",
+                r#"
+                (module
+                  (func $exec)
+                  (func $ex_fn (param i32))
+                  (export "e" (func $ex_fn)))
+                "#,
+                &spec_funcs,
+                &hspecs,
+            ),
+            (
+                "element item",
+                r#"
+                (module
+                  (table 1 1 funcref)
+                  (elem (i32.const 0) func $ex_fn)
+                  (func $exec)
+                  (func $ex_fn (param i32)))
+                "#,
+                &spec_funcs,
+                &hspecs,
+            ),
+            (
+                "mod_start",
+                r#"
+                (module
+                  (func $exec)
+                  (func $ex_fn)
+                  (start $ex_fn))
+                "#,
+                &start_spec_funcs,
+                &start_hspecs,
+            ),
+            (
+                "BI_ref_func",
+                r#"
+                (module
+                  (func $exec ref.func $ex_fn drop)
+                  (func $ex_fn (param i32)))
+                "#,
+                &spec_funcs,
+                &hspecs,
+            ),
+        ] {
+            let err = translate(wat, sf, hs).expect_err(&format!(
+                "{site}: a reference to a retained spec function must be rejected"
+            ));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("retained `exists`/`unique` specification function"),
+                "{site}: the rejection must name the retained-function rule; got: {msg}",
+            );
+        }
+    }
+
+    /// A `T_app`/`HA_app_ok` symbol resolving to a retained spec function is
+    /// rejected: the retained function is the subject of its own obligation,
+    /// not an interpretable symbol.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn applying_a_retained_spec_function_symbol_is_rejected() {
+        let (spec_funcs, mut hspecs) =
+            spec_maps("Reach", vec![1], vec![exists_entry("ex_fn", 0, vec![0])]);
+        hspecs
+            .get_mut("Reach")
+            .expect("inserted above")
+            .push(HSpecEntry::new(
+                HFnRef("applier".to_string()),
+                HAssert::Defined(HTerm::App(HFnRef("ex_fn".to_string()), vec![])),
+                SpecKind::Forall,
+            ));
+        let err = translate(
+            r#"
+            (module
+              (func $exec)
+              (func $ex_fn (param i32)))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("applying a retained spec function symbol must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not an interpretable symbol") && msg.contains("ex_fn"),
+            "the rejection must name the applied symbol and the rule; got: {msg}",
+        );
+    }
+
+    /// Reachability classification hard-depends on the name section: a module
+    /// with `exists`/`unique` obligations but no function names is rejected,
+    /// where a forall-only module without `T_app` still translates.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn absent_name_section_rejects_reachability_obligations() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![exists_entry("ex_fn", 0, vec![0])]);
+        // No `$` identifiers, so `wat` emits no name section.
+        let err = translate("(module (func (param i32)))", &spec_funcs, &hspecs)
+            .expect_err("a nameless module cannot resolve a reachability target");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("carries no function names"),
+            "the rejection must name the missing name section; got: {msg}",
+        );
+
+        // The forall-only control: same nameless module, universal obligation,
+        // translates fine.
+        let (spec_funcs, hspecs) = spec_maps(
+            "Only",
+            vec![0],
+            vec![HSpecEntry::new(
+                HFnRef("ghost".to_string()),
+                HAssert::Defined(HTerm::Local(0)),
+                SpecKind::Forall,
+            )],
+        );
+        translate("(module (func (param i32)))", &spec_funcs, &hspecs)
+            .expect("a forall obligation needs no symbol resolution");
+    }
+
+    /// A reachability symbol no defined function carries is rejected.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn unresolvable_reachability_symbol_is_rejected() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![exists_entry("ghost", 0, vec![0])]);
+        let err = translate("(module (func $ex_fn (param i32)))", &spec_funcs, &hspecs)
+            .expect_err("an unresolvable reachability symbol must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no defined function in the module carries") && msg.contains("ghost"),
+            "the rejection must name the unresolvable symbol; got: {msg}",
+        );
+    }
+
+    /// A reachability symbol shared by several defined functions is ambiguous
+    /// and rejected. The name-section collision cannot be written in WAT, so
+    /// the section is appended by hand.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ambiguous_reachability_symbol_is_rejected() {
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func (param i32))
+              (func (param i32)))
+            "#,
+        )
+        .expect("ambiguity skeleton assembles");
+
+        // name section: both function indices carry the identical name
+        // `ex_probe`.
+        let func_name = b"ex_probe";
+        let mut func_subsec = Vec::new();
+        func_subsec.push(2u8);
+        for idx in 0u8..2 {
+            func_subsec.push(idx);
+            func_subsec.push(func_name.len() as u8);
+            func_subsec.extend_from_slice(func_name);
+        }
+        let mut name_payload = Vec::new();
+        name_payload.push(0x04);
+        name_payload.extend_from_slice(b"name");
+        name_payload.push(0x01);
+        name_payload.push(func_subsec.len() as u8);
+        name_payload.extend_from_slice(&func_subsec);
+        let mut bytes = skeleton;
+        bytes.push(0x00);
+        bytes.push(name_payload.len() as u8);
+        bytes.extend_from_slice(&name_payload);
+
+        let (spec_funcs, hspecs) = spec_maps(
+            "Reach",
+            vec![0, 1],
+            vec![exists_entry("ex_probe", 0, vec![0])],
+        );
+        let err = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect_err("an ambiguous reachability symbol must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2 defined") && msg.contains("ambiguous"),
+            "the rejection must report the ambiguity; got: {msg}",
+        );
+    }
+
+    /// A reachability obligation resolving to a function `inference.spec_funcs`
+    /// does not list under its spec is rejected: retention may only ever move
+    /// a spec function.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn reachability_target_outside_the_spec_index_list_is_rejected() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![1], vec![exists_entry("exec", 0, vec![0])]);
+        let err = translate(
+            r#"
+            (module
+              (func $exec (param i32))
+              (func $ex_fn (param i32)))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("a reachability target outside the spec's index list must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not list under that spec"),
+            "the rejection must name the spec_funcs disagreement; got: {msg}",
+        );
+    }
+
+    /// `entry_arity` exceeding the retained function's parameter count is
+    /// rejected before emission: the choice suffix can only extend the source
+    /// parameters, never shrink them, so an oversized arity is producer drift.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn entry_arity_exceeding_the_param_count_is_rejected() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![exists_entry("ex_fn", 2, vec![0])]);
+        let err = translate("(module (func $ex_fn (param i32)))", &spec_funcs, &hspecs)
+            .expect_err("an oversized entry arity must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("declares entry arity 2") && msg.contains("parameter count is 1"),
+            "the rejection must report the arity overflow; got: {msg}",
+        );
+    }
+
+    /// A `visible_locs` slot outside the retained function's frame
+    /// (parameters + declared locals) is rejected before emission.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn visible_loc_outside_the_frame_is_rejected() {
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![unique_entry("uq_fn", 0, vec![2])]);
+        // One parameter plus one declared local: frame = 2, so slot 2 is out.
+        let err = translate(
+            "(module (func $uq_fn (param i32) (local i32)))",
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("an out-of-frame visible slot must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("source-visible slot 2")
+                && msg.contains("frame size (parameters + locals) is 2"),
+            "the rejection must report the out-of-frame slot; got: {msg}",
+        );
+
+        // The in-frame control: slots 0 and 1 both fit.
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![unique_entry("uq_fn", 0, vec![0, 1])]);
+        translate(
+            "(module (func $uq_fn (param i32) (local i32)))",
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("in-frame visible slots pass the bounds check");
+    }
+
+    /// The explicit-vs-embedded `inference.hspecs` reconciliation covers the
+    /// kind and reachability-metadata fields: byte-identical maps agree, a map
+    /// differing only in `visible_locs` is a mismatch, and empty explicit maps
+    /// adopt the embedded section all the way through reachability emission.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn embedded_hspecs_round_trip_covers_reachability_metadata() {
+        fn leb128_u32(mut value: u32) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value == 0 {
+                    out.push(byte);
+                    break;
+                }
+                out.push(byte | 0x80);
+            }
+            out
+        }
+        fn append_custom_section(bytes: &mut Vec<u8>, name: &str, payload: &[u8]) {
+            let mut content = Vec::new();
+            content.extend_from_slice(&leb128_u32(u32::try_from(name.len()).unwrap()));
+            content.extend_from_slice(name.as_bytes());
+            content.extend_from_slice(payload);
+            bytes.push(0x00);
+            bytes.extend_from_slice(&leb128_u32(u32::try_from(content.len()).unwrap()));
+            bytes.extend_from_slice(&content);
+        }
+
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![exists_entry("ex_fn", 0, vec![0])]);
+
+        // The embedded twin of the explicit maps: an `inference.spec_funcs`
+        // payload (version, one pair) plus the canonical hspecs encoding.
+        let mut spec_funcs_payload = Vec::new();
+        spec_funcs_payload.extend(leb128_u32(super::SPEC_FUNCS_SECTION_VERSION));
+        spec_funcs_payload.extend(leb128_u32(1));
+        spec_funcs_payload.extend(leb128_u32(5));
+        spec_funcs_payload.extend_from_slice(b"Reach");
+        spec_funcs_payload.extend(leb128_u32(1));
+        spec_funcs_payload.extend(leb128_u32(0));
+
+        let mut bytes =
+            wat::parse_str("(module (func $ex_fn (param i32)))").expect("fixture assembles");
+        append_custom_section(
+            &mut bytes,
+            super::SPEC_FUNCS_SECTION_NAME,
+            &spec_funcs_payload,
+        );
+        append_custom_section(
+            &mut bytes,
+            inference_hassert::HSPECS_SECTION_NAME,
+            &inference_hassert::encode(&hspecs),
+        );
+
+        // Empty explicit maps adopt the embedded sections; the adopted kind
+        // reaches emission.
+        let adopted = translate_bytes("Prog", &bytes, &FxHashMap::default(), &HSpecMap::default())
+            .expect("embedded sections are adopted");
+        assert!(
+            adopted.contains("Definition Prog__Reach_ex_specs : list reachability_spec :="),
+            "the adopted exists-kind entry must reach reachability emission:\n{adopted}",
+        );
+
+        // Byte-identical explicit maps agree with the embedded sections.
+        let agreed = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect("matching explicit maps agree with the embedded sections");
+        assert_eq!(adopted, agreed, "both paths must emit identical output");
+
+        // A map differing ONLY in the reachability metadata is a mismatch:
+        // the equality got stricter with the kind fields.
+        let (_, divergent) = spec_maps("Reach", vec![0], vec![exists_entry("ex_fn", 0, vec![])]);
+        let err = translate_bytes("Prog", &bytes, &spec_funcs, &divergent)
+            .expect_err("a visible_locs disagreement must be a mismatch");
+        assert!(
+            matches!(
+                err.downcast_ref::<WasmToVError>(),
+                Some(WasmToVError::EmbeddedHspecsMismatch { .. })
+            ),
+            "the disagreement must surface as EmbeddedHspecsMismatch; got: {err:?}",
+        );
+    }
+
+    /// Residual non-determinism in a retained body is rejected: the
+    /// reachability lowering is vanilla WASM by construction, so a 0xfc opcode
+    /// in a retained body is a corrupt or foreign artifact.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn residual_nondet_in_a_retained_body_is_rejected() {
+        // `wat` cannot assemble the custom 0xfc opcodes, so splice a raw
+        // `i32.uzumaki` (0xfc 0x31) body into a named one-function module.
+        let mut bytes = vec![
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            // type section: one () -> () type
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            // function section: one function of type 0
+            0x03, 0x02, 0x01, 0x00, // code section: one body: uzumaki, drop, end
+            0x0a, 0x07, 0x01, 0x05, 0x00, 0xfc, 0x31, 0x1a, 0x0b,
+        ];
+        // name section naming function 0 `ex_fn`.
+        let func_name = b"ex_fn";
+        let mut func_subsec = Vec::new();
+        func_subsec.push(1u8);
+        func_subsec.push(0u8);
+        func_subsec.push(func_name.len() as u8);
+        func_subsec.extend_from_slice(func_name);
+        let mut name_payload = Vec::new();
+        name_payload.push(0x04);
+        name_payload.extend_from_slice(b"name");
+        name_payload.push(0x01);
+        name_payload.push(func_subsec.len() as u8);
+        name_payload.extend_from_slice(&func_subsec);
+        bytes.push(0x00);
+        bytes.push(name_payload.len() as u8);
+        bytes.extend_from_slice(&name_payload);
+
+        let (spec_funcs, hspecs) =
+            spec_maps("Reach", vec![0], vec![exists_entry("ex_fn", 0, vec![])]);
+        let err = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect_err("residual non-determinism in a retained body must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(
+                "non-deterministic instruction in a function body the emitted module retains"
+            ),
+            "the rejection must use the retention-aware wording; got: {msg}",
         );
     }
 }

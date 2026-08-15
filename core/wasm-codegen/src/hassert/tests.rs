@@ -10,7 +10,9 @@
 #![allow(clippy::similar_names)] // the expected-tree builders use short, related names
 
 use inference_ast::arena::AstArena;
-use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecMap, HTerm};
+use inference_hassert::{
+    HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecMap, HTerm, ReachMeta, SpecKind,
+};
 use inference_type_checker::TypeCheckerBuilder;
 use inference_type_checker::typed_context::TypedContext;
 
@@ -65,10 +67,14 @@ fn buckets_of(ctx: &TypedContext) -> EmittableFunctions {
 }
 
 /// Translates a type-checked program, returning its obligations and the rendered
-/// diagnostics.
+/// diagnostics. The reachability plans are built by the same pre-scan production
+/// code generation runs, so the pass sees exactly what it would see in a real
+/// proof-mode build.
 fn translate(ctx: &TypedContext) -> (HSpecMap, Vec<String>) {
     let buckets = buckets_of(ctx);
-    let (map, diagnostics) = super::translate_spec_fns(ctx, &buckets);
+    let reach_plans = super::reach::plan_reachability_specs(ctx)
+        .expect("the reachability pre-scan should accept every translation-test body");
+    let (map, diagnostics) = super::translate_spec_fns(ctx, &buckets, &reach_plans);
     (map, diagnostics.iter().map(ToString::to_string).collect())
 }
 
@@ -1756,9 +1762,13 @@ fn the_domination_checker_catches_an_unguarded_read() {
 // ----- 11. diagnostics --------------------------------------------------
 
 #[test]
-fn p001_rejects_a_quantified_spec_function() {
-    let e = err("spec S { fn f() exists { let x: i32 = @; assert(x > 0); } } ");
+fn p001_rejects_an_assume_bodied_spec_function() {
+    let e = err("spec S { fn f() assume { let x: i32 = @; assert(x > 0); } } ");
     assert!(e.contains("error[P001]"), "{e}");
+    assert!(
+        e.contains("has an `assume` body") && e.contains("`assume` is not a quantifier"),
+        "the message must explain why an assume body states no property: {e}"
+    );
 }
 
 #[test]
@@ -1808,7 +1818,12 @@ fn p007_rejects_a_forall_block_inside_an_exists_block() {
 #[test]
 fn p008_rejects_a_compound_uzumaki() {
     let src = "spec S { fn f() forall { let arr: [i32; 3] = @; let n: i32 = @; assert(n > 0); } }";
-    assert!(err(src).contains("error[P008]"));
+    let e = err(src);
+    assert!(e.contains("error[P008]"), "{e}");
+    assert!(
+        e.contains("has no assertion encoding"),
+        "the universal-mode wording must stay unchanged: {e}"
+    );
 }
 
 #[test]
@@ -2238,4 +2253,402 @@ fn a_quantified_spec_method_keeps_its_own_report() {
             "method `{rest}`: {rendered}"
         );
     }
+}
+
+// ----- 14. reachability obligations (exists/unique bodies) ----------------
+
+/// The single entry of a spec that has exactly one, kind included.
+fn sole_entry(map: &HSpecMap, spec: &str) -> inference_hassert::HSpecEntry {
+    let entries = map.get(spec).unwrap_or_else(|| {
+        panic!(
+            "no spec `{spec}`; have {:?}",
+            map.keys().collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(entries.len(), 1, "expected exactly one entry for `{spec}`");
+    entries[0].clone()
+}
+
+/// Walks an assertion and fails on any `HA_has_type`: a reachability payload
+/// denotes against the frame an actual execution reaches, where every slot
+/// carries its runtime type, so a stated typing has no place in it.
+fn assert_no_typing_guards(h: &HAssert) {
+    match h {
+        HAssert::True
+        | HAssert::False
+        | HAssert::TermEq(_, _)
+        | HAssert::AppOk(_, _)
+        | HAssert::Defined(_) => {}
+        HAssert::HasType(t, ty) => {
+            panic!(
+                "a reachability payload must carry no typing guard, found HasType({t:?}, {ty:?})"
+            )
+        }
+        HAssert::Not(inner) | HAssert::Ex(inner) => assert_no_typing_guards(inner),
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            assert_no_typing_guards(l);
+            assert_no_typing_guards(r);
+        }
+    }
+}
+
+/// An `exists` body translates operationally: the entry parameter and the
+/// named choice both read their own frame slots, with no binder and no typing
+/// guard, and the entry carries the reachability kind with its metadata.
+#[test]
+fn an_exists_body_binds_its_choices_to_frame_slots() {
+    let map = ok("spec S { fn f(x: i32) exists { let n: i32 = @; assert(n > x); } }");
+    let entry = sole_entry(&map, "S");
+    assert_eq!(entry.hassert, nz(gts(local(1), local(0))));
+    assert_no_typing_guards(&entry.hassert);
+    assert_eq!(
+        entry.kind,
+        SpecKind::Exists(ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0, 1],
+        })
+    );
+}
+
+/// A `unique` body translates exactly like an `exists` one — only the kind
+/// differs — and `==` takes the strict `term_eq` the existential path uses.
+#[test]
+fn a_unique_body_translates_like_exists_under_its_own_kind() {
+    let map = ok("spec S { fn f() unique { let n: i32 = @; assert(n == 7); } }");
+    let entry = sole_entry(&map, "S");
+    assert_eq!(entry.hassert, teq(local(0), i32c(7)));
+    assert_eq!(
+        entry.kind,
+        SpecKind::Unique(ReachMeta {
+            entry_arity: 0,
+            visible_locs: vec![0],
+        })
+    );
+}
+
+/// Nested `assume` and `exists` blocks are conjuncts of a reachability body:
+/// their statements translate in the same mode, so the nested block's named
+/// choice still reads its hoisted choice parameter (and joins `visible_locs`).
+#[test]
+fn nested_assume_and_exists_blocks_are_conjuncts_in_a_reach_body() {
+    let map = ok("spec S {
+        fn f(x: i32) exists {
+          assume { assert(x > 0); }
+          exists {
+            let n: i32 = @;
+            assert(n > x);
+          }
+          assert(x < 100);
+        }
+      }");
+    let entry = sole_entry(&map, "S");
+    assert_eq!(
+        entry.hassert,
+        and(
+            nz(gts(local(0), i32c(0))),
+            and(nz(gts(local(1), local(0))), nz(lts(local(0), i32c(100)))),
+        )
+    );
+    assert_eq!(
+        entry.kind,
+        SpecKind::Exists(ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0, 1],
+        })
+    );
+}
+
+/// An `if` in a reachability body is the strict disjunction of guarded
+/// conjunctions the existential path builds, so a non-denoting condition
+/// cannot fabricate a reached exit.
+#[test]
+fn a_reach_if_is_a_strict_disjunction_of_guarded_conjunctions() {
+    let map = ok(
+        "spec S { fn f(x: i32) exists { if x > 0 { assert(x == 1); } else { assert(x == 2); } } }",
+    );
+    let cond = || gts(local(0), i32c(0));
+    assert_eq!(
+        sole_entry(&map, "S").hassert,
+        or(
+            and(nz(cond()), teq(local(0), i32c(1))),
+            and(eqz(cond()), teq(local(0), i32c(2))),
+        )
+    );
+}
+
+/// An anonymous call-argument `@` in an `exists` body reads its own choice
+/// parameter — no `HA_ex` binder — and stays out of `visible_locs`: only what
+/// the source names is part of the observable face.
+#[test]
+fn an_anonymous_choice_in_an_exists_body_reads_its_parameter() {
+    let map = ok("fn g(v: i32) -> i32 { return v; }
+        spec S { fn f(x: i32) exists { assert(g(@) == x); } }");
+    let entry = sole_entry(&map, "S");
+    assert_eq!(entry.hassert, teq(app("g", vec![local(1)]), local(0)));
+    assert_eq!(
+        entry.kind,
+        SpecKind::Exists(ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0],
+        })
+    );
+}
+
+/// A pure `let` is inlined as its term on the reachability path exactly as on
+/// the universal one, occupies no payload slot, and stays out of
+/// `visible_locs`.
+#[test]
+fn a_pure_let_is_inlined_and_stays_out_of_visible_locs() {
+    let map = ok("spec S { fn f() exists { let n: i32 = @; let t: i32 = n + 1; assert(t > 0); } }");
+    let entry = sole_entry(&map, "S");
+    assert_eq!(
+        entry.hassert,
+        nz(gts(
+            bin(HNumType::I32, HBinop::Add, local(0), i32c(1)),
+            i32c(0)
+        ))
+    );
+    assert_eq!(
+        entry.kind,
+        SpecKind::Exists(ReachMeta {
+            entry_arity: 0,
+            visible_locs: vec![0],
+        })
+    );
+}
+
+/// `HA_ex` survives in a reachability payload for exactly one purpose: the
+/// pinned witness of a short-circuit `&&`/`||`, whose machinery is
+/// mode-independent. The `@`s themselves never bind one.
+#[test]
+fn a_short_circuit_witness_keeps_its_binder_in_a_reach_body() {
+    let map = ok("spec S { fn f(x: i32) exists { let ok: bool = x == 0 || x > 5; assert(ok); } }");
+    let entry = sole_entry(&map, "S");
+    let taken = || nz(eqs(local(0), i32c(0)));
+    let skipped = || eqz(eqs(local(0), i32c(0)));
+    assert_eq!(
+        entry.hassert,
+        ex(and(
+            or(
+                and(taken(), teq(lvar(0), i32c(1))),
+                and(skipped(), teq(lvar(0), gts(local(0), i32c(5)))),
+            ),
+            nz(lvar(0)),
+        ))
+    );
+    assert_no_typing_guards(&entry.hassert);
+}
+
+/// One spec holding all three kinds: the forall sibling keeps its universal
+/// entry (typing guard included), and each reachability sibling carries its
+/// own kind — the partition downstream selects theorems by.
+#[test]
+fn mixed_kind_siblings_carry_their_own_kinds() {
+    let map = ok("spec S {
+        fn a() forall { let n: i32 = @; assert(n >= n); }
+        fn e() exists { let n: i32 = @; assert(n > 0); }
+        fn u() unique { let n: i32 = @; assert(n == 1); }
+      }");
+    let entries = map.get("S").expect("spec S");
+    assert_eq!(entries.len(), 3, "one entry per free function");
+    let by_symbol = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.fn_symbol == HFnRef(name.to_string()))
+            .unwrap_or_else(|| panic!("no entry `{name}`"))
+    };
+    let meta = || ReachMeta {
+        entry_arity: 0,
+        visible_locs: vec![0],
+    };
+    assert_eq!(by_symbol("S.a").kind, SpecKind::Forall);
+    assert_eq!(by_symbol("S.e").kind, SpecKind::Exists(meta()));
+    assert_eq!(by_symbol("S.u").kind, SpecKind::Unique(meta()));
+    assert!(
+        matches!(by_symbol("S.a").hassert, HAssert::Imp(_, _)),
+        "the universal sibling keeps its guarded shape"
+    );
+    assert_no_typing_guards(&by_symbol("S.e").hassert);
+    assert_no_typing_guards(&by_symbol("S.u").hassert);
+}
+
+/// The vacuity verdict applies to reachability bodies unchanged: an `exists`
+/// body that asserts nothing collapses to `⊤` and is reported as `P010` — not
+/// `P001`, which no longer covers `exists`.
+#[test]
+fn a_vacuous_exists_body_is_p010_not_p001() {
+    let e = err("spec S { fn f() exists { let n: i32 = @; } }");
+    assert!(e.contains("error[P010]"), "{e}");
+    assert!(
+        e.contains("is `exists`-quantified but asserts nothing"),
+        "{e}"
+    );
+    assert!(
+        !e.contains("P001"),
+        "P001 must not fire for an exists body: {e}"
+    );
+}
+
+/// A spec body calling an `exists`/`unique` sibling is `P011` — and
+/// specifically not `P005`, whose non-deterministic-body arm sits *after* the
+/// reachability carve-out on the resolve path and would otherwise swallow it
+/// with the wrong wording and remedy.
+#[test]
+fn p011_rejects_a_call_to_a_reachability_spec_function() {
+    let from_forall = err("spec S {
+        fn e() exists { let n: i32 = @; assert(n > 0); }
+        fn f() forall { let a: i32 = @; e(); assert(a >= a); }
+      }");
+    assert!(from_forall.contains("error[P011]"), "{from_forall}");
+    assert!(
+        from_forall.contains("call to `e` is not allowed")
+            && from_forall.contains("`exists`-quantified spec function"),
+        "{from_forall}"
+    );
+    assert!(
+        !from_forall.contains("P005"),
+        "P011 must pre-empt the non-det-body P005: {from_forall}"
+    );
+
+    let from_exists = err("spec S {
+        fn u() unique { let n: i32 = @; assert(n == 1); }
+        fn f() exists { u(); assert(1 == 1); }
+      }");
+    assert!(from_exists.contains("error[P011]"), "{from_exists}");
+    assert!(
+        from_exists.contains("`unique`-quantified spec function"),
+        "{from_exists}"
+    );
+    assert!(!from_exists.contains("P005"), "{from_exists}");
+}
+
+/// The same rejection reaches the term translator through the same resolve
+/// path. A reachability callee is void by construction (the no-return rule),
+/// so no value-demanding position can hold one in a type-correct program; the
+/// term path's reachable door is a parenthesized expression statement, which
+/// is read as a term for its diagnostics — the callee resolves before its
+/// result is classified, so the carve-out fires there exactly as it does for
+/// a bare statement call.
+#[test]
+fn p011_fires_on_the_term_path_too() {
+    let e = err("spec S {
+        fn e() exists { let n: i32 = @; assert(n > 0); }
+        fn f() forall { let a: i32 = @; (e()); assert(a >= a); }
+      }");
+    assert!(e.contains("error[P011]"), "{e}");
+    assert!(!e.contains("P005"), "{e}");
+}
+
+/// An anonymous `@` argument is rejected in a `unique` body (`P012`): it is
+/// excluded from the source-visible observation, so distinct choices nothing
+/// names would collapse into one observation — while the same shape in an
+/// `exists` body stays accepted, where the exclusion cannot change whether
+/// the observation set is non-empty.
+#[test]
+fn p012_rejects_an_anonymous_choice_in_a_unique_body_only() {
+    let unique = err("fn g(v: i32) -> i32 { return v; }
+        spec S { fn f() unique { let n: i32 = @; assert(g(@) == n); } }");
+    assert!(unique.contains("error[P012]"), "{unique}");
+    assert!(
+        unique.contains("anonymous `@` argument in a `unique` spec function")
+            && unique.contains("bind it first"),
+        "{unique}"
+    );
+
+    let exists = ok("fn g(v: i32) -> i32 { return v; }
+        spec S { fn f() exists { let n: i32 = @; assert(g(@) == n); } }");
+    assert_eq!(
+        sole_entry(&exists, "S").hassert,
+        teq(app("g", vec![local(1)]), local(0))
+    );
+}
+
+/// A compound `@` in a reachability body keeps `P008` but explains the
+/// reachability-specific impossibility: a choice arrives as one scalar WASM
+/// parameter. (The universal-mode wording is pinned unchanged in section 11.)
+#[test]
+fn p008_speaks_reachability_for_a_compound_choice_in_a_reach_body() {
+    let e =
+        err("spec S { fn f() exists { let arr: [i32; 2] = @; let n: i32 = @; assert(n > 0); } }");
+    assert!(e.contains("error[P008]"), "{e}");
+    assert!(
+        e.contains("cannot be a reachability choice")
+            && e.contains("arrives as one scalar WASM parameter"),
+        "{e}"
+    );
+}
+
+/// A nested `forall` block keeps `P007` and a nested `unique` block keeps
+/// `P002` inside a reachability body, exactly as inside an `exists` block.
+#[test]
+fn nested_forall_and_unique_blocks_keep_their_rejections_in_a_reach_body() {
+    let forall = err("spec S { fn f() exists { let n: i32 = @; forall { assert(n > 0); } } }");
+    assert!(forall.contains("error[P007]"), "{forall}");
+
+    let unique = err("spec S { fn f() exists { let n: i32 = @; unique { assert(n > 0); } } }");
+    assert!(unique.contains("error[P002]"), "{unique}");
+}
+
+/// The highest-risk invariant, checked end to end: the payload's `T_local`
+/// indices must equal the compiled function's actual parameter layout. The
+/// same source runs through real proof-mode code generation; the emitted type
+/// section (via its name entries) pins where each parameter sits, and the
+/// obligation attached to the same output must read exactly those indices —
+/// entry parameter at 0, named choice at 1, anonymous choice at 2.
+#[test]
+fn reach_payload_slots_match_the_compiled_parameter_layout() {
+    let source = "\
+fn g(a: i32, b: bool) -> i32 {
+  if b {
+    return a;
+  }
+  return 0;
+}
+
+spec S {
+  fn f(x: i32) exists {
+    let c: i64 = @;
+    assume { assert(c > 0); }
+    assert(g(x, @) == x);
+  }
+}
+";
+    let ctx = type_check(source);
+    let output = crate::codegen(
+        &ctx,
+        "align",
+        crate::CodegenOptions {
+            target: crate::Target::Wasm32,
+            mode: CompilationMode::Proof,
+            opt_level: crate::Target::Wasm32.default_opt_level(),
+            features: crate::EmitFeatures::default(),
+        },
+    )
+    .expect("proof-mode codegen should succeed");
+
+    // The compiled layout: the declared parameter, then the choices in source
+    // order, i64/i32 by declared class.
+    let wat = wasmprinter::print_bytes(output.wasm()).expect("WAT print should succeed");
+    let flat = wat.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("(param $x i32) (param $c i64) (param $__choice1 i32)"),
+        "the compiled signature must be entry + named choice + anonymous choice:\n{flat}"
+    );
+
+    // The payload attached to the same output reads exactly those indices.
+    let entry = sole_entry(output.hspecs(), "S");
+    assert_eq!(
+        entry.hassert,
+        and(
+            nz(rel(HNumType::I64, HRelop::GtS, local(1), i64c(0))),
+            teq(app("g", vec![local(0), local(2)]), local(0)),
+        )
+    );
+    assert_eq!(
+        entry.kind,
+        SpecKind::Exists(ReachMeta {
+            entry_arity: 1,
+            visible_locs: vec![0, 1],
+        })
+    );
 }

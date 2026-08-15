@@ -1,0 +1,16 @@
+// An `assume`-BODIED spec function (`fn f() assume { … }`). `assume` is not a
+// quantifier — it only reinterprets a failing path as a filtered-out one for
+// an enclosing `forall` — so a spec function whose whole body is `assume`
+// states no property, and a proof-mode build (`-v`) fails with a fatal P001
+// naming the function. A compile-mode build strips the proof-only spec and
+// succeeds.
+pub fn main() -> i32 {
+    return 0;
+}
+
+spec AssumeDemo {
+    fn assume_probe() assume {
+        let n: i32 = @;
+        assert(n == n);
+    }
+}

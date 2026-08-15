@@ -1,0 +1,34 @@
+// A `unique`-bodied spec function, shaped for the `coqc` gate's corpus: the
+// body is reachability-lowered exactly like an `exists` one, but its obligation
+// is gathered into a `_uq_specs : list reachability_spec` consumed by a
+// `ValidUniqueSpec` theorem — this fixture is the corpus producer for that
+// grammar (an `exists` fixture cannot stand in: the two kinds select different
+// predicates).
+//
+// Shaped the way it is because the corpus runs parse → type-check → codegen
+// with NO analysis, so every constraint is carried by the fixture itself:
+// the obligation is non-vacuous (P010 rejects a body whose claims collapse to
+// the vacuous `HA_true`); the cross-call target `parity` is a DEFINED
+// executable function (an extern call would be rejected as P005); the body
+// neither declares a return type nor contains `return` (the verifier reduces
+// the retained body without an enclosing activation frame); and the single
+// `@` is NAMED — `unique` compares source-visible exit states, so an
+// anonymous choice, which no `reach_visible_locs` slot could carry, is
+// rejected as P012.
+//
+// The `assume` pins the named choice to `parity(seed)`, so for every entry
+// value exactly one choice survives the filter — the shape whose obligation
+// `ValidUniqueSpec` is designed to state.
+fn parity(n: i32) -> i32 {
+    return n % 2;
+}
+
+spec UniqueParity {
+    fn uq_parity(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == parity(seed));
+        }
+        assert(bit * bit == bit);
+    }
+}

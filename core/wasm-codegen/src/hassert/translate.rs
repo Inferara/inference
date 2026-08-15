@@ -2,10 +2,30 @@
 //!
 //! One [`SpecFnTranslator`] per specification function walks its typed AST and
 //! produces a single [`HAssert`] obligation. The scheme is a right-folded
-//! statement translator with two polarities ([`Mode::Univ`]/[`Mode::Exist`]) and
-//! a small term translator that mirrors the WASM operators code generation emits
-//! for the same expressions, so the obligation speaks the same numeric language
-//! as the compiled body it constrains.
+//! statement translator with three modes ([`Mode::Univ`]/[`Mode::Exist`]/
+//! [`Mode::Reach`]) and a small term translator that mirrors the WASM operators
+//! code generation emits for the same expressions, so the obligation speaks the
+//! same numeric language as the compiled body it constrains.
+//!
+//! ## Reachability bodies read their choices from the frame
+//!
+//! An `exists`/`unique`-quantified body translates in [`Mode::Reach`], whose
+//! statement semantics are those of [`Mode::Exist`] (an `assume` block is a
+//! conjunct, an `if` a strict disjunction of guarded conjunctions) but whose
+//! `@` handling is entirely different: the downstream judgment runs the
+//! compiled body and quantifies the hidden trailing choice *parameters* code
+//! generation appended for each scalar `@`, so the payload binds each `@` to
+//! the [`HTerm::Local`] slot of its own choice parameter — no `HA_ex` binder
+//! (the predicate already quantifies the choices operationally; a binder would
+//! double-quantify and detach the payload from the frame) and no
+//! `HA_has_type` slot guard (the payload denotes against the *real* reached
+//! frame, where every slot carries its runtime type; the guard discipline
+//! below targets `ValidSpec`'s unconstrained valuations). Both the compiled
+//! body and this translator read the same pre-scan
+//! [`ChoicePlan`], keyed by `ExprId`, so a payload slot index equals the
+//! frame index of the same choice by construction rather than by parallel
+//! counting. `HA_ex` still appears in reachability payloads, but only for
+//! short-circuit witnesses, whose machinery is mode-independent.
 //!
 //! ## Logical variables carry levels, not indices, until the end
 //!
@@ -80,6 +100,7 @@ use rustc_hash::FxHashMap;
 
 use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
+use super::reach::ChoicePlan;
 
 /// Polarity of the surrounding quantification.
 ///
@@ -95,6 +116,24 @@ enum Mode {
     /// a strict disjunction of guarded conjunctions, `@` binds an `HA_ex`
     /// logical variable.
     Exist,
+    /// Reachability context (`exists`/`unique`-quantified body): statement
+    /// semantics of [`Mode::Exist`], but `@` reads the [`HTerm::Local`] slot
+    /// of the choice parameter the pre-scan planned for it — the downstream
+    /// judgment quantifies the choices operationally, so no binder and no
+    /// typing guard is introduced.
+    Reach,
+}
+
+/// The reachability context of the function being translated, present exactly
+/// while its `exists`/`unique` body translates in [`Mode::Reach`].
+struct ReachCtx<'a> {
+    /// The pre-scan's choice plan for this function — the same map code
+    /// generation consumed for the signature suffix and the `@` lowering.
+    plan: &'a ChoicePlan,
+    /// Whether the body is `unique`-quantified. An anonymous call-argument
+    /// `@` is rejected there ([`PCode::P012`]): it is excluded from the
+    /// source-visible observation, which would silently weaken uniqueness.
+    unique: bool,
 }
 
 /// What an identifier resolves to inside a specification body.
@@ -108,6 +147,20 @@ enum Binding {
     /// keeps its absolute level, so the term re-indexes correctly wherever it is
     /// later embedded.
     Term(HTerm),
+}
+
+/// Why a callee cannot serve a specification claim, deciding which diagnostic
+/// the call site raises.
+enum CalleeError {
+    /// Not a module-defined deterministic function, for this reason —
+    /// [`PCode::P005`].
+    NotApplicable(&'static str),
+    /// An `exists`/`unique`-quantified spec function ([`PCode::P011`]),
+    /// carrying its quantifier word. A reachability spec function is the
+    /// subject of a judgment about running its own body with its own choices,
+    /// not a callable — and its compiled form has hidden trailing choice
+    /// parameters no call site supplies.
+    ReachabilitySpec { kind: &'static str },
 }
 
 /// The classification of a call's result, deciding whether it can be a term.
@@ -160,6 +213,9 @@ pub(super) struct SpecFnTranslator<'a> {
     /// Typing guards for the universal slots introduced since the last
     /// structural statement, in introduction order, awaiting their drain.
     univ_guards: Vec<HAssert>,
+    /// The reachability context, `Some` exactly while an `exists`/`unique`
+    /// body translates in [`Mode::Reach`].
+    reach: Option<ReachCtx<'a>>,
     env: FxHashMap<String, Binding>,
     diags: Vec<HassertDiagnostic>,
 }
@@ -181,6 +237,7 @@ impl<'a> SpecFnTranslator<'a> {
             depth: 0,
             pending: Vec::new(),
             univ_guards: Vec::new(),
+            reach: None,
             env: FxHashMap::default(),
             diags: Vec::new(),
         }
@@ -194,75 +251,98 @@ impl<'a> SpecFnTranslator<'a> {
     /// Translates one specification free function into its obligation.
     ///
     /// A `forall`-quantified or plain (`Regular`) body is translated in
-    /// universal mode. An `exists`/`unique`/`assume`-quantified body has no
-    /// milestone-1 encoding and yields [`PCode::P001`] plus a trivial `⊤`
-    /// obligation (discarded, since any diagnostic aborts code generation).
-    pub(super) fn translate_fn(&mut self, def_id: DefId) -> HAssert {
+    /// universal mode; an `exists`/`unique`-quantified one in reachability
+    /// mode, reading its `@` slots from `plan` (the same pre-scan plan code
+    /// generation consumed, so payload slots and compiled frame indices agree
+    /// by construction). An `assume`-quantified body states no property —
+    /// `assume` is not a quantifier — and yields [`PCode::P001`] plus a
+    /// trivial `⊤` obligation (discarded, since any diagnostic aborts code
+    /// generation).
+    pub(super) fn translate_fn(&mut self, def_id: DefId, plan: Option<&'a ChoicePlan>) -> HAssert {
         let (args, body) = match &self.arena[def_id].kind {
             Def::Function { args, body, .. } => (args.clone(), *body),
             _ => return HAssert::True,
         };
 
         let body_kind = self.arena[body].block_kind;
-        match body_kind {
-            BlockKind::Forall | BlockKind::Regular => {}
-            BlockKind::Exists | BlockKind::Assume | BlockKind::Unique => {
+        let mode = match body_kind {
+            BlockKind::Forall | BlockKind::Regular => Mode::Univ,
+            BlockKind::Exists | BlockKind::Unique => {
+                let plan = plan.expect(
+                    "an exists/unique-bodied spec free function reached translation without a \
+                     reachability plan — the pre-scan walks the same spec structure this pass \
+                     iterates, so a missing plan means the two walks disagree",
+                );
+                self.reach = Some(ReachCtx {
+                    plan,
+                    unique: body_kind == BlockKind::Unique,
+                });
+                Mode::Reach
+            }
+            BlockKind::Assume => {
                 let name = self.arena.def_name(def_id).to_string();
                 self.error(
                     PCode::P001,
                     self.arena[def_id].location,
                     format!(
-                        "spec function `{name}` is `{}`-quantified; only `forall`-quantified \
-                         (or plain) spec functions can be translated to a verification assertion \
-                         yet — restructure the property as a `forall` function with a nested \
-                         `exists` block",
-                        block_kind_word(body_kind)
+                        "spec function `{name}` has an `assume` body, which states no property: \
+                         `assume` is not a quantifier — it only reinterprets a failing path as a \
+                         filtered-out one for an enclosing `forall`, so with nothing enclosing it \
+                         there is no claim to prove; give the function a `forall` body and nest \
+                         the `assume` inside it, ahead of the assertion the surviving paths must \
+                         satisfy"
                     ),
                 );
                 return HAssert::True;
             }
-        }
+        };
 
-        self.bind_parameters(&args);
+        self.bind_parameters(&args, mode);
 
         let stmts = self.arena[body].stmts.clone();
-        let raw = self.t_stmts(&stmts, Mode::Univ);
+        let raw = self.t_stmts(&stmts, mode);
         // Rewrite every logical-variable level to the de Bruijn index it has at
         // its own binder depth, now that the whole tree (and thus every binder)
         // is known.
         lower_assert(&raw, 0)
     }
 
-    /// Binds each parameter to a universal slot in declaration order.
-    fn bind_parameters(&mut self, args: &[inference_ast::nodes::ArgData]) {
+    /// Binds each parameter to a slot in declaration order.
+    fn bind_parameters(&mut self, args: &[inference_ast::nodes::ArgData], mode: Mode) {
         for arg in args {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
-                    let slot = self.parameter_slot(arg.location, *ty);
+                    let slot = self.parameter_slot(arg.location, *ty, mode);
                     self.env
                         .insert(self.arena[*name].name.clone(), Binding::Slot(slot));
                 }
                 ArgKind::Ignored { ty } => {
-                    let _ = self.parameter_slot(arg.location, *ty);
+                    let _ = self.parameter_slot(arg.location, *ty, mode);
                 }
                 ArgKind::SelfRef { .. } | ArgKind::TypeOnly(_) => {}
             }
         }
     }
 
-    /// Consumes the slot a parameter occupies and records the typing guard its
-    /// readers depend on. An ignored parameter is guarded like a named one: the
-    /// guard is inert for a slot the payload never reads, and uniformity beats a
-    /// use analysis. A non-scalar parameter type is [`PCode::P004`]; its slot is
-    /// still consumed so later slot numbers stay aligned with the source, and it
-    /// contributes no guard — it has no numeric typing to state.
-    fn parameter_slot(&mut self, location: Location, ty: TypeId) -> u32 {
+    /// Consumes the slot a parameter occupies and, under universal
+    /// quantification, records the typing guard its readers depend on. An
+    /// ignored parameter is guarded like a named one: the guard is inert for a
+    /// slot the payload never reads, and uniformity beats a use analysis. A
+    /// non-scalar parameter type is [`PCode::P004`]; its slot is still consumed
+    /// so later slot numbers stay aligned with the source, and it contributes
+    /// no guard — it has no numeric typing to state.
+    ///
+    /// A reachability payload pushes no guard for any slot: it denotes against
+    /// the frame an actual execution reaches, where every slot already carries
+    /// its runtime type, so a stated typing would be dead weight the downstream
+    /// exemplars do not carry.
+    fn parameter_slot(&mut self, location: Location, ty: TypeId, mode: Mode) -> u32 {
         let scalar = self.type_is_scalar(ty);
         if !scalar {
             self.error(PCode::P004, location, self.non_scalar_message(ty));
         }
         let slot = self.next_slot();
-        if scalar {
+        if scalar && mode == Mode::Univ {
             let width = self.declared_class(ty);
             self.push_univ_guard(slot, width);
         }
@@ -366,7 +446,10 @@ impl<'a> SpecFnTranslator<'a> {
         let antecedent = self.drain_guards_over(HAssert::True);
         debug_assert!(
             mode == Mode::Univ || antecedent == HAssert::True,
-            "existential translation introduces no universal slot, so none can be pending"
+            "typing guards pend only under universal quantification: existential translation \
+             introduces no universal slot, and reachability translation deliberately pushes no \
+             guard for any slot (its payload denotes against the real reached frame), so none \
+             can be pending in either mode"
         );
         let tail = self.t_stmts(rest, mode);
         HAssert::imp(antecedent, HAssert::and(contribution, tail))
@@ -407,7 +490,7 @@ impl<'a> SpecFnTranslator<'a> {
         if matches!(self.arena[value_expr].kind, Expr::Uzumaki) {
             let scalar = self.type_is_scalar(ty);
             if !scalar {
-                self.emit_non_scalar_uzumaki(ty, self.arena[value_expr].location);
+                self.emit_non_scalar_uzumaki(ty, self.arena[value_expr].location, mode);
             }
             return match mode {
                 Mode::Univ => {
@@ -426,6 +509,19 @@ impl<'a> SpecFnTranslator<'a> {
                     let body = self.t_stmts(rest, Mode::Exist);
                     self.depth -= 1;
                     HAssert::ex(body)
+                }
+                Mode::Reach => {
+                    // The choice already lives in its appended parameter: code
+                    // generation normalized the drawn value into the parameter
+                    // itself, so the payload reads the same frame slot the
+                    // compiled body binds — no binder, no guard. A non-scalar
+                    // `@` was never planned and already carries its diagnostic
+                    // above, so only the scalar case binds.
+                    if scalar {
+                        let slot = self.choice_slot(value_expr);
+                        self.env.insert(name, Binding::Slot(slot));
+                    }
+                    self.t_stmts(rest, Mode::Reach)
                 }
             };
         }
@@ -511,12 +607,16 @@ impl<'a> SpecFnTranslator<'a> {
                     HAssert::imp(HAssert::nz(cond), then_h)
                 }
             }
-            Mode::Exist => {
+            // Reachability shares the existential shape: a branch's claim holds
+            // on the arm the run takes, and its statements translate in the
+            // enclosing mode so a reachability branch keeps reading its choice
+            // parameters.
+            Mode::Exist | Mode::Reach => {
                 s.check_branch_forall(then_block);
-                let then_h = s.scoped_block(then_block, Mode::Exist);
+                let then_h = s.scoped_block(then_block, mode);
                 if let Some(else_id) = else_block {
                     s.check_branch_forall(else_id);
-                    let else_h = s.scoped_block(else_id, Mode::Exist);
+                    let else_h = s.scoped_block(else_id, mode);
                     HAssert::or(
                         HAssert::and(HAssert::nz(cond.clone()), then_h),
                         HAssert::and(HAssert::eqz(cond), else_h),
@@ -533,25 +633,34 @@ impl<'a> SpecFnTranslator<'a> {
         })
     }
 
-    /// A block statement, dispatched on its kind. `assume` bodies always
-    /// translate existentially (their `@`s read as "some choice satisfies the
-    /// filter"); `assume` flips between implication (universal) and conjunction
-    /// (existential).
+    /// A block statement, dispatched on its kind. Under universal
+    /// quantification an `assume` body translates existentially (its `@`s read
+    /// as "some choice satisfies the filter"); `assume` flips between
+    /// implication (universal) and conjunction (existential and reachability).
     ///
     /// A universal `assume` fuses the pending slot guards into the antecedent it
     /// already builds, so `let n: i32 = @; assume { assert(n > 1); }` states the
     /// slot's typing and the source filter as one hypothesis.
     fn t_block(&mut self, block_id: BlockId, rest: &[StmtId], mode: Mode) -> HAssert {
         let kind = self.arena[block_id].block_kind;
+        // Inside a reachability body, a nested `assume`/`exists` block keeps
+        // translating in reachability mode: its `@`s are choice parameters of
+        // the enclosing function (the pre-scan hoisted them), so an
+        // existential binder here would name a value the frame already holds.
+        let nested_exist_mode = if mode == Mode::Reach {
+            Mode::Reach
+        } else {
+            Mode::Exist
+        };
         match kind {
             BlockKind::Assume => {
-                let body = self.scoped_block(block_id, Mode::Exist);
+                let body = self.scoped_block(block_id, nested_exist_mode);
                 match mode {
                     Mode::Univ => {
                         let antecedent = self.drain_guards_over(body);
                         HAssert::imp(antecedent, self.t_stmts(rest, Mode::Univ))
                     }
-                    Mode::Exist => HAssert::and(body, self.t_stmts(rest, Mode::Exist)),
+                    Mode::Exist | Mode::Reach => HAssert::and(body, self.t_stmts(rest, mode)),
                 }
             }
             BlockKind::Regular => {
@@ -559,7 +668,7 @@ impl<'a> SpecFnTranslator<'a> {
                 self.t_structural(body, rest, mode)
             }
             BlockKind::Forall => {
-                if mode == Mode::Exist {
+                if matches!(mode, Mode::Exist | Mode::Reach) {
                     self.error(
                         PCode::P007,
                         self.arena[block_id].location,
@@ -572,7 +681,7 @@ impl<'a> SpecFnTranslator<'a> {
                 self.t_structural(body, rest, mode)
             }
             BlockKind::Exists => {
-                let body = self.scoped_block(block_id, Mode::Exist);
+                let body = self.scoped_block(block_id, nested_exist_mode);
                 self.t_structural(body, rest, mode)
             }
             BlockKind::Unique => {
@@ -718,9 +827,9 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// A comparison in assertion position. `==` is the one operator whose
-    /// encoding depends on the mode: strict `term_eq` on a witness path,
-    /// `nz(relop)` under universal quantification — which the verifier's
-    /// strictified reading makes just as strict (a non-denoting relop refutes
+    /// encoding depends on the mode: strict `term_eq` on the existential and
+    /// reachability paths, `nz(relop)` under universal quantification — which
+    /// the verifier's strictified reading makes just as strict (a non-denoting relop refutes
     /// the obligation rather than discharging it, which is what the slot
     /// typing guards are for).
     ///
@@ -743,7 +852,7 @@ impl<'a> SpecFnTranslator<'a> {
         match op {
             OperatorKind::Eq => match mode {
                 Mode::Univ => HAssert::nz(relop(num_ty, HRelop::Eq, ta, tb)),
-                Mode::Exist => HAssert::TermEq(ta, tb),
+                Mode::Exist | Mode::Reach => HAssert::TermEq(ta, tb),
             },
             OperatorKind::Ne => HAssert::nz(relop(num_ty, HRelop::Ne, ta, tb)),
             OperatorKind::Lt => HAssert::nz(relop(num_ty, signed_relop(unsigned, Lt), ta, tb)),
@@ -1104,8 +1213,8 @@ impl<'a> SpecFnTranslator<'a> {
                     zero_sentinel()
                 }
             },
-            Err(reason) => {
-                self.error_call(function, reason);
+            Err(error) => {
+                self.emit_callee_error(function, &error);
                 zero_sentinel()
             }
         }
@@ -1119,8 +1228,8 @@ impl<'a> SpecFnTranslator<'a> {
                 let arg_terms = self.arg_terms(&args, mode);
                 HAssert::AppOk(HFnRef(key.to_string()), arg_terms)
             }
-            Err(reason) => {
-                self.error_call(function, reason);
+            Err(error) => {
+                self.emit_callee_error(function, &error);
                 HAssert::True
             }
         }
@@ -1140,14 +1249,25 @@ impl<'a> SpecFnTranslator<'a> {
             .collect()
     }
 
-    /// A `@` in call-argument position: an anonymous universal slot, or a
-    /// pending existential binder to be wrapped around the enclosing statement.
-    /// An anonymous slot has no declared type, so its guard width comes from the
-    /// type recorded for the argument.
+    /// A `@` in call-argument position: an anonymous universal slot, a pending
+    /// existential binder to be wrapped around the enclosing statement, or —
+    /// in a reachability body — the choice parameter the pre-scan planned for
+    /// it. An anonymous slot has no declared type, so its guard width comes
+    /// from the type recorded for the argument.
     ///
     /// Unlike a short-circuit witness, this binder carries no defining
     /// constraint: `@` *is* the prover's free choice, so pinning it to a value
     /// would be the opposite of what it means.
+    ///
+    /// A reachability body reads the raw choice parameter: code generation
+    /// normalizes an anonymous narrow choice at its use site, not in the
+    /// parameter itself, but the judgment quantifies whole choice vectors and
+    /// every in-domain value is a fixed point of the normalization, so the raw
+    /// and normalized readings coincide on exactly the vectors a proof would
+    /// pick. In a `unique` body an anonymous choice is rejected outright
+    /// ([`PCode::P012`]): it is excluded from the source-visible observation
+    /// the judgment compares, so distinct choices nothing names would collapse
+    /// into one observation — a silent weakening of uniqueness.
     fn uzumaki_argument(&mut self, arg: ExprId, mode: Mode) -> HTerm {
         match mode {
             Mode::Univ => {
@@ -1157,23 +1277,55 @@ impl<'a> SpecFnTranslator<'a> {
                 HTerm::Local(slot)
             }
             Mode::Exist => self.bind_witness(|_| HAssert::True),
+            Mode::Reach => {
+                let (planned, unique) = {
+                    let reach = self
+                        .reach
+                        .as_ref()
+                        .expect("Mode::Reach requires a reachability context");
+                    (reach.plan.by_expr.get(&arg).copied(), reach.unique)
+                };
+                // Unlike the `let` seam, this position performs no scalarity
+                // pre-check of its own, so the plan lookup is the check: the
+                // pre-scan plans every scalar `@`, and an unplanned one here
+                // is at a non-scalar type.
+                let Some(slot) = planned else {
+                    self.emit_unplanned_reach_argument(arg);
+                    return zero_sentinel();
+                };
+                if unique {
+                    self.error(
+                        PCode::P012,
+                        self.arena[arg].location,
+                        "anonymous `@` argument in a `unique` spec function has no \
+                         source-visible face: `unique` compares source-visible exit states, and \
+                         a choice nothing names cannot distinguish them — bind it first \
+                         (`let c: i32 = @;`) so the choice participates in uniqueness"
+                            .to_string(),
+                    );
+                    return zero_sentinel();
+                }
+                HTerm::Local(slot)
+            }
         }
     }
 
     /// Resolves a call's callee to a `(FnKey, DefId)` for a module-defined,
-    /// deterministic function, or an [`PCode::P005`] reason.
+    /// deterministic function, or the [`CalleeError`] the call site raises.
     ///
     /// Mirrors code generation's resolution: a bare same-file call (including a
     /// spec-sibling helper) is resolved spec-first then by the current file's
     /// free key; a cross-file item import, a `::`-qualified free function, and an
     /// associated function use the type-checker-recorded target; an instance
     /// method has no term encoding.
-    fn resolve_callee(&self, function: ExprId) -> Result<(FnKey, DefId), &'static str> {
+    fn resolve_callee(&self, function: ExprId) -> Result<(FnKey, DefId), CalleeError> {
         match &self.arena[function].kind {
             Expr::Identifier(ident_id) => {
                 let name = self.arena[*ident_id].name.clone();
                 if self.ctx.is_extern_function(&name) {
-                    return Err("external functions carry no verified body");
+                    return Err(CalleeError::NotApplicable(
+                        "external functions carry no verified body",
+                    ));
                 }
                 // A cross-file item import (`use lib::arith::{add}; add()`)
                 // resolves to its defining file via the recorded target.
@@ -1191,19 +1343,33 @@ impl<'a> SpecFnTranslator<'a> {
                 let spec_key =
                     FnKey::spec_free_folded(self.module_path, self.spec_name, name.clone());
                 if let Some(def_id) = self.callee.get(&spec_key) {
+                    // An `exists`/`unique`-bodied sibling is carved out *before*
+                    // the general non-deterministic-body arm below: it would
+                    // otherwise be swallowed by that arm's `P005`, whose
+                    // "specification term" wording is wrong for a void callee
+                    // and whose remedy does not fit — this callee is the
+                    // subject of its own reachability judgment, not a body
+                    // that merely lacks executable meaning.
+                    if let Some(kind) = self.reachability_kind(def_id) {
+                        return Err(CalleeError::ReachabilitySpec { kind });
+                    }
                     return self.validate_body(spec_key, def_id);
                 }
                 let free_key = FnKey::free_in(self.module_path.to_vec(), name);
                 if let Some(def_id) = self.callee.get(&free_key) {
                     return self.validate_body(free_key, def_id);
                 }
-                Err("external functions carry no verified body")
+                Err(CalleeError::NotApplicable(
+                    "external functions carry no verified body",
+                ))
             }
             // `Point::new()` / `math::arith::add()`: the recorded target names the
             // struct's or free function's defining file.
             Expr::TypeMemberAccess { .. } => {
                 let Some(target) = self.ctx.call_target(function) else {
-                    return Err("it does not resolve to a module-defined function");
+                    return Err(CalleeError::NotApplicable(
+                        "it does not resolve to a module-defined function",
+                    ));
                 };
                 let key = match &target.receiver_struct {
                     Some(struct_name) => FnKey::method_in(
@@ -1215,27 +1381,48 @@ impl<'a> SpecFnTranslator<'a> {
                 };
                 self.validate_defined(key)
             }
-            Expr::MemberAccess { .. } => Err("instance methods operate on memory"),
-            _ => Err("it does not resolve to a module-defined function"),
+            Expr::MemberAccess { .. } => Err(CalleeError::NotApplicable(
+                "instance methods operate on memory",
+            )),
+            _ => Err(CalleeError::NotApplicable(
+                "it does not resolve to a module-defined function",
+            )),
         }
     }
 
     /// Confirms a `FnKey` names a module-defined function (not an import) and
     /// validates its body.
-    fn validate_defined(&self, key: FnKey) -> Result<(FnKey, DefId), &'static str> {
+    fn validate_defined(&self, key: FnKey) -> Result<(FnKey, DefId), CalleeError> {
         match self.callee.get(&key) {
             Some(def_id) => self.validate_body(key, def_id),
-            None => Err("external functions carry no verified body"),
+            None => Err(CalleeError::NotApplicable(
+                "external functions carry no verified body",
+            )),
         }
     }
 
     /// Rejects a callee whose body contains non-deterministic constructs — it can
     /// carry no realized claim.
-    fn validate_body(&self, key: FnKey, def_id: DefId) -> Result<(FnKey, DefId), &'static str> {
+    fn validate_body(&self, key: FnKey, def_id: DefId) -> Result<(FnKey, DefId), CalleeError> {
         if self.arena.def_is_non_det(def_id) {
-            return Err("its body is non-deterministic and has no executable meaning");
+            return Err(CalleeError::NotApplicable(
+                "its body is non-deterministic and has no executable meaning",
+            ));
         }
         Ok((key, def_id))
+    }
+
+    /// The quantifier word of an `exists`/`unique`-quantified function body,
+    /// or `None` for any other body kind.
+    fn reachability_kind(&self, def_id: DefId) -> Option<&'static str> {
+        match &self.arena[def_id].kind {
+            Def::Function { body, .. } => match self.arena[*body].block_kind {
+                BlockKind::Exists => Some("exists"),
+                BlockKind::Unique => Some("unique"),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Classifies a call's result. The recorded result type is preferred; a
@@ -1393,8 +1580,11 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Emits the right diagnostic for a `@` at a non-scalar type: [`PCode::P008`]
-    /// for a compound (array/struct) type, [`PCode::P004`] otherwise.
-    fn emit_non_scalar_uzumaki(&mut self, ty: TypeId, location: Location) {
+    /// for a compound (array/struct) type, [`PCode::P004`] otherwise. The
+    /// `P008` wording is mode-aware — in a reachability body the reason a
+    /// compound `@` is impossible is different (a choice arrives as one scalar
+    /// parameter), and the universal wording stays byte-identical.
+    fn emit_non_scalar_uzumaki(&mut self, ty: TypeId, location: Location, mode: Mode) {
         let type_info = TypeInfo::from_type_id(self.arena, ty);
         let compound = match &type_info.kind {
             TypeInfoKind::Array(_, _) => true,
@@ -1404,14 +1594,20 @@ impl<'a> SpecFnTranslator<'a> {
             _ => false,
         };
         if compound {
-            self.error(
-                PCode::P008,
-                location,
+            let message = if mode == Mode::Reach {
+                format!(
+                    "uzumaki (@) over compound type `{type_info}` cannot be a reachability \
+                     choice: a choice arrives as one scalar WASM parameter, and a value of type \
+                     `{type_info}` lives in linear memory; quantify its scalar components \
+                     individually"
+                )
+            } else {
                 format!(
                     "uzumaki (@) over compound type `{type_info}` has no assertion encoding; \
                      quantify scalar components individually"
-                ),
-            );
+                )
+            };
+            self.error(PCode::P008, location, message);
         } else {
             self.error(
                 PCode::P004,
@@ -1422,6 +1618,79 @@ impl<'a> SpecFnTranslator<'a> {
                 ),
             );
         }
+    }
+
+    /// The `@` the pre-scan did not plan, reached in call-argument position of
+    /// a reachability body. The pre-scan plans every scalar `@`, so an
+    /// unplanned one is at a non-scalar type: a compound gets the reachability
+    /// [`PCode::P008`] wording, anything else the standard non-scalar
+    /// [`PCode::P004`] text.
+    fn emit_unplanned_reach_argument(&mut self, arg: ExprId) {
+        let location = self.arena[arg].location;
+        let kind = self.ctx.get_node_typeinfo(node_expr(arg)).map(|t| t.kind);
+        match kind {
+            Some(
+                kind @ (TypeInfoKind::Array(_, _)
+                | TypeInfoKind::Struct(_, _)
+                | TypeInfoKind::Custom(_)),
+            ) => {
+                self.error(
+                    PCode::P008,
+                    location,
+                    format!(
+                        "uzumaki (@) over compound type `{kind}` cannot be a reachability \
+                         choice: a choice arrives as one scalar WASM parameter, and a value of \
+                         type `{kind}` lives in linear memory; quantify its scalar components \
+                         individually"
+                    ),
+                );
+            }
+            Some(kind) => {
+                self.error(
+                    PCode::P004,
+                    location,
+                    format!(
+                        "type `{kind}` cannot appear in a specification term; only bool, \
+                         integer, and enum values can"
+                    ),
+                );
+            }
+            None => {
+                self.error(
+                    PCode::P004,
+                    location,
+                    "type of this value cannot appear in a specification term; only bool, \
+                     integer, and enum values can"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    /// The appended choice-parameter index of a scalar `@` in a reachability
+    /// body, from the shared pre-scan plan.
+    ///
+    /// A miss is a compiler bug, never a program error, and there is no honest
+    /// slot to fall back on — inventing one would emit a payload slot that is
+    /// not the choice parameter, a silently wrong obligation. Three sites
+    /// classify "is this `@` scalar" today (`reach.rs`'s `plan_choice` and the
+    /// compiler's `Expr::Uzumaki` arm from the recorded type; this
+    /// translator's `type_is_scalar` from the declared type, with extra arms
+    /// for enum-resolving `Custom`/`Qualified` names), so a scalar this pass
+    /// sees that the plan lacks means those classifiers diverged.
+    fn choice_slot(&self, expr: ExprId) -> u32 {
+        let reach = self
+            .reach
+            .as_ref()
+            .expect("Mode::Reach requires a reachability context");
+        reach.plan.by_expr.get(&expr).copied().unwrap_or_else(|| {
+            panic!(
+                "scalar `@` reached reachability translation without a planned choice \
+                 parameter — the pre-scan and the translator disagree on scalar \
+                 classification, and emitting any other slot would misalign the payload \
+                 with the compiled frame"
+            )
+        })
     }
 
     /// The bare type name of a type expression, for enum resolution fallback.
@@ -1519,6 +1788,29 @@ impl<'a> SpecFnTranslator<'a> {
             self.arena[function].location,
             format!("call to `{name}` cannot be used in a specification term ({reason})"),
         );
+    }
+
+    /// Raises the diagnostic a [`CalleeError`] stands for: [`PCode::P005`]
+    /// with its reason, or [`PCode::P011`] for an `exists`/`unique`-quantified
+    /// spec callee.
+    fn emit_callee_error(&mut self, function: ExprId, error: &CalleeError) {
+        match error {
+            CalleeError::NotApplicable(reason) => self.error_call(function, reason),
+            CalleeError::ReachabilitySpec { kind } => {
+                let name = self.call_display_name(function);
+                self.error(
+                    PCode::P011,
+                    self.arena[function].location,
+                    format!(
+                        "call to `{name}` is not allowed: `{name}` is an `{kind}`-quantified \
+                         spec function, and its obligation is a claim about running its own \
+                         body with its own choices — there is no predicate to apply here; state \
+                         the property you want directly in this body, or move the shared part \
+                         into an ordinary function both spec functions can call"
+                    ),
+                );
+            }
+        }
     }
 
     /// A readable callee name for a diagnostic (bare name, or `Type::method`).
@@ -1734,16 +2026,6 @@ fn term_mentions_level(term: &HTerm, level: u32) -> bool {
         HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
             term_mentions_level(l, level) || term_mentions_level(r, level)
         }
-    }
-}
-
-fn block_kind_word(kind: BlockKind) -> &'static str {
-    match kind {
-        BlockKind::Exists => "exists",
-        BlockKind::Assume => "assume",
-        BlockKind::Unique => "unique",
-        BlockKind::Forall => "forall",
-        BlockKind::Regular => "regular",
     }
 }
 

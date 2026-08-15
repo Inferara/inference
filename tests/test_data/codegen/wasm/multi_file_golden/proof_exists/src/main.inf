@@ -1,0 +1,28 @@
+// Proof-mode byte golden for the `exists`-kind reachability lowering: the
+// spec function's declared parameter is followed by its hidden trailing
+// choice parameters (i32, i64, i32 — the named `n`/`wide` and the anonymous
+// call argument), so the module's TYPE section carries the suffix nothing
+// else byte-pins. The body lowers vanilla (no 0xfc wrapper, filters as
+// trap-on-false) and the obligation travels as an exists-kind
+// `inference.hspecs` v2 entry whose visible locs name the entry parameter
+// and the two named choices only.
+fn double(n: i32) -> i32 {
+    return n + n;
+}
+
+spec ReachExists {
+    fn ex_choice(lo: i32) exists {
+        let n: i32 = @;
+        assume {
+            assert(n > lo);
+        }
+        let wide: i64 = @;
+        assume {
+            assert(wide >= 0);
+        }
+        assert(double(n) == n + n);
+        assert(double(@) >= lo);
+    }
+}
+
+pub fn main() {}
