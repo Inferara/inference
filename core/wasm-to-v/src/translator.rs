@@ -89,7 +89,8 @@
 //! - `Mg mut t init`: Construct global with mutability, type, and initializer
 //! - `Mi m n d`: Construct import with module name, import name, and descriptor
 //! - `Me n d`: Construct export with name and descriptor
-//! - `Ma of al`: Construct memory argument with offset and alignment
+//! - `Ma ofs al`: Construct memory argument with offset and alignment (`ofs`,
+//!   not `of`, because ssreflect reserves `of` as a keyword)
 //!
 //! ## Translation Functions
 //!
@@ -631,7 +632,7 @@ impl WasmParseData<'_> {
         res.push_str("  modexp_desc := d;\n");
         res.push_str("|}.\n");
         res.push('\n');
-        res.push_str("Definition Ma of al := {|memarg_offset := of; memarg_align := al|}.\n");
+        res.push_str("Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.\n");
         res.push('\n');
 
         let mut errors = Vec::new();

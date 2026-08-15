@@ -22,7 +22,7 @@ Definition Me n d := {|
   modexp_desc := d;
 |}.
 
-Definition Ma of al := {|memarg_offset := of; memarg_align := al|}.
+Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.
 
 Definition uq_parity : module_func := {|
   modfunc_type := 0%N;
