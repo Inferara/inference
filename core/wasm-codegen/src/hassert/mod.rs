@@ -68,6 +68,21 @@
 //! accumulate down the statement fold — but a witness bound by a pure `let` or
 //! a `const` scopes over the rest of its block, so its two levels sit above
 //! every statement that follows and a chain of such bindings adds up.
+//!
+//! An aggregate is the largest single consumer, and what a leaf costs depends
+//! on where it comes from: a universal `@` or parameter leaf costs a typing-
+//! guard level; a leaf bound under a nested `forall` costs a guard level *and*
+//! an `All` level; an existential leaf costs one `Ex` level and no guard (a
+//! prover-chosen value states no typing); and a literal's leaves bind nothing
+//! and guard nothing, nesting only one conjunct apiece through a leafwise
+//! comparison. All of them accumulate across every aggregate introduction in
+//! the function, which is why the leaf budget
+//! (`SPEC_FN_MAX_QUANTIFIED_LEAVES`, `P013`) is a per-function running total
+//! rather than a per-introduction cap — a cap that let each of four parameters
+//! through individually would still reach the encoder's backstop between them.
+//! `P013` is checked from the declared type *before* any leaf is materialized,
+//! so an over-budget declaration never builds the deep tree it is being
+//! rejected for.
 //! Overrunning the cap is not an encoder hazard: the pre-encode gate
 //! ([`check_payload`](crate::hspecs_section::check_payload)) already turns an
 //! over-deep tree into a

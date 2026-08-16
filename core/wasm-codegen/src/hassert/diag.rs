@@ -29,20 +29,67 @@ pub(crate) enum PCode {
     /// Spec function body is `assume`-quantified. `assume` is not a
     /// quantifier — with no enclosing `forall` there is no claim to prove.
     P001,
-    /// A construct with no assertion encoding (`loop`, `break`, `unique` block,
-    /// `**`, a literal that is not a scalar, memory access).
+    /// A construct with no assertion encoding: `loop`, `break`, a nested
+    /// `unique` block, `**`, a string literal, an array/struct literal read in
+    /// scalar term position or written at a shape outside the supported
+    /// surface, or an access chain the element encoding cannot pin — one
+    /// carrying more than one non-constant index, or one whose non-constant
+    /// index lands on an aggregate rather than a scalar leaf.
+    ///
+    /// Four of these carry their own message instead of the shared template,
+    /// because the template's "this has no encoding; move the logic into an
+    /// executable helper" is either false or useless for them. `loop`: a
+    /// loop's purpose in a specification — saying something about every
+    /// element — is precisely what quantifying an index and constraining it
+    /// says directly, so its message names that idiom. The out-of-surface
+    /// literal: literals encode now, so the restriction is the *shape*, and
+    /// the helper remedy dead-ends (a compound result is [`PCode::P005`], a
+    /// compound argument [`PCode::P004`]). And each access-chain case, which
+    /// states what the encoding can pin and how to get there.
     P002,
-    /// Reassignment (`Stmt::Assign`) in a specification body.
+    /// Reassignment (`Stmt::Assign`) in a specification body — a permanent
+    /// rule, not a pending feature. A specification names values, not storage:
+    /// every name stands for one value throughout the claim, which is what
+    /// lets the translation read a name as the same term wherever it appears.
+    /// Supporting mutation would mean per-branch value versioning across
+    /// quantifier scopes for no expressive gain over a fresh `let`.
     P003,
-    /// A non-scalar type in a term, parameter, or `@` position.
+    /// A type with no place in a specification term. Three wordings live under
+    /// this code, because three different facts land here:
+    ///
+    /// - the type is not representable at all — `unit`, a function type, or an
+    ///   aggregate outside the representable surface (arrays of scalars at any
+    ///   rank, and structs whose fields are scalars or *one-dimensional* scalar
+    ///   arrays: the executable aggregate `@` surface, bounded by analysis
+    ///   rules A027/A028);
+    /// - the type is representable but was read *whole* where a term is
+    ///   required — an aggregate call argument, most often. The surface
+    ///   enumeration above would contradict this rejection, so the message
+    ///   states the real fact instead: an aggregate is not a term;
+    /// - the declaration is an *aggregate* parameter of an `exists`/`unique`
+    ///   body, which the identical declaration in a `forall` body would
+    ///   leaf-expand. The message names the quantifier, since that — not the
+    ///   type — is what rules it out: the obligation denotes against the frame
+    ///   an actual run reaches, where the parameter is one pointer local. A
+    ///   non-scalar, non-aggregate parameter there is unrepresentable for the
+    ///   first reason instead, and takes the first wording.
     P004,
     /// A call that cannot be represented as a `T_app` term.
     P005,
     /// `@` outside a `let` right-hand side or a call-argument position.
     P006,
-    /// A `forall` block nested inside an `exists` context.
+    /// A `forall` block nested inside an `exists` context of an
+    /// `exists`/`unique`-quantified body. Inside a universal body the same
+    /// nesting translates — the inner block binds a universal logical variable
+    /// per `@` — but a reachability body's `@`s are choice parameters its
+    /// judgment quantifies operationally, so a universal binder over one has no
+    /// representation.
     P007,
-    /// `@` at a compound (array/struct) type.
+    /// `@` at a compound (array/struct) type — in a reachability body, where a
+    /// choice arrives as one scalar parameter of the run the obligation talks
+    /// about, or in any body at a shape outside the representable surface. A
+    /// supported-shape compound `@` in a universal body quantifies one variable
+    /// per scalar leaf instead of raising this.
     P008,
     /// A specification *method* carrying a proof obligation the translation
     /// cannot deliver — quantified, or plain but claiming a property. A method
@@ -62,6 +109,24 @@ pub(crate) enum PCode {
     /// nothing names is excluded from that face, which would silently weaken
     /// the judgment; binding it first (`let c: i32 = @;`) makes it count.
     P012,
+    /// An aggregate introduction (a compound `@`, a compound parameter, or an
+    /// array/struct literal) whose scalar leaves would push the specification
+    /// function past its cumulative quantified-leaf budget
+    /// (`SPEC_FN_MAX_QUANTIFIED_LEAVES`). A quantified leaf brings a binder and
+    /// a typing guard, each one assertion-tree level; a literal's leaves are
+    /// constants and still nest one level apiece through a leafwise
+    /// comparison. Either way the levels accumulate across every introduction
+    /// in the function, so the budget is a per-function total, not a
+    /// per-introduction cap.
+    P013,
+    /// A constant-folded array index that is out of bounds for the accessed
+    /// array — `const K: i32 = 5; a[K]`, or `a[1 + 4]`, on `[i32; 3]`. States
+    /// the same fact analysis rule A037 states for a *direct-literal* index;
+    /// A037's pattern requires the literal directly under the access, so an
+    /// index named through a constant or computed from constants reaches the
+    /// translator even with analysis on, and the no-analysis codegen paths make
+    /// this the only guard for any of the spellings.
+    P014,
 }
 
 impl fmt::Display for PCode {
@@ -79,6 +144,8 @@ impl fmt::Display for PCode {
             PCode::P010 => "P010",
             PCode::P011 => "P011",
             PCode::P012 => "P012",
+            PCode::P013 => "P013",
+            PCode::P014 => "P014",
         };
         f.write_str(code)
     }

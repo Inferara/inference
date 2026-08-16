@@ -1,0 +1,118 @@
+// Quantifier alternation in specification bodies: a `forall` block nested
+// inside an existential context (an `exists` block, an `assume` block, or an
+// `if` branch of one) states a universal claim *under* the existential one, and
+// is emitted with the library's `Hall` sugar — this fixture is the corpus
+// producer for it.
+//
+// The nesting needs a real binder rather than a fresh quantifier slot. The
+// downstream `ValidSpec` judgment already quantifies every slot the payload
+// reads, so a slot standing in for the inner `forall` would be quantified
+// outside the enclosing `HA_ex`: `∃x. ∀y. P` would silently become `∀y. ∃x. P`,
+// the swap the rejection this fixture lifts existed to prevent.
+//
+// Inside such a block a `@` binds one logical variable per scalar leaf, each
+// stating its own typing — the guard is an *antecedent inside the binder*,
+// because a `T_lvar` names nothing outside the quantifier that introduced it.
+// The claims are chosen to be true, so the emitted obligations are dischargeable
+// rather than merely well-typed.
+fn twice(n: i32) -> i32 {
+    return n + n;
+}
+
+fn zero_of(n: i32) -> i32 {
+    return n - n;
+}
+
+spec QuantifierAlternation {
+    // The canonical alternation: some value leaves every value unchanged under
+    // addition. `k` is the existential witness, `x` the universal variable.
+    fn additive_identity() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                let x: i32 = @;
+                assert(x + k == x);
+            }
+        }
+    }
+
+    // A universal claim as a *filter*: an `assume` block translates
+    // existentially, so a `forall` inside one alternates the same way, and the
+    // resulting `Hall` lands in the antecedent of what follows.
+    fn filtered_by_a_universal(lo: i32) forall {
+        assume {
+            forall {
+                let x: i32 = @;
+                assert(twice(x) == x + x);
+            }
+        }
+        assert(twice(lo) == lo + lo);
+    }
+
+    // The `if`-branch twin of the block form: the branch block itself carries
+    // the `forall` kind, so the alternation appears inside one arm of the
+    // existential disjunction.
+    fn branch_alternation(n: i32) forall {
+        exists {
+            let m: i32 = @;
+            assume {
+                assert(m == n);
+            }
+            if m == n forall {
+                let x: i32 = @;
+                assert(x + m == x + n);
+            }
+        }
+    }
+
+    // An aggregate `@` under the nested quantifier binds one variable per
+    // scalar leaf, so a two-element array nests two `Hall`s over one shared
+    // antecedent of two typing guards.
+    fn aggregate_alternation() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                let a: [i32; 2] = @;
+                assert(a[0] + k == a[0]);
+            }
+        }
+    }
+
+    // Both binder channels at once: the block introduces a universal variable
+    // and a term-position `||` whose witness is existential, so a `Hall` and an
+    // `HA_ex` interleave over one shared level counter.
+    fn interleaved_binders() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                let x: i32 = @;
+                let safe: bool = x == 0 || twice(x) == x + x;
+                assert(safe || k != 0);
+            }
+        }
+    }
+
+    // A call-argument `@` under the nested quantifier: it has no name to bind,
+    // so its binder wraps the statement's atom directly and carries its typing
+    // guard with it.
+    fn anonymous_universal_choice() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                assert(zero_of(@) == k);
+            }
+        }
+    }
+}

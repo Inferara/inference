@@ -56,9 +56,14 @@ mod gate {
     /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
     /// `build_v_rejects_unique_block_with_p002` in `apps/infs`).
     ///
-    /// The last two entries exist for operator coverage rather than for a proof
-    /// shape: between them they put every arithmetic, bitwise, shift and
-    /// comparison operator the obligation printer can spell into a fixture
+    /// `spec_quantifier_alternation.inf` is the sole producer of the `Hall`
+    /// universal-binder sugar: only a `forall` block nested inside an
+    /// existential context emits one, so without this fixture that stub
+    /// declaration would never be elaborated by the compile below.
+    ///
+    /// The operator-matrix entries exist for operator coverage rather than for
+    /// a proof shape: between them they put every arithmetic, bitwise, shift
+    /// and comparison operator the obligation printer can spell into a fixture
     /// `coqc` elaborates. They are split by theme rather than merged because a
     /// gate failure should name the operator family it is about (#401).
     const CORPUS: &[(&str, &str)] = &[
@@ -81,6 +86,12 @@ mod gate {
         ("rocq_exists_spec.inf", "rocq_exists_spec"),
         ("rocq_unique_spec.inf", "rocq_unique_spec"),
         ("spec_mixed_kinds.inf", "spec_mixed_kinds"),
+        ("spec_aggregate_values.inf", "spec_aggregate_values"),
+        ("spec_bounded_iteration.inf", "spec_bounded_iteration"),
+        (
+            "spec_quantifier_alternation.inf",
+            "spec_quantifier_alternation",
+        ),
     ];
 
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
@@ -135,6 +146,12 @@ mod gate {
         "T_app ",
         "T_local ",
         "HA_ex",
+        // The universal binder, reached only by a `forall` block nested inside
+        // an existential context. `spec_quantifier_alternation.inf` is its sole
+        // producer, so without that fixture `coqc` would never elaborate the
+        // `Hall` Definition and a drift in it would pass unnoticed — the hole
+        // this needle list exists to keep closed.
+        "Hall ",
         "HA_has_type ",
         "BT_valtype (Some",
         // The reachability grammar, in its applied forms: the kind-selected
@@ -2530,6 +2547,196 @@ Definition a_definition (x : nat) : nat := x.
         );
     }
 
+    /// Committed `.v` golden for the aggregate-values fixture. Regenerate with
+    /// the `#[ignore]`d [`regenerate::regenerate_aggregate_values_v`] after an
+    /// intentional emitter change.
+    fn aggregate_values_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_aggregate_values.v")
+    }
+
+    /// The proof-mode `.v` for the aggregate-values fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry the leaf
+    /// encoding's contract shape: a compound `@` and a compound parameter
+    /// quantify one `T_local` slot per scalar leaf, each leading its
+    /// antecedent with an `HA_has_type` guard at the leaf's own width; an
+    /// aggregate `==` is a leafwise `term_eq` conjunction; an aggregate `@`
+    /// under an `exists` block binds nested `HA_ex` binders. No memory atom
+    /// exists to be emitted — the pure fragment is the whole encoding.
+    #[test]
+    fn spec_aggregate_values_matches_committed_v_golden() {
+        let generated = generate_v("spec_aggregate_values.inf", "spec_aggregate_values");
+        let golden_path = aggregate_values_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_aggregate_values_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_aggregate_values.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_aggregate_values_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder an encoding regression into the
+        // committed file.
+        assert!(
+            golden.contains("HA_has_type (T_local 2%N) T_i32"),
+            "a 3-leaf array `@` must guard its third leaf slot:\n{golden}"
+        );
+        assert!(
+            golden.contains("HA_has_type (T_local 1%N) T_i64"),
+            "a struct's `i64` field leaf must be guarded at its own width:\n{golden}"
+        );
+        assert!(
+            golden.contains("term_eq (T_local 0%N) (T_local 2%N)"),
+            "aggregate `==` must be the leafwise `term_eq` of matching leaves:\n{golden}"
+        );
+        assert!(
+            golden.contains("HA_ex (HA_ex"),
+            "an aggregate `@` in an `exists` block must bind one nested `HA_ex` \
+             per leaf:\n{golden}"
+        );
+        assert!(
+            !golden.contains("HA_pto") && !golden.contains("HA_iter"),
+            "the leaf encoding is pure — no memory atom may appear:\n{golden}"
+        );
+    }
+
+    /// Committed `.v` golden for the bounded-iteration fixture. Regenerate
+    /// with the `#[ignore]`d [`regenerate::regenerate_bounded_iteration_v`]
+    /// after an intentional emitter change.
+    fn bounded_iteration_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_bounded_iteration.v")
+    }
+
+    /// The proof-mode `.v` for the bounded-iteration fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry the
+    /// non-constant index's contract shape: the element is a fresh `HA_ex`
+    /// binder whose definition leads with the *unsigned* range bound and then
+    /// names one case per element. The range bound is conjoined with the claim
+    /// rather than guarding it, which is what makes an out-of-range index
+    /// refute the obligation instead of discharging it vacuously.
+    #[test]
+    fn spec_bounded_iteration_matches_committed_v_golden() {
+        let generated = generate_v("spec_bounded_iteration.inf", "spec_bounded_iteration");
+        let golden_path = bounded_iteration_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_bounded_iteration_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_bounded_iteration.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_bounded_iteration_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder an encoding regression into the
+        // committed file.
+        assert!(
+            golden.contains("T_relop T_i32 (Relop_i (ROI_lt SX_U))"),
+            "the element's range bound must be the term-level *unsigned* `<`; a signed \
+             comparison would leave a negative index unconstrained:\n{golden}"
+        );
+        assert!(
+            golden.contains(
+                "HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_U))"
+            ),
+            "the element is a fresh binder whose definition is *conjoined* with the claim and \
+             leads with the range bound — conjoined is what refutes an out-of-range index \
+             instead of discharging it vacuously:\n{golden}"
+        );
+        assert!(
+            golden.contains("Himpl (term_eq (T_local"),
+            "the element must be defined by cases over its index:\n{golden}"
+        );
+        assert!(
+            !golden.contains("HA_pto") && !golden.contains("HA_iter"),
+            "the element encoding is pure — no memory atom may appear:\n{golden}"
+        );
+    }
+
+    /// Committed `.v` golden for the quantifier-alternation fixture.
+    /// Regenerate with the `#[ignore]`d
+    /// [`regenerate::regenerate_quantifier_alternation_v`] after an intentional
+    /// emitter change.
+    fn quantifier_alternation_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_quantifier_alternation.v")
+    }
+
+    /// The proof-mode `.v` for the quantifier-alternation fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry the
+    /// alternation's contract shape: a `Hall` *inside* the enclosing `HA_ex`
+    /// (the other order is the swap the encoding exists to prevent), a typing
+    /// guard for the universal variable stated as an antecedent within its own
+    /// binder, and one `Hall` per scalar leaf of an aggregate `@`.
+    #[test]
+    fn spec_quantifier_alternation_matches_committed_v_golden() {
+        let generated = generate_v(
+            "spec_quantifier_alternation.inf",
+            "spec_quantifier_alternation",
+        );
+        let golden_path = quantifier_alternation_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_quantifier_alternation_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_quantifier_alternation.inf drifted from the committed \
+             golden {}; if the emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_quantifier_alternation_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder an encoding regression into the
+        // committed file.
+        assert!(
+            golden.contains("HA_ex (HA_and (term_eq (T_lvar 0) (T_const (Vi32 0))) (Hall "),
+            "the universal binder must sit INSIDE the existential one; the other order is \
+             the alternation swap the explicit binder exists to prevent:\n{golden}"
+        );
+        assert!(
+            golden.contains("Hall (Himpl (HA_has_type (T_lvar 0) T_i32)"),
+            "a nested-universal `@` must state its typing as an antecedent within its own \
+             binder — a `T_lvar` guard outside its quantifier names nothing:\n{golden}"
+        );
+        assert!(
+            golden.contains("Hall (Hall (Himpl (HA_and (HA_has_type (T_lvar 1) T_i32)"),
+            "an aggregate `@` under the nested quantifier must bind one `Hall` per scalar \
+             leaf over one shared guard antecedent:\n{golden}"
+        );
+        assert!(
+            golden.contains("Hall (Himpl (HA_has_type (T_lvar 0) T_i32) (HA_ex (HA_and (Hor "),
+            "the two binder channels must interleave inside one block: a short-circuit \
+             witness allocated after a universal variable is bound within it, off the same \
+             level counter:\n{golden}"
+        );
+    }
+
     /// Committed `.v` golden for the `unique`-kind reachability fixture.
     /// Regenerate with the `#[ignore]`d [`regenerate::regenerate_unique_spec_v`]
     /// after an intentional emitter change.
@@ -2605,8 +2812,9 @@ Definition a_definition (x : nat) : nat := x.
     #[cfg(test)]
     mod regenerate {
         use super::{
-            exists_spec_golden_path, generate_v, literal_ctx_golden_path, prime_golden_path,
-            unique_spec_golden_path,
+            aggregate_values_golden_path, bounded_iteration_golden_path, exists_spec_golden_path,
+            generate_v, literal_ctx_golden_path, prime_golden_path,
+            quantifier_alternation_golden_path, unique_spec_golden_path,
         };
         use std::path::Path;
 
@@ -2645,6 +2853,30 @@ Definition a_definition (x : nat) : nat := x.
         fn regenerate_unique_spec_v() {
             let v = generate_v("rocq_unique_spec.inf", "rocq_unique_spec");
             write_golden(&v, &unique_spec_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_aggregate_values_v() {
+            let v = generate_v("spec_aggregate_values.inf", "spec_aggregate_values");
+            write_golden(&v, &aggregate_values_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_bounded_iteration_v() {
+            let v = generate_v("spec_bounded_iteration.inf", "spec_bounded_iteration");
+            write_golden(&v, &bounded_iteration_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_quantifier_alternation_v() {
+            let v = generate_v(
+                "spec_quantifier_alternation.inf",
+                "spec_quantifier_alternation",
+            );
+            write_golden(&v, &quantifier_alternation_golden_path());
         }
     }
 }

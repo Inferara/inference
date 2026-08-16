@@ -98,12 +98,18 @@ pub enum HTerm {
     Relop(HNumType, HRelop, Box<HTerm>, Box<HTerm>),
 }
 
-/// An assertion, mirroring the `hassert` inductive plus its two transparent
-/// sugars `Himpl`/`Hor` (`Assertions.v`).
+/// An assertion, mirroring the `hassert` inductive plus its three transparent
+/// sugars `Himpl`/`Hor`/`Hall` (`Assertions.v`).
 ///
 /// The heap fragment (`HA_emp`/`HA_star`/`HA_iter`/`HA_pto`/`HA_size`) and the
 /// general `HA_pred` are omitted: memory constructs are never produced, and
 /// [`Self::TermEq`] is the only predicate form (the `pred_eq`/2 discipline).
+///
+/// **Declaration order is the wire format.** `codec.rs` assigns each variant a
+/// tag by its position here, and those tags are part of the `inference.hspecs`
+/// format — so a new variant is *appended*, never inserted beside a relative it
+/// reads like ([`Self::All`] belongs next to [`Self::Ex`] by meaning and last
+/// by contract).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HAssert {
     /// `HA_true` — ⊤.
@@ -133,6 +139,14 @@ pub enum HAssert {
     /// arity (including a `void` result, where the scalar `T_app` is never
     /// defined).
     AppOk(HFnRef, Vec<HTerm>),
+    /// `Hall` — ∀x. H, the transparent sugar `HA_not (HA_ex (HA_not H))`,
+    /// binding de Bruijn logical variable 0 in its body exactly as
+    /// [`Self::Ex`] does. Kept explicit like [`Self::Imp`]/[`Self::Or`] so the
+    /// printer renders `Hall` without pattern-matching an encoding.
+    ///
+    /// Declared last on purpose, against meaning: see the type's own note —
+    /// the tag order is the declaration order and is part of the wire format.
+    All(Box<HAssert>),
 }
 
 impl HAssert {
@@ -175,6 +189,18 @@ impl HAssert {
         match body {
             HAssert::True => HAssert::True,
             body => HAssert::Ex(Box::new(body)),
+        }
+    }
+
+    /// Universal quantification, simplifying `∀x. ⊤ = ⊤` — the dual of
+    /// [`Self::ex`], and sound for the same reason: the assertion language's
+    /// domain is never empty, so a body that claims nothing claims nothing
+    /// under either quantifier. The body binds de Bruijn logical variable 0.
+    #[must_use = "builds an assertion"]
+    pub fn all(body: HAssert) -> HAssert {
+        match body {
+            HAssert::True => HAssert::True,
+            body => HAssert::All(Box::new(body)),
         }
     }
 
@@ -317,6 +343,22 @@ mod tests {
         assert_eq!(HAssert::ex(HAssert::True), HAssert::True);
         let body = HAssert::Defined(HTerm::LVar(0));
         assert_eq!(HAssert::ex(body.clone()), HAssert::Ex(Box::new(body)));
+    }
+
+    #[test]
+    fn all_simplifies_a_trivial_body() {
+        assert_eq!(HAssert::all(HAssert::True), HAssert::True);
+        let body = HAssert::Defined(HTerm::LVar(0));
+        assert_eq!(HAssert::all(body.clone()), HAssert::All(Box::new(body)));
+    }
+
+    /// The two binders are distinct nodes over the same body: nothing in the
+    /// IR lets an `Ex` stand in for an `All`, which is the whole reason the
+    /// universal binder is explicit rather than the `¬∃¬` encoding.
+    #[test]
+    fn all_is_not_ex_over_the_same_body() {
+        let body = HAssert::Defined(HTerm::LVar(0));
+        assert_ne!(HAssert::all(body.clone()), HAssert::ex(body));
     }
 
     #[test]

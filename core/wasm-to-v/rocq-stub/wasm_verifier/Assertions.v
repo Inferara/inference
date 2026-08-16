@@ -61,11 +61,11 @@ Definition pred_eq : nat := 0.
 (* Term-equality assertion  tau1 = tau2. *)
 Definition term_eq (a b : term) : hassert := HA_pred pred_eq (a :: b :: nil).
 
-(* [hassert] has no primitive implication or disjunction constructor; these are
-   the standard classical De Morgan encodings, mirrored as
-   definitionally-transparent Definitions so the emitter can print them by
-   name. The library's matching universal-quantifier sugar [Hall] is not
-   declared: the only construct that would emit it is a `forall` block nested
-   inside an `exists` context, which code generation rejects as P007. *)
+(* [hassert] has no primitive implication, disjunction or universal-quantifier
+   constructor; these are the standard classical De Morgan encodings, mirrored
+   as definitionally-transparent Definitions so the emitter can print them by
+   name. [Hall]'s body binds logical de Bruijn index 0, exactly like the
+   [HA_ex] it is built from. *)
 Definition Himpl (p q : hassert) : hassert := HA_not (HA_and p (HA_not q)).
 Definition Hor (p q : hassert) : hassert := HA_not (HA_and (HA_not p) (HA_not q)).
+Definition Hall (body : hassert) : hassert := HA_not (HA_ex (HA_not body)).

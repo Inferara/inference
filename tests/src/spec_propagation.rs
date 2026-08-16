@@ -262,20 +262,22 @@ mod scenario_2_export_gating {
     }
 }
 
-// A spec whose body builds or reads a struct has no assertion encoding, so
-// proof-mode codegen now rejects it (the obligation is a required deliverable).
+// A spec body that builds and reads flat struct values now encodes them as
+// scalar leaf trees. What stays rejected in a literal is a field-position
+// uzumaki: `@` is an introduction form only where a `let` or a call argument
+// binds it, and a literal field is neither.
 #[cfg(test)]
-mod spec_struct_value_is_rejected {
+mod spec_struct_values {
     use super::helpers::try_compile;
     use inference_wasm_codegen::CompilationMode;
 
-    /// A struct literal (with field-position uzumaki) and a subsequent field
-    /// access in a spec `forall` body have no `hassert` encoding, so proof-mode
-    /// codegen fails with `P002`. (Previously this compiled to WASM because the
-    /// obligation pass was additive; the flip to fatal makes an untranslatable
-    /// spec a hard error.)
+    /// A field-position `@` inside a struct literal is not an introduction
+    /// form — `@` is bound by a `let` or a call argument — so proof-mode
+    /// codegen rejects it with `P006`, whose message names both sanctioned
+    /// positions. (Bind the whole struct with `let p: Point = @;` to
+    /// quantify per leaf instead.)
     #[test]
-    fn field_position_uzumaki_struct_in_spec_forall_is_rejected() {
+    fn field_position_uzumaki_in_a_spec_literal_is_rejected() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             spec S {
@@ -286,18 +288,20 @@ mod spec_struct_value_is_rejected {
             }
         "#;
         let err = try_compile(source, CompilationMode::Proof)
-            .expect_err("a struct-valued spec body has no assertion encoding");
+            .expect_err("a field-position uzumaki has no binding to introduce it");
         let msg = err.to_string();
         assert!(
-            msg.contains("P002") && msg.contains("struct"),
-            "expected a P002 rejection naming the struct construct; got:\n{msg}"
+            msg.contains("P006"),
+            "expected a P006 rejection for the field-position uzumaki; got:\n{msg}"
         );
     }
 
-    /// The typed-let form (`let a: i32 = @; Point { x: a }`) reads a struct field
-    /// in the assertion, so it is rejected for the same reason.
+    /// The typed-let form (`let a: i32 = @; Point { x: a }`) is now fully
+    /// encodable: the literal binds a leaf value tree over the already-bound
+    /// slots, and the field read resolves to a slot term — proof-mode
+    /// codegen succeeds and carries the obligation.
     #[test]
-    fn typed_let_struct_in_spec_forall_is_rejected() {
+    fn typed_let_struct_in_spec_forall_now_encodes() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             spec S {
@@ -309,12 +313,11 @@ mod spec_struct_value_is_rejected {
                 }
             }
         "#;
-        let err = try_compile(source, CompilationMode::Proof)
-            .expect_err("a struct-valued spec body has no assertion encoding");
-        let msg = err.to_string();
+        let output = try_compile(source, CompilationMode::Proof)
+            .expect("a flat struct value in a spec body now encodes as leaf terms");
         assert!(
-            msg.contains("P002"),
-            "expected a P002 rejection for the struct construct; got:\n{msg}"
+            !output.hspecs().is_empty(),
+            "the spec must carry its obligation"
         );
     }
 }
