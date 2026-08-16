@@ -150,8 +150,9 @@
 //! From Wasm Require Import bytes numerics datatypes host.
 //! From WasmVerifier Require Import Assertions Verifier.
 //! (* The proof-contract import line gains ` Exists` when the module carries a
-//!    reachability (`exists`/`unique`) obligation, and `Open Scope byte_scope.`
-//!    follows when the module carries a data segment. *)
+//!    reachability (`exists`/`unique`) obligation, and the two lines
+//!    `Open Scope byte_scope.` and `Local Delimit Scope Z_scope with Zst.`
+//!    follow when the module carries a data segment. *)
 //!
 //! (* Helper definitions *)
 //! Definition Vi32 i := ...
@@ -594,7 +595,7 @@ impl WasmParseData<'_> {
         // wasm-verifier `Exists` module. The import joins the line only when a
         // reachability obligation exists, so a forall-only module's preamble is
         // byte-identical to what it was before reachability emission existed
-        // (the same keying discipline as `Open Scope byte_scope.` below).
+        // (the same keying discipline as the two data-segment lines below).
         if self.has_reachability_entries() {
             res.push_str("From WasmVerifier Require Import Assertions Verifier Exists.\n");
         } else {
@@ -602,15 +603,41 @@ impl WasmParseData<'_> {
         }
         // A data segment's bytes are mostly written in the hex notations the
         // `Wasm.bytes` module declares in `byte_scope`, and those parse only
-        // while that scope is open. Whether an `Import` chain leaves it open is
-        // a detail of the library, not of this contract, so a module that can
-        // spell a byte notation states its own requirement. The line is keyed
-        // on the presence of a data segment rather than on the bytes in it:
-        // opening a scope nothing happens to use is inert, while deciding per
-        // byte would make the preamble depend on segment contents. A module
-        // with no data segment names no byte at all, and emits no such line.
+        // while that scope is open; the twelve values that have no notation are
+        // written as `encode` applications instead, whose argument carries an
+        // explicit `Z` scope key. A data segment is the only thing that makes
+        // an emitted module spell that key at all (the other keys a module
+        // spells are `%N`, on indices and the other structural `N` fields, and
+        // `%nat`, on a reachability record's `reach_entry_arity`; every other
+        // numeral is unkeyed, taking its scope from the expected type). Both
+        // lines below state a requirement the module would otherwise inherit:
+        // whether an `Import` chain leaves `byte_scope` open, and which scope
+        // the `Z` delimiting key still names once that chain has been walked,
+        // are details of the libraries above this contract rather than of the
+        // contract itself.
+        //
+        // The key needs restating because mathcomp's algebra library delimits
+        // its own `int_scope` with `Z` (`ssrint.v`), and delimiting is
+        // last-writer-wins: whichever `Delimit` a file's `Import`/`Export`
+        // chain applies last decides the key, an explicit `%Z` is read through
+        // the key regardless of which scopes are open, and only a later
+        // re-delimit recovers it. Rather than compete for `Z` — which would
+        // take mathcomp's own `%Z` away from anything read alongside this
+        // module — the module claims a private key for `Z_scope` and spells
+        // its byte arguments with that. `Local` confines the claim to this
+        // file, where a file-global `Delimit` would leak the key to every
+        // consumer that imports the module. The full mechanism, and why
+        // the `%N` key is handled on the consumer side instead, live in
+        // ROCQ_CONTRACT.md's "mathcomp consumers" section (#416).
+        //
+        // Both lines are keyed on a data segment being present rather than on
+        // the bytes inside it: an unused scope and an unused key are equally
+        // inert, while deciding per byte would make the preamble depend on
+        // segment contents. A module with no data segment names no byte and
+        // spells no `Z` key, and emits neither line.
         if !self.data.is_empty() {
             res.push_str("Open Scope byte_scope.\n");
+            res.push_str("Local Delimit Scope Z_scope with Zst.\n");
         }
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
@@ -3035,13 +3062,17 @@ fn translate_basic_operator(
 /// `#1F` are absent, and spelling one of those would emit syntax the backend
 /// cannot parse even though the notation looks uniform. Those twelve values are
 /// therefore written as the `encode` application the notation would have
-/// abbreviated, which needs no scope and elaborates for every value.
+/// abbreviated, which elaborates for every value.
+///
+/// That argument is the only place an emitted module spells the `Z` scope key,
+/// and it spells the private key the preamble claims for `Z_scope` rather than
+/// `Z` itself, which mathcomp's algebra library takes for its own `int_scope`.
 ///
 /// The notation is preferred where it exists because it keeps a data segment
 /// legible as the hex dump it came from.
 fn byte_literal(byte: u8) -> String {
     if matches!(byte, 0x12..=0x19 | 0x1C..=0x1F) {
-        format!("(encode {byte}%Z)")
+        format!("(encode {byte}%Zst)")
     } else {
         format!("#{byte:02X}")
     }

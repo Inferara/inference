@@ -79,20 +79,49 @@ a forall-only module names nothing from it. (Coq's standard `List` also
 exports an inductive named `Exists`; the two occupy separate namespaces
 — one is a module, the other a term — and no emitted term spells bare
 `Exists`, so the combination is unambiguous.) And a module carrying at
-least one data segment also emits
+least one data segment also emits both of
 
 ```coq
 Open Scope byte_scope.
+Local Delimit Scope Z_scope with Zst.
 ```
 
 because most data bytes are spelled with a `byte_scope` notation (see
-below) and those parse only while that scope is open. Whether an `Import`
-chain leaves the scope open is a detail of the library rather than of
-this contract, so a module that can spell a byte notation states the
-requirement itself. The line is keyed on a data segment being present
-rather than on the bytes inside it: opening a scope nothing happens to
-use is inert. A module with no data segment names no byte at all and
-emits no such line.
+below) and those parse only while that scope is open, while the rest are
+spelled as `encode` applications whose argument carries an explicit `Z`
+scope key — the only place an emitted module spells that key at all.
+(The full key inventory of an emitted module is three: `%N` on indices
+and the other structural `N` fields, `%nat` on a reachability record's
+`reach_entry_arity`, and this `%Zst`; every other numeral is unkeyed,
+taking its scope from the expected type.) Whether an `Import` chain
+leaves `byte_scope` open, and which scope the `Z` delimiting key still
+names once that chain has been walked, are details of the libraries
+rather than of this contract, so a module that can spell either states
+the requirement itself.
+
+The second line exists because mathcomp's algebra library delimits its
+own `int_scope` with the `Z` key (`ssrint.v`, alongside a `Number
+Notation` on its `int`), so in any file whose `Import`/`Export` chain
+applies that `Delimit` — the rebinding takes effect at import time, and
+does not travel through a non-exporting intermediate —
+`(encode 18%Z)` re-reads its argument as mathcomp's `int` and fails to
+type-check against `encode : Z -> byte`. Delimiting is last-writer-wins:
+whichever `Delimit` the chain applies last decides the key, an explicit
+`%Z` is read through the key no matter which scopes the file opens (so
+`Open Scope Z_scope.` does not recover it), and only a later re-delimit
+does. Since a scope may carry several delimiting keys, the emitter takes
+a private one for `Z_scope` rather than compete for `Z`, which would
+take mathcomp's own `%Z` away from anything read alongside the module.
+This mirrors mathcomp's own move in the other direction, where `ssrnat`
+claims `%num` for `BinNat`'s scope after taking `%N` for its own (see
+"mathcomp consumers" below). `Local` confines the claim to the emitted
+file: a file-global `Delimit` would leak the key to every consumer that
+imports the module.
+
+Both lines are keyed on a data segment being present rather than on the
+bytes inside it: a scope nothing uses and a key nothing spells are
+equally inert. A module with no data segment names no byte and spells no
+`Z` key, and emits neither line.
 
 Within that context, the translator depends on:
 
@@ -117,10 +146,11 @@ Within that context, the translator depends on:
   hand-written and covers 244 of the 256 values — `#12` .. `#19` and
   `#1C` .. `#1F` have no notation. A byte is emitted in its notation
   where one exists, and as the `encode` application that notation would
-  have abbreviated (`(encode 18%Z)`) for the twelve that have none. The
-  notations parse only while `byte_scope` is open, which is what the
-  conditional preamble line above supplies; the applications need no
-  scope.
+  have abbreviated (`(encode 18%Zst)`) for the twelve that have none.
+  The notations parse only while `byte_scope` is open, and `Zst` is the
+  private key the emitted module claims for the standard `Z_scope` its
+  argument lives in — both supplied by the conditional preamble lines
+  above, and neither one inherited from an import chain.
 - `BI_br_table : list N -> N -> basic_instruction` — the explicit label
   vector **and** the default label. The default is a separate immediate
   in the binary format and never appears in the vector, and a table whose
@@ -222,13 +252,39 @@ mathcomp imports matters, and why the line triggers Rocq's default-on
 to silence it). The trade is symmetrical: after the re-delimit,
 mathcomp's own `%N`-keyed `nat` notations no longer parse in that file
 — `%nat` and `%num` still do. `Local` also matters: a file-global
-`Delimit` leaks to every file that `Require`s the consumer and
-re-breaks `%N` there in the other direction. The emitter deliberately
+`Delimit` leaks to every file that imports the consumer and re-breaks
+`%N` there in the other direction. The emitter deliberately
 does not switch to `%num`: that key is *defined by `ssrnat`*, so it does
 not exist in the mathcomp-free context this contract targets, and
 emitting it would break both the standalone contract and this repo's
 own `coqc` gate. `%N` is the right key for what the emitter targets;
 the re-delimit line is the consumer's half of the bargain.
+
+The `%Z` analogue of that hijack exists, and needs no consumer
+accommodation because the emitter already carries it. mathcomp's algebra
+library delimits its own `int_scope` with the `Z` key (`ssrint.v`,
+alongside a `Number Notation` on its `int`), so `18%Z` re-reads as
+mathcomp's `int` in any file whose `Import`/`Export` chain applies that
+`Delimit` — one scope key over from the `ssrnat` case above, and the
+same failure mode. Two files can be that file: the emitted `.v` itself,
+should the backend build behind its preamble ever re-export mathcomp
+algebra, and a consumer that imports it and restates emitted data bytes
+in its own text.
+
+The emitter answers both by spelling its `Z`-keyed literals — the
+`encode` arguments of the twelve notation-less data bytes, and nothing
+else — with the private `%Zst` key it claims in the preamble (see
+"Required Rocq context" above). The two keys get different treatment out
+of cost, not mechanism: emitted `%N` literals are everywhere — every
+index, every payload a consumer restates, every committed golden and
+downstream proof — so re-keying them would churn all of that, and the
+one-line recipe above already covers the consumer files that read them;
+the `Z` key is spelled only in the `encode` arguments of data bytes,
+which only foreign or statically-linked modules carry, so the emitter
+re-keys it at the source and nothing downstream has to know (#416). A
+consumer restating emitted data bytes in its own file carries the
+emitter's own line, `Local Delimit Scope Z_scope with Zst.`, alongside
+them (with `ZArith` in scope for `Z_scope` to exist).
 
 The discharge originally needed a second accommodation, now gone.
 Emitted files once bound the `Ma` helper's offset argument as `of`,

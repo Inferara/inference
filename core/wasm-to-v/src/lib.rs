@@ -598,9 +598,12 @@ mod tests {
         // hex notations where the contract declares one, and as the `encode`
         // application that notation abbreviates for the twelve values it does
         // not. The scope is opened by the preamble of any module carrying a
-        // data segment — the notation does not parse otherwise.
+        // data segment — the notation does not parse otherwise — and the
+        // application's argument carries the private key that same preamble
+        // claims, since `Z` itself may be pointing at mathcomp's `int_scope`
+        // by the time the module is read.
         assert!(
-            output.contains("#78 :: (encode 18%Z) :: nil"),
+            output.contains("#78 :: (encode 18%Zst) :: nil"),
             "a data byte must reach the `.v` in its `byte_scope` notation, or \
              as an `encode` application where the contract declares none; \
              got:\n{output}",
@@ -614,6 +617,11 @@ mod tests {
             output.contains("Open Scope byte_scope.\n"),
             "a module carrying a data segment must open the scope its byte \
              literals are written in; got:\n{output}",
+        );
+        assert!(
+            output.contains("Local Delimit Scope Z_scope with Zst.\n"),
+            "a module carrying a data segment must claim the private key its \
+             `encode` arguments are spelled with; got:\n{output}",
         );
     }
 

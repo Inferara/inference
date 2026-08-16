@@ -561,19 +561,25 @@ mod gate {
             }
         }
 
-        // 4. The `byte_scope` preamble line is conditional on a data segment,
+        // 4. Both data-segment preamble lines are conditional on a data segment,
         //    and Inference codegen emits none, so no corpus module carries one.
-        //    Pinning its absence keeps the preamble free of anything a module
+        //    Pinning their absence keeps the preamble free of anything a module
         //    does not use, and keeps every committed `.v` byte-identical to the
-        //    output it had before byte literals gained a scope requirement.
+        //    output it had before byte literals gained a scope requirement and a
+        //    private delimiting key.
         for m in &generated {
-            assert!(
-                !m.v.contains("Open Scope byte_scope."),
-                "`{}` carries no data segment, so its preamble must not \
-                 open `byte_scope`; got:\n{}",
-                m.source,
-                m.v
-            );
+            for line in [
+                "Open Scope byte_scope.",
+                "Local Delimit Scope Z_scope with Zst.",
+            ] {
+                assert!(
+                    !m.v.contains(line),
+                    "`{}` carries no data segment, so its preamble must not \
+                     carry `{line}`; got:\n{}",
+                    m.source,
+                    m.v
+                );
+            }
         }
 
         // 5. The coqc compile is gated: real in CI, skipped locally when absent.
@@ -677,13 +683,19 @@ mod gate {
             "(BI_ref_func 0%N :: nil)",
             "(BI_ref_func 1%N :: nil)",
             "moddata_init := #68 :: #69 :: nil",
-            "moddata_init := #00 :: (encode 18%Z) :: (encode 31%Z) :: #FF :: nil",
+            "moddata_init := #00 :: (encode 18%Zst) :: (encode 31%Zst) :: #FF :: nil",
             "MD_active 0%N",
             "MD_passive",
             // The byte notations parse only inside `byte_scope`, so a module
             // carrying data segments opens it; `coqc` below is what proves the
             // line is load-bearing rather than decorative.
             "Open Scope byte_scope.\n",
+            // The `encode` applications above spell their argument with a
+            // private key, because mathcomp's algebra library delimits its own
+            // `int_scope` with `Z`. `coqc` below proves the claim and the
+            // spelling elaborate under vanilla Rocq; surviving the mathcomp
+            // rebinding is what the key exists for.
+            "Local Delimit Scope Z_scope with Zst.\n",
         ] {
             assert!(
                 v.contains(needle),
