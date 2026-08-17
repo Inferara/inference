@@ -9,6 +9,7 @@ repository = { workspace = true }
 [dependencies]
 wasm-encoder.workspace = true
 inference-ast.workspace = true
+inference-compiler-interface.workspace = true
 inference-type-checker.workspace = true
 inference-fn-key.workspace = true
 inference-hassert.workspace = true
@@ -19,7 +20,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 inf-wasmparser.workspace = true
-inference-compiler-interface.workspace = true
 inference-parser.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
 wasmprinter = "0.254.0"

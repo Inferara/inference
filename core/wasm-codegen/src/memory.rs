@@ -58,14 +58,13 @@ use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::{FxHashMap, FxHashSet};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
-/// One WASM memory page in bytes.
-///
-/// The unit [`crate::MemoryLayout::pages`] counts in, and the size of the default
-/// layout's single page.
-pub(crate) const PAGE_SIZE: u32 = 65536;
-
 /// Stack frame alignment in bytes (matches LLVM/Rust WASM convention).
-pub(crate) const FRAME_ALIGNMENT: u32 = 16;
+///
+/// Defined beside [`crate::MemoryLayout`] in `inference-compiler-interface`,
+/// whose validation reads it: the grid this module rounds every frame to is the
+/// same grid a rejected stack size is measured against, and one definition is
+/// what keeps the two from parting ways.
+pub(crate) use inference_compiler_interface::FRAME_ALIGNMENT;
 
 /// WASM global index for `__stack_pointer` (the only global in the module).
 const STACK_POINTER_GLOBAL: u32 = 0;
@@ -1595,6 +1594,7 @@ pub(crate) fn emit_stack_epilogue(func: &mut Function, layout: &FrameLayout) {
 mod tests {
     use super::*;
     use inference_ast::nodes::Visibility;
+    use inference_compiler_interface::PAGE_SIZE;
     use inference_type_checker::type_info::TypeInfo;
     use inference_type_checker::{StructFieldInfo, StructInfo};
     use inference_type_checker::typed_context::TypedContext;
