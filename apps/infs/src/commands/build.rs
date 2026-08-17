@@ -90,10 +90,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::project_build::{
-    forward_wasm_features, mode_flag, probe_compiler_compatibility, run_project_build,
+    forward_memory_layout, forward_wasm_features, mode_flag, probe_compiler_compatibility,
+    run_project_build,
 };
 use crate::errors::InfsError;
-use crate::project::manifest::{InferenceToml, MANIFEST_FILE_NAME, find_manifest_dir};
+use crate::project::manifest::{
+    InferenceToml, MANIFEST_FILE_NAME, MemoryConfig, find_manifest_dir,
+};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::find_infc_with_source;
 use inference_compiler_interface::WasmFeatureName;
@@ -198,8 +201,8 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 /// - The source file does not exist
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
-/// - the enclosing manifest requests `wasm-features` the resolved `infc` cannot
-///   honor
+/// - the enclosing manifest requests `wasm-features` or a `[memory]` table the
+///   resolved `infc` cannot honor
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
     if !path.exists() {
@@ -208,6 +211,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
 
     let enclosing = enclosing_manifest(path)?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
 
     let (infc_path, infc_source) = find_infc_with_source()?;
     let compat = probe_compiler_compatibility(&infc_path, infc_source)?;
@@ -239,6 +243,7 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
         .as_ref()
         .map(|(dir, _)| dir.join(MANIFEST_FILE_NAME));
     forward_wasm_features(&mut cmd, compat, &features, manifest_path.as_deref())?;
+    forward_memory_layout(&mut cmd, compat, &memory, manifest_path.as_deref())?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -365,6 +370,42 @@ pub(crate) fn manifest_wasm_features(
     manifest: Option<&InferenceToml>,
 ) -> Result<Vec<WasmFeatureName>> {
     manifest.map_or_else(|| Ok(Vec::new()), |m| m.build.resolved_wasm_features())
+}
+
+/// Everything a single-file build takes from the enclosing project's manifest.
+///
+/// Bundled rather than passed one by one because the four share a provenance:
+/// every one comes off the single [`enclosing_manifest`] load, and a build that
+/// mixed one project's features with another's dependencies would have read two
+/// manifests. Passing them as a unit is what makes that unrepresentable, and it
+/// keeps the settings borrowed from the caller that resolved them — resolution
+/// stays ahead of the compiler lookup, so a malformed manifest is reported
+/// without first probing the toolchain.
+pub(crate) struct EnclosingSettings<'a> {
+    /// `[wasm-dependencies]`, resolved to absolute paths.
+    pub(crate) deps: &'a [(String, PathBuf)],
+    /// `[build] wasm-features`, resolved against the shared vocabulary.
+    pub(crate) features: &'a [WasmFeatureName],
+    /// The `[memory]` table as declared, keys still optional.
+    pub(crate) memory: &'a MemoryConfig,
+    /// The manifest a diagnostic tells the user to edit, or `None` for a source
+    /// outside any project.
+    pub(crate) manifest_path: Option<&'a Path>,
+}
+
+/// Reads the `[memory]` table of an already-loaded enclosing manifest.
+///
+/// `None` — a source outside any project — declares nothing, which is the single
+/// all-stack page every build emitted before the table existed. Centralizing that
+/// default is why both single-file paths call this rather than reaching into
+/// `memory` themselves.
+///
+/// Infallible where [`manifest_wasm_features`] is not, because it hands back the
+/// declared keys rather than their resolution: the numbers are checked where they
+/// are turned into a layout, which is the same place the ABI gate and the echo
+/// live.
+pub(crate) fn manifest_memory(manifest: Option<&InferenceToml>) -> MemoryConfig {
+    manifest.map_or_else(MemoryConfig::default, |m| m.memory)
 }
 
 /// Compiles the entry point of a discovered project (project mode).

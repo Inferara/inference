@@ -1486,7 +1486,7 @@ mod budget_matches_emitted_stack {
     fn default_stack_budget_equals_default_emitted_stack_size() {
         assert_eq!(
             inference_analysis::AnalysisOptions::default().stack_budget_bytes,
-            inference_wasm_codegen::MemoryLayout::default().stack_size,
+            inference_wasm_codegen::MemoryLayout::default().stack_size(),
             "A036's default budget must be the stack region a default build emits"
         );
     }

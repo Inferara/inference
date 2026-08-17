@@ -365,14 +365,15 @@ fn abi_version_flag_prints_and_exits() {
 }
 
 /// Pins the ABI version string to the literal value introduced for the
-/// `--wasm-features` flag. The `abi_version_flag_prints_and_exits` test above
-/// checks the binary against the shared constant; this one additionally asserts
-/// the concrete `1.2` so an accidental constant change is caught here too.
+/// `--memory-pages` / `--stack-size` flags. The `abi_version_flag_prints_and_exits`
+/// test above checks the binary against the shared constant; this one
+/// additionally asserts the concrete `1.3` so an accidental constant change is
+/// caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.2" or "1.20" — which would satisfy a substring match — cannot pass.
+/// "11.3" or "1.30" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_two() {
+fn abi_version_is_one_dot_three() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -380,8 +381,8 @@ fn abi_version_is_one_dot_two() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.2",
-        "ABI version must be exactly 1.2, not merely contain it"
+        "1.3",
+        "ABI version must be exactly 1.3, not merely contain it"
     );
 }
 
@@ -476,6 +477,234 @@ fn unknown_wasm_feature_is_rejected_before_any_output() {
     assert!(
         !temp.child("out").child("trivial.wasm").path().exists(),
         "a rejected feature request must leave no artifact"
+    );
+}
+
+// Memory layout flags ---
+
+/// A program that allocates an array frame, so both places the layout is read
+/// are emitted: the memory section exists only for a module that needs memory,
+/// and `__stack_pointer` only accompanies it.
+const FRAME_ALLOCATING_SOURCE: &str = "\
+pub fn read_first() -> i32 {
+    let arr: [i32; 4] = [1, 2, 3, 4];
+    return arr[0];
+}
+";
+
+/// Renders a module as WAT, for assertions about a section's shape rather than
+/// its bytes.
+fn wat_of(wasm: &[u8]) -> String {
+    wasmprinter::print_bytes(wasm).expect("layout fixtures are printable WebAssembly 1.0")
+}
+
+/// A layout requested on the command line must survive the whole pipeline and
+/// reach the emitted module, in both of the numbers it carries.
+///
+/// The library API is covered by `a_configured_layout_reaches_the_emitted_module`
+/// in the `inference-tests` crate. This is the flag half, and it is a separate
+/// question: everything between `argv` and `CodegenOptions` — the clap fields,
+/// the resolver, and the one assignment that puts the resolved layout on the
+/// options — is exercised only from here. A `layout:` field left hard-coded to
+/// the default would pass every library test.
+///
+/// The page count and the stack size are asserted together because they are read
+/// independently — the memory section takes one, the stack-pointer global takes
+/// the other — so pinning a single number would leave the other free to be
+/// ignored. A layout whose stack is half its memory is what separates them: under
+/// the default the two are numerically equal, and an emitter that confused one
+/// for the other would still look correct.
+///
+/// The default-layout half is the control: the same program compiled twice
+/// differs in exactly these two numbers, and differs in them only because the
+/// flags asked it to.
+#[test]
+fn a_layout_requested_on_the_command_line_reaches_the_emitted_module() {
+    let configured = wat_of(&compile_source_with(
+        &["--memory-pages", "2", "--stack-size", "32768"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        configured.contains("(memory (;0;) 2 2)"),
+        "the memory section must declare the requested 2 fixed pages:\n{configured}"
+    );
+    assert!(
+        configured.contains("(global (;0;) (mut i32) i32.const 32768)"),
+        "the stack pointer must start at the requested stack size:\n{configured}"
+    );
+
+    let default = wat_of(&compile_source_with(&[], FRAME_ALLOCATING_SOURCE));
+    assert!(
+        default.contains("(memory (;0;) 1 1)"),
+        "the same source with no flags must declare one page:\n{default}"
+    );
+    assert!(
+        default.contains("(global (;0;) (mut i32) i32.const 65536)"),
+        "the same source with no flags must start the stack pointer at one page:\n{default}"
+    );
+}
+
+/// Either flag alone reaches the module, with the other number left at its
+/// default. Partial specification is the common case, and a resolver that
+/// required both would be indistinguishable from one that ignored the missing
+/// key if only the both-flags case were tested.
+#[test]
+fn either_memory_flag_alone_reaches_the_emitted_module() {
+    let pages_only = wat_of(&compile_source_with(
+        &["--memory-pages", "3"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        pages_only.contains("(memory (;0;) 3 3)"),
+        "--memory-pages alone must size the memory:\n{pages_only}"
+    );
+    assert!(
+        pages_only.contains("(global (;0;) (mut i32) i32.const 65536)"),
+        "--memory-pages alone must leave the stack at its default:\n{pages_only}"
+    );
+
+    let stack_only = wat_of(&compile_source_with(
+        &["--stack-size", "16384"],
+        FRAME_ALLOCATING_SOURCE,
+    ));
+    assert!(
+        stack_only.contains("(memory (;0;) 1 1)"),
+        "--stack-size alone must leave the memory at its default:\n{stack_only}"
+    );
+    assert!(
+        stack_only.contains("(global (;0;) (mut i32) i32.const 16384)"),
+        "--stack-size alone must size the stack:\n{stack_only}"
+    );
+}
+
+/// An unusable layout fails the build before any phase runs, rather than being
+/// clamped or ignored — and the diagnostic names the flag spelling.
+#[test]
+fn an_unusable_layout_is_rejected_before_any_output() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--stack-size")
+        .arg("131072");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("`--stack-size`"))
+        .stderr(predicate::str::contains(
+            "does not fit in the linear memory",
+        ));
+
+    assert!(
+        !temp.child("out").child("trivial.wasm").path().exists(),
+        "a rejected layout must leave no artifact"
+    );
+}
+
+/// `n` zero elements, as an Inference array literal.
+fn zeros(n: usize) -> String {
+    let mut literal = String::from("[");
+    for i in 0..n {
+        if i > 0 {
+            literal.push_str(", ");
+        }
+        literal.push('0');
+    }
+    literal.push(']');
+    literal
+}
+
+/// A three-deep call chain of ~4 KB frames: roughly 12 KB cumulative, which fits
+/// the default 64 KB stack and does not fit an 8 KB one.
+///
+/// No single frame exceeds 8 KB, which is deliberate. Frame layout asserts on a
+/// single frame outgrowing the stack, and that assert is a panic; sizing every
+/// frame under the smaller stack keeps this test about A036's *cumulative* budget
+/// rather than about which of two failure modes fires first.
+fn stack_chain_source() -> String {
+    let elements = zeros(1024);
+    format!(
+        "\
+fn level_two() -> i32 {{
+    let arr: [i32; 1024] = {elements};
+    return arr[0];
+}}
+
+fn level_one() -> i32 {{
+    let arr: [i32; 1024] = {elements};
+    return arr[0] + level_two();
+}}
+
+pub fn main() -> i32 {{
+    let arr: [i32; 1024] = {elements};
+    return arr[0] + level_one();
+}}
+"
+    )
+}
+
+/// A036 measures call chains against the stack this build emits, not against a
+/// fixed default.
+///
+/// This is the test that says the analysis phase received the configured layout.
+/// Wiring only code generation would leave the compiler emitting an 8 KB stack
+/// while the rule cleared a 12 KB chain against 64 KB — it would accept, and ship,
+/// a program that overflows its own stack. The default-budget half is the control:
+/// the same source is fine, so the rejection is attributable to the flag.
+///
+/// The rejection is asserted as a *diagnostic*: the A036 message on stderr,
+/// naming the smaller budget. A bare `.failure()` would also be satisfied by a
+/// panic, which is the shape this failure takes if analysis and code generation
+/// ever disagree about the stack — so the absence of a panic is asserted too.
+#[test]
+fn a036_measures_against_the_requested_stack_size() {
+    let source = stack_chain_source();
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), &source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "the chain fits the default stack, so the default build must produce an artifact"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), &source).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--stack-size")
+        .arg("8192");
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("maximum stack depth"),
+        "the smaller stack must be reported by A036, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("8192-byte stack"),
+        "the diagnostic must name the requested budget, not the default, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "the smaller stack must produce a diagnostic, not a panic, got:\n{stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected build must leave no artifact"
     );
 }
 

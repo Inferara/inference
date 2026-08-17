@@ -94,16 +94,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::commands::build::{
-    enclosing_manifest, format_wasm_dep_arg, manifest_wasm_dependencies, manifest_wasm_features,
+    EnclosingSettings, enclosing_manifest, format_wasm_dep_arg, manifest_memory,
+    manifest_wasm_dependencies, manifest_wasm_features,
 };
 use crate::commands::project_build::{
-    forward_wasm_features, probe_compiler_compatibility, run_project_build,
+    forward_memory_layout, forward_wasm_features, probe_compiler_compatibility, run_project_build,
 };
 use crate::errors::InfsError;
 use crate::project::manifest::MANIFEST_FILE_NAME;
 use crate::project::{self, ProjectContext};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
-use inference_compiler_interface::WasmFeatureName;
 
 /// The entry point invoked in project mode and the default for single-file mode.
 const DEFAULT_ENTRY_POINT: &str = "main";
@@ -246,6 +246,7 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 
     let enclosing = enclosing_manifest(path)?;
     let features = manifest_wasm_features(enclosing.as_ref().map(|(_, manifest)| manifest))?;
+    let memory = manifest_memory(enclosing.as_ref().map(|(_, manifest)| manifest));
     let deps = manifest_wasm_dependencies(enclosing.as_ref())?;
     let manifest_path = enclosing
         .as_ref()
@@ -258,9 +259,12 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
         infc_source,
         path,
         &args.wasm_lib_dirs,
-        &deps,
-        &features,
-        manifest_path.as_deref(),
+        &EnclosingSettings {
+            deps: &deps,
+            features: &features,
+            memory: &memory,
+            manifest_path: manifest_path.as_deref(),
+        },
     )?;
 
     run_wasmtime(&wasm_path, &args.entry_point, &args.args)
@@ -410,10 +414,15 @@ fn compile_to_wasm(
     infc_source: ResolutionSource,
     source_path: &Path,
     wasm_lib_dirs: &[PathBuf],
-    deps: &[(String, PathBuf)],
-    features: &[WasmFeatureName],
-    manifest_path: Option<&Path>,
+    settings: &EnclosingSettings<'_>,
 ) -> Result<PathBuf> {
+    let EnclosingSettings {
+        deps,
+        features,
+        memory,
+        manifest_path,
+    } = *settings;
+
     let mut cmd = Command::new(infc_path);
     cmd.arg(source_path)
         .arg("--parse")
@@ -428,9 +437,10 @@ fn compile_to_wasm(
         cmd.arg("--wasm-dep").arg(format_wasm_dep_arg(name, path)?);
     }
 
-    if !features.is_empty() {
+    if !features.is_empty() || !memory.is_default() {
         let compat = probe_compiler_compatibility(infc_path, infc_source)?;
         forward_wasm_features(&mut cmd, compat, features, manifest_path)?;
+        forward_memory_layout(&mut cmd, compat, memory, manifest_path)?;
     }
 
     let status = cmd

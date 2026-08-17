@@ -1416,7 +1416,7 @@ impl Compiler {
                 module_path,
                 extern_names: &self.extern_name_to_idx,
             },
-            self.memory_layout.stack_size,
+            self.memory_layout.stack_size(),
         )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
@@ -6390,8 +6390,8 @@ impl Compiler {
             // A separate maximum, which is what makes a memory growable, is
             // issue #170 and is not part of the single size issue #210 asks for.
             memory_section.memory(MemoryType {
-                minimum: u64::from(self.memory_layout.pages),
-                maximum: Some(u64::from(self.memory_layout.pages)),
+                minimum: u64::from(self.memory_layout.pages()),
+                maximum: Some(u64::from(self.memory_layout.pages())),
                 memory64: false,
                 shared: false,
                 page_size_log2: None,
@@ -6662,10 +6662,10 @@ mod tests {
     #[test]
     fn a_configured_layout_sizes_the_memory_and_the_stack_pointer_separately() {
         let mut compiler = Compiler::new("test");
-        compiler.set_memory_layout(MemoryLayout {
-            pages: 2,
-            stack_size: 32_768,
-        });
+        compiler.set_memory_layout(
+            MemoryLayout::resolve(Some(2), Some(32_768), crate::MemoryLayoutSource::Flag)
+                .expect("a half-page stack in two pages is admissible"),
+        );
         compiler.enable_memory();
         let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         let wat =

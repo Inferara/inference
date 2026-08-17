@@ -48,7 +48,11 @@
 
 /// The linear memory shape, re-exported so [`CodegenOptions`] and every caller
 /// naming the field keep one path to it.
-pub use inference_compiler_interface::MemoryLayout;
+///
+/// [`MemoryLayout`]'s fields are private and [`MemoryLayout::resolve`] is the
+/// only way to name a non-default one, so the constructor's vocabulary comes
+/// along: a caller that can set the field must be able to build the value.
+pub use inference_compiler_interface::{MemoryLayout, MemoryLayoutError, MemoryLayoutSource};
 
 /// Compilation target for code generation.
 ///

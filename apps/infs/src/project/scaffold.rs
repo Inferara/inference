@@ -210,7 +210,10 @@ fn write_git_files(project_path: &Path) -> Result<()> {
 /// covered by a test. `target`/`optimize` stay commented because they are not
 /// yet consumed (writing them would imply they work). `[build.wasm-opt]` stays
 /// commented because it is opt-in and requires an external `wasm-opt` binary
-/// the project may not have installed. `[verification] output-dir` stays
+/// the project may not have installed. `[memory]` stays commented because its
+/// defaults live in code and an uncommented table would forward flags to `infc`
+/// on every build, gating a scaffolded project on a newer compiler ABI than it
+/// needs. `[verification] output-dir` stays
 /// commented because its default (`proofs/`) lives in code and is honored only
 /// in proof mode.
 fn manifest_content(project_name: &str) -> String {
@@ -248,6 +251,13 @@ mode = "compile"
 # enabled = true
 # level = "3"
 # auto-install = true
+
+# [memory]
+# Linear memory of the emitted module. Either key may be given alone; the other
+# keeps its default. `stack-size` also sets the budget A036 measures call-chain
+# frame usage against, so a smaller stack tightens that diagnostic.
+# pages = 1
+# stack-size = 65536
 
 # [verification]
 # Output directory for proof artifacts (honored only in proof mode).

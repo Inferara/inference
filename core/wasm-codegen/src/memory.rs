@@ -1004,7 +1004,7 @@ fn copy_memarg(offset: u32) -> MemArg {
 /// `i32.sub` uses modular arithmetic and never traps. If the subtraction wraps
 /// (SP goes "below 0"), the result is a large unsigned value: the frame is at
 /// most the configured stack size and SP is at least 0, so a wrapped frame
-/// pointer is at least `2^32 - stack_size`. `MemoryLayout::validate` requires
+/// pointer is at least `2^32 - stack_size`. `MemoryLayout::resolve` requires
 /// `memory_bytes + stack_size <= 2^32`, which is exactly the statement that
 /// `2^32 - stack_size` is at or past the end of memory. WebAssembly computes an
 /// effective address as `base + offset` without 32-bit wraparound, so the first
@@ -1642,21 +1642,24 @@ mod tests {
     #[test]
     fn stack_pointer_init_equals_stack_size() {
         let layout = crate::MemoryLayout::default();
-        assert_eq!(layout.stack_size, 65536);
-        assert_eq!(layout.stack_pointer_init(), layout.stack_size.cast_signed());
+        assert_eq!(layout.stack_size(), 65536);
+        assert_eq!(
+            layout.stack_pointer_init(),
+            layout.stack_size().cast_signed()
+        );
     }
 
     #[test]
     fn default_stack_fills_exactly_one_page() {
         let layout = crate::MemoryLayout::default();
-        assert_eq!(layout.pages, 1);
-        assert_eq!(layout.stack_size, PAGE_SIZE);
+        assert_eq!(layout.pages(), 1);
+        assert_eq!(layout.stack_size(), PAGE_SIZE);
     }
 
     #[test]
     fn stack_pointer_init_fits_in_i32() {
         assert!(
-            i32::try_from(crate::MemoryLayout::default().stack_size).is_ok(),
+            i32::try_from(crate::MemoryLayout::default().stack_size()).is_ok(),
             "the stack size must fit in i32 for the stack pointer initializer"
         );
     }

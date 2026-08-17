@@ -152,7 +152,7 @@ fn codegen_impl_with_options(
         let _analysis_result = inference_analysis::analyze_with_options(
             &typed_context,
             inference_analysis::AnalysisOptions {
-                stack_budget_bytes: options.layout.stack_size,
+                stack_budget_bytes: options.layout.stack_size(),
             },
         )
         .unwrap();

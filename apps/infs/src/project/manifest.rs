@@ -32,6 +32,10 @@
 //! level = "3"             # forwarded as -O<level>: "0".."4", "s", "z"
 //! auto-install = false    # download wasm-opt automatically if it is missing
 //!
+//! [memory]                # linear memory of the emitted module
+//! pages = 1               # 64 KiB pages; emitted as a fixed, non-growable size
+//! stack-size = 65536      # shadow stack bytes, at the bottom of that memory
+//!
 //! [verification]
 //! output-dir = "proofs/"  # honored only in proof mode
 //! ```
@@ -55,7 +59,9 @@
 //! See [`RESERVED_WORDS`] for the complete list.
 
 use anyhow::{Context, Result, bail};
-use inference_compiler_interface::{WasmFeatureName, WasmFeatureSource, resolve_wasm_features};
+use inference_compiler_interface::{
+    MemoryLayout, MemoryLayoutSource, WasmFeatureName, WasmFeatureSource, resolve_wasm_features,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -132,6 +138,15 @@ pub struct InferenceToml {
     /// Build configuration.
     #[serde(default, skip_serializing_if = "BuildConfig::is_default")]
     pub build: BuildConfig,
+
+    /// Linear memory configuration.
+    ///
+    /// A top-level table rather than a `[build]` key because it describes the
+    /// artifact's shape rather than how the build runs, and because it is read in
+    /// both compilation modes — a proof-mode `.v` describes frames laid out in
+    /// exactly this memory.
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_default")]
+    pub memory: MemoryConfig,
 
     /// Verification configuration for Rocq output.
     #[serde(default, skip_serializing_if = "VerificationConfig::is_default")]
@@ -459,6 +474,77 @@ impl WasmOptConfig {
     }
 }
 
+/// The `[memory]` table: the linear memory the emitted module declares and the
+/// share of it the shadow stack occupies.
+///
+/// Both keys are optional and an absent table is identical to a table with
+/// neither key — there is no state where declaring `[memory]` means something on
+/// its own, unlike `[build.wasm-opt]` whose presence is what enables the
+/// optimizer. That is why this is a plain field with a `Default` rather than an
+/// `Option`: "the user said nothing" and "the user said nothing in particular"
+/// must resolve to the same memory.
+///
+/// The keys are kept as raw `Option`s rather than eagerly resolved into a
+/// [`MemoryLayout`] because which keys were *set* is information the resolved
+/// layout no longer carries, and forwarding needs it: an `infs` that forwarded a
+/// resolved layout would send `--memory-pages 1 --stack-size 65536` for a project
+/// with no `[memory]` table at all, turning every build into a layout request and
+/// tripping the compiler-ABI gate for a project that asked for nothing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// Linear memory size in 64 KiB pages. Absent means one page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u32>,
+
+    /// Shadow stack size in bytes. Absent means 64 KiB.
+    #[serde(
+        rename = "stack-size",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stack_size: Option<u32>,
+}
+
+impl MemoryConfig {
+    /// Returns true when the project asked for no particular memory, which is
+    /// both the serialization skip condition and the "forward nothing" test.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.pages.is_none() && self.stack_size.is_none()
+    }
+
+    /// The declared keys resolved into the shared compiler vocabulary, with every
+    /// absent key filled from the default layout.
+    ///
+    /// The resolution is the same call [`Self::validate`] makes on load, so this
+    /// cannot disagree with what the loader accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the diagnostic rejecting the declared memory, naming the manifest
+    /// spelling of the keys. For a manifest that came from
+    /// [`InferenceToml::from_toml`] this cannot fail — validation already ran. The
+    /// fallible signature is for the other constructor: the fields are public, so
+    /// a test or tool that builds a `MemoryConfig` in memory can populate them
+    /// without ever passing through the loader, and this is where such a value is
+    /// checked.
+    pub fn resolved_layout(&self) -> Result<MemoryLayout> {
+        MemoryLayout::resolve(self.pages, self.stack_size, MemoryLayoutSource::Manifest)
+            .map_err(Into::into)
+    }
+
+    /// Validates the declared keys as the layout they complete to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the offending value when the two numbers do not
+    /// describe a memory a module can declare.
+    fn validate(&self) -> Result<()> {
+        self.resolved_layout().map(|_| ())
+    }
+}
+
 /// Verification configuration for Rocq output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -652,6 +738,7 @@ impl InferenceToml {
             dependencies: Dependencies::default(),
             wasm_dependencies: WasmDependencies::default(),
             build: BuildConfig::default(),
+            memory: MemoryConfig::default(),
             verification: VerificationConfig::default(),
         }
     }
@@ -722,21 +809,22 @@ impl InferenceToml {
 
     /// Parses a manifest from a TOML string.
     ///
-    /// Missing optional sections (`[dependencies]`, `[build]`,
+    /// Missing optional sections (`[dependencies]`, `[build]`, `[memory]`,
     /// `[verification]`) are filled in with their defaults; absent fields
     /// within present sections likewise default. Only `[package]` (with at
     /// least `name` and `version`) is required. A key no fixed-schema table
     /// knows is rejected during structural parsing. After that, the `[build]`
-    /// values are validated against their allowed sets.
+    /// and `[memory]` values are validated against their allowed sets.
     ///
     /// # Errors
     ///
     /// Returns an error if the input is not valid TOML, does not match the
     /// manifest schema (`[package]` is missing, or a table carries an unknown
-    /// key), or carries an invalid `[build]` value.
+    /// key), or carries an invalid `[build]` or `[memory]` value.
     pub fn from_toml(s: &str) -> Result<Self> {
         let manifest: Self = toml::from_str(s).context("Failed to parse Inference.toml")?;
         manifest.build.validate()?;
+        manifest.memory.validate()?;
         Ok(manifest)
     }
 
@@ -2100,6 +2188,172 @@ target = "wasm32"
             err.to_string().contains("surrounding whitespace"),
             "got: {err}"
         );
+    }
+
+    // [memory] table ---
+
+    /// Builds a manifest whose `[memory]` table carries `body`.
+    fn manifest_with_memory(body: &str) -> String {
+        format!(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n\
+             [memory]\n{body}"
+        )
+    }
+
+    #[test]
+    fn memory_absent_yields_the_default_layout() {
+        let manifest = InferenceToml::from_toml(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n",
+        )
+        .expect("parses");
+        assert!(manifest.memory.is_default());
+        assert_eq!(
+            manifest.memory.resolved_layout().unwrap(),
+            MemoryLayout::default()
+        );
+    }
+
+    /// An empty `[memory]` table is indistinguishable from no table at all, so
+    /// the whole table is skipped on serialize and nothing is forwarded.
+    #[test]
+    fn memory_table_with_no_keys_is_still_the_default() {
+        let manifest = InferenceToml::from_toml(&manifest_with_memory("")).expect("parses");
+        assert!(manifest.memory.is_default());
+        assert!(
+            !manifest.to_toml().unwrap().contains("[memory]"),
+            "an empty table must not round-trip into the file"
+        );
+    }
+
+    /// Each key is independently settable, and the unset one keeps its default.
+    /// A project that wants a larger memory has no reason to restate the stack
+    /// size, and would silently get a different stack if it restated it wrongly.
+    #[test]
+    fn each_memory_key_can_be_declared_alone() {
+        let pages_only =
+            InferenceToml::from_toml(&manifest_with_memory("pages = 4\n")).expect("parses");
+        assert_eq!(pages_only.memory.pages, Some(4));
+        assert_eq!(pages_only.memory.stack_size, None);
+        let layout = pages_only.memory.resolved_layout().unwrap();
+        assert_eq!(layout.pages(), 4);
+        assert_eq!(layout.stack_size(), MemoryLayout::default().stack_size());
+
+        let stack_only = InferenceToml::from_toml(&manifest_with_memory("stack-size = 32768\n"))
+            .expect("parses");
+        assert_eq!(stack_only.memory.pages, None);
+        assert_eq!(stack_only.memory.stack_size, Some(32_768));
+        let layout = stack_only.memory.resolved_layout().unwrap();
+        assert_eq!(layout.pages(), MemoryLayout::default().pages());
+        assert_eq!(layout.stack_size(), 32_768);
+    }
+
+    #[test]
+    fn both_memory_keys_parse_and_resolve() {
+        let manifest =
+            InferenceToml::from_toml(&manifest_with_memory("pages = 2\nstack-size = 32768\n"))
+                .expect("parses");
+        assert!(!manifest.memory.is_default());
+        let layout = manifest.memory.resolved_layout().unwrap();
+        assert_eq!(layout.pages(), 2);
+        assert_eq!(layout.stack_size(), 32_768);
+    }
+
+    /// The stack size is spelled with a hyphen, matching every other multi-word
+    /// manifest key. The underscore spelling is a typo, not an alias.
+    #[test]
+    fn stack_size_is_spelled_with_a_hyphen() {
+        let msg = rejection_of(&manifest_with_memory("stack_size = 32768\n"));
+        assert!(
+            msg.contains("unknown field") && msg.contains("stack_size"),
+            "the error must diagnose the underscore spelling, got: {msg}"
+        );
+        assert!(
+            msg.contains("stack-size"),
+            "the error must name the key the user meant, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_the_memory_table_is_rejected() {
+        let msg = rejection_of(&manifest_with_memory("page = 2\n"));
+        assert!(
+            msg.contains("unknown field") && msg.contains("page"),
+            "the error must diagnose an unknown field and name it, got: {msg}"
+        );
+    }
+
+    /// Validation runs on load, so a manifest that reached a caller has already
+    /// been checked — and the diagnostic names the manifest spelling rather than
+    /// the compiler flags.
+    #[test]
+    fn an_unusable_memory_is_rejected_on_load_naming_the_manifest_keys() {
+        let msg = rejection_of(&manifest_with_memory("pages = 0\n"));
+        assert!(msg.contains("`[memory] pages`"), "got: {msg}");
+        assert!(msg.contains("at least one 64 KiB page"), "got: {msg}");
+
+        let msg = rejection_of(&manifest_with_memory("stack-size = 1000\n"));
+        assert!(msg.contains("`[memory] stack-size`"), "got: {msg}");
+        assert!(
+            msg.contains("multiple of the 16-byte frame alignment"),
+            "got: {msg}"
+        );
+    }
+
+    /// A key legal on its own is still judged against the layout it completes to.
+    /// Without the fill-then-check order this manifest would load and emit a
+    /// stack twice the size of the memory holding it.
+    #[test]
+    fn a_declared_stack_is_checked_against_the_undeclared_page_count() {
+        let msg = rejection_of(&manifest_with_memory("stack-size = 131072\n"));
+        assert!(
+            msg.contains("does not fit in the linear memory"),
+            "got: {msg}"
+        );
+        assert!(
+            InferenceToml::from_toml(&manifest_with_memory("pages = 4\nstack-size = 131072\n"))
+                .is_ok(),
+            "the same stack loads once the page count makes room for it"
+        );
+    }
+
+    /// A declared table survives serialization and reparses to an equal manifest,
+    /// and its keys stay in `[memory]` rather than reparenting into the sub-table
+    /// that precedes them.
+    ///
+    /// `[build.wasm-opt]` is present deliberately: it is the one sub-table the
+    /// manifest emits, and a scalar key written after its header would belong to
+    /// `wasm-opt` on the next parse. `[memory]` is safe from that because it is a
+    /// table header of its own — an absolute path, not a continuation — but that
+    /// is a property of the emitted shape rather than of the field order, so it
+    /// is worth pinning rather than assuming.
+    #[test]
+    fn memory_round_trips_beneath_the_wasm_opt_sub_table() {
+        let mut manifest = InferenceToml::new("demo");
+        manifest.build.wasm_opt = Some(WasmOptConfig::default());
+        manifest.memory = MemoryConfig {
+            pages: Some(2),
+            stack_size: Some(32_768),
+        };
+
+        let serialized = manifest.to_toml().expect("serializes");
+        let wasm_opt_at = serialized
+            .find("[build.wasm-opt]")
+            .expect("the sub-table header must be emitted");
+        let memory_at = serialized
+            .find("[memory]")
+            .expect("the memory table must be emitted");
+        assert!(
+            wasm_opt_at < memory_at,
+            "this test is only meaningful with [memory] written after the sub-table:\n\
+             {serialized}"
+        );
+
+        let reparsed = InferenceToml::from_toml(&serialized).expect("round-trips");
+        assert_eq!(
+            reparsed.memory, manifest.memory,
+            "the memory keys must survive the round trip rather than reparenting:\n{serialized}"
+        );
+        assert_eq!(reparsed, manifest);
     }
 
     /// The rendered cause chain of a rejected manifest.
