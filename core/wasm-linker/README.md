@@ -144,7 +144,7 @@ behind a clear error rather than attempting an unsound merge.
 
 ### Tier A — Pure Functions
 
-No memory accesses, no globals, no data segments, no tables. Examples: `sum`,
+No memory accesses, no global or table access, no data segments. Examples: `sum`,
 `sub`, `abs`, any function that only reads its parameters and does arithmetic.
 
 Merge cost: copy the body, dedup the type, rewrite `call` targets. No address
@@ -161,8 +161,8 @@ relocation needed.
 ### Tier B — Memory Through Caller-Passed Pointers
 
 The closure loads or stores through addresses the caller supplies, but defines no
-static data of its own, no mutable globals, and no table or element entries.
-Examples: `sort(ptr, len)`, `memcpy(dst, src, n)`.
+static data of its own, reads or writes no global, and names no table or element
+entry. Examples: `sort(ptr, len)`, `memcpy(dst, src, n)`.
 
 Merge cost: same as Tier A. The function shares the single linear memory the main
 module owns; no address relocation is required because all addresses are
@@ -203,14 +203,15 @@ declared memory grows beyond what the program uses. Issue #420 tracks closing th
 gap (a numeric/interval domain plus declared pointee sizes for `external fn`
 parameters); #333 would supply part of the same channel.
 
-### Tier C — Own Static Data, Globals, or Tables
+### Tier C — Own Static Data, Global Access, or Table Use
 
-The closure carries its own baked-in data segments (lookup tables, string
-constants), defines or accesses module globals (per-module mutable state), or
-uses table and element entries for indirect calls. Merging these without
-relocation metadata would silently produce an incorrect module because the
-absolute addresses and per-module state would alias unpredictably with the main
-module.
+Any one of three signals puts a candidate here: the module carries its own
+baked-in data segments (lookup tables, string constants) or an element segment
+that initializes a table; or the closure reads or writes a module global
+(per-module mutable state); or the closure names the table space (indirect calls,
+`table.*`, `ref.func`). Merging these without relocation metadata would silently
+produce an incorrect module because the absolute addresses and per-module state
+would alias unpredictably with the main module.
 
 The linker rejects Tier-C inputs with `LinkError::RequiresRelocatableBuild` and
 a list of specific reasons. Build the external module with a
@@ -229,11 +230,75 @@ structure and the closure's `ClosureEffects`:
 | Signal | Tier-C reason |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | own static data segments |
-| `!module.globals.is_empty()` or closure uses `global.get` / `global.set` | defines or accesses module globals |
-| `!module.tables.is_empty()` or `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| closure uses `global.get` / `global.set` | reads or writes module globals |
+| `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
 
 If no Tier-C reasons are collected, the closure is Tier B when any body accesses
 memory (load/store/copy/fill/size/grow), and Tier A otherwise.
+
+#### Declaration versus use
+
+Globals and tables are gated on **use**; data segments on **declaration**. The
+asymmetry is deliberate.
+
+A global no closure body reads or writes, and a table with no element segment
+that no instruction names, are inert — nothing observes them, so dropping them
+from the merged output changes nothing. This matters because real toolchain
+output is full of exactly that boilerplate: lld puts a `__stack_pointer` mutable
+global into every `wasm32-unknown-unknown` artifact, and an empty
+`(table 1 1 funcref)` into every `std` one. Rejecting on the declaration would
+exclude every such artifact over state a leaf integer function never touches.
+
+The two declaration-gated signals rest on different arguments and should not be
+collapsed into one.
+
+An *active* **data segment** writes linear memory at instantiation whether or not
+any instruction names it, so an unreferenced one still changes what the merged
+program observes. That is a correctness argument. A *passive* segment would be
+inert, but the parser retains only `data_count` and discards each segment's kind,
+so the two cannot be distinguished here and both are rejected.
+
+An **element segment** is rejected as *conservatism*, not on the data-segment
+argument. Dropping one is in fact unobservable: the merged output declares no
+table for it to initialize, so nothing can read what it wrote. It stays rejected
+because an element segment marks a module built around indirect dispatch, and
+admitting one would silently discard a construct the author wrote. Relaxing it is
+a deliberate decision, not an oversight.
+
+Dropping an admitted external's globals and tables is sound because
+`ClosureEffects` is **closure-scoped**: it is accumulated over the bodies
+reachable from the root export, so a closure admitted with no global or table
+effect contains no operator naming either index space.
+
+That property is load-bearing for **globals** in particular. The rewrite pass
+remaps function and type indices only, and the merge re-emits the main module's
+global section, so a leaked `global.get 0` in a merged body would rebind to
+*main's* first global and — the types agreeing, as two `i32` globals do — still
+pass post-merge validation. Wrong value, no diagnostic. For **tables** the
+failure mode is benign: no table section is emitted at all, so a leaked table
+operator names a table the output does not have and validation rejects it as an
+unknown table. Fail-safe, which is why the global half is the one that has to
+hold.
+
+### What this does not buy
+
+Clearing the tier gate is necessary for linking stock toolchain output, not
+sufficient. A `wasm32-unknown-unknown` artifact also declares a multi-page linear
+memory, and reconciliation never relaxes the anchor module's declared bound — so
+against an Inference main, which emits a fixed one-page `(memory 1 1)`, such an
+artifact now passes tier classification and fails at memory reconciliation
+instead:
+
+```text
+error: cannot reconcile linear memory for `sum`: the reconciled minimum
+       (17 pages) exceeds the declared maximum (1 pages) of the memory it is
+       merged into; the kept memory bound is not relaxed
+```
+
+Configurable linear memory is a separate change. Note also that an external's
+declared memory is folded in whenever its module has a memory section, whether or
+not the merged closure addresses memory — so a pure leaf function still
+contributes its module's memory to the output.
 
 ## Entry Point
 

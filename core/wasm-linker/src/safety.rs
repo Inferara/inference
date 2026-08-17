@@ -133,8 +133,12 @@ pub(crate) struct OpEffect {
     pub uses_globals: bool,
     /// The operator refers to a data segment (`memory.init` / `data.drop`).
     pub uses_data_segments: bool,
-    /// The operator touches the table / element space (`call_indirect`,
-    /// `table.*`, `ref.func`, `elem.drop`, `memory.init` element forms).
+    /// The operator touches the table space: `call_indirect`, the non-segment
+    /// `table.*` accessors, or `ref.func`. The segment-indexed forms
+    /// (`table.init`/`elem.drop`/`table.copy`) do not appear here — they are
+    /// rejected outright as an unmodeled family, so no closure carrying one is
+    /// ever classified. `memory.init` names a *data* segment, not an element
+    /// one, and sets `uses_memory`/`uses_data_segments` instead.
     pub uses_tables: bool,
 }
 
@@ -656,6 +660,210 @@ mod tests {
         .iter()
         .any(|op| check_operator(op).is_ok_and(|e| e.uses_globals));
         assert!(any_global, "global.get must mark global use");
+    }
+
+    /// Every operator in the instruction set that names a global or table index.
+    /// The body below is deliberately ill-typed — `wat` assembles without type
+    /// checking — so that each one appears exactly once regardless of its
+    /// operands.
+    fn global_and_table_naming_ops() -> Vec<Operator<'static>> {
+        ops(r#"
+            (module
+              (type (;0;) (func))
+              (memory (;0;) 1)
+              (table (;0;) 2 2 funcref)
+              (elem (;0;) (i32.const 0) func 0)
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0)
+                global.get 0
+                global.set 0
+                call_indirect (type 0)
+                table.get 0
+                table.set 0
+                table.size 0
+                table.grow 0
+                table.fill 0
+                ref.func 0
+                table.init 0 0
+                elem.drop 0
+                table.copy 0 0)
+              (export "f" (func 0)))
+            "#)
+    }
+
+    /// Operators that name neither index space, as the negative half of the
+    /// invariant below. Covers the two data-segment forms specifically, because
+    /// `memory.init` is easy to misfile as touching the element space.
+    fn non_global_non_table_ops() -> Vec<Operator<'static>> {
+        ops(r#"
+            (module
+              (memory (;0;) 1)
+              (data (;0;) "\2a")
+              (func (;0;) (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.add
+                local.tee 0
+                i32.load
+                i32.const 0
+                i32.store
+                memory.size
+                memory.grow
+                memory.copy
+                memory.fill
+                memory.init 0
+                data.drop 0
+                i32.const 0)
+              (export "f" (func 0)))
+            "#)
+    }
+
+    /// Asserts the sole operator of interest in `wat`'s first body reports
+    /// `uses_tables`. Used by the four table-accessor tests below.
+    fn assert_marks_table_use(wat: &str, instruction: &str) {
+        let marked = ops(wat)
+            .iter()
+            .any(|op| check_operator(op).is_ok_and(|e| e.uses_tables));
+        assert!(marked, "{instruction} must mark table use");
+    }
+
+    // The four non-segment table accessors below carry `uses_tables` as their
+    // only remaining guard. Tier classification used to reject any module with a
+    // table section at all, so a module reaching one of these was rejected on its
+    // declaration whatever the flag said; now that the gate turns on use, a
+    // missing flag here would admit a closure that names the table space. They
+    // are unreachable through `link` today (all four need reference types, which
+    // `SUPPORTED_WASM_FEATURES` excludes) and a leak would fail post-merge
+    // validation rather than miscompile — but they are defense in depth whose
+    // backstop is gone, so each is pinned by name. `table.size` is additionally
+    // covered end-to-end in `closure::tests`.
+
+    #[test]
+    fn table_get_marks_table_use() {
+        assert_marks_table_use(
+            r#"(module (table 1 funcref) (func (param i32)
+                 local.get 0 table.get 0 drop) (export "f" (func 0)))"#,
+            "table.get",
+        );
+    }
+
+    #[test]
+    fn table_set_marks_table_use() {
+        assert_marks_table_use(
+            r#"(module (table 1 funcref) (func (param i32)
+                 local.get 0 ref.null func table.set 0) (export "f" (func 0)))"#,
+            "table.set",
+        );
+    }
+
+    #[test]
+    fn table_grow_marks_table_use() {
+        assert_marks_table_use(
+            r#"(module (table 1 funcref) (func (param i32) (result i32)
+                 ref.null func local.get 0 table.grow 0) (export "f" (func 0)))"#,
+            "table.grow",
+        );
+    }
+
+    #[test]
+    fn table_fill_marks_table_use() {
+        assert_marks_table_use(
+            r#"(module (table 1 funcref) (func (param i32 i32)
+                 local.get 0 ref.null func local.get 1 table.fill 0) (export "f" (func 0)))"#,
+            "table.fill",
+        );
+    }
+
+    /// Which index space an operator names, decided from the operator itself.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Names {
+        Global,
+        Table,
+        Neither,
+    }
+
+    /// Classifies `op` by the index space its *encoding* names, independently of
+    /// the effect flags [`check_operator`] assigns. This is the left-hand side of
+    /// the biconditional below, so it must be derived from the instruction set
+    /// rather than from [`OpEffect`].
+    fn names(op: &Operator) -> Names {
+        match op {
+            Operator::GlobalGet { .. } | Operator::GlobalSet { .. } => Names::Global,
+            Operator::CallIndirect { .. }
+            | Operator::ReturnCallIndirect { .. }
+            | Operator::TableGet { .. }
+            | Operator::TableSet { .. }
+            | Operator::TableGrow { .. }
+            | Operator::TableSize { .. }
+            | Operator::TableFill { .. }
+            | Operator::TableInit { .. }
+            | Operator::TableCopy { .. }
+            | Operator::ElemDrop { .. }
+            | Operator::RefFunc { .. } => Names::Table,
+            _ => Names::Neither,
+        }
+    }
+
+    #[test]
+    fn naming_a_global_or_table_is_equivalent_to_the_effect_flag() {
+        // The invariant the linker's tier gate depends on, stated as a
+        // biconditional over the operator set rather than as a consequence
+        // observed on a few closures.
+        //
+        // `tier::tier_c_reasons` admits a closure whose module *declares* a global
+        // or table as long as `uses_globals`/`uses_tables` are clear, and the
+        // merge then drops those declarations. That is sound only if no admitted
+        // operator can name a global or table without setting the matching flag.
+        //
+        // Both directions are asserted. Forward: every operator that names an
+        // index space is either rejected outright (so it can never reach a
+        // classified closure) or reports the corresponding flag — `ref.func`
+        // quietly losing `uses_tables` fails here. Backward: no operator that
+        // names neither space may report either flag, which is what keeps a
+        // spurious flag from being mistaken for coverage.
+        let corpus: Vec<Operator<'static>> = global_and_table_naming_ops()
+            .into_iter()
+            .chain(non_global_non_table_ops())
+            .collect();
+
+        for op in &corpus {
+            let effect = match check_operator(op) {
+                Ok(effect) => effect,
+                Err(_) => continue,
+            };
+            match names(op) {
+                Names::Global => assert!(
+                    effect.uses_globals,
+                    "{op:?} names a global but leaves uses_globals clear"
+                ),
+                Names::Table => assert!(
+                    effect.uses_tables,
+                    "{op:?} names a table but leaves uses_tables clear"
+                ),
+                Names::Neither => assert!(
+                    !effect.uses_globals && !effect.uses_tables,
+                    "{op:?} names neither index space, but reports {effect:?}"
+                ),
+            }
+        }
+
+        // Guards the corpus itself: if `wat` silently dropped an instruction the
+        // fixture lists, the biconditional above would still pass while testing
+        // less. Every naming operator the classifier knows must actually appear.
+        let naming: Vec<String> = corpus
+            .iter()
+            .filter(|op| names(op) != Names::Neither)
+            .map(|op| format!("{op:?}"))
+            .collect();
+        assert_eq!(
+            naming.len(),
+            12,
+            "the corpus must carry all 12 global/table-naming instructions, got {naming:?}"
+        );
+        assert!(
+            corpus.iter().any(|op| names(op) == Names::Neither),
+            "the corpus must also carry non-naming operators for the backward direction"
+        );
     }
 
     #[test]

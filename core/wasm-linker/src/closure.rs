@@ -30,8 +30,12 @@ pub(crate) struct ClosureEffects {
     pub uses_globals: bool,
     /// Any body refers to a data segment (`memory.init` / `data.drop`).
     pub uses_data_segments: bool,
-    /// Any body performs an indirect call or otherwise touches the table /
-    /// element space (`call_indirect`, `table.*`, `ref.func`, `elem.drop`).
+    /// Any body performs an indirect call or otherwise names the table space
+    /// (`call_indirect`, the non-segment `table.*` accessors, `ref.func`). The
+    /// segment-indexed forms (`table.init`/`elem.drop`/`table.copy`) are
+    /// rejected by the allow-list before they could set this, so a module's
+    /// element segments are counted separately (`ParsedModule::element_count`)
+    /// rather than surfacing here.
     pub uses_tables: bool,
 }
 

@@ -151,9 +151,9 @@ classifies each closure:
 
 | Tier | What the closure may touch | Merged? | Admission condition |
 |------|---------------------------|---------|---------------------|
-| A | No memory, globals, data segments, or tables — pure arithmetic | Yes | None beyond the operator allow-list |
-| B | Linear memory **only through caller-supplied pointers**; no own globals, data segments, or tables | Yes | Provenance proof: every memory address is parameter-derived (see below) |
-| C | Own static data segments, defined globals, or table/element entries | No | Rejected with `LinkError::RequiresRelocatableBuild` |
+| A | No memory, no global or table access, no data segments — pure arithmetic | Yes | None beyond the operator allow-list |
+| B | Linear memory **only through caller-supplied pointers**; no own data segments, no global or table access | Yes | Provenance proof: every memory address is parameter-derived (see below) |
+| C | Own static data segments, global access, or table/element use | No | Rejected with `LinkError::RequiresRelocatableBuild` |
 
 ### What Each Tier May Touch
 
@@ -163,11 +163,38 @@ The classification logic inspects the parsed module structure and the closure's
 | Signal | Forces Tier C |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | owns static data segments |
-| `!module.globals.is_empty()` or closure uses `global.get` / `global.set` | defines or accesses module globals |
-| `!module.tables.is_empty()` or `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| closure uses `global.get` / `global.set` | reads or writes module globals |
+| `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
 
 If no Tier-C signals are present, the closure is Tier B when any body accesses
 linear memory (load, store, copy, fill, size, or grow), and Tier A otherwise.
+
+Globals and table *use* are gated on **use**; data and element segments on
+**declaration**. A global no body reads or writes, and a table with no element
+segment that no instruction names, are inert — and they are exactly what real
+toolchains emit unconditionally (lld puts a `__stack_pointer` global into every
+`wasm32-unknown-unknown` artifact, and an empty `(table 1 1 funcref)` into every
+`std` one), so rejecting on their declaration would exclude every such artifact.
+
+The two declaration-gated signals rest on different arguments. An *active* data
+segment writes memory at instantiation whether or not any instruction names it,
+so an unreferenced one still changes program behavior — a correctness argument.
+An *element* segment is rejected as conservatism: dropping one is unobservable,
+since the merged output declares no table for it to initialize, but it marks a
+module built around indirect dispatch and admitting it would silently discard a
+construct the author wrote.
+
+Dropping an admitted external's globals and tables is sound because
+`ClosureEffects` is closure-scoped: a closure admitted with no global or table
+effect contains no operator naming either index space. That matters most for
+globals — the merge re-emits main's global section, so a leaked `global.get 0`
+would rebind to main's first global and, the types agreeing, still pass
+post-merge validation. A leaked *table* operator is fail-safe by comparison: no
+table section is emitted, so validation rejects it as an unknown table.
+
+Clearing the tier gate is not the same as linking. A stock artifact also declares
+a multi-page memory that the merge will not reconcile against an Inference main's
+fixed one-page `(memory 1 1)`; see the memory reconciliation rules below.
 
 A Tier-A function carries no shared-memory surface at all: it reads its parameters,
 does arithmetic, and returns. Merge cost is a body copy, a type dedup, and an

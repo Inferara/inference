@@ -150,9 +150,12 @@ pub enum LinkError {
     #[error("merged function transitively imports `{module}::{field}`, which has no body to merge")]
     TransitiveHostImport { module: String, field: String },
 
-    /// The external function requires relocation support (Tier C): it carries
-    /// its own static data, globals, or table/element entries, so merging it
-    /// into the shared memory would need relocation metadata.
+    /// The external function requires relocation support (Tier C): its module
+    /// carries its own data or element segments, or its closure reads or writes
+    /// a global or names the table space, so merging it into the shared memory
+    /// would need relocation metadata. A global or table the module merely
+    /// *declares* and no body touches is not a reason — see
+    /// [`crate::tier`].
     #[error(
         "external function `{field}` requires a relocatable build: {}",
         .reasons.join("; ")
