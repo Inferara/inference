@@ -112,8 +112,17 @@ use crate::LinkError;
 /// The feasibility tier of a merge candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tier {
-    /// Pure function: touches no memory, no global, no table, and its module
+    /// Pure function: touches no linear memory, names no table, and its module
     /// declares no data or element segment.
+    ///
+    /// Globals are classified on use, not declaration: a closure that reads or
+    /// writes one is Tier A — or Tier B if it also touches memory — and the
+    /// external's globals are merged into the output above main's with its
+    /// accessors remapped, an admission kept sound by address provenance tagging
+    /// a global-derived value `NotParam`, so a closure that computes a memory
+    /// address through a global is still rejected. The module documentation above
+    /// gives the argument in full, including why merging globals is mutually
+    /// exclusive with a future data-segment placement.
     A,
     /// Memory through caller-passed pointers only.
     B,

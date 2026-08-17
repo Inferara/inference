@@ -17,14 +17,26 @@
 //! closure as Tier C ([`LinkError::RequiresRelocatableBuild`]). Fail closed.
 //!
 //! For a bulk-memory op (`memory.fill`/`memory.copy`/`memory.init`) the **size /
-//! extent** operand carries the *same* caller-derivation requirement as an
-//! address. Such an op touches the contiguous region `[address, address + size)`,
-//! so proving only the start caller-relative is not enough: a constant or global
-//! extent would let the op clobber or read an unbounded span above a caller
-//! pointer (`memory.fill(base, v, 0x8000)` scorches host memory the caller never
+//! extent** operand carries a caller-derivation requirement of its own. Such an
+//! op touches the contiguous region `[address, address + size)`, so proving only
+//! the start caller-relative is not enough: a constant or global extent would let
+//! the op clobber or read an unbounded span above a caller pointer
+//! (`memory.fill(base, v, 0x8000)` scorches host memory the caller never
 //! exposed) — the same unbounded-clobber the rejected counted-loop form achieves,
-//! one instruction at a time. Modeling the extent with the address rule keeps the
+//! one instruction at a time. Requiring the extent to be caller-derived keeps the
 //! realistic caller-owns-`(ptr, len)` pattern linkable while closing that escape.
+//!
+//! The extent requirement is the address requirement **minus one clause**, not a
+//! copy of it: both demand a proven odd coefficient and a support inside the
+//! trusted parameter set, and only the address additionally demands that the odd
+//! coefficient rest on a *single* parameter where an internal call site may have
+//! correlated two. In a function some internal `call` targets,
+//! `memory.fill(dst, v, n + m)` therefore still links while
+//! `memory.fill(n + m, v, len)` does not — the same two-odd form, admitted as an
+//! extent and refused as an address. "Address masks and extent masks are checked
+//! differently" below argues why the weaker rule is the right one; reading the
+//! two as one requirement makes that section look like an unexplained exception
+//! rather than the deliberate asymmetry it is.
 //!
 //! ## What this proves, and what it does not
 //!
@@ -131,9 +143,19 @@
 //! both coefficients at 1; `p + p` makes the coefficient 2, and repeated
 //! doubling drives it to `2^32 == 0`. So `add` unions two `Param` operands only
 //! when their odd supports are **disjoint** — then no coefficient can pair up and
-//! turn even — and fails closed to `NotParam` when they might overlap. Every
-//! operator that can cancel two equal `Param` inputs outright (`sub`, `xor`,
-//! `and`, `div`, …) still yields `NotParam` unconditionally.
+//! turn even — and fails closed to `NotParam` when they might overlap. The
+//! bitwise, division, remainder, right-shift, rotate and comparison operators
+//! (`xor`, `and`, `div`, …) need no such condition and yield `NotParam` for every
+//! operand pair: each can cancel the caller contribution whatever the other
+//! operand is.
+//!
+//! `sub` belongs to neither group. Subtracting a proven `Const` leaves the affine
+//! form intact, so `Param - Const` and `Scaled - Const` keep their tags and
+//! `Const - Const` folds. What falls through to `NotParam` is `Param - Param` —
+//! unconditionally, with no disjointness test to rescue it, since `b - b` is an
+//! exact cancellation rather than a parity accident — and `Const - Param`, which
+//! negates the caller contribution into a `C - p` that a later `add` must not
+//! re-promote. `sub_prov` enumerates the arms and argues each.
 //!
 //! ### Correlated parameters: why one odd coefficient is not always enough
 //!

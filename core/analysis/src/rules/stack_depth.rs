@@ -24,7 +24,7 @@
 //! `compute_struct_field_layout` field-by-field, including each field's natural
 //! alignment), so a type's intrinsic size matches codegen precisely — even for
 //! an array of structs, whose size is `exact_size(elem) * length` with no
-//! per-element inflation. The only over-approximation is at *slot placement*:
+//! per-element inflation. One over-approximation is at *slot placement*:
 //! each slot sits at an unknown frame offset that codegen aligns to the type's
 //! natural alignment (at most 8 bytes — `i64`/`u64`), so up to 7 leading padding
 //! bytes can appear before it. The estimator therefore adds [`MAX_SLOT_PADDING`]
@@ -34,6 +34,22 @@
 //! `FrameLayout.total_size` for every function. `if`/`else` branches take the
 //! per-branch maximum (mirroring codegen, which reuses the offset across the two
 //! arms) rather than the sum.
+//!
+//! Two further sources of slack sit outside the size computation, and each is
+//! argued at the function that introduces it. Every `self` receiver is charged a
+//! full slot, where codegen copies the receiver into the frame only when the body
+//! assigns through it or forwards it to an `external fn` — so a method that only
+//! reads `self` is charged for a frame codegen does not build. The
+//! self-referential scratch charge is a flat maximum over the whole body, both
+//! arms of an `if` included; that mirrors codegen's own scan rather than
+//! exceeding it, but neither side is branch-aware, so a function whose two arms
+//! stage different literals is charged for the larger although no run needs both.
+//!
+//! None of the three can push the estimate *below* codegen's frame, which is the
+//! only direction soundness constrains. The invariant is one-sided —
+//! estimate ≥ real — so tightening any of them is a precision improvement rather
+//! than a correctness fix, and the cost of leaving them loose is a rejected
+//! program, never an overflowed stack.
 //!
 //! # Limitation
 //!

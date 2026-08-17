@@ -25,16 +25,35 @@
 //!
 //! ## Feasibility tiers
 //!
-//! - **Tier A** — pure functions (no memory, globals, data, tables). Merged.
+//! - **Tier A** — the closure touches no linear memory and names no table.
+//!   Merged.
 //! - **Tier B** — memory through caller-passed pointers only. Merged onto the
 //!   single shared linear memory; no address relocation needed.
 //! - **Tier C** — the module declares a data or element segment, or the closure
-//!   reads or writes a global or names the table space. Merging would require
-//!   relocation metadata the static merge does not consume, so it is
-//!   **rejected** with [`LinkError::RequiresRelocatableBuild`] rather than
-//!   producing an unsound module. A global or table the module merely
-//!   *declares* and no body touches is inert and is not a reason; see
-//!   [`tier`].
+//!   names the table space. Merging would require relocation metadata the static
+//!   merge does not consume, so it is **rejected** with
+//!   [`LinkError::RequiresRelocatableBuild`] rather than producing an unsound
+//!   module. A table the module merely *declares* and no body touches is inert
+//!   and is not a reason; see [`tier`].
+//!
+//! Globals are classified on use, not declaration: a closure that reads or
+//! writes one is Tier A — or Tier B if it also touches memory — and the
+//! external's globals are merged into the output above main's with its accessors
+//! remapped, an admission kept sound by address provenance tagging a
+//! global-derived value `NotParam`, so a closure that computes a memory address
+//! through a global is still rejected.
+//!
+//! That is worth reading before touching either half of it, because two
+//! safeguards in this crate exist *for* the global-touching closure and read as
+//! redundant to anyone who believes it was excluded here. The provenance rule
+//! above is one. The other is that placing an external's data segments at their
+//! original addresses stays mutually exclusive with merging globals: an
+//! external's shadow-stack region is claimed by nothing this crate parses except
+//! the initializer of a mutable global, so a disjointness proof over declared
+//! segments and memory limits cannot see it, and a merged global carries that
+//! invisible claim into the output. Both arguments are written out in full in the
+//! `tier` module documentation. Relaxing either is a soundness change, not a
+//! cleanup.
 //!
 //! ## Entry point
 //!
@@ -156,11 +175,18 @@ pub enum LinkError {
     TransitiveHostImport { module: String, field: String },
 
     /// The external function requires relocation support (Tier C): its module
-    /// carries its own data or element segments, or its closure reads or writes
-    /// a global or names the table space, so merging it into the shared memory
-    /// would need relocation metadata. A global or table the module merely
-    /// *declares* and no body touches is not a reason — see
-    /// [`crate::tier`].
+    /// declares a data or element segment, or its closure names the table space,
+    /// so merging it into the shared memory would need relocation metadata. A
+    /// table the module merely *declares* and no body touches is not a reason.
+    ///
+    /// Globals are classified on use, not declaration: a closure that reads or
+    /// writes one is Tier A — or Tier B if it also touches memory — and the
+    /// external's globals are merged into the output above main's with its
+    /// accessors remapped, an admission kept sound by address provenance tagging
+    /// a global-derived value `NotParam`, so a closure that computes a memory
+    /// address through a global is still rejected. Such a rejection arrives
+    /// through the provenance clause of [`crate::tier`] and never names a global
+    /// in `reasons`.
     #[error(
         "external function `{field}` requires a relocatable build: {}",
         .reasons.join("; ")
@@ -203,6 +229,13 @@ pub enum LinkError {
 /// A warning is never a defect the linker found in the merged program. It states
 /// where the merge's own proofs stop, at a point where the emitted artifact
 /// makes that limit reachable.
+///
+/// Every variant so far concerns a **merged external**, and a wrapper in the
+/// `inference` crate leans on that: its no-externals fast path returns an empty
+/// warning list without calling the linker at all, which stays equivalent only
+/// while no variant can arise from the main module or the reconciled memory
+/// alone. A variant that can must be raised on that path too, or it is silently
+/// dropped for every program that links no external.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkWarning {
     /// One or more externals were admitted at Tier B — their memory accesses

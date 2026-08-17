@@ -233,8 +233,12 @@
 //!
 //! ## Limitations
 //!
-//! - **Analyze phase**: The semantic analysis phase currently covers loop
-//!   control flow validation. Additional analyses are planned for future releases.
+//! - **Analyze phase**: [`analyze`] runs the whole registered rule set, but
+//!   against the *default* memory layout. A caller that emits a different one
+//!   must use [`analyze_with_options`] and pass the matching stack budget, or
+//!   A036 measures cumulative call-chain frame usage against a shadow stack the
+//!   artifact does not have — accepting a program that overflows a smaller stack,
+//!   or rejecting one a larger stack accommodates.
 //!
 //! ## CLI Tools
 //!
@@ -620,19 +624,18 @@ pub fn type_check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
 
 /// Performs semantic analysis on the typed AST.
 ///
-/// This function runs control flow analysis passes on the typed AST,
-/// validating invariants that go beyond type correctness. Currently includes:
+/// Runs the whole registered rule set on the typed AST, validating invariants
+/// that go beyond type correctness: control flow, unreachable code, variable
+/// initialization, recursion and cumulative stack depth, lint warnings, and the
+/// codegen restrictions that describe constructs the type system admits but the
+/// code generator cannot lower. `inference_analysis`'s module documentation
+/// carries the catalogue rule by rule and is the list to consult; a summary
+/// repeated here would go stale as rules are added.
 ///
-/// - **Loop control flow validation**: Ensures `break` appears only inside loops
-///   and not inside non-deterministic blocks, `return` does not appear inside
-///   loops or non-deterministic blocks, and infinite loops contain a `break`
-///   statement.
-///
-/// Future analyses will include:
-/// - Dead code detection
-/// - Unused variable warnings
-/// - Unreachable code analysis
-/// - Initialization checking
+/// This is the **default-layout** entry point: it measures A036 against the
+/// stack budget a default build emits. A caller that configures the memory
+/// layout must call [`analyze_with_options`] with the matching budget instead,
+/// or that rule polices a shadow stack the artifact does not have.
 ///
 /// # Examples
 ///
@@ -648,12 +651,13 @@ pub fn type_check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
 ///
 /// # Errors
 ///
-/// Returns `AnalysisErrors` if any control flow violations are found, such as:
-/// - `break` statement outside a loop body
-/// - `break` statement inside a non-deterministic block
-/// - `return` statement inside a loop body
-/// - `return` statement inside a non-deterministic block
-/// - Infinite loop without a `break` statement
+/// Returns `AnalysisErrors` when any rule produces an `Error`-severity finding.
+/// A control-flow violation is one such finding — a `break` outside a loop, a
+/// `return` inside one, an infinite loop with no `break` — but so are an
+/// unreachable-statement, uninitialized-variable, recursion, stack-depth, or
+/// unsupported-codegen-construct finding. Every rule runs before the errors are
+/// returned, so one call reports everything that is wrong rather than the first
+/// thing.
 ///
 /// # Parameters
 ///
@@ -740,9 +744,18 @@ pub fn codegen(
 ///
 /// Returns an error if any module fails to parse, an import is left unsatisfied
 /// by the supplied externals, or a merged function falls into the unsupported
-/// Tier C — its module declares a data or element segment, or its closure reads
-/// or writes a global or names the table space. The underlying error downcasts
-/// to [`LinkError`].
+/// Tier C — its module declares a data or element segment, or its closure names
+/// the table space. The underlying error downcasts to [`LinkError`].
+///
+/// Globals are classified on use, not declaration: a closure that reads or
+/// writes one is Tier A — or Tier B if it also touches memory — and the
+/// external's globals are merged into the output above main's with its accessors
+/// remapped, an admission kept sound by address provenance tagging a
+/// global-derived value `NotParam`, so a closure that computes a memory address
+/// through a global is still rejected. That admission is what makes a real
+/// toolchain artifact linkable when its closure genuinely reads or writes a
+/// module global — a counter, a mode flag, a seed — and not only when its leaf
+/// functions leave lld's `__stack_pointer` untouched.
 pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
     link_with_warnings(main_wasm, externals).map(|out| out.wasm)
 }
@@ -755,6 +768,19 @@ pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec
 /// dropping them. Any caller that can put text in front of a user should prefer
 /// this form: a warning describes the artifact that was just written, and
 /// [`link`] discards it.
+///
+/// This wrapper is **not** interchangeable with
+/// [`inference_wasm_linker::link_with_warnings`] on an empty `externals`. The
+/// no-op path below returns the input bytes without running the linker at all,
+/// so main-side shapes the linker rejects are accepted here: a data or element
+/// segment, a start function, a table, a second memory, a float, `v128`, or
+/// reference-typed value in one of main's own signatures, and a duplicated or
+/// malformed `inference.spec_funcs` or `inference.hspecs` custom section. Two
+/// entry points reaching different verdicts on identical bytes is recorded
+/// because a later caller will otherwise assume it cannot happen. It is benign
+/// on the live pipeline — main is always this compiler's own codegen output —
+/// and the documented error contract is honoured as written, since every input
+/// carrying an import to satisfy goes through the linker.
 ///
 /// # Errors
 ///
@@ -772,9 +798,14 @@ pub fn link_with_warnings(
     // *module's own imports* rather than merely on `externals.is_empty()` keeps it
     // fail-closed and honours the documented error contract above.
     //
-    // Its empty warning list is a fact about the path, not an omission: a warning
-    // is raised about a merged external, and this path returns before any external
-    // is examined — indeed only when there is none to examine.
+    // Its empty warning list is a fact about the path, not an omission — but the
+    // fact rests on something nothing else records. Every `LinkWarning` variant
+    // there is today concerns a merged external, and this path returns before any
+    // external is examined, indeed only when there is none to examine. The type
+    // is documented far more broadly than that, as anything a successful link
+    // owes the user, so a variant about the reconciled memory or about main's own
+    // shape would be dropped here with nothing failing. Adding one means deciding
+    // whether it can arise with no externals, and moving this return if it can.
     if externals.is_empty() && module_is_import_free(main_wasm) {
         return Ok(LinkOutput {
             wasm: main_wasm.to_vec(),
