@@ -2337,3 +2337,155 @@ fn missing_source_file_exits_one() {
         .code(1)
         .stderr(predicate::str::contains("path not found"));
 }
+
+// Linker warnings on a build that merges an external.
+//
+// The merge admits an external at Tier B by proving every memory address it
+// forms derives from a parameter of the call; it cannot prove the address stays
+// inside the buffer that parameter points into. A single fixed page hid that gap
+// — a reach past the caller's buffer left the memory and trapped — and a larger
+// memory removes the backstop, so the merge says so.
+//
+// The linker's own suite pins when the warning is *raised*. What only a real
+// process can show is that it is *delivered*: that the driver prints it, on
+// stderr, without turning an advisory into a failed build. Deleting the print
+// loop leaves every library assertion satisfied.
+
+/// A `.wasm` whose one export reads linear memory at an address taken straight
+/// from its parameter — the shape the merge admits at Tier B.
+const TIER_B_LOAD_LIB: &str = r#"
+(module
+  (type (;0;) (func (param i32) (result i32)))
+  (memory (;0;) 1)
+  (func (;0;) (type 0) (param i32) (result i32)
+    local.get 0
+    i32.load)
+  (export "load_at" (func 0)))
+"#;
+
+/// A program binding that export. The array is what makes the main module
+/// declare a memory at all: with none, the merge would adopt the external's one
+/// page and `--memory-pages` would have nothing to enlarge.
+const CALLS_TIER_B_EXTERNAL: &str = "\
+external fn load_at(p: i32) -> i32;
+use { load_at } from memlib;
+
+pub fn main() -> i32 {
+    let scratch: [i32; 4] = [0, 0, 0, 0];
+    return load_at(scratch[0]);
+}
+";
+
+/// Stages the program and its external side by side, returning the temp
+/// directory, the entry path, and the `--wasm-dep` value binding `memlib` to the
+/// assembled `.wasm`.
+fn tier_b_project() -> (assert_fs::TempDir, std::path::PathBuf, String) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", CALLS_TIER_B_EXTERNAL);
+    let lib = temp.child("memlib.wasm");
+    let bytes = wat::parse_str(TIER_B_LOAD_LIB).expect("the external fixture is valid WAT");
+    std::fs::write(lib.path(), bytes).unwrap();
+    let dep = format!(
+        "memlib={}",
+        lib.path().to_str().expect("temp paths are UTF-8")
+    );
+    (temp, entry, dep)
+}
+
+/// A build whose merged external addresses memory through its parameter, into a
+/// memory of more than one page, reports the gap on stderr and still succeeds.
+///
+/// A warning is not an error, so the exit status and the artifact are asserted
+/// alongside the text: a driver that printed the message and then aborted would
+/// satisfy a stderr-only assertion while breaking every such build.
+///
+/// `Linked 1 external module(s)` is asserted because it is what makes the rest
+/// attributable. Without it, a fixture whose external silently failed to bind
+/// would produce no warning for a reason that has nothing to do with the page
+/// count, and the negative control below would pass for that reason too.
+///
+/// The text is matched on the claim, not the sentence: the two halves of the
+/// distinction the warning exists to draw, the name the user knows the function
+/// by, and the page count that made it worth saying.
+#[test]
+fn a_tier_b_external_merged_into_a_multi_page_memory_warns_on_stderr() {
+    let (temp, entry, dep) = tier_b_project();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--memory-pages")
+        .arg("2")
+        .arg("--wasm-dep")
+        .arg(&dep);
+
+    let assert = cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module(s)"))
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("load_at"),
+        "the warning must name the external the user bound, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("derives from a parameter"),
+        "the warning must state what the merge does prove, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("stays within the buffer"),
+        "the warning must state what the merge does not prove, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("2 pages"),
+        "the warning must name the memory that removed the backstop, got:\n{stderr}"
+    );
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "a warning must not withhold the artifact"
+    );
+}
+
+/// The same program and the same external, built without `--memory-pages`, merge
+/// silently.
+///
+/// This is what makes the warning a condition rather than a constant: a driver
+/// that printed the message unconditionally would pass the test above unchanged.
+/// The emitted page count is asserted so the silence is attributable to the one
+/// page and not to the external having dropped out of the build.
+#[test]
+fn the_same_external_in_a_single_page_build_merges_without_warning() {
+    let (temp, entry, dep) = tier_b_project();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("--wasm-dep")
+        .arg(&dep);
+
+    let assert = cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module(s)"))
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("warning:"),
+        "a single-page build must merge the same external silently, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("derives from a parameter"),
+        "the Tier-B claim must not be reported at one page, got:\n{stderr}"
+    );
+
+    let artifact = temp.child("out").child("main.wasm");
+    let wat = wat_of(&std::fs::read(artifact.path()).unwrap());
+    assert!(
+        wat.contains("(memory (;0;) 1 1)"),
+        "the silence must come from a one-page reconciled memory:\n{wat}"
+    );
+}
