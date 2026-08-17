@@ -834,22 +834,31 @@ fn lld_shaped_lib() -> Vec<u8> {
     )
 }
 
-#[test]
-fn an_lld_shaped_external_clears_the_tier_gate_but_not_memory_reconciliation() {
-    // What the relaxed global/table gate does and does not buy, pinned against
-    // the main-module shape the Inference compiler actually emits: `(memory 1 1)`
-    // — one page, maximum pinned equal to the minimum.
-    //
-    // The tier gate no longer objects: the closure reads no global and names no
-    // table. But the external declares 17 pages, and memory reconciliation never
-    // relaxes the anchor module's declared bound, so the link fails one step
-    // later with `IncompatibleMemory`. Relaxing the tier gate is therefore
-    // necessary but not sufficient for a stock `wasm32-unknown-unknown`
-    // artifact; configurable linear memory is a separate change.
-    //
-    // This test pins today's rejection deliberately. When configurable memory
-    // lands it will be flipped on purpose, not discovered by surprise.
-    let main = wasm(
+/// The same lld shape, but with a body that stores through a caller-supplied
+/// pointer: a memory-*using* closure over a 17-page module. Its declared memory
+/// is a fact about the merged output, so reconciliation must judge it.
+fn lld_shaped_memory_using_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 17)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    )
+}
+
+/// A main module that imports `sum` and calls it from an exported `compute`,
+/// under the memory shape the Inference compiler emits: `(memory 1 1)`, one page
+/// with the maximum pinned equal to the minimum.
+fn infc_shaped_main_importing_sum() -> Vec<u8> {
+    wasm(
         r#"
         (module
           (type (;0;) (func (param i32 i32) (result i32)))
@@ -862,39 +871,66 @@ fn an_lld_shaped_external_clears_the_tier_gate_but_not_memory_reconciliation() {
           (export "memory" (memory 0))
           (export "compute" (func 1)))
         "#,
-    );
-
-    let err = link(&main, &[&lld_shaped_lib()])
-        .expect_err("17 pages cannot be reconciled onto a pinned single page");
-    match err {
-        LinkError::IncompatibleMemory { field, reason } => {
-            assert_eq!(field, "sum");
-            assert!(
-                reason.contains("17 pages") && reason.contains("1 pages"),
-                "the diagnostic must name both bounds so the real blocker is legible: {reason}"
-            );
-        }
-        LinkError::RequiresRelocatableBuild { reasons, .. } => {
-            panic!("the tier gate must no longer be what rejects this artifact, got {reasons:?}")
-        }
-        other => panic!("expected IncompatibleMemory, got {other:?}"),
-    }
+    )
 }
 
 #[test]
-fn an_lld_shaped_external_links_onto_a_memoryless_main_and_widens_the_output_memory() {
-    // The same external against a main that declares no memory of its own. Here
-    // the link succeeds — and the merged output adopts the external's 17 pages
-    // even though the merged closure is a pure `i32.add` that never addresses
-    // memory at all.
+fn an_lld_shaped_external_links_onto_an_infc_shaped_main() {
+    // What the relaxed global/table gate buys, pinned against the main-module
+    // shape the Inference compiler actually emits: `(memory 1 1)`.
     //
-    // That imprecision is pinned, not endorsed: `MemoryReconciler::fold` folds an
-    // external's declared limits whenever the module has a memory section,
-    // independently of whether the closure uses memory, so a memory-free closure
-    // still drags its module's memory into the output. Narrowing that is a
-    // separate question from this change's global/table gate, and is deliberately
-    // out of scope here; this test makes the current behavior visible rather than
-    // leaving it implied.
+    // The tier gate does not object: the closure reads no global and names no
+    // table. Neither does memory reconciliation. The external declares 17 pages,
+    // and the reconciler never relaxes the anchor module's pinned bound — but the
+    // closure is a leaf `i32.add` that never addresses memory, so the external's
+    // declaration is not folded in at all and main's single page is kept as-is.
+    //
+    // This test previously pinned the opposite outcome: an `IncompatibleMemory`
+    // rejection of 17 pages against main's pinned 1. That was recorded as
+    // behavior pinned rather than endorsed — the tier gate had been relaxed, and
+    // the reconciler was the next thing to reject a stock
+    // `wasm32-unknown-unknown` artifact, over pages nothing would have touched.
+    // Adoption is now guarded on the closure's `uses_memory` effect. A
+    // memory-*using* external still meets that rejection unchanged; see
+    // `a_memory_using_lld_shaped_external_still_fails_reconciliation`.
+    let main = infc_shaped_main_importing_sum();
+
+    let linked = link(&main, &[&lld_shaped_lib()])
+        .expect("a pure closure must not drag its module's 17 pages into the link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+
+    assert_eq!(
+        memory_limits(&linked),
+        Some((1, Some(1))),
+        "main's own memory must survive untouched: neither widened to the external's \
+         minimum nor relaxed to its unbounded maximum"
+    );
+
+    // The global/table gate still holds on the merged output.
+    assert!(
+        module_globals(&linked).is_empty(),
+        "the external's __stack_pointer must not reach the output"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "no body may name a global or table the output does not declare"
+    );
+}
+
+#[test]
+fn an_lld_shaped_external_links_onto_a_memoryless_main_without_adopting_its_memory() {
+    // The same external against a main that declares no memory of its own. The
+    // link succeeds and the merged output declares no memory at all: the merged
+    // closure is a pure `i32.add`, so the external's 17 pages are not adopted.
+    //
+    // This test previously pinned the opposite — an output memory of
+    // `(17, None)` — explicitly as imprecision pinned rather than endorsed. It
+    // reached further than the `.wasm`: `wasm-to-v` emits the reconciled limits
+    // into the paired `.v` as the module's `mod_mems`, so a pure function's
+    // incidental page count became an observable in the verification deliverable.
     let main = wasm(
         r#"
         (module
@@ -908,15 +944,16 @@ fn an_lld_shaped_external_links_onto_a_memoryless_main_and_widens_the_output_mem
         "#,
     );
 
-    let linked = link(&main, &[&lld_shaped_lib()]).expect("a memoryless main adopts the external");
+    let linked = link(&main, &[&lld_shaped_lib()])
+        .expect("a memoryless main links a pure closure from a memory-declaring module");
     assert_valid(&linked);
     assert!(function_imports(&linked).is_empty());
     assert_eq!(code_body_count(&linked), 2);
 
     assert_eq!(
         memory_limits(&linked),
-        Some((17, None)),
-        "the external's declared memory is adopted whole, despite a closure that never addresses it"
+        None,
+        "a closure that never addresses memory must not synthesize one in the output"
     );
 
     // The gate this change is about still holds on the merged output: neither the
@@ -929,6 +966,236 @@ fn an_lld_shaped_external_links_onto_a_memoryless_main_and_widens_the_output_mem
         body_naming_a_global_or_table(&linked, None),
         None,
         "no body may name a global or table the output does not declare"
+    );
+}
+
+#[test]
+fn a_memory_using_lld_shaped_external_still_fails_reconciliation() {
+    // The counterpart that keeps the guard honest. The same 17-page lld shape,
+    // but the closure stores through a caller-supplied pointer, so its declared
+    // memory *is* folded in — and the reconciler still refuses to widen main's
+    // pinned single page to hold it.
+    //
+    // Guarding adoption narrows *which* externals contribute limits; it does not
+    // loosen the reconciliation applied to the ones that do. The page-count
+    // blocker for a stock memory-using artifact is untouched, and configurable
+    // linear memory remains a separate change.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+
+    let err = link(&main, &[&lld_shaped_memory_using_lib()])
+        .expect_err("17 pages cannot be reconciled onto a pinned single page");
+    match err {
+        LinkError::IncompatibleMemory { field, reason } => {
+            assert_eq!(field, "store_at");
+            assert!(
+                reason.contains("17 pages") && reason.contains("1 pages"),
+                "the diagnostic must name both bounds so the real blocker is legible: {reason}"
+            );
+        }
+        LinkError::RequiresRelocatableBuild { reasons, .. } => {
+            panic!("the tier gate must not be what rejects this artifact, got {reasons:?}")
+        }
+        other => panic!("expected IncompatibleMemory, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_memory_using_external_still_widens_the_reconciled_minimum() {
+    // The guard must not amount to switching adoption off. A memory-using closure
+    // over a 3-page external, folded onto a main that reserves one page under a
+    // five-page cap, must still widen the output minimum to 3 — a result
+    // distinguishable from dropping the external's declaration, which would have
+    // left `(1, Some(5))`.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 5)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 3)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a memory-using Tier-B closure must still merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((3, Some(5))),
+        "the memory-using external's minimum must still widen the output, under main's kept cap"
+    );
+    assert!(
+        body_has_i32_store(&linked, 1),
+        "the merged Tier-B body must retain its memory store"
+    );
+}
+
+#[test]
+fn a_memory_using_external_under_the_mains_bound_links_unchanged() {
+    // The everyday Tier-B shape, asserted on the limits rather than only on the
+    // memory export's survival: a one-page external whose closure stores through a
+    // caller pointer, merged into the `(memory 1 1)` main the compiler emits. It
+    // linked before the adoption guard and must link after it.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a one-page Tier-B external must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((1, Some(1))),
+        "main's pinned page must be kept, and the external's equal minimum changes nothing"
+    );
+    assert!(
+        body_has_i32_store(&linked, 1),
+        "the merged Tier-B body must retain its memory store"
+    );
+}
+
+#[test]
+fn memory_size_alone_counts_as_memory_use_and_adopts_the_memory() {
+    // `memory.size` reads no byte of linear memory — it returns a page count —
+    // so it is the operator most likely to be mistaken for memory-free. It is
+    // exactly what the adoption guard must treat as use: the value it returns
+    // *is* the reconciled minimum, so dropping the declaration that produced it
+    // would change the merged program's observable answer.
+    //
+    // Against a memoryless main the proof is unambiguous: the output memory can
+    // only have come from the external, so its presence shows the closure was
+    // classified as memory-using.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "memlib" "pages" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (result i32)
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (memory (;0;) 4)
+          (func (;0;) (type 0) (result i32)
+            memory.size)
+          (export "pages" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a memory.size closure must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((4, None)),
+        "memory.size must count as memory use, so the external's declaration is adopted"
+    );
+}
+
+#[test]
+fn only_the_memory_using_external_contributes_its_declaration() {
+    // The per-external form of the guard, against a memoryless main so every page
+    // in the output is traceable to the external that contributed it. One
+    // external is a pure `i32.add` over a 17-page lld-shaped module; the other
+    // stores through a caller pointer over a 2-page module. The output must
+    // reserve 2 pages — the memory-using external's — and not 17.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (type (;1;) (func (param i32 i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (import "mathlib" "store_at" (func (;1;) (type 1)))
+          (func (;2;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            local.get 0
+            local.get 1
+            call 1
+            call 0)
+          (export "run" (func 2)))
+        "#,
+    );
+    let store_lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 2)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lld_shaped_lib(), &store_lib])
+        .expect("both externals must merge");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(
+        memory_limits(&linked),
+        Some((2, None)),
+        "only the memory-using external may contribute limits; the pure external's 17 \
+         pages must not appear"
+    );
+    assert!(
+        module_globals(&linked).is_empty(),
+        "neither external's global may reach the output"
     );
 }
 

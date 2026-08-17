@@ -342,6 +342,8 @@ impl Plan {
             // minimum large enough for every module's static range (H15), and
             // rejects growth the reconciled maximum cannot satisfy. Incompatible
             // fundamental shapes (`memory64`/`shared`/page size) are rejected.
+            // Only a closure that actually addresses memory contributes limits —
+            // the tier verdict above is the same distinction, Tier B versus A.
             memory.fold(
                 external.memory.as_ref(),
                 cl.effects.uses_memory,
@@ -1058,6 +1060,10 @@ fn map_val_type(ty: &inf_wasmparser::ValType) -> Result<EncValType, LinkError> {
 ///   memory from the external's declaration (H24); a memory-using external with
 ///   *no* memory declaration of its own and a memoryless main is irreconcilable
 ///   (there is nothing to address), so it is rejected (the guard, part C).
+/// - An external whose closure **never touches memory** contributes nothing,
+///   whatever its module declares. Its memory section describes the machine it
+///   was compiled for, not one the merged output has to provide; see
+///   [`MemoryReconciler::fold`] for why dropping it is unobservable.
 struct MemoryReconciler {
     /// The reconciled memory so far, or `None` if no module has contributed one.
     current: Option<EncMemoryType>,
@@ -1088,9 +1094,12 @@ impl MemoryReconciler {
 
     /// Folds one external's memory and memory effects into the reconciliation.
     ///
-    /// `uses_memory`/`uses_memory_grow` are the external closure's effects, used
-    /// to decide whether a memory is required at all and whether growth must be
-    /// admitted.
+    /// `uses_memory`/`uses_memory_grow` are the external closure's effects.
+    /// `uses_memory` decides both whether a memory is required at all and
+    /// whether this external's own declaration contributes to the reconciled
+    /// result; `uses_memory_grow` decides whether growth must be admitted. The
+    /// two are not independent: every operator that grows memory also uses it,
+    /// so the growth check never runs on an external whose limits were dropped.
     fn fold(
         &mut self,
         ext_mem: Option<&inf_wasmparser::MemoryType>,
@@ -1103,17 +1112,55 @@ impl MemoryReconciler {
         }
 
         if let Some(ext_mem) = ext_mem {
-            // Reject an unsupported memory shape for *every* contributed external
-            // memory, including the `None => ext` adopt path onto a memoryless
-            // main — otherwise a memory64/shared/custom-page external would be
-            // adopted verbatim and wasm-to-v would silently re-encode it as a
-            // 32-bit memory (audit C-4/L-1).
+            // Reject an unsupported memory shape for *every* declared external
+            // memory, adopted or not, including the `None => ext` adopt path onto
+            // a memoryless main — otherwise a memory64/shared/custom-page external
+            // would be adopted verbatim and wasm-to-v would silently re-encode it
+            // as a 32-bit memory (audit C-4/L-1). The check stays outside the
+            // adoption gate below: it costs nothing on the dropped path and keeps
+            // the rejection absolute rather than conditional on an effect flag.
             reject_unsupported_memory_shape(ext_mem, field)?;
-            let ext = to_enc_memory(ext_mem);
-            self.current = Some(match self.current {
-                None => ext,
-                Some(cur) => reconcile_pair(cur, ext, field)?,
-            });
+
+            // Adopt the external's declared limits only when its closure actually
+            // addresses memory. A module's memory section describes the machine
+            // *that module* was built for; it becomes a fact about the merged
+            // output only if some merged body reads it. Folding it in
+            // unconditionally let a pure function impose its module's page count
+            // on the output — visible in the emitted `.wasm` and restated in the
+            // paired `.v` as the machine the proof is about — and, against a main
+            // that pins its own bound, rejected the link outright over a memory
+            // nothing would have touched.
+            //
+            // Dropping it is unobservable, on three facts that must hold together:
+            //
+            // - `uses_memory` is *closure-scoped*. `closure::compute` accumulates
+            //   it in `scan_body` over exactly the functions it returns in
+            //   `local_func_indices` — the same set the merge copies below — so
+            //   `false` means no body that reaches the output contains a memory
+            //   operator. This is the argument `tier` already relies on to drop an
+            //   external's globals and tables.
+            // - Every operator family that reaches linear memory sets it:
+            //   integer load/store, `memory.copy`, `memory.fill`, `memory.init`,
+            //   and `memory.size`/`memory.grow`. The last two are the ones worth
+            //   spelling out — they yield or extend a *page count* rather than
+            //   addressing a byte, so they read as unrelated to a memory's limits
+            //   when they are in fact the operators that observe them most
+            //   directly: `memory.size` returns the reconciled minimum, and
+            //   `memory.grow` is answered by the reconciled maximum. Both count as
+            //   use, and both are excluded here when `uses_memory` is false.
+            //   Anything outside the allow-list is rejected before it could reach
+            //   a body, so no unlisted operator can address memory silently.
+            // - No dropped memory is written behind the closure's back at
+            //   instantiation: `tier::classify` runs before this fold and rejects
+            //   any external declaring a data segment, so an external reaching
+            //   here has none to initialize the memory being dropped.
+            if uses_memory {
+                let ext = to_enc_memory(ext_mem);
+                self.current = Some(match self.current {
+                    None => ext,
+                    Some(cur) => reconcile_pair(cur, ext, field)?,
+                });
+            }
         }
 
         if uses_memory_grow {
