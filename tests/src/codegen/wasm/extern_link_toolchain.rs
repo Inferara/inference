@@ -260,7 +260,7 @@ mod extern_link_toolchain_tests {
             imports(&wasm).is_empty(),
             "an artifact that imports its environment has nothing to merge those imports onto"
         );
-        for export in ["clamp_add", "sum_n"] {
+        for export in ["clamp_add", "mulhi", "sum_n"] {
             assert!(
                 found.exports.iter().any(|name| name == export),
                 "the artifact must export `{export}`; it exports {:?}",
@@ -346,6 +346,85 @@ mod extern_link_toolchain_tests {
             2_147_483_647,
             "adding zero at the largest representable value must still be the identity"
         );
+    }
+
+    /// Tier A again, for the operators the numeric envelope was widened to admit:
+    /// `i64.extend_i32_s` and `i32.wrap_i64`, carried by a real artifact.
+    ///
+    /// Those two had no toolchain producer until this function existed. Writing a
+    /// computation "in 64 bits" is not enough to get them — `clamp_add` is
+    /// written that way and reaches the artifact as branchless `i32`, because an
+    /// optimizer narrows any intermediate whose result it can obtain more
+    /// cheaply. They survive only where 64 bits are load-bearing, and the high
+    /// half of a 32x32 product is the smallest natural case: no `i32`-only
+    /// lowering computes it.
+    ///
+    /// The negative points are the discriminating ones. They separate the
+    /// *signedness* of the widening, which is what the emitted
+    /// `BI_cvtop … (Some SX_S)` records and the one part of the conversion a
+    /// wrong lowering would get wrong silently: widening unsigned instead returns
+    /// -2 for `(-1, -1)` and 0 for `(-1, 1)`, while agreeing on every
+    /// non-negative point below.
+    #[test]
+    fn a_tier_a_leaf_carrying_width_conversions_executes_after_the_merge() {
+        let (linked, warnings) = link_against_artifact(
+            "external fn mulhi(a: i32, b: i32) -> i32;\n\
+             use { mulhi } from rustlib;\n\
+             pub fn high_product(a: i32, b: i32) -> i32 { return mulhi(a, b); }",
+            "toolchain_width_conversions",
+            1,
+        );
+        assert!(
+            warnings.is_empty(),
+            "a leaf that never touches memory has no reach to warn about; got {warnings:?}"
+        );
+
+        let (mut store, instance) = instantiate(&linked);
+        let high_product: TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "high_product")
+            .expect("the merged module exports `high_product`");
+
+        for (a, b, expected, what) in [
+            (
+                65_536,
+                65_536,
+                1,
+                "a product of exactly 2^32 has all of its content above the low word, so a \
+                 body that stayed in 32 bits returns 0",
+            ),
+            (
+                2_147_483_647,
+                2_147_483_647,
+                1_073_741_823,
+                "the largest positive product, far outside anything 32 bits can hold",
+            ),
+            (
+                -1,
+                -1,
+                0,
+                "widening unsigned instead of signed turns this into (2^32-1)^2 and returns -2",
+            ),
+            (
+                -1,
+                1,
+                -1,
+                "the high word of a negative product is its sign extension; widening \
+                 unsigned returns 0",
+            ),
+            (
+                3,
+                5,
+                0,
+                "a product with no high bits must return none, ruling out a body that \
+                 returns the low word",
+            ),
+        ] {
+            assert_eq!(
+                high_product.call(&mut store, (a, b)).expect("executes"),
+                expected,
+                "mulhi({a}, {b}): {what}"
+            );
+        }
     }
 
     /// Tier B: the same artifact's pointer walk reads memory this program owns.

@@ -29,14 +29,15 @@ and this one is meant to satisfy none of them — it is linker input, not a gold
 
 | | |
 |---|---|
-| Size | 462 bytes |
-| SHA-256 | `dc05db7eaa506b2604aa916c3dcdf9d27f2214a8718009249e86f327ca84072f` |
+| Size | 492 bytes |
+| SHA-256 | `e233c35c2b340f55ce1d837990b403a7ea2cc61db1ecf25c8d3c0d2910c0227a` |
 | Built with | `rustc 1.97.1 (8bab26f4f 2026-07-14)` / `cargo 1.97.1 (c980f4866 2026-06-30)` |
 
-Sections: type, function, memory, global, export, code, and the three custom
-sections `name`, `producers` and `target_features`. Exports are `clamp_add`,
-`sum_n` and `memory`; the memory is sixteen pages and the single global is lld's
-`__stack_pointer`.
+Sections, in order, with their total encoded size: type (9), function (6),
+memory (5), global (11), export (40), code (113), then the three custom sections
+`name` (70), `producers` (79) and `target_features` (151). Exports are
+`clamp_add`, `mulhi`, `sum_n` and `memory`; the memory is sixteen pages and the
+single global is lld's `__stack_pointer`.
 
 ## Why it is inside the merge envelope
 
@@ -65,25 +66,43 @@ none of them. The envelope is decided by the instructions present, not by what
 the target claims. That distinction is invisible until a crate grows a
 `copy_from_slice` and the section stops being a red herring.
 
-The two exports were chosen to land one in each admitted tier:
+The exports cover both admitted tiers, and between them the operator families the
+envelope admits:
 
 - `clamp_add` touches no memory at all — **Tier A**. Its closure contributes no
   memory to the merge, so a memoryless main stays memoryless.
+- `mulhi` is also **Tier A**, and is the one carrying the width-changing
+  conversions. See below for why it takes the shape it does.
 - `sum_n` reads only through the pointer its caller supplies — **Tier B**. The
   merged module takes the sixteen-page memory, and the link raises
   `LinkWarning::TierBInMultiPageMemory` naming that page count, because the merge
   proves every address derives from a parameter and not that it stays inside the
   buffer the parameter points into.
 
-One thing worth knowing before reading `rustlib-src/src/lib.rs` against a
-disassembly: `clamp_add` is written as a 64-bit widening add followed by a clamp,
-and LLVM recognises that as a saturating add and emits it branchlessly in 32
-bits. The artifact therefore contains no `i64` operator at all, and `clamp_add`
-reduces to `i32.add`, `i32.shr_s`, `i32.xor`, `i32.lt_s` and `select`. `sum_n`
-similarly becomes a
-pointer bump rather than a scaled index: `loop` / `block` / `br_if` / `br` around
-an `i32.load` off a running pointer, which is the loop-carried form the
-provenance analysis has to follow to admit it.
+The distinct operators each one reaches the linker with:
+
+| export | operators |
+|---|---|
+| `clamp_add` | `local.get` `local.tee` `i32.const` `i32.add` `i32.shr_s` `i32.xor` `i32.lt_s` `select` |
+| `mulhi` | `local.get` `i64.const` `i64.extend_i32_s` `i64.mul` `i64.shr_u` `i32.wrap_i64` |
+| `sum_n` | `local.get` `local.set` `i32.const` `i32.add` `i32.gt_s` `i32.load` `select` `block` `loop` `br` `br_if` `return` |
+
+### Writing in 64 bits does not get you 64-bit operators
+
+`clamp_add` is written as a 64-bit widening add followed by a clamp, and LLVM
+recognises that as a saturating add and emits it branchlessly in 32 bits. Its
+`i64` intermediate leaves no trace in the artifact. `sum_n` is likewise not what
+its source says: the scaled index becomes a pointer bump, a `loop` / `block` /
+`br_if` / `br` around an `i32.load` off a running pointer, which is the
+loop-carried form the provenance analysis has to follow to admit it.
+
+That is why `mulhi` is here. An optimizer narrows any intermediate whose result
+it can reach more cheaply, so the width conversions survive only where 64 bits
+are load-bearing — and the high half of a 32x32 product is the smallest natural
+case, since no 32-bit-only lowering computes it. It is the artifact's only source
+of `i64.extend_i32_s` and `i32.wrap_i64`, which are also the only reason the
+`BI_cvtop` constructors reach `coqc` from a real artifact rather than from a
+hand-assembled module.
 
 `sum_n` also opens with a `select` of its own, clamping `n` to `n > 0 ? n : 0` —
 so the artifact contains **two**, and a claim about the clamp's branchless
@@ -103,9 +122,10 @@ At `0` every function gets a real stack frame, so `clamp_add` — which touches 
 memory at all once optimized — opens by computing `__stack_pointer - 16` and
 spilling through it. That address derives from a global rather than from a
 parameter, which is a Tier-C rejection, and it is the *reason* an unoptimized
-build is out: not the arithmetic, the frame. (`i64.extend_i32_s` and
-`i32.wrap_i64` do survive there, so the unoptimized build is the one that matches
-a naive reading of the source.)
+build is out: the frame, not the arithmetic. `clamp_add` also keeps its own
+`i64.extend_i32_s` pair there, which is what makes it a poor witness for the
+conversions despite reading like one in source — the build that has them is the
+build that does not link.
 
 So the envelope covers optimized foreign artifacts, which is what `--release`
 delivers, and a debug build of the same crate is outside it. Worth stating
@@ -135,7 +155,7 @@ place.
 The `cmp` reproduces byte-for-byte only under the recorded toolchain. A different
 `rustc` may select different instructions or stamp a different `producers`
 section, and that is not by itself a problem — nothing asserts these bytes. Which
-half of the file differs matters, though, because 293 of the 462 bytes are custom
+half of the file differs matters, though, because 300 of the 492 bytes are custom
 sections:
 
 - `name`, `producers` and `target_features` churn on any toolchain bump, and a

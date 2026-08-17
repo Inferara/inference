@@ -817,14 +817,23 @@ mod gate {
     /// same reason. `BI_loop` alone is produced by any `while`; it is the result
     /// type on it that no Inference lowering emits.
     ///
-    /// Two of the three are unproducible here and one is not, and the difference
-    /// is worth keeping straight rather than letting the stronger claim cover
-    /// all three. `BI_select` in any form and a `BI_loop` carrying a result type
-    /// have no emitter arm at all — this compiler never selects, and its `while`
-    /// lowering always writes `BT_valtype None`. `BI_load T_i32 None (Ma 0%N 2%N)`
-    /// is merely *absent from the corpus*: an ordinary `values[i]` emits exactly
-    /// that form, so what the third needle pins is the merged body's lowering
-    /// staying put, not a shape only a foreign compiler can reach.
+    /// Three of the four forms are unproducible here and one is not, and the
+    /// difference is worth keeping straight rather than letting the stronger
+    /// claim cover them all. `BI_select` in any form, a `BI_loop` carrying a
+    /// result type, and `BI_cvtop` in either direction have no emitter arm at all
+    /// — this compiler never selects, its `while` lowering always writes
+    /// `BT_valtype None`, and it emits no width conversion, narrowing sub-`i32`
+    /// values with shifts and masks instead. `BI_load T_i32 None (Ma 0%N 2%N)` is
+    /// merely *absent from the corpus*: an ordinary `values[i]` emits exactly that
+    /// form, so what that needle pins is the merged body's lowering staying put,
+    /// not a shape only a foreign compiler can reach.
+    ///
+    /// The `BI_cvtop` pair is the reason this entry answers the question the
+    /// numeric envelope was widened for. The conversions were admitted across the
+    /// stub, translator, allow-list and feature gate, and until `mulhi` existed
+    /// every module elaborating one was hand-assembled — the corpus could show
+    /// the constructors were accepted, never that a real artifact containing them
+    /// links and translates.
     ///
     /// Each needle is matched against the body it is about rather than the whole
     /// module, because module-wide the select needle is vacuous: the artifact
@@ -867,6 +876,19 @@ mod gate {
                  emits `BT_valtype None`",
             ),
             (
+                "rustlib_mulhi",
+                "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)",
+                "the widening half of the 64-bit intermediate. This compiler emits no \
+                 conversion at all, so without a foreign body the constructor reaches \
+                 `coqc` only from a hand-assembled module",
+            ),
+            (
+                "rustlib_mulhi",
+                "BI_cvtop T_i32 CVO_wrap T_i64 None",
+                "the narrowing half; the two travel together, and a lowering that dropped \
+                 either would be computing something else",
+            ),
+            (
                 "rustlib_sum_n",
                 "BI_load T_i32 None (Ma 0%N 2%N)",
                 "the Tier-B load off the caller's pointer; this form is elaborated by a \
@@ -885,7 +907,7 @@ mod gate {
         }
 
         let defined = module_func_names(&v);
-        for name in ["rustlib_clamp_add", "rustlib_sum_n"] {
+        for name in ["rustlib_clamp_add", "rustlib_mulhi", "rustlib_sum_n"] {
             let index = defined
                 .iter()
                 .position(|candidate| *candidate == name)

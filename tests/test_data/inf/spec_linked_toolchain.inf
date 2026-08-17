@@ -7,10 +7,17 @@
 // The sibling `spec_linked_extern.inf` already puts a merged body in front of
 // `coqc`, but its external came out of this compiler's own emitter, so every
 // instruction in it is one some single-file fixture emits too. What this fixture
-// adds is a body written by a different compiler: LLVM's branchless clamp, and a
-// pointer-walking loop whose `BI_loop` carries a result type. Both are shapes the
-// Inference emitter has no way to produce, and translating them is the claim the
-// linker envelope rests on.
+// adds is bodies written by a different compiler: LLVM's branchless clamp, a
+// pointer-walking loop whose `BI_loop` carries a result type, and the width
+// conversions of a 32x32 high-product. None of the three has an emitter arm here
+// — this compiler never selects, its `while` lowering always writes
+// `BT_valtype None`, and it emits no conversion at all — so translating them is
+// the claim the linker envelope rests on.
+//
+// `mulhi` is why `BI_cvtop` reaches `coqc` from a real artifact rather than only
+// from a hand-assembled module. Its 64-bit intermediate is load-bearing, which is
+// what keeps `i64.extend_i32_s` and `i32.wrap_i64` alive through optimization;
+// `clamp_add` is also written over `i64` and is narrowed back to `i32` entirely.
 //
 // Two constraints this fixture is written around, both of which would otherwise
 // surface as a confusing failure elsewhere:
@@ -32,11 +39,16 @@
 // aggregate fixtures got.
 
 external fn clamp_add(a: i32, b: i32) -> i32;
+external fn mulhi(a: i32, b: i32) -> i32;
 external fn sum_n(p: i32, n: i32) -> i32;
-use { clamp_add, sum_n } from rustlib;
+use { clamp_add, mulhi, sum_n } from rustlib;
 
 pub fn saturating_add(a: i32, b: i32) -> i32 {
   return clamp_add(a, b);
+}
+
+pub fn high_product(a: i32, b: i32) -> i32 {
+  return mulhi(a, b);
 }
 
 pub fn total(p: i32, n: i32) -> i32 {
@@ -47,6 +59,11 @@ spec ToolchainSpec {
   fn adding_zero_changes_nothing() forall {
     let a: i32 = @;
     assert(clamp_add(a, 0) == a);
+  }
+
+  fn multiplying_by_zero_carries_nothing_high() forall {
+    let a: i32 = @;
+    assert(mulhi(a, 0) == 0);
   }
 
   fn summing_nothing_is_zero() forall {

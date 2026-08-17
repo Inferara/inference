@@ -779,8 +779,12 @@ surface is more than a description of one emitter's output.
 these shapes are elaborated rather than merely permitted. Through it the
 gate sees a `BI_select` standing in for a branch LLVM removed, a
 `BI_loop` carrying a result type where Inference's `while` lowering
-always emits `BT_valtype None`, and a `BI_load` off a pointer walked by a
-loop-carried local. An obligation applying such a body — `T_app` at the
+always emits `BT_valtype None`, `BI_cvtop` in both directions from a
+32x32 high-product whose 64-bit intermediate no narrower lowering
+computes, and a `BI_load` off a pointer walked by a loop-carried local.
+The `BI_cvtop` pair matters most of the four: the integer width
+conversions are accepted by this translator, and until that artifact
+existed every module elaborating one was hand-assembled. An obligation applying such a body — `T_app` at the
 merged function's own index — is what makes the claim about it a claim
 about the bytes that will run.
 
