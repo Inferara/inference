@@ -29,17 +29,20 @@
 //! ## What this proves, and what it does not
 //!
 //! The property proved here is **derivation**, not **containment**: every
-//! address is shown to *flow from* a caller-supplied parameter. Nothing here
-//! shows that an address stays *inside the region the caller meant to grant* —
-//! and nothing here can, because the analysis carries no sizes. The lattice has
-//! three tags and no numeric component; it cannot represent "how far from `p`".
+//! address is shown to *flow from* a caller-supplied parameter — concretely,
+//! that it is a bijective function of one of them, so the external cannot pin it
+//! to a location of its own choosing. Nothing here shows that an address stays
+//! *inside the region the caller meant to grant* — and nothing here can, because
+//! the analysis carries no sizes. The lattice records which parameters a value
+//! depends on and the *parity* of their coefficients, never a magnitude; it
+//! cannot represent "how far from `p`".
 //!
 //! So all of these are admitted, by design:
 //!
 //! ```text
 //! store at p + 1048576          ; a constant displacement, unbounded
 //! store at p + q                ; two parameters summed - no constant at all
-//! store at p + p    (= 2p)      ; nowhere near p for any nonzero p
+//! store at p + (q << 2)         ; a scaled index, equally unbounded
 //! ptr = p; loop { store ptr; ptr += 4 }   ; walks off the end of any buffer
 //! ```
 //!
@@ -48,6 +51,13 @@
 //! property their sum is the caller's business. That is also why bounding the
 //! *constant* displacement would buy nothing — the cheapest way to address
 //! arbitrarily far from `p` uses no constant.
+//!
+//! `p + p` is **not** in that list, though an earlier revision admitted it. Two
+//! copies of one parameter sum to `2p`, and thirty-two chained doublings reach
+//! `2^32 * p == 0` — a fixed absolute address built from `i32.add` alone. What
+//! separates it from `p + q` is not magnitude but *coefficient parity*, which is
+//! why the lattice tracks that and rejects a sum whose two operands may share a
+//! parameter.
 //!
 //! The practical consequence is worth stating plainly, because it is easy to
 //! read the contract above as stronger than it is: **an admitted external can
@@ -66,36 +76,91 @@
 //!
 //! ## The lattice
 //!
-//! Every operand-stack slot and every local carries one of three provenance tags:
+//! Every value the analysis does not treat as opaque is an **affine form** in
+//! the enclosing function's parameters,
 //!
-//! - [`Prov::Param`] — the value provably flows from one or more function
-//!   parameters (the carried [`ParamMask`] records *which* of this function's
-//!   parameters) through operations that cannot erase the caller's pointer
-//!   (`local.get` of a `Param` slot, `add` of a `Param` with a `Param` or a
-//!   proven `Const`, `sub` of a `Param` minuend by a non-`Param` subtrahend).
-//! - [`Prov::Const`] — the value provably is a compile-time constant
-//!   (caller-independent), produced by a `*.const` literal or by `add`/`sub` of
-//!   two `Const`s. This tag exists solely so a `Param + Const` (a struct-field or
-//!   array-element offset) can stay `Param`, while a `Param + NotParam` cannot —
-//!   a `NotParam` addend is only *not provably param-derived*, so it may secretly
-//!   hold a negated parameter (`C - p`) that cancels the `Param` operand back to a
-//!   caller-independent constant (`(C - p) + p == C`). A constant used *directly*
-//!   as a memory address is still rejected (it is not `Param`).
-//! - [`Prov::NotParam`] — every other producer: a global, a call result, the
-//!   table space, *any* multiplicative/bitwise/shift op (each can cancel the
-//!   caller contribution: `param*0`, `param&0`, `param^param`), every unary op,
-//!   any binary op whose operands are not both proven constant, or any source the
-//!   analysis cannot prove parameter-derived. The fail-closed default for an
-//!   uninitialized local, a stack underflow, and any unmodeled situation.
+//! ```text
+//! v  =  k0*p0 + k1*p1 + ... + c        (all k_i and c compile-time constants)
+//! ```
 //!
-//! The lattice join is the must-join: a value stays `Param` only when it is
-//! `Param` on *all* incoming paths (the carried mask is then the **union** of
-//! the per-path masks — on every path it derives from *some* parameter, so on the
-//! merged path it derives from one of the union), and it widens to `NotParam` the
-//! moment any incoming path is `Const` or `NotParam`. The lattice has no value
-//! identity, so it can never prove two `Param` operands unequal — which is why
-//! every operator that can cancel two equal `Param` inputs to a constant (`sub`,
-//! `xor`, `and`, `mul`, …) treats its result as `NotParam`.
+//! and the tags record just enough about that form to decide whether the module
+//! could pin `v` to a location of its own choosing.
+//!
+//! - [`Prov::Param`] — an affine form in which **at least one** coefficient is
+//!   **odd**. An odd number is a unit modulo `2^32`/`2^64`, so `v` is a
+//!   *bijection* in that parameter: whatever the other operands do, moving that
+//!   parameter moves `v`, and no choice of constants can flatten it. This is the
+//!   only tag a memory address may carry. The carried [`Linear`] records which
+//!   parameters may hold the odd coefficient, every parameter the form may
+//!   mention at all, and whether the odd coefficient is known to sit on a
+//!   *single* parameter.
+//! - [`Prov::Scaled`] — an affine form in which **every** coefficient is
+//!   **even**: `p*4` and `p << 2` land here, and so does `p*0 == 0`. An even
+//!   coefficient may be zero, so a `Scaled` value can be a fixed constant and is
+//!   never a legal address on its own. Its worth is as an *addend*: even plus
+//!   odd is odd, so `Param + Scaled` stays `Param`, which is exactly the LLVM
+//!   scaled-index idiom `base + index * elem_size`.
+//! - [`Prov::Const`] — a compile-time constant (caller-independent), carrying
+//!   the value itself when it is modeled and `None` when only constancy is
+//!   known. The value is carried because a multiplier's or a shift count's
+//!   *parity* decides whether the product keeps an odd coefficient. `Const`
+//!   exists so a `Param + Const` (a struct-field or array-element offset) can
+//!   stay `Param` while a `Param + NotParam` cannot — a `NotParam` addend is
+//!   only *not provably param-derived*, so it may secretly hold a negated
+//!   parameter (`C - p`) that cancels the `Param` operand back to a
+//!   caller-independent constant (`(C - p) + p == C`). A constant used
+//!   *directly* as a memory address is still rejected (it is not `Param`).
+//! - [`Prov::NotParam`] — not provably an affine form in the parameters at all:
+//!   a global, a call result, a loaded value, the table space, a division,
+//!   remainder, bitwise or rotate op, every unary op, a product of two
+//!   non-constants, a shift by a non-constant, or any source the analysis cannot
+//!   classify. The fail-closed default for an uninitialized local, a stack
+//!   underflow, and any unmodeled situation.
+//!
+//! The lattice join is the must-join: a value keeps a tag only when it carries
+//! that tag on *all* incoming paths, and widens to `NotParam` otherwise. Joining
+//! two `Param`s unions their masks — on every path some parameter in the union
+//! carries the odd coefficient — and keeps the single-odd knowledge only when
+//! both paths had it.
+//!
+//! ### Why parity, and why the odd supports must be disjoint
+//!
+//! The lattice has no value identity, so it cannot tell `p + q` (two parameters)
+//! from `p + p` (one parameter twice). It does not have to: it tracks the parity
+//! of each coefficient, and that is what the two cases differ in. `p + q` leaves
+//! both coefficients at 1; `p + p` makes the coefficient 2, and repeated
+//! doubling drives it to `2^32 == 0`. So `add` unions two `Param` operands only
+//! when their odd supports are **disjoint** — then no coefficient can pair up and
+//! turn even — and fails closed to `NotParam` when they might overlap. Every
+//! operator that can cancel two equal `Param` inputs outright (`sub`, `xor`,
+//! `and`, `div`, …) still yields `NotParam` unconditionally.
+//!
+//! ### Correlated parameters: why one odd coefficient is not always enough
+//!
+//! An odd coefficient makes `v` a bijection in one of *this function's*
+//! parameters. That buys something only if moving that parameter is something
+//! the host can do — that is, if the parameter is itself a bijection in one of
+//! the host's own arguments. Bijections compose, so the argument chains through
+//! call sites, but only while exactly **one** parameter carries the odd
+//! coefficient.
+//!
+//! With two it breaks, and the counterexample is short. Take a root `r(a, b)`
+//! that stores at `a + b + 4096` and, somewhere inside, calls itself as
+//! `r(a, -a)`. Both arguments are caller-derived — `-a` is a bijection in `a` —
+//! so both of `r`'s parameters are justified at that site, and both odd
+//! coefficients look sound in isolation. Yet the recursive invocation stores at
+//! `a + (-a) + 4096 == 4096`: a fixed absolute address, for every host input.
+//! The two odd coefficients cancelled because the call site made the two
+//! parameters *correlated*.
+//!
+//! So summing two odd coefficients is admitted only where the parameters are
+//! independent coordinates the host chose separately, which is precisely the
+//! closure root entered **only** from the host. A function some internal `call`
+//! targets — the root included, once a self- or mutually-recursive call re-enters
+//! it — has parameters an internal caller may have correlated, and there every
+//! address must trace its odd coefficient to a *single* parameter. Even
+//! coefficients stay unrestricted even then: odd plus even is odd no matter how
+//! the parameters correlate, so `base + index*4` remains linkable in a helper.
 //!
 //! ### Why the mask join is a union, and verification is `⊆`
 //!
@@ -107,6 +172,27 @@
 //! it. (An `add(p0, p1)` would be safe with only one operand trusted, since
 //! `caller_base + anything` stays caller-relative; using the stricter `⊆` rule
 //! there is a sound over-approximation that keeps a single, uniform check.)
+//!
+//! The subset check covers the **whole** support, the even-coefficient part
+//! included, and that part is load-bearing rather than tidiness. The bijection
+//! argument for `Param + Scaled` assumes the even addend is an affine form in
+//! parameters the analysis has justified. Let an *unjustified* parameter through
+//! and it collapses: a caller that hands a helper `(ptr, (C - ptr) >> 2)` and
+//! sees it address `p0 + (p1 << 2)` has pinned the access to a four-byte window
+//! around `C`, because `p1` there is not an affine form in anything.
+//!
+//! ### Address masks and extent masks are checked differently
+//!
+//! The single-odd-coefficient rule above is an **address** rule. A bulk-memory
+//! extent is held to the weaker original rule — non-empty and within the trusted
+//! set — so `memory.fill(dst, v, n + m)` still links in a called helper. That
+//! asymmetry is deliberate: the extent requirement is hardening, not a
+//! guarantee. It stops the one-instruction unbounded clobber, and it cannot stop
+//! more than that, because a helper holding a single trusted pointer can already
+//! scorch the same span one `i32.store` at a time in a loop — a form this
+//! analysis admits by design (see "what this proves, and what it does not").
+//! Tightening the extent to a single parameter would reject real
+//! `(base, off, len)` helpers while closing nothing.
 //!
 //! ### Why `add` is not symmetric in `Param`
 //!
@@ -133,24 +219,35 @@
 //!
 //! Each function is summarised *once* against a fixed seed: parameter `i` seeds
 //! `Param({i})`. From that single pass the analysis records, per function, the
-//! address mask of every memory access and, per call site, the argument mask of
-//! every argument (each in the calling function's own parameter terms). A
+//! parameter dependence of every memory access and, per call site, the dependence
+//! of every argument (each in the calling function's own parameter terms). A
 //! greatest-fixpoint pass over the call graph then computes, for every function
 //! `g`, the set `trusted[g]` of `g`'s parameters that are provably caller-derived:
 //!
 //! - `trusted[root]` is **all** of the root's parameters (the caller owns them).
-//! - a parameter `j` of a non-root `g` is trusted iff at *every* recorded call
-//!   site `f → g` the argument in position `j` is itself param-derived from
-//!   `trusted[f]` — i.e. its mask is non-empty and a subset of `trusted[f]`.
+//! - a parameter `j` of `g` is trusted iff at *every* recorded call site
+//!   `f → g` the argument in position `j` is [`is_live`] in `f` — an affine form
+//!   with an odd coefficient, resting only on parameters `f` itself has
+//!   justified, and (where `f`'s own parameters may be correlated) on a single
+//!   one of them.
+//!
+//! The root is not exempt from the second clause. Its *external* caller — the
+//! host that invokes the exported function — justifies all of its parameters, so
+//! a root with no internal call site keeps them all; but a self- or
+//! mutually-recursive call re-enters the root with arguments the host never
+//! chose, and that site is checked like any other.
 //!
 //! Starting from "all parameters trusted" and iteratively removing any parameter
 //! contradicted at a call site converges (a finite lattice, monotone descent),
-//! handling self- and mutual recursion. A function reachable only through a table
-//! (no direct call site) keeps its default-untrusted parameters, so a dereference
-//! of an unjustified parameter is rejected. Call/`call_indirect` results are
-//! always `NotParam`. Finally every memory access is verified against its
-//! function's `trusted` set (`mask ⊆ trusted`); any access that fails rejects the
-//! whole closure.
+//! handling self- and mutual recursion. The greatest fixpoint is sound here
+//! because the property is inductive on the call chain: every real invocation is
+//! reached from the host entry in finitely many calls, the host entry is the base
+//! case, and each site preserves the property. A function reachable only through
+//! a table (no direct call site) keeps its default-untrusted parameters, so a
+//! dereference of an unjustified parameter is rejected. Call/`call_indirect`
+//! results are always `NotParam`. Finally every memory access is verified with
+//! the same [`is_live`] predicate against its function's `trusted` set; any
+//! access that fails rejects the whole closure.
 
 use inf_wasmparser::{BinaryReader, BlockType, FunctionBody, Operator};
 
@@ -207,6 +304,13 @@ impl ParamMask {
         self.0 & !other.0 == 0
     }
 
+    /// Whether the two masks share a parameter. Two affine forms whose odd
+    /// supports intersect may hold odd coefficients on the *same* parameter,
+    /// where summing them turns the coefficient even.
+    fn intersects(self, other: ParamMask) -> bool {
+        self.0 & other.0 != 0
+    }
+
     fn without(self, index: usize) -> ParamMask {
         if index < 64 {
             ParamMask(self.0 & !(1 << index))
@@ -237,44 +341,167 @@ const MAX_WASM_FUNCTION_LOCALS: usize = 50_000;
 /// long before a real overflow.
 const MAX_ANALYSIS_DEPTH: usize = 256;
 
+/// Absolute ceiling on a single `loop`'s fixpoint rounds, clamping
+/// [`fixpoint_round_cap`]'s lattice-height bound.
+///
+/// The height bound is what *precision* needs; this is what *termination cost*
+/// allows. Every round re-interprets the whole loop body, and nested loops
+/// multiply, so an unclamped bound would let an adversarial body with hundreds
+/// of live slots and many parameters spin for millions of body walks. Real code
+/// stabilises in a handful of rounds and never approaches either bound.
+const MAX_FIXPOINT_ROUNDS: usize = 1024;
+
+/// The number of rounds a `loop`'s fixpoint may take before the analysis stops
+/// trusting its own state and rejects.
+///
+/// `State::join` is decreasing, so a round that does not terminate the fixpoint
+/// must lower at least one of the `slots` (locals plus header stack) strictly in
+/// the value lattice. The longest strictly-decreasing chain one slot can walk is
+/// the taller of these, for `p` representable parameters:
+///
+/// - `Param`: `odd` grows (`p - 1` steps), `support` grows (`p - 1` steps),
+///   `single_odd` clears (1 step), then `NotParam` (1) — at most `2p`;
+/// - `Scaled`: the support grows from empty (`p` steps), then `NotParam` (1);
+/// - `Const`: a known value to an unknown one, then `NotParam` (2).
+///
+/// so `2p + 2` covers every slot with room to spare, and `slots * (2p + 2) + 2`
+/// rounds cover every slot descending in turn. Parameters past the mask's 64-bit
+/// range never enter a mask, so `p` saturates at 64.
+fn fixpoint_round_cap(slots: usize, param_count: usize) -> usize {
+    let representable_params = param_count.min(64);
+    let per_slot = representable_params.saturating_mul(2).saturating_add(2);
+    slots
+        .saturating_mul(per_slot)
+        .saturating_add(2)
+        .min(MAX_FIXPOINT_ROUNDS)
+}
+
+/// How an affine form depends on the enclosing function's parameters.
+///
+/// The form is `Σ kᵢ·pᵢ + c` for compile-time constants `kᵢ` and `c`. `odd`
+/// over-approximates `{ i : kᵢ is odd }` and is non-empty whenever the form is
+/// tagged [`Prov::Param`], so at least one parameter in it provably carries an
+/// odd coefficient. `support` over-approximates every parameter the form
+/// mentions, odd and even coefficients alike (`odd ⊆ support`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Linear {
+    odd: ParamMask,
+    support: ParamMask,
+    /// Whether the odd coefficient provably rests on exactly *one* parameter
+    /// (whose index lies somewhere in `odd`). Two summed `Param` operands clear
+    /// it: their odd coefficients then sit on two parameters, which a correlating
+    /// call site can cancel against each other.
+    single_odd: bool,
+}
+
+impl Linear {
+    /// The dependence of a bare `local.get` of parameter `index`: coefficient 1
+    /// on that one parameter, so a single odd coefficient and nothing else.
+    fn of_param(index: usize) -> Linear {
+        let m = ParamMask::single(index);
+        Linear {
+            odd: m,
+            support: m,
+            single_odd: true,
+        }
+    }
+
+    /// The dependence carrying no proven odd coefficient: the fail-closed value
+    /// recorded for a `Scaled`, `Const` or `NotParam` operand, which can never
+    /// satisfy [`is_live`].
+    fn opaque(support: ParamMask) -> Linear {
+        Linear {
+            odd: ParamMask::EMPTY,
+            support,
+            single_odd: false,
+        }
+    }
+
+    /// The must-join across control-flow paths: the odd coefficient sits in the
+    /// union of the two odd supports, the form may mention the union of the two
+    /// supports, and it rests on a single parameter only when it did on both
+    /// paths (on either path exactly one parameter is odd, though which one may
+    /// differ — that is enough, since the bijection argument names no index).
+    fn join(self, other: Linear) -> Linear {
+        Linear {
+            odd: self.odd.union(other.odd),
+            support: self.support.union(other.support),
+            single_odd: self.single_odd && other.single_odd,
+        }
+    }
+}
+
 /// The provenance lattice for a value (an operand-stack slot or a local).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prov {
-    /// The value provably derives from one or more of *this function's*
-    /// parameters (recorded in the [`ParamMask`]) and cannot have been cancelled
-    /// to a caller-independent constant. The mask is always non-empty.
-    Param(ParamMask),
-    /// The value provably is a compile-time constant (a `*.const` literal, or
-    /// `add`/`sub` of two `Const`s). Caller-independent: never a valid memory
-    /// address on its own, but a valid *offset* to add to a `Param` base.
-    Const,
-    /// The value derives from a global, call result, a parameter-cancelling
-    /// operator, a non-constant binary op, or any source the analysis cannot
-    /// prove parameter-derived or constant. The fail-closed default.
+    /// An affine form in this function's parameters with **at least one odd**
+    /// coefficient, so the value is a bijection in that parameter and cannot
+    /// have been flattened to a caller-independent constant. `Linear::odd` is
+    /// always non-empty.
+    Param(Linear),
+    /// An affine form in this function's parameters whose coefficients are
+    /// **all even** — `p*4`, `p << 2`, and also `p*0 == 0`. Never a legal
+    /// address on its own (an even coefficient may be zero), but a legal addend
+    /// to a `Param`: even plus odd stays odd. The mask is the form's support.
+    Scaled(ParamMask),
+    /// The value provably is a compile-time constant (a `*.const` literal, or an
+    /// `add`/`sub`/`mul`/`shl` of two `Const`s). `Some` carries the value —
+    /// needed because a multiplier's or shift count's parity decides the
+    /// product's tag — and `None` records constancy whose value is not modeled
+    /// (a float literal, or two different constants merged at a join).
+    /// Caller-independent: never a valid memory address on its own, but a valid
+    /// *offset* to add to a `Param` base.
+    Const(Option<i64>),
+    /// The value derives from a global, call result, load, a
+    /// parameter-cancelling operator, a product or shift the analysis cannot
+    /// resolve to an affine form, or any source it cannot classify. The
+    /// fail-closed default.
     NotParam,
 }
 
 impl Prov {
-    /// The must-join: a value stays `Param` only when *both* operands are
-    /// `Param`, with the **union** of their masks (on every path it derives from
-    /// some parameter, so on the merged path it derives from one of the union).
-    /// Two `Const`s stay `Const`; anything else widens to `NotParam`. Used to
-    /// merge a local (or a stack slot) across control-flow paths.
+    /// The must-join: a value keeps its tag only when both incoming paths carry
+    /// it, and widens to `NotParam` otherwise. Two `Const`s of the same value
+    /// stay that constant; two differing ones stay a constant of unmodeled
+    /// value. Used to merge a local (or a stack slot) across control-flow paths.
     fn join(self, other: Prov) -> Prov {
         match (self, other) {
-            (Prov::Param(a), Prov::Param(b)) => Prov::Param(a.union(b)),
-            (Prov::Const, Prov::Const) => Prov::Const,
+            (Prov::Param(a), Prov::Param(b)) => Prov::Param(a.join(b)),
+            (Prov::Scaled(a), Prov::Scaled(b)) => Prov::Scaled(a.union(b)),
+            (Prov::Const(a), Prov::Const(b)) if a == b => Prov::Const(a),
+            (Prov::Const(_), Prov::Const(_)) => Prov::Const(None),
             _ => Prov::NotParam,
         }
     }
 
-    /// The mask of parameters this value derives from, empty for a non-`Param`.
-    fn mask(self) -> ParamMask {
+    /// The parameter dependence recorded for this value at an access or a call
+    /// argument. Only a `Param` carries a proven odd coefficient; every other
+    /// tag yields an empty `odd` and so can never be live.
+    fn dependence(self) -> Linear {
         match self {
-            Prov::Param(m) => m,
-            _ => ParamMask::EMPTY,
+            Prov::Param(l) => l,
+            Prov::Scaled(m) => Linear::opaque(m),
+            Prov::Const(_) | Prov::NotParam => Linear::opaque(ParamMask::EMPTY),
         }
     }
+}
+
+/// Whether `dep` provably moves with the host's arguments, given the parameters
+/// `trust` justifies in the function that computed it.
+///
+/// Three conditions, each closing a different escape:
+///
+/// - a proven **odd coefficient** (`odd` non-empty), so the form is a bijection
+///   in some parameter and no constant folding can flatten it — this is what a
+///   `Const`, a `Scaled` (`p*0`) and a `NotParam` all fail;
+/// - the whole **support** within `trust`, so every parameter the form leans on,
+///   including the even-coefficient ones, is itself known to move with the host;
+/// - where the parameters may be **correlated** — any function an internal call
+///   site targets, the closure root included once recursion re-enters it — the
+///   odd coefficient resting on a *single* parameter, so two odd coefficients a
+///   caller correlated cannot cancel each other.
+fn is_live(dep: Linear, trust: ParamMask, correlated: bool) -> bool {
+    !dep.odd.is_empty() && dep.support.is_subset_of(trust) && (!correlated || dep.single_odd)
 }
 
 /// The abstract state at a program point: the provenance of every local and of
@@ -316,12 +543,32 @@ impl State {
 }
 
 /// A direct `call` site recorded during a function's summary pass: the callee's
-/// global function index and the provenance mask of each argument, expressed in
-/// the *calling* function's own parameter terms.
+/// global function index and the parameter dependence of each argument,
+/// expressed in the *calling* function's own parameter terms.
 #[derive(Debug, Clone)]
 struct CallSite {
     callee: u32,
-    arg_masks: Vec<ParamMask>,
+    arg_deps: Vec<Linear>,
+}
+
+/// What a recorded memory operand is, which decides how strictly it is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    /// A linear-memory address. Held to the full [`is_live`] rule, correlation
+    /// clause included.
+    Address,
+    /// The size operand of a bulk-memory op, which bounds the region touched
+    /// rather than naming it. Held to the same rule minus the correlation
+    /// clause, so a helper may still combine two caller-supplied lengths; see
+    /// "Address masks and extent masks are checked differently".
+    Extent,
+}
+
+/// One recorded memory operand: what it is, and what it depends on.
+#[derive(Debug, Clone, Copy)]
+struct Access {
+    kind: AccessKind,
+    dep: Linear,
 }
 
 /// The flow-sensitive summary of one function, computed *once* with each
@@ -332,16 +579,14 @@ struct CallSite {
 struct FunctionSummary {
     /// The number of leading locals that are parameters.
     param_count: usize,
-    /// One entry per memory access: the provenance mask of its required address
-    /// operand(s) (`memory.copy` records one entry each for its dest and src so
-    /// the single subset check covers both). For a bulk-memory op the **size /
-    /// extent** operand is recorded as its own entry too: the op touches the
-    /// whole region `[address, address + size)`, so a caller-bounded start is not
-    /// enough — the extent must be caller-derived as well, or a constant size
-    /// could clobber an unbounded region above a caller pointer. An empty mask is
-    /// an address or extent the pass could not prove parameter-derived — it can
-    /// never satisfy the subset check, so it rejects unconditionally.
-    accesses: Vec<ParamMask>,
+    /// One entry per memory operand the analysis must justify: every address
+    /// (`memory.copy` records one each for its dest and src) and, for a
+    /// bulk-memory op, its **size / extent** as well. Such an op touches the
+    /// whole region `[address, address + size)`, so a caller-bounded start is
+    /// not enough — a constant size could clobber an unbounded region above a
+    /// caller pointer. A dependence with no proven odd coefficient can never
+    /// satisfy [`is_live`], so it rejects unconditionally.
+    accesses: Vec<Access>,
     /// One entry per direct `call` site, in body order.
     calls: Vec<CallSite>,
 }
@@ -394,14 +639,16 @@ pub(crate) fn verify_param_addressing(
     // 2. Greatest fixpoint: trusted[g] starts as all of g's params, root keeps
     //    them all, and any param contradicted at a reachable call site is removed
     //    until the assignment stabilises.
-    let trusted = compute_trusted_params(&summaries, root);
+    let trust_model = compute_trusted_params(&summaries, root);
 
-    // 3. Verify every access: its address mask must be a non-empty subset of its
-    //    function's trusted set.
+    // 3. Verify every recorded operand against its function's trusted set, with
+    //    the correlation clause applied only to addresses.
     for (&func_idx, summary) in &summaries {
-        let trust = trusted.get(&func_idx).copied().unwrap_or(ParamMask::EMPTY);
-        for &access in &summary.accesses {
-            if access.is_empty() || !access.is_subset_of(trust) {
+        let trust = trust_model.trusted_of(func_idx);
+        let correlated = trust_model.is_correlated(func_idx);
+        for access in &summary.accesses {
+            let correlation_applies = correlated && access.kind == AccessKind::Address;
+            if !is_live(access.dep, trust, correlation_applies) {
                 return Err(reject(
                     field,
                     "accesses memory at an address not derived from the exported function's \
@@ -416,19 +663,50 @@ pub(crate) fn verify_param_addressing(
     Ok(())
 }
 
+/// Which parameters of each closure function are caller-derived, and which
+/// functions an internal call site may have handed correlated arguments.
+#[derive(Debug, Default)]
+struct TrustModel {
+    trusted: std::collections::BTreeMap<u32, ParamMask>,
+    /// Every function some internal `call` targets. Their parameters are not
+    /// independent host coordinates, so an address there must rest its odd
+    /// coefficient on a single parameter.
+    correlated: std::collections::BTreeSet<u32>,
+}
+
+impl TrustModel {
+    /// The trusted parameters of `func_idx`, empty for a function the fixpoint
+    /// never reached (fail closed).
+    fn trusted_of(&self, func_idx: u32) -> ParamMask {
+        self.trusted
+            .get(&func_idx)
+            .copied()
+            .unwrap_or(ParamMask::EMPTY)
+    }
+
+    fn is_correlated(&self, func_idx: u32) -> bool {
+        self.correlated.contains(&func_idx)
+    }
+}
+
 /// Computes, for every summarised function, the subset of its parameters that are
-/// provably caller-derived (the *greatest* fixpoint).
+/// provably caller-derived (the *greatest* fixpoint), together with the set of
+/// functions an internal call site targets.
 ///
 /// The root has an implicit **external** call site — the host that calls the
 /// exported function and supplies its pointer arguments — that justifies all of
 /// the root's parameters. Every other function is justified only by the *internal*
 /// `call` sites inside the closure. A parameter of a function `g` is trusted only
 /// when it is justified at the external site (root only) *and* at every internal
-/// call site `f → g`: the argument in that position must be non-empty and a subset
-/// of `f`'s own trusted set. Crucially the root is **not** exempt from its own
-/// internal call sites: a self- or mutually-recursive call that passes a constant
-/// for a root parameter demotes it, because the recursive invocation re-enters the
-/// root with an argument the host never supplied.
+/// call site `f → g`: the argument in that position must be [`is_live`] in `f`.
+/// The root is **not** exempt from its own internal call sites — a self- or
+/// mutually-recursive call re-enters it with arguments the host never chose.
+///
+/// The same traversal records which functions have an internal call site at all.
+/// That is what marks a function's parameters *correlated*: a caller free to pass
+/// `(a, -a)` breaks the independence that lets two odd coefficients be summed, so
+/// the verifier holds every address in such a function to a single odd
+/// coefficient. The root is included the moment recursion re-enters it.
 ///
 /// Starting from "all parameters trusted" and removing any parameter a reachable
 /// call site contradicts is monotone (a parameter never re-enters once removed)
@@ -439,7 +717,14 @@ pub(crate) fn verify_param_addressing(
 fn compute_trusted_params(
     summaries: &std::collections::BTreeMap<u32, FunctionSummary>,
     root: u32,
-) -> std::collections::BTreeMap<u32, ParamMask> {
+) -> TrustModel {
+    // Correlation does not depend on the fixpoint, so the call sites are walked
+    // once here and the result reused on every round and by the verifier.
+    let correlated: std::collections::BTreeSet<u32> = summaries
+        .values()
+        .flat_map(|summary| summary.calls.iter().map(|call| call.callee))
+        .collect();
+
     // Optimistic seed: every function starts all-trusted and the fixpoint pares
     // each one down against the current assignment until it stabilises.
     let mut trusted: std::collections::BTreeMap<u32, ParamMask> = summaries
@@ -454,19 +739,18 @@ fn compute_trusted_params(
             // The root's external caller justifies all params and always counts as
             // a caller; a non-root is justified only by internal call sites.
             let mut justified = ParamMask::first_n(summary.param_count);
-            let mut has_caller = callee == root;
+            let has_caller = callee == root || correlated.contains(&callee);
 
             for (&caller, caller_summary) in summaries {
                 let caller_trust = trusted.get(&caller).copied().unwrap_or(ParamMask::EMPTY);
+                let caller_correlated = correlated.contains(&caller);
                 for call in &caller_summary.calls {
                     if call.callee != callee {
                         continue;
                     }
-                    has_caller = true;
                     for j in 0..summary.param_count {
-                        let arg = call.arg_masks.get(j).copied().unwrap_or(ParamMask::EMPTY);
-                        let arg_trusted = !arg.is_empty() && arg.is_subset_of(caller_trust);
-                        if !arg_trusted {
+                        let arg = call.arg_deps.get(j).copied().unwrap_or_default();
+                        if !is_live(arg, caller_trust, caller_correlated) {
                             justified = justified.without(j);
                         }
                     }
@@ -489,7 +773,10 @@ fn compute_trusted_params(
         }
     }
 
-    trusted
+    TrustModel {
+        trusted,
+        correlated,
+    }
 }
 
 /// Builds the Tier-C rejection error naming `field` with a single `reason`.
@@ -516,7 +803,12 @@ fn summarize_function(
     let local_count = count_and_cap_locals(&func_body, param_count, body.len())?;
     let mut locals = vec![Prov::NotParam; local_count];
     for (i, slot) in locals.iter_mut().take(param_count).enumerate() {
-        *slot = Prov::Param(ParamMask::single(i));
+        // A parameter past the mask's 64-bit range has no representable
+        // identity, so it stays the opaque default rather than seeding a
+        // `Param` whose odd support cannot name it.
+        if i < 64 {
+            *slot = Prov::Param(Linear::of_param(i));
+        }
     }
 
     let ops = collect_operators(&func_body)?;
@@ -553,7 +845,10 @@ fn summarize_function(
     if interp.interpret(0, body_end, entry, 0)?.is_none() {
         // Record an unprovable access so the verifier rejects this function even
         // if it had no explicit memory op (a deep-nesting / structural reject).
-        summary.accesses.push(ParamMask::EMPTY);
+        summary.accesses.push(Access {
+            kind: AccessKind::Address,
+            dep: Linear::default(),
+        });
     }
     Ok(summary)
 }
@@ -561,6 +856,11 @@ fn summarize_function(
 /// Single-function convenience used by the unit tests: runs [`summarize_function`]
 /// over one body, treating that function as its own closure root (all parameters
 /// trusted), and reports whether every memory access is provably parameter-derived.
+///
+/// The modeled root is entered only by the host, so its parameters are
+/// independent coordinates and the correlation clause of [`is_live`] does not
+/// apply. A body that recursed into itself would need the whole-closure
+/// [`verify_param_addressing`] to see that call site.
 #[cfg(test)]
 fn function_is_param_addressing(
     module: &ParsedModule,
@@ -572,7 +872,7 @@ fn function_is_param_addressing(
     Ok(summary
         .accesses
         .iter()
-        .all(|access| !access.is_empty() && access.is_subset_of(trusted)))
+        .all(|access| is_live(access.dep, trusted, false)))
 }
 
 /// Collects the body's operator stream into an owned vector. The body length is
@@ -832,10 +1132,10 @@ impl<'a, 'b> Interp<'a, 'b> {
         let (param_arity, result_arity) = self.block_arity(blockty);
         let mut header_in = self.block_entry_state(outer, param_arity);
 
-        // Fixpoint: re-run the body until the header entry state stops changing.
-        // Each iteration can only flip slots Param -> NotParam, so the loop
-        // terminates in at most (slot count + 1) rounds.
-        let max_rounds = header_in.locals.len() + header_in.stack.len() + 2;
+        let max_rounds = fixpoint_round_cap(
+            header_in.locals.len() + header_in.stack.len(),
+            self.summary.param_count,
+        );
         let mut final_region;
         let mut rounds = 0;
         loop {
@@ -853,8 +1153,15 @@ impl<'a, 'b> Interp<'a, 'b> {
 
             final_region = region;
             rounds += 1;
-            if next_header == header_in || rounds >= max_rounds {
+            if next_header == header_in {
                 break;
+            }
+            if rounds >= max_rounds {
+                // The cap was not reached by descending the lattice, so the
+                // states seen so far are more precise than the fixpoint and
+                // must not be trusted. Reject rather than accept a `Param` the
+                // next round would have demoted.
+                return Ok(None);
             }
             header_in = next_header;
         }
@@ -985,9 +1292,19 @@ impl<'a, 'b> Interp<'a, 'b> {
             }
 
             // -- Constant literals: caller-independent constants (a valid offset
-            //    to add to a Param base, never a valid address on their own). --
-            I32Const { .. } | I64Const { .. } | F32Const { .. } | F64Const { .. } => {
-                state.stack.push(Prov::Const);
+            //    to add to a Param base, never a valid address on their own).
+            //    The integer value rides along because a multiplier's or shift
+            //    count's parity decides whether a product keeps an odd
+            //    coefficient; a float literal can be neither, so it records
+            //    constancy alone. --
+            I32Const { value } => {
+                state.stack.push(Prov::Const(Some(i64::from(*value))));
+            }
+            I64Const { value } => {
+                state.stack.push(Prov::Const(Some(*value)));
+            }
+            F32Const { .. } | F64Const { .. } => {
+                state.stack.push(Prov::Const(None));
             }
 
             // -- Sources that are neither parameter-derived nor proven constant:
@@ -1003,7 +1320,7 @@ impl<'a, 'b> Interp<'a, 'b> {
             | I64Load16S { .. } | I64Load16U { .. } | I64Load32S { .. }
             | I64Load32U { .. } => {
                 let addr = pop(state);
-                record_access(summary, addr.mask());
+                record_address(summary, addr);
                 state.stack.push(Prov::NotParam);
             }
 
@@ -1013,7 +1330,7 @@ impl<'a, 'b> Interp<'a, 'b> {
             | I64Store16 { .. } | I64Store32 { .. } => {
                 pop(state); // the stored value
                 let addr = pop(state);
-                record_access(summary, addr.mask());
+                record_address(summary, addr);
             }
 
             // -- Bulk memory: both the address AND the extent operand must be
@@ -1032,10 +1349,10 @@ impl<'a, 'b> Interp<'a, 'b> {
                 // extent, so it must be caller-derived; the value is the fill
                 // byte (neither an address nor an extent) and is discarded.
                 let size = pop(state);
-                record_access(summary, size.mask());
+                record_extent(summary, size);
                 pop(state); // value (the fill byte)
                 let dest = pop(state);
-                record_access(summary, dest.mask());
+                record_address(summary, dest);
             }
             MemoryCopy { .. } => {
                 // Stack: [dest, src, size]; both dest and src are addresses and
@@ -1043,11 +1360,11 @@ impl<'a, 'b> Interp<'a, 'b> {
                 // trusted. Each is recorded as its own access; the verifier
                 // rejects if any is empty or not a subset of the trusted set.
                 let size = pop(state);
-                record_access(summary, size.mask());
+                record_extent(summary, size);
                 let src = pop(state);
                 let dest = pop(state);
-                record_access(summary, dest.mask());
-                record_access(summary, src.mask());
+                record_address(summary, dest);
+                record_address(summary, src);
             }
             MemoryInit { .. } => {
                 // Stack: [dest, offset, size]; dest is the address and size
@@ -1056,10 +1373,10 @@ impl<'a, 'b> Interp<'a, 'b> {
                 // discarded. (memory.init also implies a data segment -> already
                 // Tier C; this is defense-in-depth on the destination and extent.)
                 let size = pop(state);
-                record_access(summary, size.mask());
+                record_extent(summary, size);
                 pop(state); // offset (into the data segment, not linear memory)
                 let dest = pop(state);
-                record_access(summary, dest.mask());
+                record_address(summary, dest);
             }
 
             // -- memory.size / memory.grow yield page counts, never addresses --
@@ -1091,10 +1408,10 @@ impl<'a, 'b> Interp<'a, 'b> {
             Call { function_index } => {
                 let sig = module.func_sig(*function_index).cloned();
                 if let Some(sig) = sig.as_ref() {
-                    let arg_masks = top_arg_masks(state, sig.params.len());
+                    let arg_deps = top_arg_deps(state, sig.params.len());
                     summary.calls.push(CallSite {
                         callee: *function_index,
-                        arg_masks,
+                        arg_deps,
                     });
                 }
                 apply_call(sig.as_ref(), state);
@@ -1141,9 +1458,10 @@ impl<'a, 'b> Interp<'a, 'b> {
             }
             Nop => {}
 
-            // -- Arithmetic: only `add` and the constrained `sub` propagate Param;
-            //    every other binary and every unary op produces NotParam (each can
-            //    cancel the caller contribution). --
+            // -- Arithmetic: `add`, the constrained `sub`, and scaling by a
+            //    constant propagate an affine form; every other binary and every
+            //    unary op produces NotParam (each can cancel the caller
+            //    contribution). --
             _ if is_add(op) => {
                 let a = pop(state);
                 let b = pop(state);
@@ -1154,6 +1472,25 @@ impl<'a, 'b> Interp<'a, 'b> {
                 let a = pop(state); // subtrahend (top)
                 let b = pop(state); // minuend
                 state.stack.push(sub_prov(b, a));
+            }
+            I32Mul | I64Mul => {
+                let a = pop(state);
+                let b = pop(state);
+                state.stack.push(mul_prov(a, b));
+            }
+            // The two shift widths are separate arms because WebAssembly reduces
+            // the count modulo the operand width, and which width applies decides
+            // whether a count is a no-op.
+            I32Shl => {
+                // WASM stack for `v << s` is [v, s] with the count on top.
+                let count = pop(state);
+                let value = pop(state);
+                state.stack.push(shl_prov(value, count, 32));
+            }
+            I64Shl => {
+                let count = pop(state);
+                let value = pop(state);
+                state.stack.push(shl_prov(value, count, 64));
             }
             _ if is_other_binary(op) => {
                 pop(state);
@@ -1318,20 +1655,31 @@ enum StepOutcome {
     Unreachable,
 }
 
-/// Records one memory access's address mask into `summary`. `memarg.offset` is
+/// Records one memory address operand into `summary`. `memarg.offset` is
 /// deliberately not consulted: a `param + N` effective address still varies with
 /// the caller's pointer and can never reach a caller-independent host location,
-/// so the offset cannot turn a trusted base into an untrusted one. An empty mask
-/// (an address not provably parameter-derived) is recorded as-is; the verifier
-/// rejects it.
-fn record_access(summary: &mut FunctionSummary, mask: ParamMask) {
-    summary.accesses.push(mask);
+/// so the offset cannot turn a trusted base into an untrusted one. A dependence
+/// with no proven odd coefficient is recorded as-is; the verifier rejects it.
+fn record_address(summary: &mut FunctionSummary, addr: Prov) {
+    summary.accesses.push(Access {
+        kind: AccessKind::Address,
+        dep: addr.dependence(),
+    });
 }
 
-/// The provenance masks of the top `count` operand-stack slots, deepest-first
-/// (so index `j` is the `j`-th call argument). Underflow slots default to the
-/// empty mask (fail closed).
-fn top_arg_masks(state: &State, count: usize) -> Vec<ParamMask> {
+/// Records a bulk-memory op's size operand, which bounds the region touched
+/// rather than naming it and so skips the correlation clause of [`is_live`].
+fn record_extent(summary: &mut FunctionSummary, size: Prov) {
+    summary.accesses.push(Access {
+        kind: AccessKind::Extent,
+        dep: size.dependence(),
+    });
+}
+
+/// The parameter dependence of the top `count` operand-stack slots,
+/// deepest-first (so index `j` is the `j`-th call argument). Underflow slots
+/// default to a dependence with no odd coefficient (fail closed).
+fn top_arg_deps(state: &State, count: usize) -> Vec<Linear> {
     let depth = state.stack.len();
     (0..count)
         .map(|j| {
@@ -1339,8 +1687,8 @@ fn top_arg_masks(state: &State, count: usize) -> Vec<ParamMask> {
             depth
                 .checked_sub(count - j)
                 .and_then(|idx| state.stack.get(idx))
-                .map(|prov| prov.mask())
-                .unwrap_or(ParamMask::EMPTY)
+                .map(|prov| prov.dependence())
+                .unwrap_or_default()
         })
         .collect()
 }
@@ -1447,28 +1795,124 @@ fn result_tail(stack: &[Prov], result_arity: usize) -> Vec<Prov> {
     }
 }
 
-/// The provenance of `a + b`. `add` is commutative, so the rule is symmetric in
-/// its operands.
+/// The provenance of `a + b`. Adding two affine forms adds their coefficients,
+/// so the rule is entirely about what that does to parity. `add` is commutative,
+/// so the rule is symmetric in its operands.
 ///
-/// - `Param + Param`: two genuine caller values; the result varies with the
-///   caller's inputs (`a6`/`a13`). The mask is the **union**: the sum derives
-///   from every parameter either operand does. `Param`.
+/// - `Param + Param` with **disjoint** odd supports: no coefficient can pair up,
+///   so every odd one survives and the sum keeps at least one (`a6`/`a13`). The
+///   result carries the union of both, and no longer rests on a single
+///   parameter — two odd coefficients are what a correlating call site can
+///   cancel, which is why `single_odd` clears here.
+/// - `Param + Param` with odd supports that **may overlap**: the two odd
+///   coefficients may sit on the same parameter, where they sum to an even one.
+///   `p + p == 2p`, and thirty-two of those reach `2^32*p == 0`. `NotParam`.
+/// - `Param + Scaled` / `Scaled + Param`: odd plus even is odd, whatever the
+///   parameters are and however they correlate. The odd support is unchanged and
+///   the scaled operand's support joins the total — this is the scaled-index
+///   idiom `base + index * elem_size`. `Param`.
 /// - `Param + Const` / `Const + Param`: `caller_base + fixed_offset` provably
 ///   still varies with the caller's pointer (the struct-field / array-element
-///   case `a2`/`a5`). The `Param` mask carries through unchanged.
+///   case `a2`/`a5`). The `Param` dependence carries through unchanged.
 /// - `Param + NotParam`: **unsound to keep `Param`.** `NotParam` means *not
 ///   provably parameter-derived*, not *constant*; it may hold `C - p`, and
 ///   `(C - p) + p == C` is a fixed, caller-independent absolute address. Demote
 ///   to `NotParam`.
-/// - `Const + Const`: a constant. `Const`.
+/// - `Scaled + Scaled` / `Scaled + Const`: even plus even stays even. `Scaled`.
+/// - `Const + Const`: a constant, folded when both values are modeled.
 /// - anything else: `NotParam`.
 fn add_prov(a: Prov, b: Prov) -> Prov {
     match (a, b) {
-        (Prov::Param(x), Prov::Param(y)) => Prov::Param(x.union(y)),
-        (Prov::Param(m), Prov::Const) | (Prov::Const, Prov::Param(m)) => Prov::Param(m),
-        (Prov::Const, Prov::Const) => Prov::Const,
+        (Prov::Param(x), Prov::Param(y)) => {
+            if x.odd.intersects(y.odd) {
+                Prov::NotParam
+            } else {
+                Prov::Param(Linear {
+                    odd: x.odd.union(y.odd),
+                    support: x.support.union(y.support),
+                    single_odd: false,
+                })
+            }
+        }
+        (Prov::Param(l), Prov::Scaled(m)) | (Prov::Scaled(m), Prov::Param(l)) => {
+            Prov::Param(Linear {
+                support: l.support.union(m),
+                ..l
+            })
+        }
+        (Prov::Param(l), Prov::Const(_)) | (Prov::Const(_), Prov::Param(l)) => Prov::Param(l),
+        (Prov::Scaled(x), Prov::Scaled(y)) => Prov::Scaled(x.union(y)),
+        (Prov::Scaled(m), Prov::Const(_)) | (Prov::Const(_), Prov::Scaled(m)) => Prov::Scaled(m),
+        (Prov::Const(x), Prov::Const(y)) => Prov::Const(fold(x, y, i64::wrapping_add)),
         _ => Prov::NotParam,
     }
+}
+
+/// The provenance of `a * b`, modeled only where one operand is a constant: a
+/// product of two non-constants is not an affine form at all.
+///
+/// The constant's **parity** decides everything. An odd multiplier is a unit
+/// modulo `2^32`/`2^64`, so it preserves the parity of every coefficient and the
+/// form stays a bijection in the same parameter. An even one turns every
+/// coefficient even — including all the way to zero for `p * 0`, which is why
+/// the result may no longer address memory. A constant whose value is not
+/// modeled decides nothing, so it fails closed.
+///
+/// A `Const` operand therefore never simply passes the other operand through: it
+/// either folds into the coefficients or, with an even value, demotes the form.
+fn mul_prov(a: Prov, b: Prov) -> Prov {
+    match (a, b) {
+        (Prov::Const(Some(x)), Prov::Const(Some(y))) => Prov::Const(Some(x.wrapping_mul(y))),
+        (Prov::Const(_), Prov::Const(_)) => Prov::Const(None),
+        (Prov::Param(l), Prov::Const(Some(k))) | (Prov::Const(Some(k)), Prov::Param(l)) => {
+            if k % 2 == 0 {
+                Prov::Scaled(l.support)
+            } else {
+                Prov::Param(l)
+            }
+        }
+        // Every coefficient is already even, and even times any compile-time
+        // constant stays even, so the value of the multiplier does not matter.
+        (Prov::Scaled(m), Prov::Const(_)) | (Prov::Const(_), Prov::Scaled(m)) => Prov::Scaled(m),
+        _ => Prov::NotParam,
+    }
+}
+
+/// The provenance of `value << count` on a `bits`-wide operand.
+///
+/// A shift by a constant is a multiply by `2^(count mod bits)`, and
+/// WebAssembly's modulo is the whole subtlety: a count of 32 on an `i32` shifts
+/// by **zero**, leaving the value untouched. Tagging that `Scaled` would assert
+/// "every coefficient is even" about a form whose coefficients are unchanged,
+/// and a later `Param + Scaled` would then re-promote a cancelling pair. So a
+/// count reducing to zero keeps the form exactly as it was, and only a genuine
+/// shift produces the even coefficients `Scaled` claims.
+///
+/// A non-constant count decides nothing about parity and fails closed.
+fn shl_prov(value: Prov, count: Prov, bits: u32) -> Prov {
+    let Prov::Const(Some(raw)) = count else {
+        return Prov::NotParam;
+    };
+    let shift = (raw as u64) % u64::from(bits);
+    if shift == 0 {
+        return value;
+    }
+    match value {
+        Prov::Const(Some(v)) => Prov::Const(Some(v.wrapping_shl(shift as u32))),
+        Prov::Const(None) => Prov::Const(None),
+        Prov::Param(l) => Prov::Scaled(l.support),
+        Prov::Scaled(m) => Prov::Scaled(m),
+        Prov::NotParam => Prov::NotParam,
+    }
+}
+
+/// Folds two modeled constants with `op`, yielding an unmodeled constant when
+/// either value is itself unmodeled. The fold is 64-bit even for a 32-bit
+/// operator; only the low bits are ever read back (a multiplier's parity, a
+/// shift count modulo the operand width), and those agree with the narrower
+/// result.
+fn fold(a: Option<i64>, b: Option<i64>, op: fn(i64, i64) -> i64) -> Option<i64> {
+    Some(op(a?, b?))
 }
 
 /// The provenance of `b - a` (minuend `b`, subtrahend `a`).
@@ -1483,12 +1927,20 @@ fn add_prov(a: Prov, b: Prov) -> Prov {
 /// - `Param - Param`: may be `b - b == 0`, a caller-independent constant
 ///   (`n1`/`n6`). `NotParam`.
 /// - `Const - Const`: a constant. `Const`.
+/// - `Scaled - Const`: negating nothing and shifting by a constant leaves every
+///   coefficient even. `Scaled`.
 /// - anything else (including `Const - Param`, which negates the caller
 ///   contribution to `C - p` that a later `add` must not re-promote): `NotParam`.
+///
+/// `Const - Param` stays `NotParam` even though negation preserves parity and
+/// the `add` rule would now catch the `(C - p) + p` cancellation on its own. The
+/// looser rule buys no real pattern and would flip `cancel6`'s rejection of a
+/// bare `C - p` address, so the conservative classification stands.
 fn sub_prov(b: Prov, a: Prov) -> Prov {
     match (b, a) {
-        (Prov::Param(m), Prov::Const) => Prov::Param(m),
-        (Prov::Const, Prov::Const) => Prov::Const,
+        (Prov::Param(l), Prov::Const(_)) => Prov::Param(l),
+        (Prov::Scaled(m), Prov::Const(_)) => Prov::Scaled(m),
+        (Prov::Const(x), Prov::Const(y)) => Prov::Const(fold(x, y, i64::wrapping_sub)),
         _ => Prov::NotParam,
     }
 }
@@ -1505,10 +1957,18 @@ fn is_sub(op: &Operator) -> bool {
     matches!(op, I32Sub | I64Sub | F32Sub | F64Sub)
 }
 
-/// Whether `op` is a two-operand numeric instruction *other than* add/sub: a
-/// multiply, divide, remainder, bitwise op, shift, rotate, float min/max/
-/// copysign, or any comparison. Each can cancel the caller contribution to a
-/// caller-independent value, so its result is unconditionally `NotParam`.
+/// Whether `op` is a two-operand numeric instruction *other than* add, sub, and
+/// the integer multiply and left shift: a divide, remainder, bitwise op, right
+/// shift, rotate, float multiply/min/max/copysign, or any comparison. Each can
+/// cancel the caller contribution to a caller-independent value, so its result
+/// is unconditionally `NotParam`.
+///
+/// Integer `mul` and `shl` are the exceptions and are handled by their own
+/// transfer functions: scaling an affine form by a constant is still an affine
+/// form, and the constant's parity says whether it can still address memory.
+/// `shr` is not among them — it is not a multiply, and it is exactly how a
+/// module would divide a parameter back out. Float `mul` is not among them
+/// either, since parity means nothing for a float.
 fn is_other_binary(op: &Operator) -> bool {
     use Operator::*;
     matches!(
@@ -1518,10 +1978,10 @@ fn is_other_binary(op: &Operator) -> bool {
             | I64Eq | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS
             | I64GeU | F32Eq | F32Ne | F32Lt | F32Gt | F32Le | F32Ge | F64Eq | F64Ne | F64Lt
             | F64Gt | F64Le | F64Ge
-        // i32 / i64 multiplicative, bitwise, shift, rotate
-            | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or | I32Xor | I32Shl
-            | I32ShrS | I32ShrU | I32Rotl | I32Rotr | I64Mul | I64DivS | I64DivU | I64RemS
-            | I64RemU | I64And | I64Or | I64Xor | I64Shl | I64ShrS | I64ShrU | I64Rotl | I64Rotr
+        // i32 / i64 divisive, bitwise, right shift, rotate
+            | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or | I32Xor
+            | I32ShrS | I32ShrU | I32Rotl | I32Rotr | I64DivS | I64DivU | I64RemS
+            | I64RemU | I64And | I64Or | I64Xor | I64ShrS | I64ShrU | I64Rotl | I64Rotr
         // float multiplicative / min / max / copysign
             | F32Mul | F32Div | F32Min | F32Max | F32Copysign | F64Mul | F64Div | F64Min | F64Max
             | F64Copysign
@@ -1551,5 +2011,7 @@ fn is_unary(op: &Operator) -> bool {
     )
 }
 
+#[cfg(test)]
+mod differential;
 #[cfg(test)]
 mod tests;

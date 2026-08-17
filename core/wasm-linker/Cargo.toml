@@ -20,3 +20,8 @@ wat = "1.225.0"
 inf-wasmparser = { workspace = true }
 inference-wasm-to-v-translator = { workspace = true }
 rustc-hash = { workspace = true }
+# Runs the provenance fixtures for real, so the analysis verdict can be compared
+# against the addresses a module actually touches. The comparison needs the
+# crate-private `verify_param_addressing`, so it lives in an in-crate test module
+# rather than an integration test.
+wasmtime = "47.0.3"
