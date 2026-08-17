@@ -18,6 +18,12 @@
 //! module's own bodies are re-encoded too, because removing imports shifts
 //! their local-function indices and redirects their calls to satisfied imports
 //! onto the merged bodies.
+//!
+//! The output **global** space is built the same way and rewritten through the
+//! same pass: the main module's globals keep indices `0..`, and each external
+//! whose merged closure reads or writes a global has its whole global section
+//! appended after them. Main's indices being fixed is what leaves its bodies and
+//! its global exports untouched.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -165,6 +171,18 @@ struct Plan {
     /// Per external module: `source_type_idx -> output type idx` for the types
     /// its merged closure references.
     external_type_remap: Vec<BTreeMap<u32, u32>>,
+    /// Output global section: the main module's globals at their original
+    /// indices, followed by the globals of each external that contributes one.
+    ///
+    /// Main keeps indices `0..main.globals.len()` so its own bodies and its
+    /// global exports need no rewriting at all.
+    out_globals: Vec<GlobalDef>,
+    /// Per external module: `source_global_idx -> output global idx`, total over
+    /// the external's declared globals when it contributes them and **empty**
+    /// when it does not. The empty case is load-bearing rather than incidental:
+    /// it is what turns a body that names a global against the closure scanner's
+    /// verdict into a clean [`LinkError`] instead of a rebind onto main's state.
+    external_global_remap: Vec<BTreeMap<u32, u32>>,
     /// What the completed merge owes the user beyond the bytes themselves.
     warnings: Vec<LinkWarning>,
     /// The single shared linear memory the output declares, reconciled across
@@ -305,6 +323,13 @@ impl Plan {
         // warning, so each field is recorded once.
         let mut tier_b_fields: Vec<String> = Vec::new();
 
+        // Whether any merged closure of each external reads or writes a global,
+        // which decides whether that external's global declarations are carried
+        // into the output. One external may satisfy several imports, so this
+        // accumulates across its closures: the whole module's globals are
+        // contributed once, as a unit, if any of them are touched.
+        let mut external_contributes_globals = vec![false; externals.len()];
+
         // 3. For every satisfied import, compute its closure, classify the tier,
         //    and allocate output indices + output types for the whole closure.
         for (import_idx, &(ext_idx, root)) in satisfied.iter().enumerate() {
@@ -349,6 +374,7 @@ impl Plan {
             if verdict == Tier::B && !tier_b_fields.contains(field) {
                 tier_b_fields.push(field.clone());
             }
+            external_contributes_globals[ext_idx] |= cl.effects.uses_globals;
 
             // Reconcile this external's memory into the shared output memory:
             // fold in its declared limits (widening minimum/maximum) and check
@@ -487,6 +513,38 @@ impl Plan {
             }
         }
 
+        // Build the output global space: main's globals keep indices `0..`, and
+        // each contributing external's are appended after them.
+        //
+        // Identical globals across two externals are **not** deduplicated, and
+        // this is the one place where the merge's treatment of globals and its
+        // treatment of signatures must diverge. `intern_sig` collapses two
+        // structurally identical function types because a type is a *description*
+        // — two modules naming the same shape mean the same thing by it. A global
+        // is not a description but a variable: two externals that each declare
+        // `(global (mut i32) (i32.const 0))` have a counter apiece, and collapsing
+        // them would splice two modules' independent state into one cell, where
+        // each module's writes silently become the other's reads. Nothing
+        // downstream would object — the module validates, and the `.v` describes
+        // the collapsed machine faithfully.
+        //
+        // Externals are walked in slice order rather than in the order their
+        // imports were satisfied, so the output global space depends only on the
+        // input, not on the order the main module happens to list its imports in.
+        let mut out_globals = main.globals.clone();
+        let mut external_global_remap: Vec<BTreeMap<u32, u32>> =
+            externals.iter().map(|_| BTreeMap::new()).collect();
+        for (ext_idx, external) in externals.iter().enumerate() {
+            if !external_contributes_globals[ext_idx] {
+                continue;
+            }
+            for (source_idx, global) in external.globals.iter().enumerate() {
+                external_global_remap[ext_idx]
+                    .insert(source_idx as u32, out_globals.len() as u32);
+                out_globals.push(global.clone());
+            }
+        }
+
         let reconciled_memory = memory.finish();
 
         Ok(Plan {
@@ -497,6 +555,8 @@ impl Plan {
             merged,
             merged_index,
             external_type_remap,
+            out_globals,
+            external_global_remap,
             warnings: unbounded_reach_warning(&tier_b_fields, reconciled_memory.as_ref())
                 .into_iter()
                 .collect(),
@@ -599,10 +659,13 @@ impl Plan {
             module.section(&memory);
         }
 
-        // Global section (main globals only; external globals are Tier C).
-        if !main.globals.is_empty() {
+        // Global section: main's globals, then each contributing external's.
+        // Emitted from the plan rather than from `main` directly, so a main
+        // module that declares no globals of its own still gets a section when an
+        // external brings one.
+        if !self.out_globals.is_empty() {
             let mut globals = GlobalSection::new();
-            for g in &main.globals {
+            for g in &self.out_globals {
                 globals.global(map_global_type(g)?, &map_global_init(g.init));
             }
             module.section(&globals);
@@ -810,9 +873,24 @@ impl Plan {
                     LinkError::Parse(format!("main body references type index {idx} out of range"))
                 })
         };
+        // Identity: main's globals are emitted first and keep their source
+        // indices, so no main-module body needs rewriting. The bounds check is
+        // not redundant with that — it keeps the identity honest, so a main body
+        // naming a global the module never declared errors here instead of
+        // selecting whichever external's global landed at that index.
+        let global = |idx: u32| {
+            if (idx as usize) < main.globals.len() {
+                Ok(idx)
+            } else {
+                Err(LinkError::Parse(format!(
+                    "main body references global index {idx} out of range"
+                )))
+            }
+        };
         let map = IndexMap {
             func: &func,
             ty: &ty,
+            global: &global,
         };
         let function = reencode_body(body, &map, BodyOrigin::Main)?;
         if let Some(e) = func_err.into_inner() {
@@ -846,9 +924,18 @@ impl Plan {
                 ))
             })
         };
+        let global_remap = &self.external_global_remap[external_idx];
+        let global = |idx: u32| {
+            global_remap.get(&idx).copied().ok_or_else(|| {
+                LinkError::UnsupportedConstruct(format!(
+                    "merged body references an unmapped global index {idx}"
+                ))
+            })
+        };
         let map = IndexMap {
             func: &func,
             ty: &ty,
+            global: &global,
         };
         let function = reencode_body(body, &map, BodyOrigin::External)?;
         if let Some(e) = func_err.into_inner() {

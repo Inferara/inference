@@ -142,13 +142,15 @@ Whether an external function can be merged depends on what its transitive closur
 touches. The tier model ships the common cases first and gates the hard case
 behind a clear error rather than attempting an unsound merge.
 
-### Tier A — Pure Functions
+### Tier A — No Linear-Memory Access
 
-No memory accesses, no global or table access, no data segments. Examples: `sum`,
-`sub`, `abs`, any function that only reads its parameters and does arithmetic.
+No memory accesses, no table access, no data segments. The closure may read and
+write its own module's globals. Examples: `sum`, `sub`, `abs`, any function that
+only reads its parameters and does arithmetic, and a function that keeps a
+counter or a mode flag in a global.
 
-Merge cost: copy the body, dedup the type, rewrite `call` targets. No address
-relocation needed.
+Merge cost: copy the body, dedup the type, rewrite `call` targets and global
+indices. No address relocation needed.
 
 ```wat
 ;; Tier A: pure arithmetic — trivially mergeable
@@ -161,8 +163,8 @@ relocation needed.
 ### Tier B — Memory Through Caller-Passed Pointers
 
 The closure loads or stores through addresses the caller supplies, but defines no
-static data of its own, reads or writes no global, and names no table or element
-entry. Examples: `sort(ptr, len)`, `memcpy(dst, src, n)`.
+static data of its own and names no table or element entry. Examples:
+`sort(ptr, len)`, `memcpy(dst, src, n)`.
 
 Merge cost: same as Tier A. The function shares the single linear memory the main
 module owns; no address relocation is required because all addresses are
@@ -210,15 +212,19 @@ a reconciled memory of more than one page raises a
 raised manifest setting: a main configured to two pages and a memoryless main
 adopting a seventeen-page external memory have lost the same backstop.
 
-### Tier C — Own Static Data, Global Access, or Table Use
+### Tier C — Own Static Data or Table Use
 
-Any one of three signals puts a candidate here: the module carries its own
-baked-in data segments (lookup tables, string constants) or an element segment
-that initializes a table; or the closure reads or writes a module global
-(per-module mutable state); or the closure names the table space (indirect calls,
+Either of two signals puts a candidate here: the module carries its own baked-in
+data segments (lookup tables, string constants) or an element segment that
+initializes a table; or the closure names the table space (indirect calls,
 `table.*`, `ref.func`). Merging these without relocation metadata would silently
-produce an incorrect module because the absolute addresses and per-module state
+produce an incorrect module because the absolute addresses and dispatch tables
 would alias unpredictably with the main module.
+
+Global access is **not** among them. The merge carries the whole global section
+of every external whose closure touches one into the output, re-indexed above the
+main module's; see [Merged globals](#merged-globals) for what that is and is not
+sound for.
 
 The linker rejects Tier-C inputs with `LinkError::RequiresRelocatableBuild` and
 a list of specific reasons. Build the external module with a
@@ -237,15 +243,16 @@ structure and the closure's `ClosureEffects`:
 | Signal | Tier-C reason |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | own static data segments |
-| closure uses `global.get` / `global.set` | reads or writes module globals |
-| `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| closure uses `call_indirect` / `table.*` / `ref.func` | performs an indirect call or otherwise names the table space |
+| `module.element_count > 0` | declares an element segment |
 
 If no Tier-C reasons are collected, the closure is Tier B when any body accesses
-memory (load/store/copy/fill/size/grow), and Tier A otherwise.
+memory (load/store/copy/fill/size/grow), and Tier A otherwise. Global use
+contributes no reason and decides no tier.
 
 #### Declaration versus use
 
-Globals and tables are gated on **use**; data segments on **declaration**. The
+Table use is gated on **use**; data and element segments on **declaration**. The
 asymmetry is deliberate.
 
 A global no closure body reads or writes, and a table with no element segment
@@ -272,20 +279,53 @@ because an element segment marks a module built around indirect dispatch, and
 admitting one would silently discard a construct the author wrote. Relaxing it is
 a deliberate decision, not an oversight.
 
-Dropping an admitted external's globals and tables is sound because
+Dropping an admitted external's inert globals and its tables is sound because
 `ClosureEffects` is **closure-scoped**: it is accumulated over the bodies
 reachable from the root export, so a closure admitted with no global or table
 effect contains no operator naming either index space.
 
-That property is load-bearing for **globals** in particular. The rewrite pass
-remaps function and type indices only, and the merge re-emits the main module's
-global section, so a leaked `global.get 0` in a merged body would rebind to
-*main's* first global and — the types agreeing, as two `i32` globals do — still
-pass post-merge validation. Wrong value, no diagnostic. For **tables** the
-failure mode is benign: no table section is emitted at all, so a leaked table
-operator names a table the output does not have and validation rejects it as an
-unknown table. Fail-safe, which is why the global half is the one that has to
-hold.
+Both halves are fail-safe if that were ever violated, for different reasons. A
+closure whose globals were dropped as untouched has an **empty** global remap, so
+a leaked `global.get` finds no mapping and surfaces a clean `LinkError`. For
+**tables** no table section is emitted at all, so a leaked table operator names a
+table the output does not have and validation rejects it as unknown.
+
+### Merged globals
+
+The output global space is the main module's globals at indices `0..`, followed
+by the whole global section of each external whose merged closure reads or writes
+one. Main's indices never shift, so its bodies and its global exports need no
+rewriting. Externals are appended in slice order, so the layout depends only on
+the input.
+
+Structurally identical globals are **not** deduplicated the way signatures are. A
+type is a description — two modules naming the same shape mean the same thing by
+it — but a global is a variable. Two externals that each declare
+`(global (mut i32) (i32.const 0))` have a counter apiece, and collapsing them
+would splice two modules' independent state into one cell, where each module's
+writes silently become the other's reads.
+
+**A globals lift is sound only for globals used as pure scalar state.** The merge
+re-indexes a global correctly and relocates its *value* not at all, and in real
+toolchain output that value is often an address: `__stack_pointer` and
+`__heap_base` hold positions in the layout the external was compiled for. Two
+things keep the admitted set narrow. A closure that touches memory is Tier B, so
+address provenance runs and treats a value read from a global as not
+parameter-derived — which rejects the shadow-stack idiom outright. And the main
+module cannot name an external's globals at all, since its own indices are
+unchanged and a main that *imports* a global is rejected up front.
+
+That protection is conditional: provenance runs only for a memory-touching
+closure. An external that merely *returns* `global.get $__stack_pointer` to a
+caller which then dereferences it is Tier A, admitted, and hands over an address
+that means something else after the merge. This is not opened by merging globals
+— nothing analyzes a scalar an external returns, and the same function written as
+`i32.const 1048576` links today with no global anywhere — but merging globals
+makes the shape common rather than exotic.
+
+For why this capability and a future one that places external data segments at
+their original addresses are mutually exclusive, see the module documentation of
+`src/tier.rs`.
 
 ### What this does not buy
 
@@ -424,7 +464,7 @@ Test coverage includes:
 - **Dead-code exclusion** — an unreferenced `unused` function is not merged
 - **Tier B** — `store_at` writes to a caller address; merge succeeds; memory export survives
 - **Tier C (data segment)** — `lookup` using `memory.init` is rejected with a data-segment reason
-- **Tier C (global)** — `counter` accessing a module global is rejected with a global reason
+- **Merged globals** — a global-reading external links and its body names the *external's* remapped global, not main's; two externals' structurally identical globals stay distinct; a global-bearing external merges onto a globalless main; a global used to address memory is still rejected by provenance
 - **Tier C (indirect call)** — `call_indirect` use is rejected with a table/element reason
 - **Multiple externals** — `sum` from one library and `sub` from another; both satisfied
 - **Unsatisfied import** — missing `sub` fails with `UnsatisfiedImport`

@@ -528,11 +528,12 @@ fn tier_b_merges_function_over_caller_memory() {
 /// space, rendered for the failure message, or `None` if the body names
 /// neither. `func_idx` of `None` scans every body.
 ///
-/// The merge emits the main module's globals only and preserves no table
-/// section, so a merged external body carrying one of these would silently
-/// rebind to a main-module entity (or to nothing). Used to confirm that
-/// admitting an external which *declares* a global or table leaves no operator
-/// behind that could resolve against the wrong module.
+/// Used on merges where no module contributes a global and the merge preserves
+/// no table section, to confirm that admitting an external which *declares*
+/// either leaves no operator behind that could resolve against the wrong module.
+/// Where an external legitimately contributes globals, [`body_global_indices`]
+/// is the sharper instrument: what matters there is not that the operator is
+/// absent but that its operand was remapped.
 fn body_naming_a_global_or_table(bytes: &[u8], func_idx: Option<usize>) -> Option<String> {
     let mut idx = 0usize;
     for payload in Parser::new(0).parse_all(bytes) {
@@ -560,6 +561,37 @@ fn body_naming_a_global_or_table(bytes: &[u8], func_idx: Option<usize>) -> Optio
         }
     }
     None
+}
+
+/// The `("get" | "set", global index)` of every global accessor in body
+/// `func_idx`, in operator order.
+///
+/// The operand is the whole point. A merged external's `global.get 0` copied
+/// verbatim still names *a* global, and where main declares one of the same type
+/// the merged module validates and runs — so a test that only asserted the
+/// operator survived, or only counted the module's globals, would pass on the
+/// exact miscompile the remap exists to prevent. Only the index distinguishes
+/// them.
+fn body_global_indices(bytes: &[u8], func_idx: usize) -> Vec<(&'static str, u32)> {
+    let mut idx = 0usize;
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            if idx == func_idx {
+                return body
+                    .get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|op| match op.unwrap() {
+                        Operator::GlobalGet { global_index } => Some(("get", global_index)),
+                        Operator::GlobalSet { global_index } => Some(("set", global_index)),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            idx += 1;
+        }
+    }
+    panic!("no body at index {func_idx}");
 }
 
 #[test]
@@ -787,13 +819,31 @@ fn a_global_read_outside_the_closure_does_not_block_the_link() {
 }
 
 #[test]
-fn a_global_read_through_a_transitive_call_is_tier_c() {
+fn a_global_read_through_a_transitive_call_is_remapped() {
     // The converse of the test above, pinning that the effect scan follows
     // calls: `sum` itself names no global, but the helper it calls does. The
-    // helper *is* in the closure and would be merged, so the read must reject
-    // the link. Without transitivity the relaxed gate would admit a body
-    // carrying a `global.get` the merge cannot re-index.
-    let main = main_importing_sum();
+    // helper *is* in the closure and is merged, so the external's globals must be
+    // contributed on its account — the closure's `uses_globals` is what decides,
+    // and it is set transitively or not at all.
+    //
+    // Main declares one global of its own, so the external's single global lands
+    // at output index 1 and the helper's operand must move from 0 to 1. Were the
+    // effect scan not transitive, the external's globals would be dropped, the
+    // remap left empty, and the helper's `global.get 0` would fail the lookup —
+    // so this fixture pins the transitivity from the merge side too.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#,
+    );
     let lib = wasm(
         r#"
         (module
@@ -812,17 +862,25 @@ fn a_global_read_through_a_transitive_call_is_tier_c() {
         "#,
     );
 
-    let err = link(&main, &[&lib]).expect_err("a transitive global read must be rejected");
-    match err {
-        LinkError::RequiresRelocatableBuild { field, reasons } => {
-            assert_eq!(field, "sum");
-            assert!(
-                reasons.iter().any(|r| r.contains("global")),
-                "reason should mention globals: {reasons:?}"
-            );
-        }
-        other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
-    }
+    let linked = link(&main, &[&lib]).expect("a transitive global read must merge");
+    assert_valid(&linked);
+
+    // Bodies: main's `compute` (0), the merged `sum` (1), the merged helper (2).
+    assert_eq!(code_body_count(&linked), 3);
+    assert_eq!(
+        body_global_indices(&linked, 2),
+        vec![("get", 1)],
+        "the transitively merged helper must read the external's global at its \
+         remapped index, not main's global 0"
+    );
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 11 }".to_string()),
+            (true, "I32Const { value: 7 }".to_string()),
+        ],
+        "main's global keeps index 0 and the external's is appended after it"
+    );
 }
 
 /// An external shaped like real lld output: a multi-page linear memory, a
@@ -1722,12 +1780,199 @@ fn tier_c_data_segment_requires_relocatable_build() {
 }
 
 #[test]
-fn tier_c_global_requires_relocatable_build() {
-    // `counter` *reads* a module-defined global. It is the read that rejects,
-    // not the declaration: the merge emits main's globals only, so a surviving
-    // `global.get` would rebind to a main-module global. A global the closure
-    // never names is inert and links (see
-    // `external_with_an_unused_stack_pointer_global_links`).
+fn a_merged_global_read_names_the_externals_own_global() {
+    // The central claim of the globals merge, and the one place a mistake is
+    // invisible without checking the operand.
+    //
+    // Main declares two globals of its own, so the external's single global lands
+    // at output index 2 and the merged `counter` must read `global.get 2`. If the
+    // re-encoder had no arm for `global.get`, the operator would be copied
+    // verbatim as `global.get 0` — main's first global, an `i32` like the
+    // external's, so the merged module validates, links, and runs, returning
+    // main's 11 where the library meant its own 7. Nothing but this index
+    // separates the two outcomes: the body still contains a `global.get`, the
+    // module still has a global section, and the counts are unchanged.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "statelib" "counter" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (global (;1;) (mut i32) (i32.const 22))
+          (func (;1;) (type 0) (result i32)
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (global (;0;) (mut i32) (i32.const 7))
+          (func (;0;) (type 0) (result i32)
+            global.get 0)
+          (export "counter" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a global-reading external must merge");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("get", 2)],
+        "the merged body must read the external's global at its remapped index"
+    );
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 11 }".to_string()),
+            (true, "I32Const { value: 22 }".to_string()),
+            (true, "I32Const { value: 7 }".to_string()),
+        ],
+        "main's globals keep indices 0 and 1; the external's is appended at 2"
+    );
+    assert_eq!(
+        body_global_indices(&linked, 0),
+        vec![],
+        "main's own body is untouched here, and its indices never shift regardless"
+    );
+}
+
+#[test]
+fn a_merged_global_write_names_the_externals_own_global() {
+    // The write side, which is the more dangerous half: a `global.set` copied
+    // verbatim would not merely read the wrong value but *corrupt* main's state,
+    // and it would do so on a module that validates. Main's global 0 is a
+    // mutable `i32` exactly like the external's, so type checking cannot tell the
+    // two apart.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (import "statelib" "set_counter" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (func (;1;) (type 0) (param i32)
+            local.get 0
+            call 0)
+          (export "run" (func 1))
+          (export "state" (global 0)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (global (;0;) (mut i32) (i32.const 0))
+          (func (;0;) (type 0) (param i32)
+            local.get 0
+            global.set 0)
+          (export "set_counter" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a global-writing external must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("set", 1)],
+        "the merged body must write the external's own global, not main's state"
+    );
+
+    // Main's `state` export still names main's global 0. Appending the external's
+    // globals above main's is what keeps every main-side global reference — bodies
+    // and exports alike — correct without rewriting any of them.
+    let mut global_exports = Vec::new();
+    for payload in Parser::new(0).parse_all(&linked) {
+        if let Payload::ExportSection(reader) = payload.unwrap() {
+            for export in reader {
+                let export = export.unwrap();
+                if export.kind == ExternalKind::Global {
+                    global_exports.push((export.name.to_string(), export.index));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        global_exports,
+        vec![("state".to_string(), 0)],
+        "main's global export must still name main's own global"
+    );
+}
+
+#[test]
+fn two_externals_identical_globals_stay_distinct() {
+    // Signatures are deduplicated across externals; globals must not be. Two
+    // modules that each declare `(global (mut i32) (i32.const 0))` mean two
+    // counters, not one shared cell — a global is state, not a description — so
+    // the merged module must carry both, and each body must name its own.
+    //
+    // Collapsing them would produce a module that validates and runs, where one
+    // library's writes silently appear as the other's reads. The two libraries
+    // are deliberately byte-identical apart from their export names, so nothing
+    // but the merge's refusal to dedup keeps them apart.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (import "liba" "bump_a" (func (;0;) (type 0)))
+          (import "libb" "bump_b" (func (;1;) (type 0)))
+          (func (;2;) (type 0) (param i32)
+            local.get 0
+            call 0
+            local.get 0
+            call 1)
+          (export "run" (func 2)))
+        "#,
+    );
+    let counter_lib = |export: &str| {
+        wasm(&format!(
+            r#"
+            (module
+              (type (;0;) (func (param i32)))
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0) (param i32)
+                local.get 0
+                global.set 0)
+              (export "{export}" (func 0)))
+            "#
+        ))
+    };
+    let lib_a = counter_lib("bump_a");
+    let lib_b = counter_lib("bump_b");
+
+    let linked = raw_link(&main, &[("liba", &lib_a), ("libb", &lib_b)])
+        .expect("two global-bearing externals must merge");
+    assert_valid(&linked);
+
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 0 }".to_string()),
+            (true, "I32Const { value: 0 }".to_string()),
+        ],
+        "structurally identical globals from two externals are distinct state and \
+         must both survive"
+    );
+
+    // Bodies: main's `run` (0), then the two merged bodies (1, 2) in the order
+    // their imports were satisfied. Each must name its own cell.
+    assert_eq!(body_global_indices(&linked, 1), vec![("set", 0)]);
+    assert_eq!(body_global_indices(&linked, 2), vec![("set", 1)]);
+}
+
+#[test]
+fn a_global_bearing_external_links_onto_a_globalless_main() {
+    // The main module the Inference compiler emits declares no globals at all,
+    // and until now the merge skipped the global section entirely whenever main
+    // had none. An external that brings one must still get a section, or its
+    // merged body would name a global the output does not declare — caught by
+    // post-merge validation, but only as a failure of the linker's own output.
+    //
+    // Main is memoryless too, so this fixture also pins that a globals-only
+    // merge needs no memory: the external's global is state, not an address, and
+    // nothing here is asked to reconcile a memory that no closure touches.
     let main = wasm(
         r#"
         (module
@@ -1749,32 +1994,46 @@ fn tier_c_global_requires_relocatable_build() {
         "#,
     );
 
-    let err = link(&main, &[&lib]).expect_err("Tier C global must be rejected");
-    match err {
-        LinkError::RequiresRelocatableBuild { field, reasons } => {
-            assert_eq!(field, "counter");
-            assert!(
-                reasons.iter().any(|r| r.contains("global")),
-                "reason should mention globals: {reasons:?}"
-            );
-        }
-        other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
-    }
+    let linked = link(&main, &[&lib]).expect("a globalless main must accept an external's global");
+    assert_valid(&linked);
+    assert_eq!(
+        module_globals(&linked),
+        vec![(true, "I32Const { value: 7 }".to_string())],
+        "the external's global must be the sole entry of a section main did not open"
+    );
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("get", 0)],
+        "with no main globals below it the external's global keeps index 0"
+    );
+    assert!(
+        memory_limits(&linked).is_none(),
+        "a globals-only merge must not invent a linear memory"
+    );
 }
 
 #[test]
-fn tier_c_global_set_requires_relocatable_build() {
-    // The write side of the same rule. `global.set` is the more dangerous half:
-    // rebound onto a main-module global it would corrupt main's state rather
-    // than merely read the wrong value.
+fn a_global_used_to_address_memory_is_still_rejected() {
+    // The soundness boundary, through the public API. A merged global's *value*
+    // is carried over with no relocation, and in real toolchain output that value
+    // is an address into the layout the external was compiled for —
+    // `__stack_pointer` here. Merged onto a memory laid out for the host program
+    // the index is right and the address means something else.
+    //
+    // What keeps that from linking is address provenance, which treats a value
+    // read from a global as not parameter-derived. It is a *conditional*
+    // protection: it runs only for a closure that touches memory. This test pins
+    // the case where it does.
     let main = wasm(
         r#"
         (module
           (type (;0;) (func (param i32)))
-          (import "statelib" "set_counter" (func (;0;) (type 0)))
+          (import "memlib" "push" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
           (func (;1;) (type 0) (param i32)
             local.get 0
             call 0)
+          (export "memory" (memory 0))
           (export "run" (func 1)))
         "#,
     );
@@ -1782,24 +2041,29 @@ fn tier_c_global_set_requires_relocatable_build() {
         r#"
         (module
           (type (;0;) (func (param i32)))
-          (global (;0;) (mut i32) (i32.const 0))
+          (memory (;0;) 17)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
           (func (;0;) (type 0) (param i32)
+            global.get 0
             local.get 0
-            global.set 0)
-          (export "set_counter" (func 0)))
+            i32.store)
+          (export "push" (func 0)))
         "#,
     );
 
-    let err = link(&main, &[&lib]).expect_err("Tier C global write must be rejected");
+    let err = link(&main, &[&lib]).expect_err("a global-derived store address must be rejected");
     match err {
         LinkError::RequiresRelocatableBuild { field, reasons } => {
-            assert_eq!(field, "set_counter");
+            assert_eq!(field, "push");
+            // The rejection must come from provenance. A surviving globals reason
+            // would mean the gate was never relaxed, and every admission test
+            // above would be measuring something else.
             assert!(
-                reasons.iter().any(|r| r.contains("global")),
-                "reason should mention globals: {reasons:?}"
+                !reasons.iter().any(|r| r.contains("global")),
+                "the rejection must come from address provenance: {reasons:?}"
             );
         }
-        other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
+        other => panic!("expected RequiresRelocatableBuild from provenance, got {other:?}"),
     }
 }
 

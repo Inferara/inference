@@ -3,13 +3,13 @@
 //! Whether an external function can be merged into the single shared linear
 //! memory depends on what its transitive closure touches:
 //!
-//! - **Tier A** — pure: no memory, no global or table access, no data or
-//!   element segments. Merge is a copy + re-index.
+//! - **Tier A** — no linear-memory access: the closure computes, and may read or
+//!   write its own module's globals, but never loads or stores. Merge is a copy
+//!   + re-index of functions, types and globals.
 //! - **Tier B** — memory via caller-passed pointers only: the closure
 //!   loads/stores through addresses the caller supplies, but defines no static
-//!   data of its own, reads or writes no global, and names no table or element
-//!   entry. The one shared memory is enough; no address relocation is
-//!   needed. Admission to
+//!   data of its own and names no table or element entry. The one shared memory
+//!   is enough; no address relocation is needed. Admission to
 //!   Tier B requires *proof* (via [`crate::provenance`]) that every memory
 //!   address derives from a function parameter — a closure that fabricates an
 //!   address from a constant or its own state would alias the host program's
@@ -20,18 +20,89 @@
 //!   loop may walk a caller pointer off the end of any buffer. See the "What
 //!   this proves, and what it does not" section of [`crate::provenance`] before
 //!   relying on Tier B for a bounds property; issue #420 tracks closing it.
-//! - **Tier C** — own static data, global access, or table/element use: merging
-//!   would require relocating data and rewriting absolute addresses, which
-//!   needs relocation metadata the static merge does not consume. Rejected with
-//!   a clear error.
+//! - **Tier C** — own static data or table/element use: merging would require
+//!   relocating data and rewriting absolute addresses, which needs relocation
+//!   metadata the static merge does not consume. Rejected with a clear error.
+//!
+//! Globals cut across the tiers rather than deciding one: a closure may read or
+//! write them at either tier, and [`crate::merge`] carries the whole global
+//! section of every external that touches one into the output, re-indexed above
+//! the main module's. What that is and is not sound for is the subject of the
+//! next section.
 //!
 //! Tiers A and B turn on what the closure *uses*, not on what its module
 //! *declares*. A global no body reads or writes, and a table with no element
-//! segment that no instruction names, are inert and do not force Tier C — real
-//! toolchain output is full of such boilerplate (lld emits a `__stack_pointer`
-//! global into every `wasm32-unknown-unknown` artifact, and an empty
-//! `(table 1 1 funcref)` into every `std` one). Data segments are the deliberate
-//! exception and stay declaration-gated; [`tier_c_reasons`] explains why.
+//! segment that no instruction names, are inert and are dropped rather than
+//! merged — real toolchain output is full of such boilerplate (lld emits a
+//! `__stack_pointer` global into every `wasm32-unknown-unknown` artifact, and an
+//! empty `(table 1 1 funcref)` into every `std` one). Data segments are the
+//! deliberate exception and stay declaration-gated; [`tier_c_reasons`] explains
+//! why.
+//!
+//! # What merging a global is sound for
+//!
+//! **A globals lift is sound only for globals used as pure scalar state.** The
+//! merge re-indexes a global correctly and relocates its *value* not at all, and
+//! in real toolchain output that value is frequently an address. `__stack_pointer`
+//! and `__heap_base` hold positions in the memory layout the external was
+//! compiled for; merged onto a shared memory laid out for the host program, the
+//! index is right and the address means something else entirely.
+//!
+//! Two things keep the admitted set narrower than that sounds:
+//!
+//! - When the closure touches memory it is Tier B, so [`crate::provenance`] runs
+//!   and treats every value read from a global as `NotParam`. An address computed
+//!   through a global therefore fails the derivation proof and the closure is
+//!   rejected — which is exactly the shadow-stack idiom (`global.get $sp`,
+//!   subtract a frame, store through it) that a real lld artifact uses. Those
+//!   externals remain Tier C.
+//! - The main module cannot name an external's globals at all. Main's own
+//!   indices are unchanged by the merge, externals' are appended above them, and
+//!   a main module that *imports* a global is rejected outright, so no merged
+//!   global is reachable from a body other than its own module's.
+//!
+//! What is left admitted is a closure that reads and writes globals as scalars
+//! while addressing memory only through its parameters — a counter, a mode flag,
+//! a seed. That much is genuinely per-module state and merges correctly.
+//!
+//! The protection above is conditional, and worth stating as such: provenance
+//! runs only when `effects.uses_memory`. A closure that touches no memory is
+//! Tier A and is never analyzed, so nothing constrains what the values it
+//! computes from its globals *mean*. An external that returns `global.get
+//! $__stack_pointer` to a caller which then dereferences it is admitted, and the
+//! address it hands over is wrong.
+//!
+//! That escape is not opened by merging globals — it is the general fact that
+//! nothing analyzes a scalar an external returns. The same external written as
+//! `i32.const 1048576` is Tier A and admitted today, with no global anywhere.
+//! What merging globals changes is how often the shape occurs: a stack-pointer
+//! global is standard in the artifacts this feature exists to accept, whereas a
+//! bare address constant is not. Closing it needs the callee-side counterpart of
+//! the pointee-size channel issue #420 tracks — a claim about what a returned
+//! integer *means* — and neither exists today.
+//!
+//! # Merging globals excludes placing external data segments
+//!
+//! This capability and a future one are mutually exclusive as things stand, and
+//! the conflict is not visible from either side alone.
+//!
+//! Admitting an external's data segments would mean placing them at their
+//! original addresses and proving safety by showing each module's claimed region
+//! is disjoint from every other's. Such a proof can only range over regions the
+//! linker can see: declared data segments and memory limits. An external's
+//! shadow-stack region is described by no section this crate parses — it is
+//! implied by the initializer of a mutable global, and the sign convention that
+//! a stack grows down from it. Merging that global carries the claim into the
+//! output where the disjointness argument cannot see it, so the argument would
+//! be unsound in the presence of a merged global while appearing complete.
+//!
+//! The claim is not dormant: an external can hand a global-derived address to
+//! its caller (above), and any later relaxation admitting global-derived
+//! addressing would make it live inside the external too.
+//!
+//! Adding data-segment placement therefore means revisiting this, not building
+//! on top of it — either by teaching the linker to read a region claim out of a
+//! global's initializer, or by keeping the two mutually exclusive on purpose.
 
 use crate::closure::{Closure, ClosureEffects};
 use crate::parse::ParsedModule;
@@ -52,13 +123,13 @@ pub(crate) enum Tier {
 /// [`LinkError::RequiresRelocatableBuild`] for Tier-C inputs.
 ///
 /// A module is Tier C when it carries any of the relocation-sensitive
-/// constructs: its own data or element segments, a closure that reads or writes
-/// a global (a baked-in constant or per-module mutable state), or a closure that
-/// names the table space (an indirect call or a `table.*`/`ref.func` operator).
-/// These imply absolute addresses or per-module state that a position-naive
-/// static merge cannot reconcile across two modules sharing one memory. A
-/// declared-but-untouched global or table is not among them — see
-/// [`tier_c_reasons`].
+/// constructs: its own data or element segments, or a closure that names the
+/// table space (an indirect call or a `table.*`/`ref.func` operator). These imply
+/// absolute addresses or dispatch tables that a position-naive static merge
+/// cannot reconcile across two modules sharing one memory. Neither a
+/// declared-but-untouched table nor a global — touched or not — is among them;
+/// see [`tier_c_reasons`] for the table, and the module documentation for what
+/// merging a global is and is not sound for.
 ///
 /// A memory-touching closure is admitted to Tier B **only** when the
 /// address-provenance analysis ([`provenance::verify_param_addressing`]) proves
@@ -100,9 +171,9 @@ pub(crate) fn classify(
 /// Collects every reason the module fails Tier-A/B feasibility. Empty means the
 /// module is mergeable.
 ///
-/// Globals and table *use* are gated on use; data and element segments on
-/// declaration. Each of the three declaration-gated or use-gated choices rests
-/// on a different argument, and they are not interchangeable:
+/// Table *use* is gated on use; data and element segments on declaration. Each
+/// of these choices rests on a different argument, and they are not
+/// interchangeable:
 ///
 /// - An **active data segment** writes linear memory at instantiation whether
 ///   or not any instruction names it, so dropping an unreferenced one changes
@@ -124,30 +195,26 @@ pub(crate) fn classify(
 ///   declaration would exclude every real toolchain artifact over boilerplate a
 ///   leaf integer function never touches.
 ///
-/// Dropping the external's globals and tables from the merged output is safe
-/// precisely because [`ClosureEffects`] is *closure-scoped*: it is accumulated
-/// over the bodies reachable from the root export, so a closure admitted with
-/// `uses_globals == false` and `uses_tables == false` contains no operator
-/// naming either index space.
+/// Dropping the external's inert globals and its tables from the merged output
+/// is safe precisely because [`ClosureEffects`] is *closure-scoped*: it is
+/// accumulated over the bodies reachable from the root export, so a closure
+/// admitted with `uses_globals == false` and `uses_tables == false` contains no
+/// operator naming either index space.
 ///
-/// That property is load-bearing for **globals** specifically. [`crate::merge`]
-/// re-emits the main module's global section and [`crate::rewrite::IndexMap`]
-/// remaps function and type indices only, so a leaked `global.get 0` in a merged
-/// body would rebind to *main's* first global and — when the types agree, as two
-/// `i32` globals do — still pass post-merge validation. Wrong value, no
-/// diagnostic. For **tables** the failure mode is benign by comparison: the merge
-/// emits no table section at all, so a leaked table operator names a table the
-/// output does not have and post-merge validation rejects it as an unknown table.
-/// That is fail-safe, and it is why the global half of this argument is the one
-/// that has to hold.
+/// Neither half of that now fails silently if it were ever violated, and the two
+/// are fail-safe for different reasons. A closure whose globals were dropped has
+/// an **empty** global remap in [`crate::merge`], so a leaked `global.get` finds
+/// no mapping and surfaces a clean [`LinkError`] — where before the global space
+/// was rebuilt, the same operator would have rebound onto *main's* first global
+/// and, two `i32` globals agreeing in type, still passed post-merge validation
+/// with a wrong value and no diagnostic. For **tables** the merge emits no table
+/// section at all, so a leaked table operator names a table the output does not
+/// have and post-merge validation rejects it as unknown.
 fn tier_c_reasons(module: &ParsedModule, effects: &ClosureEffects) -> Vec<String> {
     let mut reasons = Vec::new();
 
     if module.data_count > 0 || effects.uses_data_segments {
         reasons.push("defines or initializes its own static data segments".to_string());
-    }
-    if effects.uses_globals {
-        reasons.push("reads or writes module globals".to_string());
     }
     // Split from the element-segment signal below: neither implies the other. A
     // closure may `call_indirect` through a table no segment initializes, and a
@@ -166,14 +233,16 @@ fn tier_c_reasons(module: &ParsedModule, effects: &ClosureEffects) -> Vec<String
 #[cfg(test)]
 mod tests {
     //! Tier classification over hand-built modules, exercising the boundary
-    //! between a *declared* global/table and a *used* one.
+    //! between a *declared* table and a *used* one, and the removal of globals
+    //! from the gate entirely.
     //!
     //! Every `cargo build --target wasm32-unknown-unknown` artifact carries an
     //! lld-synthesized `__stack_pointer` mutable global, and a `std` build also
     //! carries an empty `(table 1 1 funcref)`. A leaf integer function never
     //! reads either. These tests pin that such a declaration alone does not
-    //! force Tier C, while any operator that touches the global or table space
-    //! still does — and that a *data* segment stays declaration-gated.
+    //! force Tier C, that an operator naming the *table* space still does while
+    //! one naming a global no longer does, and that a *data* segment stays
+    //! declaration-gated.
 
     use super::*;
     use crate::closure;
@@ -301,46 +370,86 @@ mod tests {
     }
 
     #[test]
-    fn reading_a_global_is_tier_c() {
-        let reasons = reasons_for(
-            r#"
-            (module
-              (type (;0;) (func (result i32)))
-              (global (;0;) (mut i32) (i32.const 7))
-              (func (;0;) (type 0) (result i32)
-                global.get 0)
-              (export "counter" (func 0)))
-            "#,
-            "counter",
-        );
-        // Pinned verbatim: the reason names only the *access*, since defining a
-        // global is no longer a rejection signal. A message that still said
-        // "defines" would tell an author their declaration is fatal when it is
-        // not.
+    fn reading_a_global_is_tier_a() {
+        // A closure that reads a global touches no memory, so it is Tier A: the
+        // merge copies its bodies and its module's globals and re-indexes both.
+        // No reason may be produced at all — a stale globals reason would reject
+        // the very artifact shape this admission exists for.
         assert_eq!(
-            reasons,
-            vec!["reads or writes module globals".to_string()],
-            "global.get must still be Tier C, and the reason must name only the access"
+            classify_root(
+                r#"
+                (module
+                  (type (;0;) (func (result i32)))
+                  (global (;0;) (mut i32) (i32.const 7))
+                  (func (;0;) (type 0) (result i32)
+                    global.get 0)
+                  (export "counter" (func 0)))
+                "#,
+                "counter",
+            )
+            .expect("a global read must not reject the link"),
+            Tier::A,
+            "reading a global is orthogonal to the memory tier"
         );
     }
 
     #[test]
-    fn writing_a_global_is_tier_c() {
-        let reasons = reasons_for(
+    fn writing_a_global_is_tier_a() {
+        // The write side. `global.set` is the half that carries per-module state,
+        // and it is admitted on the strength of the merge giving this module's
+        // globals cells of their own rather than aliasing main's.
+        assert_eq!(
+            classify_root(
+                r#"
+                (module
+                  (type (;0;) (func (param i32)))
+                  (global (;0;) (mut i32) (i32.const 0))
+                  (func (;0;) (type 0) (param i32)
+                    local.get 0
+                    global.set 0)
+                  (export "set_counter" (func 0)))
+                "#,
+                "set_counter",
+            )
+            .expect("a global write must not reject the link"),
+            Tier::A,
+        );
+    }
+
+    #[test]
+    fn a_global_used_to_address_memory_is_still_tier_c() {
+        // The soundness boundary of the globals admission, at the classifier
+        // rather than through the public API. This closure stores through
+        // `global.get $__stack_pointer` — the shadow-stack idiom, and the case
+        // where a merged global's *value* is a claim about a memory layout the
+        // merged output does not have. Provenance tags a global read `NotParam`,
+        // so the derivation proof fails and the whole closure is rejected.
+        //
+        // The rejection must come from provenance, not from a surviving globals
+        // reason: a `RequiresRelocatableBuild` naming globals here would mean the
+        // gate was never actually relaxed, and every admission test above would
+        // be measuring the wrong thing.
+        let err = classify_root(
             r#"
             (module
               (type (;0;) (func (param i32)))
-              (global (;0;) (mut i32) (i32.const 0))
+              (memory (;0;) 17)
+              (global $__stack_pointer (mut i32) (i32.const 1048576))
               (func (;0;) (type 0) (param i32)
+                global.get 0
                 local.get 0
-                global.set 0)
-              (export "set_counter" (func 0)))
+                i32.store)
+              (export "store_at_stack" (func 0)))
             "#,
-            "set_counter",
-        );
+            "store_at_stack",
+        )
+        .expect_err("a global-derived address must be rejected");
+        let LinkError::RequiresRelocatableBuild { reasons, .. } = &err else {
+            panic!("expected RequiresRelocatableBuild, got {err:?}");
+        };
         assert!(
-            reasons.iter().any(|r| r.contains("global")),
-            "global.set must still be Tier C: {reasons:?}"
+            !reasons.iter().any(|r| r.contains("global")),
+            "the rejection must come from address provenance, not a globals reason: {reasons:?}"
         );
     }
 
@@ -481,10 +590,16 @@ mod tests {
     }
 
     #[test]
-    fn every_signal_at_once_accumulates_all_four_reasons_in_order() {
+    fn every_signal_at_once_accumulates_all_three_reasons_in_order() {
         // `reasons` is a `Vec`, and the error renders it as a `; `-joined list,
         // so both the accumulation and the order are user-visible. Nothing else
         // pins either: every other test drives one signal at a time.
+        //
+        // The body reads a global as well, and that must contribute *no* reason.
+        // Asserting the exact vector is what makes this the sharpest statement
+        // that globals left the gate: a re-added globals reason lands in the
+        // middle of this list and fails here even if every admission test were
+        // deleted.
         let reasons = reasons_for(
             r#"
             (module
@@ -506,11 +621,11 @@ mod tests {
             reasons,
             vec![
                 "defines or initializes its own static data segments".to_string(),
-                "reads or writes module globals".to_string(),
                 "performs an indirect call or otherwise names the table space".to_string(),
                 "declares an element segment".to_string(),
             ],
-            "all four signals must accumulate, in declaration order"
+            "all three remaining signals must accumulate in declaration order, and the \
+             global read must contribute none"
         );
     }
 
@@ -544,29 +659,32 @@ mod tests {
         );
     }
 
-    /// Every operator that names the global or table index space.
+    /// Whether `op` names the global index space.
     ///
     /// Enumerated here rather than derived from [`crate::safety::check_operator`]
     /// so the scan below is independent of the very effect flags that admitted
     /// the closure — a scan driven by those flags could not detect a closure walk
     /// that disagreed with them.
+    fn names_a_global(op: &Operator) -> bool {
+        matches!(op, Operator::GlobalGet { .. } | Operator::GlobalSet { .. })
+    }
+
+    /// Whether `op` names the table index space.
     ///
-    /// Only three of these are reachable through the public `link` API today:
-    /// `global.get`, `global.set` and `call_indirect`. The five `table.*`
-    /// accessors and `ref.func` are reference-types instructions that
-    /// [`crate::SUPPORTED_WASM_FEATURES`] excludes, so an external carrying one
-    /// is refused as `UnsupportedWasmFeature` before classification (pinned by
+    /// Only `call_indirect` is reachable through the public `link` API today.
+    /// The five `table.*` accessors and `ref.func` are reference-types
+    /// instructions that [`crate::SUPPORTED_WASM_FEATURES`] excludes, so an
+    /// external carrying one is refused as `UnsupportedWasmFeature` before
+    /// classification (pinned by
     /// `reference_typed_table_operators_are_refused_by_the_feature_gate` in
     /// `tests/link.rs`). They are listed anyway: this scan is defense in depth
     /// against a future feature-gate widening, and the segment-indexed forms
     /// (`table.init`/`table.copy`/`elem.drop`) plus `return_call_indirect` are
     /// absent only because the allow-list rejects them outright.
-    fn names_a_global_or_table(op: &Operator) -> bool {
+    fn names_a_table(op: &Operator) -> bool {
         matches!(
             op,
-            Operator::GlobalGet { .. }
-                | Operator::GlobalSet { .. }
-                | Operator::CallIndirect { .. }
+            Operator::CallIndirect { .. }
                 | Operator::TableGet { .. }
                 | Operator::TableSet { .. }
                 | Operator::TableGrow { .. }
@@ -585,46 +703,78 @@ mod tests {
                 .get_operators_reader()
                 .expect("operators")
                 .into_iter()
-                .any(|op| names_a_global_or_table(&op.expect("operator")))
+                .any(|op| {
+                    let op = op.expect("operator");
+                    names_a_global(&op) || names_a_table(&op)
+                })
         })
     }
 
+    /// A module whose exported root *reads* a global, alongside the memory-using
+    /// caller-pointer store that makes it Tier B — so the scan below has a fixture
+    /// whose `uses_globals` flag is actually set.
+    const GLOBAL_COUNTER_INSIDE_THE_CLOSURE: &str = r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (global (;0;) (mut i32) (i32.const 0))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store
+            global.get 0
+            i32.const 1
+            i32.add
+            global.set 0)
+          (export "store_at" (func 0)))
+        "#;
+
     #[test]
-    fn an_admitted_closure_names_no_global_or_table() {
-        // The agreement between the closure walk and the effect flags, which is
-        // what makes dropping an admitted external's globals and tables safe.
+    fn an_admitted_closures_operators_agree_with_its_effect_flags() {
+        // The agreement between the closure walk and the effect flags. Both
+        // halves of the merge's handling of an admitted external rest on it:
+        // whether its global section is carried into the output, and whether its
+        // tables are dropped.
         //
         // `classify` admits on `effects`, and the merge then copies exactly the
         // bodies in `local_func_indices`. If those two ever disagreed — a body
         // reaching the merged output without having contributed its effects — a
-        // `global.get` could be copied into the output, where it would rebind to
-        // main's global and still pass validation. This test reads the admitted
-        // bodies back and confirms the disagreement does not happen.
+        // closure whose globals were dropped as untouched could still carry a
+        // `global.get`, and a closure could carry a table operator into an output
+        // with no table section. This test reads the admitted bodies back and
+        // confirms the disagreement does not happen.
         //
-        // `GLOBAL_READER_OUTSIDE_THE_CLOSURE` is what gives it teeth: its module
-        // *does* contain a `global.get`, just not in `sum`'s closure. Scanning
-        // the other fixtures could never fail, since they contain no naming
-        // operator for any closure walk to wrongly include. The guard below
-        // enforces that at least one fixture is of the first kind, so the set
-        // cannot quietly regress to a tautology.
+        // The assertions are conditional on the flags rather than absolute,
+        // because a global operator in an admitted closure is now legitimate:
+        // what must hold is that the flag *predicts* it.
+        //
+        // `GLOBAL_READER_OUTSIDE_THE_CLOSURE` is what gives the negative
+        // direction teeth: its module *does* contain a `global.get`, just not in
+        // `sum`'s closure, so a closure walk that over-approximated would be
+        // caught. The other fixtures contain no naming operator for any walk to
+        // wrongly include. The guard below enforces that at least one fixture is
+        // of the first kind, so the set cannot quietly regress to a tautology.
         let mut saw_a_fixture_with_a_naming_operator = false;
+        let mut saw_a_globals_using_closure = false;
 
         for (wat, root_export) in [
             (UNUSED_STACK_POINTER, "sum"),
             (UNUSED_TABLE, "sum"),
             (UNUSED_BOILERPLATE_OVER_CALLER_MEMORY, "store_at"),
             (GLOBAL_READER_OUTSIDE_THE_CLOSURE, "sum"),
+            (GLOBAL_COUNTER_INSIDE_THE_CLOSURE, "store_at"),
         ] {
             let module = parse(wat);
             assert!(
                 !module.globals.is_empty() || !module.tables.is_empty(),
-                "fixture must declare the construct whose omission is being justified"
+                "fixture must declare the construct whose handling is being justified"
             );
             saw_a_fixture_with_a_naming_operator |= module_has_a_naming_operator(&module);
 
             let root = module.exported_func_index(root_export).unwrap();
             let cl = closure::compute(&module, root).expect("closure computes");
             classify(&module, &cl, root, root_export).expect("fixture must be admitted");
+            saw_a_globals_using_closure |= cl.effects.uses_globals;
 
             let base = module.local_func_base();
             for &idx in &cl.local_func_indices {
@@ -633,9 +783,14 @@ mod tests {
                 for op in reader.get_operators_reader().expect("operators") {
                     let op = op.expect("operator");
                     assert!(
-                        !names_a_global_or_table(&op),
-                        "an admitted closure must contain no global/table operator, \
-                         found {op:?} in function {idx} of `{root_export}`"
+                        cl.effects.uses_globals || !names_a_global(&op),
+                        "a closure admitted with uses_globals clear must contain no \
+                         global operator, found {op:?} in function {idx} of `{root_export}`"
+                    );
+                    assert!(
+                        cl.effects.uses_tables || !names_a_table(&op),
+                        "a closure admitted with uses_tables clear must contain no \
+                         table operator, found {op:?} in function {idx} of `{root_export}`"
                     );
                 }
             }
@@ -644,8 +799,14 @@ mod tests {
         assert!(
             saw_a_fixture_with_a_naming_operator,
             "at least one fixture must contain a global/table operator OUTSIDE the \
-             admitted closure — without one this test is a tautology, since a scan \
-             over bodies that contain no such operator cannot fail"
+             admitted closure — without one the negative direction is a tautology, \
+             since a scan over bodies that contain no such operator cannot fail"
+        );
+        assert!(
+            saw_a_globals_using_closure,
+            "at least one fixture must be admitted with uses_globals SET — without one \
+             the conditional assertions never take their permissive branch, and the \
+             test would silently be the old absolute scan"
         );
     }
 }

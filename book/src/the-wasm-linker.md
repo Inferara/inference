@@ -163,8 +163,13 @@ The classification logic inspects the parsed module structure and the closure's
 | Signal | Forces Tier C |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | owns static data segments |
-| closure uses `global.get` / `global.set` | reads or writes module globals |
 | `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+
+Reading or writing a module global is **not** a Tier-C signal: the closure's
+globals are merged into the output alongside the main module's, with every
+`global.get` / `global.set` remapped onto the merged index space. A global used
+to *address* memory is still rejected, because the address it produces is not
+parameter-derived.
 
 If no Tier-C signals are present, the closure is Tier B when any body accesses
 linear memory (load, store, copy, fill, size, or grow), and Tier A otherwise.
