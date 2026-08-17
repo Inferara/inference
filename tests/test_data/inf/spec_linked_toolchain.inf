@@ -1,0 +1,56 @@
+// Specifications about a linked artifact no Inference compiler produced. Both
+// externals arrive from `tests/test_data/wasmlib/rustlib.wasm`, the committed
+// output of `cargo build --release --target wasm32-unknown-unknown`, and are
+// spliced in by the static-merge linker under the name section symbols
+// `rustlib.clamp_add` and `rustlib.sum_n`, which is what the obligations apply.
+//
+// The sibling `spec_linked_extern.inf` already puts a merged body in front of
+// `coqc`, but its external came out of this compiler's own emitter, so every
+// instruction in it is one some single-file fixture emits too. What this fixture
+// adds is a body written by a different compiler: LLVM's branchless clamp, and a
+// pointer-walking loop whose `BI_loop` carries a result type. Both are shapes the
+// Inference emitter has no way to produce, and translating them is the claim the
+// linker envelope rests on.
+//
+// Two constraints this fixture is written around, both of which would otherwise
+// surface as a confusing failure elsewhere:
+//
+//   - It must declare no linear memory of its own. The external declares
+//     sixteen pages, a main declares its memory with a fixed maximum, and the
+//     merge keeps the larger minimum inside the kept maximum — so a main with
+//     the default single page cannot take this external at all. Staying
+//     memoryless means every local here is a scalar: no array, struct or string.
+//   - The corpus-wide checks reject a data segment in any module they compile,
+//     which is the same restriction seen from the other side.
+//
+// Both obligations were chosen to be true of the merged bodies — adding zero
+// saturates nowhere, and a zero-length walk reads nothing — but nothing here
+// establishes that. The `coqc` gate rewrites every `Qed.` to `Admitted.` before
+// compiling, so it checks that the obligations are well-typed and says nothing
+// about whether they hold; a false one would pass it just as quietly. Closing
+// that needs a discharge against the real verifier, as the reachability and
+// aggregate fixtures got.
+
+external fn clamp_add(a: i32, b: i32) -> i32;
+external fn sum_n(p: i32, n: i32) -> i32;
+use { clamp_add, sum_n } from rustlib;
+
+pub fn saturating_add(a: i32, b: i32) -> i32 {
+  return clamp_add(a, b);
+}
+
+pub fn total(p: i32, n: i32) -> i32 {
+  return sum_n(p, n);
+}
+
+spec ToolchainSpec {
+  fn adding_zero_changes_nothing() forall {
+    let a: i32 = @;
+    assert(clamp_add(a, 0) == a);
+  }
+
+  fn summing_nothing_is_zero() forall {
+    let p: i32 = @;
+    assert(sum_n(p, 0) == 0);
+  }
+}

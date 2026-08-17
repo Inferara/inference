@@ -189,13 +189,20 @@ sizes. All of these are admitted by design:
 |---|---|
 | `p + 1048576` | 1 MiB past the caller's pointer |
 | `p + q` (two parameters, no constant) | anywhere the caller's two values sum to |
-| `p + p` (`2p`) | nowhere near `p` for any nonzero `p` |
+| `p + (q << 2)` (a scaled index) | equally unbounded, in strides |
 | `ptr = p; loop { store ptr; ptr += 4 }` | off the end of any buffer |
 
 `Param + Param` is a deliberate, test-pinned admission: the caller supplied both
 operands, so under the derivation property their sum is the caller's business.
 It is also why bounding the *constant* displacement would buy nothing — the
 cheapest way to address arbitrarily far from `p` uses no constant at all.
+
+`p + p` is **not** admitted, though an earlier revision admitted it. Two copies
+of one parameter sum to `2p`, and thirty-two chained doublings reach
+`2^32 * p == 0` — a fixed absolute address built from `i32.add` alone. What
+separates it from `p + q` is not magnitude but *coefficient parity*, which is why
+the lattice tracks that and rejects a sum whose two operands may share a
+parameter.
 
 **In practice this means an admitted external can address anywhere in the shared
 linear memory.** What limits the damage today is not this analysis but a single
@@ -212,14 +219,18 @@ a reconciled memory of more than one page raises a
 raised manifest setting: a main configured to two pages and a memoryless main
 adopting a seventeen-page external memory have lost the same backstop.
 
-### Tier C — Own Static Data or Table Use
+### Tier C — Own Static Data, Table Use, or an Address the Caller Did Not Supply
 
-Either of two signals puts a candidate here: the module carries its own baked-in
+Any of three signals puts a candidate here: the module carries its own baked-in
 data segments (lookup tables, string constants) or an element segment that
-initializes a table; or the closure names the table space (indirect calls,
-`table.*`, `ref.func`). Merging these without relocation metadata would silently
-produce an incorrect module because the absolute addresses and dispatch tables
-would alias unpredictably with the main module.
+initializes a table; the closure names the table space (indirect calls,
+`table.*`, `ref.func`); or a memory access reaches an address the provenance
+analysis cannot trace back to a parameter of the exported function. The first two
+would silently produce an incorrect module, because the absolute addresses and
+dispatch tables would alias unpredictably with the main module. The third is the
+same hazard arriving through a body rather than a section: an address the caller
+never supplied is an address in whatever the merged module's memory happens to
+hold at that offset.
 
 Global access is **not** among them. The merge carries the whole global section
 of every external whose closure touches one into the output, re-indexed above the
@@ -237,18 +248,26 @@ error: external function `lookup` requires a relocatable build:
 
 ### Classification Logic
 
-The `tier` module collects "Tier-C reasons" by inspecting the parsed module
-structure and the closure's `ClosureEffects`:
+`tier::classify` decides in two steps. First `tier_c_reasons` inspects the parsed
+module structure and the closure's `ClosureEffects`, accumulating every signal
+that applies so one error names all of them:
 
 | Signal | Tier-C reason |
 |--------|---------------|
-| `module.data_count > 0` or closure uses `memory.init` / `data.drop` | own static data segments |
+| `module.data_count > 0` or closure uses `memory.init` / `data.drop` | defines or initializes its own static data segments |
 | closure uses `call_indirect` / `table.*` / `ref.func` | performs an indirect call or otherwise names the table space |
 | `module.element_count > 0` | declares an element segment |
 
-If no Tier-C reasons are collected, the closure is Tier B when any body accesses
-memory (load/store/copy/fill/size/grow), and Tier A otherwise. Global use
-contributes no reason and decides no tier.
+If that list is empty and no body accesses memory (load/store/copy/fill/size/grow),
+the closure is Tier A and the decision is over. Otherwise
+`provenance::verify_param_addressing` runs, and it is the second half of the same
+decision rather than a check applied to a settled tier: it either admits the
+closure as Tier B or produces the fourth Tier-C reason, *accesses memory at an
+address not derived from the exported function's parameters*. A rejection there is
+reported as `RequiresRelocatableBuild` exactly like the three above, and is always
+alone — the analysis stops at the first address it cannot account for.
+
+Global use contributes no reason and decides no tier.
 
 #### Declaration versus use
 
@@ -262,6 +281,17 @@ output is full of exactly that boilerplate: lld puts a `__stack_pointer` mutable
 global into every `wasm32-unknown-unknown` artifact, and an empty
 `(table 1 1 funcref)` into every `std` one. Rejecting on the declaration would
 exclude every such artifact over state a leaf integer function never touches.
+
+That claim is checked rather than asserted. `tests/test_data/wasmlib/rustlib.wasm`
+is a committed `cargo build --release --target wasm32-unknown-unknown` artifact
+carrying exactly that `__stack_pointer` global, and
+`tests/src/codegen/wasm/extern_link_toolchain.rs` merges it into `infc`-produced
+mains and executes the result. Its `README.md` records what makes a stock
+`#![no_std]` crate fit — chiefly that `std` is what brings the data segments and
+the function table the envelope actually rejects, and that optimization is
+load-bearing: at `opt-level = 0` every function gets a stack frame and addresses
+memory through `__stack_pointer`, which provenance rejects even for a function
+that touches no memory once optimized.
 
 The two declaration-gated signals rest on different arguments and should not be
 collapsed into one.
@@ -453,6 +483,12 @@ the `wat` crate and assert on the linked module structure via `inf-wasmparser`:
 ```bash
 cargo test -p inference-wasm-linker
 ```
+
+Fixtures written here are inputs the envelope was designed around, so they cannot
+answer whether a *foreign* compiler's output fits. That question is settled in the
+`inference-tests` crate, against a committed `wasm32-unknown-unknown` artifact:
+`extern_link_toolchain.rs` links and executes its merged bodies, and
+`rocq_typecheck.rs` compiles their Rocq translation with `coqc`.
 
 Test coverage includes:
 

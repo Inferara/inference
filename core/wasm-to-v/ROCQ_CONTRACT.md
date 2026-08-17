@@ -760,6 +760,39 @@ the **merged** module. Translating the compiler's direct output instead
 leaves the symbol naming an import, which `resolve_app_symbols` rejects
 with a message naming the missing link step.
 
+### What a linked body brings that compiled code cannot
+
+A merged body is translated by exactly the paths a compiled one is —
+there is no separate lowering for foreign functions, and the module
+record cannot tell them apart. What differs is the *instruction
+selection*: the body was chosen by whatever compiler produced the
+external, so it can spell things the Inference emitter has no way to
+emit. Nothing here relaxes the contract; the accepted surface is the
+same for both, and it is `core/wasm-linker`'s envelope — not this
+translator — that decides which foreign bodies arrive at all.
+
+The gap is worth stating because it is the only reason the accepted
+surface is more than a description of one emitter's output.
+`tests/test_data/wasmlib/rustlib.wasm`, a committed
+`wasm32-unknown-unknown` artifact, is merged into
+`tests/test_data/inf/spec_linked_toolchain.inf` by the `coqc` corpus so
+these shapes are elaborated rather than merely permitted. Through it the
+gate sees a `BI_select` standing in for a branch LLVM removed, a
+`BI_loop` carrying a result type where Inference's `while` lowering
+always emits `BT_valtype None`, and a `BI_load` off a pointer walked by a
+loop-carried local. An obligation applying such a body — `T_app` at the
+merged function's own index — is what makes the claim about it a claim
+about the bytes that will run.
+
+The module record changes shape too, in one place. Code generation emits
+its linear memory with the minimum and the maximum equal, so a module it
+produced alone always reads `Mm {|lim_min := N%N; lim_max := Some(N%N)|}`.
+A memoryless main that adopts a Tier-B external's memory takes that
+external's limits verbatim, and a `wasm32-unknown-unknown` artifact
+declares no maximum — so `lim_max := None` is a shape only a link
+produces, and `spec_linked_toolchain.inf` is the first corpus module to
+put it in front of `coqc`.
+
 `WasmParseData::resolve_app_symbols` (`src/translator.rs`) resolves every
 symbol any obligation applies, up front, before any output is built:
 
@@ -1200,12 +1233,19 @@ entries are matched by name, not position.
   Like the non-det rule above, the rejected set is unreachable from
   Inference-compiled code — the language has no floating-point or vector
   types, and its codegen emits no conversion or sign-extension at all
-  (it narrows sub-`i32` values with shifts and masks) — so the `coqc`
-  gate over the Inference corpus can never exercise it. It is reachable
+  (it narrows sub-`i32` values with shifts and masks). It is reachable
   only through foreign bytes: the external linking path and the public
   `translate_bytes` API. `core/wasm-linker` refuses the same content in
   external modules, so this is the second of two layers, and on the CLI
   path the linker's diagnostic normally arrives first.
+
+  The `coqc` corpus does carry foreign bytes — a linked
+  `wasm32-unknown-unknown` artifact, see [What a linked body
+  brings](#what-a-linked-body-brings-that-compiled-code-cannot) — but
+  that changes nothing here: an external carrying any of the above is
+  refused by the linker before translation, so no corpus module can ever
+  exercise the rejected set. These arms stay covered by the translator's
+  own unit tests, which feed the bytes directly.
 
   A value-type rejection is safe at any position because the
   section-level error accumulator is checked fail-closed: a rejected
