@@ -153,7 +153,9 @@ use clap::Parser;
 use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
 };
-use inference::{AnalysisOptions, analyze_with_options, link, parse_project, type_check, wasm_to_v};
+use inference::{
+    AnalysisOptions, analyze_with_options, link_with_warnings, parse_project, type_check, wasm_to_v,
+};
 use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
 use parser::{Cli, CliMode};
 use std::{
@@ -729,13 +731,20 @@ fn run() {
             .iter()
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
             .collect();
-        let wasm_owned = match link(codegen_output.wasm(), &external_bytes) {
-            Ok(bytes) => bytes,
+        // The warning-carrying entry point, not the discarding `link`: the merge
+        // reports where its own guarantee stops short of what a reader would
+        // assume, and a diagnostic nobody prints is one nobody acts on.
+        let linked = match link_with_warnings(codegen_output.wasm(), &external_bytes) {
+            Ok(linked) => linked,
             Err(e) => {
                 eprintln!("Linking external modules failed: {e}");
                 process::exit(1);
             }
         };
+        for warning in &linked.warnings {
+            eprintln!("warning: {warning}");
+        }
+        let wasm_owned = linked.wasm;
         if !external_modules.is_empty() {
             println!("Linked {} external module(s)", external_modules.len());
         }

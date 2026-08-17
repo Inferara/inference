@@ -52,10 +52,12 @@
 //! The practical consequence is worth stating plainly, because it is easy to
 //! read the contract above as stronger than it is: **an admitted external can
 //! address anywhere in the shared linear memory.** What limits the damage today
-//! is not this analysis but the main module's fixed single page — an
-//! out-of-region address is usually out of bounds and traps. That is an
-//! *accidental backstop*, not a guarantee, and it weakens as soon as the memory
-//! is larger than what the program actually uses.
+//! is not this analysis but a single declared page — an out-of-region address is
+//! usually out of bounds and traps. That is an *accidental backstop*, not a
+//! guarantee, and it weakens as soon as the memory is larger than what the
+//! program actually uses. The linear memory is configurable, so a merge that
+//! admits a Tier-B closure into more than one page says so:
+//! [`crate::LinkWarning::TierBInMultiPageMemory`].
 //!
 //! Closing the gap needs a numeric/interval domain over addresses (with
 //! occurrence multiplicity, so a repeated parameter cannot fold away) plus

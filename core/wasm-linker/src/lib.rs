@@ -28,16 +28,19 @@
 //! - **Tier A** — pure functions (no memory, globals, data, tables). Merged.
 //! - **Tier B** — memory through caller-passed pointers only. Merged onto the
 //!   single shared linear memory; no address relocation needed.
-//! - **Tier C** — own static data, mutable globals, or absolute addresses.
-//!   Merging would require relocation metadata the static merge does not
-//!   consume, so it is **rejected** with
-//!   [`LinkError::RequiresRelocatableBuild`] rather than producing an unsound
-//!   module.
+//! - **Tier C** — the module declares a data or element segment, or the closure
+//!   reads or writes a global or names the table space. Merging would require
+//!   relocation metadata the static merge does not consume, so it is
+//!   **rejected** with [`LinkError::RequiresRelocatableBuild`] rather than
+//!   producing an unsound module. A global or table the module merely
+//!   *declares* and no body touches is inert and is not a reason; see
+//!   [`tier`].
 //!
 //! ## Entry point
 //!
 //! [`link`] takes the main module bytes and the external module bytes and
-//! returns the unified module bytes.
+//! returns the unified module bytes. [`link_with_warnings`] is the same merge
+//! with the [`LinkWarning`]s it raised, for callers that report them.
 
 mod closure;
 mod merge;
@@ -47,6 +50,8 @@ mod rewrite;
 mod safety;
 mod spec_funcs;
 mod tier;
+
+use std::fmt;
 
 use inf_wasmparser::WasmFeatures;
 use thiserror::Error;
@@ -191,6 +196,91 @@ pub enum LinkError {
     IncompatibleMemory { field: String, reason: String },
 }
 
+/// Something a *successful* link owes the user: the merge produced a valid
+/// module, and a guarantee a reader would reasonably expect it to carry does not
+/// extend as far as the output does.
+///
+/// A warning is never a defect the linker found in the merged program. It states
+/// where the merge's own proofs stop, at a point where the emitted artifact
+/// makes that limit reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkWarning {
+    /// One or more externals were admitted at Tier B — their memory accesses
+    /// are proven to *derive from* the caller's pointers — into an output
+    /// reserving more than one 64 KiB page.
+    ///
+    /// Tier B carries no sizes, so it cannot show an access *stays within* the
+    /// buffer the caller granted (see [`provenance`]). With a single page, an
+    /// address past that buffer is usually past the memory too and traps; that
+    /// backstop is incidental, and a larger memory removes it.
+    ///
+    /// `fields` names the satisfied import fields, which is how the user knows
+    /// these functions.
+    TierBInMultiPageMemory { fields: Vec<String>, pages: u64 },
+}
+
+impl fmt::Display for LinkWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinkWarning::TierBInMultiPageMemory { fields, pages } => {
+                let names = fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (subject, verb) = if fields.len() == 1 {
+                    ("external", "addresses")
+                } else {
+                    ("externals", "address")
+                };
+                write!(
+                    f,
+                    "merged {subject} {names} {verb} linear memory through caller-supplied \
+                     pointers: the merge proves every address derives from a parameter of the \
+                     call, not that it stays within the buffer that parameter points into — the \
+                     analysis carries no sizes. The reconciled memory reserves {pages} pages, so \
+                     an address past the caller's buffer lands in valid memory, possibly a region \
+                     another merged module owns, where a single page would usually have trapped. \
+                     This states the limit of what the merge proves, not a fault found in the \
+                     merged code; issue #420 tracks the containment analysis that would close it."
+                )
+            }
+        }
+    }
+}
+
+/// A completed merge: the unified module bytes and every [`LinkWarning`] the
+/// merge raised.
+///
+/// Named fields rather than a tuple because the two halves are not
+/// interchangeable at a call site — `out.warnings` says what it is, `out.1` does
+/// not — and because the warning list is the half a caller may legitimately
+/// ignore, which positional access would hide.
+#[derive(Debug, Clone)]
+pub struct LinkOutput {
+    /// The unified, self-contained module.
+    pub wasm: Vec<u8>,
+    /// Warnings raised during the merge. Empty is the common case.
+    pub warnings: Vec<LinkWarning>,
+}
+
+/// Merges the satisfiable imports of `main_wasm` from `externals`, returning the
+/// unified module together with every warning the merge raised.
+///
+/// Identical to [`link`] in every respect but the return type; see [`link`] for
+/// the resolution rules, the fail-closed contract, and the error conditions.
+/// Use this form wherever the warnings can reach the user.
+///
+/// # Errors
+///
+/// The same conditions as [`link`].
+pub fn link_with_warnings(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+) -> Result<LinkOutput, LinkError> {
+    merge::link(main_wasm, externals)
+}
+
 /// Merges the satisfiable imports of `main_wasm` from `externals`, returning a
 /// single self-contained module with those imports removed.
 ///
@@ -214,6 +304,12 @@ pub enum LinkError {
 /// self-defending against a malformed or adversarial external even when the
 /// caller did not pre-validate it.
 ///
+/// This is the **warning-discarding** form of [`link_with_warnings`], kept for
+/// callers with nowhere to report a warning to — the test suite, whose subject
+/// is the merged bytes, and embedders that only want the artifact. Anything that
+/// speaks to a user should call [`link_with_warnings`] instead: a discarded
+/// [`LinkWarning`] is a claim about the artifact the user never hears.
+///
 /// # Errors
 ///
 /// Returns a [`LinkError`] if any module fails to parse or an external fails
@@ -222,7 +318,7 @@ pub enum LinkError {
 /// external is bound under the same `(module, field)` pair an import names
 /// ([`LinkError::AmbiguousImport`]).
 pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> Result<Vec<u8>, LinkError> {
-    merge::link(main_wasm, externals)
+    link_with_warnings(main_wasm, externals).map(|out| out.wasm)
 }
 
 /// Validates one external `.wasm` against the linker's supported-version

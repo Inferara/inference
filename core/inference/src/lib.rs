@@ -318,6 +318,11 @@ pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmTo
 /// without taking a direct dependency on `inference-wasm-linker`.
 pub use inference_wasm_linker::LinkError;
 
+/// Re-export of the static-merge linker's success types, so a consumer of
+/// [`link_with_warnings`] can name and match on what it returns without taking a
+/// direct dependency on `inference-wasm-linker`.
+pub use inference_wasm_linker::{LinkOutput, LinkWarning};
+
 /// Re-export of the `inference.spec_funcs` custom-section identifiers so
 /// downstream consumers (CLI tools, integration tests) share a single source
 /// of truth with the codegen and translator crates.
@@ -735,9 +740,29 @@ pub fn codegen(
 ///
 /// Returns an error if any module fails to parse, an import is left unsatisfied
 /// by the supplied externals, or a merged function falls into the unsupported
-/// Tier C (own static data / mutable globals). The underlying error downcasts
+/// Tier C — its module declares a data or element segment, or its closure reads
+/// or writes a global or names the table space. The underlying error downcasts
 /// to [`LinkError`].
 pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
+    link_with_warnings(main_wasm, externals).map(|out| out.wasm)
+}
+
+/// Folds external `.wasm` modules into the codegen output, reporting what the
+/// completed link owes the user.
+///
+/// Identical to [`link`], including the byte-identical no-op path for a program
+/// without externs, but keeps the [`LinkWarning`]s the merge raised instead of
+/// dropping them. Any caller that can put text in front of a user should prefer
+/// this form: a warning describes the artifact that was just written, and
+/// [`link`] discards it.
+///
+/// # Errors
+///
+/// The same conditions as [`link`].
+pub fn link_with_warnings(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+) -> anyhow::Result<LinkOutput> {
     // Byte-identical fast path *only* for a module that is provably import-free —
     // it is already the self-contained artifact this step would produce. A module
     // that still carries imports (e.g. a caller that passed no resolved externals
@@ -746,10 +771,19 @@ pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec
     // error instead of being silently passed through. Keying the fast path on the
     // *module's own imports* rather than merely on `externals.is_empty()` keeps it
     // fail-closed and honours the documented error contract above.
+    //
+    // Its empty warning list is a fact about the path, not an omission: a warning
+    // is raised about a merged external, and this path returns before any external
+    // is examined — indeed only when there is none to examine.
     if externals.is_empty() && module_is_import_free(main_wasm) {
-        return Ok(main_wasm.to_vec());
+        return Ok(LinkOutput {
+            wasm: main_wasm.to_vec(),
+            warnings: Vec::new(),
+        });
     }
-    Ok(inference_wasm_linker::link(main_wasm, externals)?)
+    Ok(inference_wasm_linker::link_with_warnings(
+        main_wasm, externals,
+    )?)
 }
 
 /// Whether `wasm` parses and declares no imports. Returns `false` on any parse

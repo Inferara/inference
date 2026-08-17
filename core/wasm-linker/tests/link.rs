@@ -6,7 +6,10 @@
 //! function bodies, and the precise rejection for Tier-C inputs.
 
 use inf_wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
-use inference_wasm_linker::{link as raw_link, LinkError};
+use inference_wasm_linker::{
+    link as raw_link, link_with_warnings as raw_link_with_warnings, LinkError, LinkOutput,
+    LinkWarning,
+};
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
 fn wasm(wat: &str) -> Vec<u8> {
@@ -25,15 +28,28 @@ fn wasm(wat: &str) -> Vec<u8> {
 /// external (multi-module satisfaction, same-field disambiguation) call
 /// [`raw_link`] directly with explicit pairs.
 fn link(main: &[u8], libs: &[&[u8]]) -> Result<Vec<u8>, LinkError> {
+    let module = sole_import_module(main);
+    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
+    raw_link(main, &pairs)
+}
+
+/// [`link`] through the warning-carrying entry point, for tests whose subject is
+/// what the merge reports rather than what it emits.
+fn link_with_warnings(main: &[u8], libs: &[&[u8]]) -> Result<LinkOutput, LinkError> {
+    let module = sole_import_module(main);
+    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
+    raw_link_with_warnings(main, &pairs)
+}
+
+/// The single logical module `main` imports from, or the empty string when it
+/// imports nothing — a no-import main links any externals away to nothing, so
+/// the label is irrelevant there.
+fn sole_import_module(main: &[u8]) -> String {
     let modules: std::collections::BTreeSet<String> = function_imports(main)
         .into_iter()
         .map(|(module, _)| module)
         .collect();
-    // A no-import main links any externals away to nothing; the module label is
-    // irrelevant there. With imports, every fixture here uses a single module.
-    let module = modules.into_iter().next().unwrap_or_default();
-    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
-    raw_link(main, &pairs)
+    modules.into_iter().next().unwrap_or_default()
 }
 
 /// Validates `bytes` as a complete WASM module.
@@ -1196,6 +1212,209 @@ fn only_the_memory_using_external_contributes_its_declaration() {
     assert!(
         module_globals(&linked).is_empty(),
         "neither external's global may reach the output"
+    );
+}
+
+// -- The Tier-B reach warning ------------------------------------------------
+
+/// A main module importing `touch` from `memlib`, calling it, and owning a
+/// linear memory of `pages` pages pinned to that size — the shape the compiler
+/// emits once a project configures its memory.
+fn main_owning_pages(pages: u32) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "memlib" "touch" (func (;0;) (type 0)))
+          (memory (;0;) {pages} {pages})
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#
+    ))
+}
+
+/// An external exporting `touch : (i32, i32) -> i32` over a one-page memory that
+/// its body never addresses: it adds its two parameters. Tier A.
+///
+/// It nonetheless *declares* the memory, so the only difference between this
+/// fixture and a one-page [`tier_b_touch_lib`] is the operator in the body —
+/// which is what makes the pair a test of the tier rather than of two modules
+/// that happen to differ.
+fn tier_a_touch_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "touch" (func 0)))
+        "#,
+    )
+}
+
+/// The same external over `pages` pages, with a body that loads through its
+/// first parameter: a caller-supplied address, so Tier B.
+fn tier_b_touch_lib(pages: u32) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) {pages})
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            i32.load
+            local.get 1
+            i32.add)
+          (export "touch" (func 0)))
+        "#
+    ))
+}
+
+/// The single warning `out` carries, panicking when it carries any other count.
+fn sole_warning(out: &LinkOutput) -> &LinkWarning {
+    match out.warnings.as_slice() {
+        [only] => only,
+        other => panic!("expected exactly one warning, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tier_b_external_in_a_multi_page_memory_warns() {
+    // What Tier B proves is that every address the external computes derives from
+    // a parameter of the call — not that it stays inside the buffer that
+    // parameter points into. A single page kept that gap mostly harmless by
+    // accident: the reach usually left the memory and trapped. Two pages do not,
+    // so the user is told.
+    let out = link_with_warnings(&main_owning_pages(2), &[&tier_b_touch_lib(1)])
+        .expect("a Tier-B external must still merge; this is a warning, not an error");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((2, Some(2))),
+        "the fixture must actually produce the multi-page memory the warning is about"
+    );
+
+    assert_eq!(
+        sole_warning(&out),
+        &LinkWarning::TierBInMultiPageMemory {
+            fields: vec!["touch".to_string()],
+            pages: 2,
+        }
+    );
+
+    // The rendered form is what a user reads, so the claim has to survive into it.
+    let rendered = sole_warning(&out).to_string();
+    assert!(
+        rendered.contains("`touch`"),
+        "the warning must name the external it is about: {rendered}"
+    );
+    assert!(
+        rendered.contains("derives") && rendered.contains("2 pages"),
+        "the warning must state the derivation claim and the page count: {rendered}"
+    );
+    assert!(
+        rendered.contains("#420"),
+        "the warning must point at the issue tracking containment analysis: {rendered}"
+    );
+}
+
+#[test]
+fn a_tier_a_external_in_a_multi_page_memory_does_not_warn() {
+    // The exposure belongs to memory-addressing closures. A pure function has no
+    // address to reach with, so the same two-page memory is not its problem —
+    // warning about it would train the user to ignore the warning.
+    //
+    // The fixture differs from the Tier-B one by its body's operator alone: same
+    // signature, same declared memory, same main module.
+    let out = link_with_warnings(&main_owning_pages(2), &[&tier_a_touch_lib()])
+        .expect("a Tier-A external must merge");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((2, Some(2))),
+        "the memory the warning would be keyed on must be present, so the silence is \
+         about the tier and not about the pages"
+    );
+    assert_eq!(
+        out.warnings,
+        Vec::new(),
+        "a closure that never addresses memory has no unbounded reach to warn about"
+    );
+}
+
+#[test]
+fn a_tier_b_external_in_a_single_page_memory_does_not_warn() {
+    // The other half of the condition. One page is the shape the accidental
+    // backstop still covers: an address past the caller's buffer is usually past
+    // the memory too, and traps.
+    let out = link_with_warnings(&main_owning_pages(1), &[&tier_b_touch_lib(1)])
+        .expect("a Tier-B external must merge");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((1, Some(1))),
+        "the external's own single page must not widen the output past the condition"
+    );
+    assert_eq!(
+        out.warnings,
+        Vec::new(),
+        "one page is the memory the warning exists to distinguish from"
+    );
+}
+
+#[test]
+fn a_warning_does_not_change_what_link_returns() {
+    // A warning is never an error, and never a different artifact. `link` is the
+    // warning-discarding form of the same merge, so the bytes must be identical
+    // to the ones reported alongside the warning — the whole test suite links
+    // through it, and would not notice a divergence.
+    let main = main_owning_pages(2);
+    let lib = tier_b_touch_lib(1);
+
+    let out = link_with_warnings(&main, &[&lib]).expect("the merge succeeds");
+    assert!(
+        !out.warnings.is_empty(),
+        "this fixture must warn, or the test compares two silent links"
+    );
+
+    let bytes = link(&main, &[&lib]).expect("a warning must not fail the link");
+    assert_eq!(
+        bytes, out.wasm,
+        "the warning-discarding form must return the same module"
+    );
+}
+
+#[test]
+fn the_unreconcilable_minimum_names_the_knob_that_would_fix_it() {
+    // The rule is deliberate — an external never relaxes the main module's own
+    // memory bound — but the remedy lies on the other side of the link from the
+    // error, and an author reading two page counts has no reason to guess that
+    // the main module's page count is theirs to set.
+    let err = link(&main_owning_pages(1), &[&tier_b_touch_lib(17)])
+        .expect_err("17 pages cannot be reconciled onto a pinned single page");
+    let LinkError::IncompatibleMemory { reason, .. } = err else {
+        panic!("expected IncompatibleMemory, got {err:?}")
+    };
+    assert!(
+        reason.contains("`pages`")
+            && reason.contains("`[memory]`")
+            && reason.contains("Inference.toml"),
+        "the diagnostic must name the manifest key that raises the page count: {reason}"
+    );
+    assert!(
+        reason.contains("--memory-pages"),
+        "and the equivalent compiler flag, for a build with no manifest: {reason}"
+    );
+    assert!(
+        reason.contains("is not relaxed"),
+        "while still stating the rule it is applying: {reason}"
     );
 }
 

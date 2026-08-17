@@ -196,12 +196,19 @@ It is also why bounding the *constant* displacement would buy nothing — the
 cheapest way to address arbitrarily far from `p` uses no constant at all.
 
 **In practice this means an admitted external can address anywhere in the shared
-linear memory.** What limits the damage today is not this analysis but the main
-module's fixed single page: an out-of-region address is usually out of bounds and
-traps. That is an accidental backstop, not a guarantee, and it weakens as the
-declared memory grows beyond what the program uses. Issue #420 tracks closing the
-gap (a numeric/interval domain plus declared pointee sizes for `external fn`
+linear memory.** What limits the damage today is not this analysis but a single
+declared page: an out-of-region address is usually out of bounds and traps. That
+is an accidental backstop, not a guarantee, and it weakens as the declared memory
+grows beyond what the program uses. Issue #420 tracks closing the gap (a
+numeric/interval domain plus declared pointee sizes for `external fn`
 parameters); #333 would supply part of the same channel.
+
+Because the memory is now configurable, a link that admits a Tier-B external into
+a reconciled memory of more than one page raises a
+`LinkWarning::TierBInMultiPageMemory` naming those externals — see
+[Entry Point](#entry-point). The condition is the *reconciled* page count, not a
+raised manifest setting: a main configured to two pages and a memoryless main
+adopting a seventeen-page external memory have lost the same backstop.
 
 ### Tier C — Own Static Data, Global Access, or Table Use
 
@@ -292,13 +299,15 @@ instead:
 ```text
 error: cannot reconcile linear memory for `sum`: the reconciled minimum
        (17 pages) exceeds the declared maximum (1 pages) of the memory it is
-       merged into; the kept memory bound is not relaxed
+       merged into; the kept memory bound is not relaxed. Give the main module
+       a memory large enough to hold the external: `pages` in the `[memory]`
+       table of `Inference.toml`, or `infc --memory-pages <N>`
 ```
 
-Configurable linear memory is a separate change. Note also that an external's
-declared memory is folded in whenever its module has a memory section, whether or
-not the merged closure addresses memory — so a pure leaf function still
-contributes its module's memory to the output.
+This is reachable only for an external whose closure actually addresses memory.
+A pure leaf function does not contribute its module's declared memory at all, so
+a `wasm32-unknown-unknown` artifact whose merged closure only computes links
+against a single-page main with main's own memory kept unchanged.
 
 ## Entry Point
 
@@ -315,6 +324,16 @@ let unified: Vec<u8> = link(
 pairs — each external is tagged with the logical module name codegen emitted for
 it. It returns the unified module bytes, or a `LinkError` if any module fails to
 parse, a merged closure reaches a transitive host import, or a closure is Tier C.
+
+`link_with_warnings` is the same merge, returning a `LinkOutput` that keeps the
+`LinkWarning`s the merge raised alongside the bytes. `link` is its
+warning-discarding form. A warning is never a defect found in the merged
+program: it states where the merge's own proofs stop, at a point where the
+emitted artifact makes that limit reachable — today, a Tier-B external merged
+into a memory of more than one page, where an address past the caller's buffer
+lands in valid memory instead of trapping (see
+[What Tier B guarantees — and what it does not](#what-tier-b-guarantees--and-what-it-does-not),
+and issue #420).
 
 Every import in the main module must be satisfiable by one of the supplied
 external modules. The match is by **both** the logical module name and the export

@@ -33,17 +33,18 @@ use crate::closure;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
 use crate::rewrite::{reencode_body, BodyOrigin, IndexMap};
 use crate::tier::{self, Tier};
-use crate::LinkError;
+use crate::{LinkError, LinkOutput, LinkWarning};
 
 /// Resolves and merges every satisfiable import of `main` from the supplied
-/// external modules, returning the unified module bytes.
+/// external modules, returning the unified module bytes and everything the
+/// completed merge owes the user beyond them.
 ///
 /// Each external arrives as `(logical_module, bytes)` so the merge can match an
 /// import's recorded `(module, field)` against the external's logical module.
 pub(crate) fn link(
     main_bytes: &[u8],
     externals: &[(&str, &[u8])],
-) -> Result<Vec<u8>, LinkError> {
+) -> Result<LinkOutput, LinkError> {
     // Structural validation of the main module on entry. The main module is the
     // linker's own codegen output on the live CLI pipeline, but the public
     // library API (`inference_wasm_linker::link`, `inference::link`) accepts
@@ -89,7 +90,10 @@ pub(crate) fn link(
     inf_wasmparser::validate(&merged)
         .map_err(|e| LinkError::InvalidMergedModule(e.to_string()))?;
 
-    Ok(merged)
+    Ok(LinkOutput {
+        wasm: merged,
+        warnings: plan.warnings,
+    })
 }
 
 /// Validates one external against the linker's supported-version contract in two
@@ -161,6 +165,8 @@ struct Plan {
     /// Per external module: `source_type_idx -> output type idx` for the types
     /// its merged closure references.
     external_type_remap: Vec<BTreeMap<u32, u32>>,
+    /// What the completed merge owes the user beyond the bytes themselves.
+    warnings: Vec<LinkWarning>,
     /// The single shared linear memory the output declares, reconciled across
     /// the main module and every memory-using merged external. `None` when no
     /// module needs a memory (a fully pure merge).
@@ -293,6 +299,12 @@ impl Plan {
         // memory-effect requirements in below.
         let mut memory = MemoryReconciler::new(main.memory.as_ref())?;
 
+        // The import fields satisfied by a Tier-B external, in import order. A
+        // duplicate import entry (valid WASM: two entries may name the same
+        // module and field) must not name the same function twice in the
+        // warning, so each field is recorded once.
+        let mut tier_b_fields: Vec<String> = Vec::new();
+
         // 3. For every satisfied import, compute its closure, classify the tier,
         //    and allocate output indices + output types for the whole closure.
         for (import_idx, &(ext_idx, root)) in satisfied.iter().enumerate() {
@@ -329,11 +341,14 @@ impl Plan {
             }
 
             let cl = closure::compute(external, root)?;
+            let field = &main.imported_funcs[import_idx].field;
             // Tier C is rejected here, before any output index is committed. The
             // classifier runs the address-provenance analysis for memory-using
             // closures, so an absolute-address access is rejected as Tier C.
-            let _tier: Tier =
-                tier::classify(external, &cl, root, &main.imported_funcs[import_idx].field)?;
+            let verdict = tier::classify(external, &cl, root, field)?;
+            if verdict == Tier::B && !tier_b_fields.contains(field) {
+                tier_b_fields.push(field.clone());
+            }
 
             // Reconcile this external's memory into the shared output memory:
             // fold in its declared limits (widening minimum/maximum) and check
@@ -348,7 +363,7 @@ impl Plan {
                 external.memory.as_ref(),
                 cl.effects.uses_memory,
                 cl.effects.uses_memory_grow,
-                &main.imported_funcs[import_idx].field,
+                field,
             )?;
 
             for &src_func in &cl.local_func_indices {
@@ -443,8 +458,6 @@ impl Plan {
             // `Type.method` convention. An explicit debug name on the source module
             // would otherwise win, but a codegen-produced external typically
             // exports the field under that same name, so this is stable.
-            let external = &externals[ext_idx];
-            let field = &main.imported_funcs[import_idx].field;
             if let Some(root_merged) = merged.iter_mut().find(|m| {
                 merged_index.get(&(m.external_idx, m.source_func_idx)) == Some(&root_output)
             }) {
@@ -474,6 +487,8 @@ impl Plan {
             }
         }
 
+        let reconciled_memory = memory.finish();
+
         Ok(Plan {
             out_types,
             main_type_remap,
@@ -482,7 +497,10 @@ impl Plan {
             merged,
             merged_index,
             external_type_remap,
-            reconciled_memory: memory.finish(),
+            warnings: unbounded_reach_warning(&tier_b_fields, reconciled_memory.as_ref())
+                .into_iter()
+                .collect(),
+            reconciled_memory,
         })
     }
 
@@ -838,6 +856,40 @@ impl Plan {
         }
         Ok(function)
     }
+}
+
+/// The warning owed to a merge that admits a Tier-B external into a linear
+/// memory of more than one page, or `None` when it does not.
+///
+/// Tier B proves *derivation* — every address the external computes flows from a
+/// parameter of the call — and not *containment*: it carries no sizes, so it
+/// cannot show the address stays inside the buffer that parameter points into
+/// (`p + q` and `2p` reach arbitrarily far with no constant at all, and both are
+/// admitted). What has kept such a reach harmless is that memory beyond the
+/// caller's buffer was usually beyond the memory itself, and trapped. That is an
+/// accidental backstop, and every page above the first erodes it.
+///
+/// The condition is therefore the **reconciled** page count, not "the user asked
+/// for more pages". A main module configured to two pages and a memoryless main
+/// that adopts a seventeen-page external memory are equally exposed: the
+/// out-of-buffer address lands in valid memory either way, and which module
+/// enlarged it changes nothing about the reach. Rewriting this as a check on the
+/// manifest would silence the second case, which is the harder one to see.
+///
+/// The count read is the reconciled *minimum* — the pages the instantiated
+/// module addresses.
+fn unbounded_reach_warning(
+    tier_b_fields: &[String],
+    reconciled: Option<&EncMemoryType>,
+) -> Option<LinkWarning> {
+    let pages = reconciled?.minimum;
+    if tier_b_fields.is_empty() || pages <= 1 {
+        return None;
+    }
+    Some(LinkWarning::TierBInMultiPageMemory {
+        fields: tier_b_fields.to_vec(),
+        pages,
+    })
 }
 
 /// Interns a signature into `out_types`, returning its index. Two functions
@@ -1236,7 +1288,10 @@ impl MemoryReconciler {
 /// every module's static range. The one reconciliation that *cannot* be honored
 /// is a reserved minimum that exceeds the anchor's maximum — the external's
 /// static footprint does not fit under the host's declared cap — which is
-/// rejected rather than emitting an invalid `min > max` memory.
+/// rejected rather than emitting an invalid `min > max` memory. That rejection
+/// names the page-count knob: the fix lies on the main module's side, which the
+/// author is unlikely to guess from a diagnostic that only reports the two
+/// numbers.
 fn reconcile_pair(
     a: EncMemoryType,
     b: EncMemoryType,
@@ -1282,7 +1337,9 @@ fn reconcile_pair(
             reason: format!(
                 "the reconciled minimum ({minimum} pages) exceeds the declared maximum \
                  ({anchor_max} pages) of the memory it is merged into; the kept memory bound \
-                 is not relaxed"
+                 is not relaxed. Give the main module a memory large enough to hold the \
+                 external: `pages` in the `[memory]` table of `Inference.toml`, or \
+                 `infc --memory-pages <N>`"
             ),
         });
     }
