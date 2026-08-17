@@ -26,6 +26,42 @@
 //! one instruction at a time. Modeling the extent with the address rule keeps the
 //! realistic caller-owns-`(ptr, len)` pattern linkable while closing that escape.
 //!
+//! ## What this proves, and what it does not
+//!
+//! The property proved here is **derivation**, not **containment**: every
+//! address is shown to *flow from* a caller-supplied parameter. Nothing here
+//! shows that an address stays *inside the region the caller meant to grant* —
+//! and nothing here can, because the analysis carries no sizes. The lattice has
+//! three tags and no numeric component; it cannot represent "how far from `p`".
+//!
+//! So all of these are admitted, by design:
+//!
+//! ```text
+//! store at p + 1048576          ; a constant displacement, unbounded
+//! store at p + q                ; two parameters summed - no constant at all
+//! store at p + p    (= 2p)      ; nowhere near p for any nonzero p
+//! ptr = p; loop { store ptr; ptr += 4 }   ; walks off the end of any buffer
+//! ```
+//!
+//! `Param + Param` is a deliberate, test-pinned admission (`a6`, `a13` in
+//! `provenance/tests.rs`): the caller supplied both operands, so under the derivation
+//! property their sum is the caller's business. That is also why bounding the
+//! *constant* displacement would buy nothing — the cheapest way to address
+//! arbitrarily far from `p` uses no constant.
+//!
+//! The practical consequence is worth stating plainly, because it is easy to
+//! read the contract above as stronger than it is: **an admitted external can
+//! address anywhere in the shared linear memory.** What limits the damage today
+//! is not this analysis but the main module's fixed single page — an
+//! out-of-region address is usually out of bounds and traps. That is an
+//! *accidental backstop*, not a guarantee, and it weakens as soon as the memory
+//! is larger than what the program actually uses.
+//!
+//! Closing the gap needs a numeric/interval domain over addresses (with
+//! occurrence multiplicity, so a repeated parameter cannot fold away) plus
+//! declared pointee sizes for `external fn` parameters, which no channel
+//! currently carries into this crate. Tracked in issue #420.
+//!
 //! ## The lattice
 //!
 //! Every operand-stack slot and every local carries one of three provenance tags:

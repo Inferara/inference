@@ -176,6 +176,33 @@ caller-supplied at runtime.
   i32.store)
 ```
 
+#### What Tier B guarantees — and what it does not
+
+Tier B proves **derivation**, not **containment**. Every address is shown to
+flow from a caller-supplied parameter; nothing shows it stays inside the region
+the caller intended to grant, and nothing can, because the analysis carries no
+sizes. All of these are admitted by design:
+
+| Admitted form | Where it actually lands |
+|---|---|
+| `p + 1048576` | 1 MiB past the caller's pointer |
+| `p + q` (two parameters, no constant) | anywhere the caller's two values sum to |
+| `p + p` (`2p`) | nowhere near `p` for any nonzero `p` |
+| `ptr = p; loop { store ptr; ptr += 4 }` | off the end of any buffer |
+
+`Param + Param` is a deliberate, test-pinned admission: the caller supplied both
+operands, so under the derivation property their sum is the caller's business.
+It is also why bounding the *constant* displacement would buy nothing — the
+cheapest way to address arbitrarily far from `p` uses no constant at all.
+
+**In practice this means an admitted external can address anywhere in the shared
+linear memory.** What limits the damage today is not this analysis but the main
+module's fixed single page: an out-of-region address is usually out of bounds and
+traps. That is an accidental backstop, not a guarantee, and it weakens as the
+declared memory grows beyond what the program uses. Issue #420 tracks closing the
+gap (a numeric/interval domain plus declared pointee sizes for `external fn`
+parameters); #333 would supply part of the same channel.
+
 ### Tier C — Own Static Data, Globals, or Tables
 
 The closure carries its own baked-in data segments (lookup tables, string

@@ -13,6 +13,12 @@
 //!   address derives from a function parameter — a closure that fabricates an
 //!   address from a constant or its own state would alias the host program's
 //!   memory and is rejected as Tier C instead.
+//!   Tier B admission proves *derivation*, not *containment*: the addresses are
+//!   shown to flow from caller parameters, not to stay inside the region the
+//!   caller granted. `p + 1048576`, `p + q` and `2p` are all admitted, and a
+//!   loop may walk a caller pointer off the end of any buffer. See the "What
+//!   this proves, and what it does not" section of [`crate::provenance`] before
+//!   relying on Tier B for a bounds property; issue #420 tracks closing it.
 //! - **Tier C** — own static data, globals, or table/element entries: merging
 //!   would require relocating data and rewriting absolute addresses, which
 //!   needs relocation metadata the static merge does not consume. Rejected with
