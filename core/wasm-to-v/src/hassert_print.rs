@@ -5,10 +5,11 @@
 //! carries each applied function symbol to its `mod_funcs` index (computed by
 //! the translator against the emitted module's function layout). The printer
 //! mirrors the wasm-verifier `Assertions.v` constructors one-to-one, with the
-//! only sugar being the three definitionally-transparent forms the IR keeps
+//! only sugar being the four definitionally-transparent forms the IR keeps
 //! explicit: [`HAssert::TermEq`] → `term_eq`, [`HAssert::Imp`] → `Himpl`,
-//! [`HAssert::Or`] → `Hor`. Every compound argument is parenthesized, so the
-//! output is unambiguous regardless of Gallina's application/precedence rules.
+//! [`HAssert::Or`] → `Hor`, [`HAssert::All`] → `Hall`. Every compound argument
+//! is parenthesized, so the output is unambiguous regardless of Gallina's
+//! application/precedence rules.
 
 use crate::gallina::z_literal;
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
@@ -30,7 +31,7 @@ pub(crate) fn print_assert(a: &HAssert, resolved: &FxHashMap<String, u32>) -> St
 pub(crate) fn collect_symbols<'a>(a: &'a HAssert, acc: &mut Vec<&'a str>) {
     match a {
         HAssert::True | HAssert::False => {}
-        HAssert::Not(x) | HAssert::Ex(x) => collect_symbols(x, acc),
+        HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => collect_symbols(x, acc),
         HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
             collect_symbols(l, acc);
             collect_symbols(r, acc);
@@ -74,6 +75,7 @@ fn assert_str(a: &HAssert, r: &FxHashMap<String, u32>) -> String {
         HAssert::Imp(l, rr) => format!("Himpl {} {}", paren_assert(l, r), paren_assert(rr, r)),
         HAssert::Or(l, rr) => format!("Hor {} {}", paren_assert(l, r), paren_assert(rr, r)),
         HAssert::Ex(body) => format!("HA_ex {}", paren_assert(body, r)),
+        HAssert::All(body) => format!("Hall {}", paren_assert(body, r)),
         HAssert::TermEq(l, rr) => format!("term_eq {} {}", paren_term(l, r), paren_term(rr, r)),
         HAssert::HasType(t, ty) => format!("HA_has_type {} {}", paren_term(t, r), numtype(*ty)),
         HAssert::Defined(t) => format!("HA_defined {}", paren_term(t, r)),

@@ -376,10 +376,12 @@ spec LibSpec {
 #[test]
 fn field_position_uzumaki_with_qualified_cross_file_struct_is_rejected() {
     // A field-position uzumaki on a qualified cross-file struct type
-    // (`lib::geom::Point { x: @, y: @ }`) inside a spec's `forall`: the struct
-    // literal and the subsequent `p.x` field access have no `hassert` encoding,
-    // so proof-mode codegen rejects the spec with `P002` (previously it produced
-    // WASM because the obligation pass was additive; the flip makes it fatal).
+    // (`lib::geom::Point { x: @, y: @ }`) inside a spec's `forall`: the
+    // qualified literal itself now resolves and binds a leaf value tree
+    // (cross-file struct types classify exactly like local ones), but `@` is
+    // an introduction form only where a `let` or a call argument binds it —
+    // a literal field is neither, so proof-mode codegen rejects each
+    // field-position `@` with `P006`.
     let main = "\
 use lib::geom;
 
@@ -395,10 +397,10 @@ pub fn main() {}
     let geom = "pub struct Point { x: i32; y: i32; }";
 
     let err = try_proof_codegen_multi_file(&[(vec![], main), (vec!["lib", "geom"], geom)])
-        .expect_err("a struct-valued cross-file spec body has no assertion encoding");
+        .expect_err("a field-position uzumaki has no binding to introduce it");
     assert!(
-        err.to_string().contains("P002"),
-        "expected a P002 rejection for the struct construct; got:\n{err}"
+        err.to_string().contains("P006"),
+        "expected a P006 rejection for each field-position uzumaki; got:\n{err}"
     );
 }
 

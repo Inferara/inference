@@ -42,11 +42,17 @@
 //! - no general `HA_pred`: [`HAssert::TermEq`] is the only predicate form,
 //!   enforcing wasm-verifier's `pred_eq`/2 discipline by construction.
 //!
-//! Implication and disjunction are *explicit* [`HAssert::Imp`]/[`HAssert::Or`]
-//! nodes rather than their classical De Morgan encodings. wasm-verifier's
-//! `Himpl`/`Hor` are definitionally-transparent `Definition`s, so the
-//! downstream printer can render these nodes as `Himpl`/`Hor` without ever
-//! pattern-matching an encoding.
+//! Implication, disjunction and universal quantification are *explicit*
+//! [`HAssert::Imp`]/[`HAssert::Or`]/[`HAssert::All`] nodes rather than their
+//! classical De Morgan encodings. wasm-verifier's `Himpl`/`Hor`/`Hall` are
+//! definitionally-transparent `Definition`s, so the downstream printer can
+//! render these nodes by name without ever pattern-matching an encoding.
+//!
+//! [`HAssert::All`] is also what keeps quantifier *alternation* honest. The
+//! downstream `ValidSpec` judgment already quantifies the payload's free
+//! variables universally, so encoding an inner universal as anything but a
+//! binder of its own — a free slot, say — would read as an outer `∀` over an
+//! inner `∃` and silently swap the two.
 
 #![warn(clippy::pedantic)]
 

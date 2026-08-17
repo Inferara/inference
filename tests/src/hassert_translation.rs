@@ -92,6 +92,9 @@ fn imp(a: HAssert, b: HAssert) -> HAssert {
 fn ex(a: HAssert) -> HAssert {
     HAssert::Ex(Box::new(a))
 }
+fn all(a: HAssert) -> HAssert {
+    HAssert::All(Box::new(a))
+}
 fn teq(a: HTerm, b: HTerm) -> HAssert {
     HAssert::TermEq(a, b)
 }
@@ -439,4 +442,282 @@ spec prime_properties {
 ";
     let output = codegen_output(source);
     assert!(output.hspecs().is_empty());
+}
+
+/// The issue's acceptance shape survives the whole pipeline: a compound `@`
+/// binds one guarded universal slot per scalar leaf, and the constant-index
+/// read is that leaf's term.
+#[test]
+fn aggregate_uzumaki_produces_leaf_slots_end_to_end() {
+    let source = "\
+spec Agg {
+  fn leaf_bounds() forall {
+    let a: [i32; 3] = @;
+    assert(a[0] <= a[0]);
+  }
+}
+";
+    let expected = imp(
+        and(
+            hastype(local(0), HNumType::I32),
+            and(
+                hastype(local(1), HNumType::I32),
+                hastype(local(2), HNumType::I32),
+            ),
+        ),
+        nz(rel(HRelop::LeS, local(0), local(0))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Agg"), expected);
+}
+
+/// A struct parameter leaf-expands through real code generation — the
+/// compiled function keeps its single pointer parameter while the payload
+/// quantifies one slot per scalar leaf, at each leaf's own width.
+#[test]
+fn struct_parameter_leaves_carry_their_widths_end_to_end() {
+    let source = "\
+struct Rec {
+  lo: i32;
+  wide: i64;
+  row: [i32; 2];
+}
+
+spec Agg {
+  fn record(r: Rec) forall {
+    assert(r.wide > r.wide - 1);
+  }
+}
+";
+    let expected = imp(
+        and(
+            hastype(local(0), HNumType::I32),
+            and(
+                hastype(local(1), HNumType::I64),
+                and(
+                    hastype(local(2), HNumType::I32),
+                    hastype(local(3), HNumType::I32),
+                ),
+            ),
+        ),
+        nz(rel64(
+            HRelop::GtS,
+            local(1),
+            HTerm::Binop(
+                HNumType::I64,
+                HBinop::Sub,
+                Box::new(local(1)),
+                Box::new(i64c(1)),
+            ),
+        )),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Agg"), expected);
+}
+
+/// Aggregate equality is leafwise through the whole pipeline, and a bound
+/// literal's leaves are its own translated constants. (The literal is bound
+/// by a `let` rather than written as a comparison operand because the
+/// executable lowering of the same body only places a literal where an
+/// enclosing variable names its frame slot.)
+#[test]
+fn aggregate_equality_is_leafwise_end_to_end() {
+    let source = "\
+spec Agg {
+  fn pinned() forall {
+    let a: [i32; 2] = @;
+    let b: [i32; 2] = [1, 2];
+    assert(a == b);
+  }
+}
+";
+    let expected = imp(
+        and(
+            hastype(local(0), HNumType::I32),
+            hastype(local(1), HNumType::I32),
+        ),
+        and(teq(local(0), i32c(1)), teq(local(1), i32c(2))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Agg"), expected);
+}
+
+/// The constraint a non-constant index pins its element with, built
+/// independently of the pass: the unsigned range bound first, then one
+/// implication per element.
+fn element_def(index: &HTerm, witness: &HTerm, leaves: &[HTerm]) -> HAssert {
+    let extent = i32::try_from(leaves.len()).expect("test extents are small");
+    let cases = leaves
+        .iter()
+        .enumerate()
+        .rev()
+        .fold(HAssert::True, |acc, (case, leaf)| {
+            let case = i32::try_from(case).expect("test extents are small");
+            HAssert::and(
+                imp(
+                    teq(index.clone(), i32c(case)),
+                    teq(witness.clone(), leaf.clone()),
+                ),
+                acc,
+            )
+        });
+    and(nz(rel(HRelop::LtU, index.clone(), i32c(extent))), cases)
+}
+
+/// The issue's bounded-iteration acceptance shape survives the whole pipeline:
+/// an array `@`, an index `@`, a range `assume`, and a claim about the element
+/// at that index. The element is a fresh binder defined by the index's
+/// unsigned range and one case per element, and the definition is conjoined
+/// with the claim — which is what makes an out-of-range index refute the
+/// obligation rather than discharge it vacuously.
+#[test]
+fn bounded_iteration_pins_its_element_by_cases_end_to_end() {
+    let source = "\
+spec Iter {
+  fn element_defined() forall {
+    let a: [i32; 3] = @;
+    let i: i32 = @;
+    assume { assert(0 <= i && i < 3); }
+    assert(a[i] == a[i]);
+  }
+}
+";
+    let leaves = [local(0), local(1), local(2)];
+    // Both reads bind their own witness; each reads as de Bruijn index 0
+    // inside its own binder.
+    let definition = || element_def(&local(3), &lvar(0), &leaves);
+    let filter = and(
+        nz(rel(HRelop::LeS, i32c(0), local(3))),
+        nz(rel(HRelop::LtS, local(3), i32c(3))),
+    );
+    let expected = imp(
+        and(
+            hastype(local(0), HNumType::I32),
+            and(
+                hastype(local(1), HNumType::I32),
+                and(
+                    hastype(local(2), HNumType::I32),
+                    and(hastype(local(3), HNumType::I32), filter),
+                ),
+            ),
+        ),
+        ex(and(
+            definition(),
+            ex(and(definition(), nz(rel(HRelop::Eq, lvar(1), lvar(0))))),
+        )),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Iter"), expected);
+}
+
+/// A constant step of an access chain descends before the non-constant one, so
+/// `m[1][j]` splits over the two elements of row `[1]` rather than over the
+/// four elements of the matrix.
+#[test]
+fn a_constant_step_descends_before_the_non_constant_one_end_to_end() {
+    let source = "\
+spec Iter {
+  fn matrix_row(j: i32) forall {
+    let m: [[i32; 2]; 2] = @;
+    assert(m[1][j] == m[1][0]);
+  }
+}
+";
+    // Slot 0 is the declared parameter `j`; the matrix takes slots 1..4.
+    let definition = element_def(&local(0), &lvar(0), &[local(3), local(4)]);
+    let expected = imp(
+        and(
+            hastype(local(0), HNumType::I32),
+            and(
+                hastype(local(1), HNumType::I32),
+                and(
+                    hastype(local(2), HNumType::I32),
+                    and(
+                        hastype(local(3), HNumType::I32),
+                        hastype(local(4), HNumType::I32),
+                    ),
+                ),
+            ),
+        ),
+        ex(and(definition, nz(rel(HRelop::Eq, lvar(0), local(3))))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Iter"), expected);
+}
+
+/// Quantifier alternation survives the whole pipeline: a `forall` block nested
+/// inside an `exists` block binds a universal *logical variable* under the
+/// existential witness, with its typing stated as an antecedent inside its own
+/// binder.
+///
+/// The nesting order is the claim. A slot standing in for the inner `forall`
+/// would be quantified by the downstream judgment — outside the `HA_ex` — and
+/// `∃k. ∀x` would silently read as `∀x. ∃k`, which is a different and weaker
+/// property.
+#[test]
+fn quantifier_alternation_nests_a_universal_under_an_existential_end_to_end() {
+    let source = "\
+spec Alt {
+  fn additive_identity() forall {
+    exists {
+      let k: i32 = @;
+      assume { assert(k == 0); }
+      forall {
+        let x: i32 = @;
+        assert(x + k == x);
+      }
+    }
+  }
+}
+";
+    let expected = ex(and(
+        teq(lvar(0), i32c(0)),
+        all(imp(
+            hastype(lvar(0), HNumType::I32),
+            nz(rel(
+                HRelop::Eq,
+                HTerm::Binop(
+                    HNumType::I32,
+                    HBinop::Add,
+                    Box::new(lvar(0)),
+                    Box::new(lvar(1)),
+                ),
+                lvar(0),
+            )),
+        )),
+    ));
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Alt"), expected);
+}
+
+/// The alternation fixture the `coqc` corpus compiles also translates through
+/// real code generation, and every one of its obligations carries a universal
+/// binder — the fixture is the gate's only producer of one, so a body that
+/// stopped emitting it would leave that stub declaration unelaborated.
+#[test]
+fn quantifier_alternation_fixture_emits_a_universal_binder_in_every_obligation() {
+    let map = proof_hspecs(&read_inf("spec_quantifier_alternation.inf"));
+    let entries = map
+        .get("QuantifierAlternation")
+        .expect("the alternation spec must produce obligations");
+    assert_eq!(entries.len(), 6, "one obligation per spec free function");
+    for entry in entries {
+        assert!(
+            binds_a_universal(&entry.hassert),
+            "`{}` must bind a universal logical variable: {:?}",
+            entry.fn_symbol.0,
+            entry.hassert
+        );
+    }
+}
+
+/// Whether the tree binds a universal logical variable anywhere.
+fn binds_a_universal(a: &HAssert) -> bool {
+    match a {
+        HAssert::All(_) => true,
+        HAssert::Not(x) | HAssert::Ex(x) => binds_a_universal(x),
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            binds_a_universal(l) || binds_a_universal(r)
+        }
+        HAssert::True
+        | HAssert::False
+        | HAssert::TermEq(_, _)
+        | HAssert::HasType(_, _)
+        | HAssert::Defined(_)
+        | HAssert::AppOk(_, _) => false,
+    }
 }

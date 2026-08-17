@@ -1,0 +1,75 @@
+// Bounded iteration in specification bodies: an index the translation cannot
+// fold names its element by cases — the unsigned range bound first, then one
+// implication per element of the array. Constant steps of an access chain
+// descend before the non-constant one, so `m[1][j]` splits over the row `[1]`
+// already selected; a struct field selects the array the same way.
+//
+// That range bound is unsigned at every index type, so a signed index needs a
+// lower bound as well as an upper one before a claim about its element holds:
+// a negative index is a huge unsigned value, which no signed upper-bound test
+// rules out.
+struct Rec {
+  tag: i32;
+  row: [i32; 2];
+}
+
+spec BoundedIteration {
+  // The element at an unconstrained index is defined only where the index is
+  // in range, so the claim carries that condition rather than reading as a
+  // tautology.
+  fn element_defined() forall {
+    let a: [i32; 3] = @;
+    let i: i32 = @;
+    assume { assert(0 <= i && i < 3); }
+    assert(a[i] == a[i]);
+  }
+
+  // The bounded-iteration property itself: every element satisfies P, so the
+  // element at any in-range index does.
+  fn every_element_is_bounded() forall {
+    let a: [i32; 3] = @;
+    let i: i32 = @;
+    assume { assert(a[0] >= 0 && a[1] >= 0); }
+    assume { assert(a[2] >= 0); }
+    assume { assert(0 <= i && i < 3); }
+    assert(a[i] >= 0);
+  }
+
+  // A constant step descends first: the split is over the two elements of row
+  // `[1]`, never over the four elements of the matrix.
+  fn matrix_row(j: i32) forall {
+    let m: [[i32; 2]; 2] = @;
+    assume { assert(j == 0); }
+    assert(m[1][j] == m[1][0]);
+  }
+
+  // A field step selects the array, then the non-constant index splits it.
+  fn record_row(r: Rec, k: i32) forall {
+    assume { assert(r.row[0] == r.row[1]); }
+    assume { assert(0 <= k && k < 2); }
+    assert(r.row[k] == r.row[0]);
+  }
+
+  // The element's defining constraint travels into the arm that evaluates it:
+  // the right operand of `||` is reached only when the left disjunct fails.
+  // The index is signed, so it carries its own lower bound — without it the
+  // left arm's signed `i > 1` and the element's unsigned range bound leave the
+  // negative indices to neither arm, and the claim is false.
+  fn guarded_by_a_disjunction() forall {
+    let a: [i32; 2] = @;
+    let i: i32 = @;
+    assume { assert(a[0] > 0 && a[1] > 0); }
+    assume { assert(0 <= i); }
+    assert(i > 1 || a[i] > 0);
+  }
+
+  // The unsigned spelling of the same claim needs no such bound: `i > 1` lowers
+  // unsigned here, exactly complementing the range bound, so between them the
+  // two arms cover every value the index can take.
+  fn guarded_by_an_unsigned_disjunction() forall {
+    let a: [i32; 2] = @;
+    let i: u32 = @;
+    assume { assert(a[0] > 0 && a[1] > 0); }
+    assert(i > 1 || a[i] > 0);
+  }
+}

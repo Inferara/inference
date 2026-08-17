@@ -58,6 +58,7 @@
 //!   0x08 HasType  term numtype
 //!   0x09 Defined  term
 //!   0x0A AppOk    symbol_idx:varu32  arg_count:varu32  term * arg_count
+//!   0x0B All      hassert
 //!
 //! term := tag:u8, then:
 //!   0x00 Const    hconst
@@ -79,7 +80,16 @@
 //! ```
 //!
 //! The tag values are stable and part of the format: they follow each enum's
-//! declaration order in [`crate::ir`].
+//! declaration order in [`crate::ir`]. A new constructor therefore appends both
+//! a variant and a tag; it never takes a value in the middle, however closely it
+//! is related to the variant it reads like.
+//!
+//! Adding a tag is *additive* and does not move [`HSPECS_SECTION_VERSION`]: a
+//! decoder that predates the tag rejects the payload loudly with
+//! [`DecodeError::UnknownHassertTag`], the section is proof-mode intermediate
+//! data, and recompilation rather than migration is the compatibility story. A
+//! version bump is for a change that reshapes entries the old decoder would
+//! otherwise misread.
 
 use crate::ir::{
     HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecEntry, HSpecMap, HTerm, ReachMeta,
@@ -315,7 +325,9 @@ fn validate_assert(
     }
     match a {
         HAssert::True | HAssert::False => Ok(()),
-        HAssert::Not(x) | HAssert::Ex(x) => validate_assert(spec, function, x, depth + 1),
+        HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => {
+            validate_assert(spec, function, x, depth + 1)
+        }
         HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
             validate_assert(spec, function, l, depth + 1)?;
             validate_assert(spec, function, r, depth + 1)
@@ -548,6 +560,7 @@ fn decode_assert(r: &mut Reader, symbols: &[String], depth: usize) -> Result<HAs
             let f = resolve_symbol(symbols, r.read_u32()?)?;
             HAssert::AppOk(f, decode_args(r, symbols, 1)?)
         }
+        0x0B => HAssert::All(Box::new(decode_assert(r, symbols, depth + 1)?)),
         other => return Err(DecodeError::UnknownHassertTag(other)),
     })
 }
@@ -675,7 +688,7 @@ fn ascending(prev: Option<&str>, name: &str) -> bool {
 fn collect_assert_symbols<'a>(a: &'a HAssert, acc: &mut Vec<&'a str>) {
     match a {
         HAssert::True | HAssert::False => {}
-        HAssert::Not(x) | HAssert::Ex(x) => collect_assert_symbols(x, acc),
+        HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => collect_assert_symbols(x, acc),
         HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
             collect_assert_symbols(l, acc);
             collect_assert_symbols(r, acc);
@@ -782,6 +795,10 @@ fn encode_assert(a: &HAssert, symbols: &[&str], out: &mut Vec<u8>) {
             for arg in args {
                 encode_term(arg, symbols, out);
             }
+        }
+        HAssert::All(x) => {
+            out.push(0x0B);
+            encode_assert(x, symbols, out);
         }
     }
 }
@@ -1121,15 +1138,17 @@ mod tests {
     }
 
     /// A tree exercising every `HAssert`, `HTerm`, `HConst`, binop, relop, and
-    /// number type, plus `App`/`AppOk` symbol references.
+    /// number type, plus `App`/`AppOk` symbol references. Both binders appear,
+    /// nested one inside the other, so their tags cannot be swapped without
+    /// this round trip noticing.
     fn kitchen_sink() -> HAssert {
         let call = HTerm::App(href("callee"), vec![HTerm::Local(0), HTerm::LVar(1)]);
         HAssert::And(
             Box::new(HAssert::Imp(
                 Box::new(HAssert::Or(
                     Box::new(HAssert::Not(Box::new(HAssert::False))),
-                    Box::new(HAssert::Ex(Box::new(HAssert::Defined(HTerm::Const(
-                        HConst::I64(-9),
+                    Box::new(HAssert::All(Box::new(HAssert::Ex(Box::new(
+                        HAssert::Defined(HTerm::Const(HConst::I64(-9))),
                     ))))),
                 )),
                 Box::new(HAssert::HasType(
@@ -1347,6 +1366,51 @@ mod tests {
         bytes.resize(bytes.len() + MAX_TREE_DEPTH, 0x02); // MAX_TREE_DEPTH `Not` tags
         bytes.push(0x00); // a `True` leaf: total depth MAX_TREE_DEPTH + 1
         assert_eq!(decode(&bytes), Err(DecodeError::TreeTooDeep));
+    }
+
+    /// The universal binder costs a level exactly as every other one-child node
+    /// does, on both the decode and the `validate` side. Built as a spine of
+    /// `All`s so a node the depth walkers forgot to count would let a tree past
+    /// the cap through.
+    #[test]
+    fn the_universal_binder_counts_a_depth_level() {
+        let all_spine = |n: usize| (1..n).fold(HAssert::True, |acc, _| HAssert::All(Box::new(acc)));
+        let at_cap = map_of(vec![("s", vec![forall("f", all_spine(MAX_TREE_DEPTH))])]);
+        assert_eq!(validate(&at_cap), Ok(()));
+        assert_eq!(decode(&encode(&at_cap)).unwrap(), at_cap);
+
+        let past_cap = map_of(vec![(
+            "s",
+            vec![forall("f", all_spine(MAX_TREE_DEPTH + 1))],
+        )]);
+        assert_eq!(
+            validate(&past_cap),
+            Err(PayloadError::TreeTooDeep {
+                spec: "s".to_string(),
+                function: "f".to_string(),
+            })
+        );
+
+        // Decode past the cap is reached through a hand-built spine, since
+        // `encode` refuses an over-deep tree by contract. `validate` is an
+        // independent walker, so only this half can catch a decode arm that
+        // recurses without counting its level — the case that turns a crafted
+        // payload into unbounded recursion instead of `TreeTooDeep`.
+        let mut bytes = vec![2, 1, 1, b'f', 1, 1, b's', 1, 0, 0x00];
+        bytes.resize(bytes.len() + MAX_TREE_DEPTH, 0x0B);
+        bytes.push(0x00);
+        assert_eq!(decode(&bytes), Err(DecodeError::TreeTooDeep));
+    }
+
+    /// The assertion tag table is closed at the universal binder: the first
+    /// unassigned value must still be a clean rejection, so a payload written by
+    /// a *newer* producer fails loudly here instead of being misparsed.
+    #[test]
+    fn rejects_the_first_unassigned_hassert_tag() {
+        assert_eq!(
+            decode(&[2, 1, 1, b'f', 1, 1, b'S', 1, 0, 0x00, 0x0C]),
+            Err(DecodeError::UnknownHassertTag(0x0C))
+        );
     }
 
     #[test]

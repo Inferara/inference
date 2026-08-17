@@ -172,6 +172,9 @@ fn or(a: HAssert, b: HAssert) -> HAssert {
 fn ex(a: HAssert) -> HAssert {
     HAssert::Ex(Box::new(a))
 }
+fn all(a: HAssert) -> HAssert {
+    HAssert::All(Box::new(a))
+}
 fn teq(a: HTerm, b: HTerm) -> HAssert {
     HAssert::TermEq(a, b)
 }
@@ -209,6 +212,9 @@ fn gts(l: HTerm, r: HTerm) -> HTerm {
 }
 fn lts(l: HTerm, r: HTerm) -> HTerm {
     rel(HNumType::I32, HRelop::LtS, l, r)
+}
+fn ges(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::GeS, l, r)
 }
 fn rems(l: HTerm, r: HTerm) -> HTerm {
     bin(HNumType::I32, HBinop::RemS, l, r)
@@ -1639,7 +1645,9 @@ fn unguarded_reads(assertion: &HAssert, guarded: &[u32], out: &mut Vec<u32>) {
         // A constant reads nothing, and a typing or definedness atom states a
         // slot's premise rather than relying on one.
         HAssert::True | HAssert::False | HAssert::HasType(_, _) | HAssert::Defined(_) => {}
-        HAssert::Not(inner) | HAssert::Ex(inner) => unguarded_reads(inner, guarded, out),
+        HAssert::Not(inner) | HAssert::Ex(inner) | HAssert::All(inner) => {
+            unguarded_reads(inner, guarded, out);
+        }
         HAssert::And(l, r) | HAssert::Or(l, r) => {
             unguarded_reads(l, guarded, out);
             unguarded_reads(r, guarded, out);
@@ -1779,16 +1787,129 @@ fn p002_rejects_constructs_without_an_encoding() {
     assert!(err(unique_src).contains("error[P002]"));
 }
 
+/// `loop` has its own message: the constructs sharing `error_no_encoding` have
+/// no substitute to point at, while a loop's whole purpose — saying something
+/// about every element — is exactly what quantifying says directly.
+#[test]
+fn p002_points_a_loop_at_the_quantifier_idiom() {
+    let e = err("spec S { fn f() forall { let n: i32 = @; loop { assert(n > 0); } } }");
+    assert!(
+        e.contains(
+            "`loop` has no encoding in the verification assertion language: a loop states a \
+             property only through an invariant this translation cannot infer"
+        ) && e.contains("constrain the index in an `assume` block"),
+        "{e}"
+    );
+}
+
+/// The shared `error_no_encoding` template still serves every other construct;
+/// lifting `loop` out of it must not have reworded its neighbours.
+#[test]
+fn the_shared_no_encoding_template_is_unchanged() {
+    let e = err("spec S { fn f() forall { let n: i32 = @; unique { assert(n > 0); } } }");
+    assert!(
+        e.contains(
+            "`unique` block has no encoding in the verification assertion language; remove it \
+             from the spec body or move the logic into an executable helper function"
+        ),
+        "{e}"
+    );
+}
+
 #[test]
 fn p003_rejects_reassignment() {
     let src = "spec S { fn f() forall { let a: i32 = @; let mut b: i32 = a; b = b + 1; assert(b > 0); } }";
     assert!(err(src).contains("error[P003]"));
 }
 
+/// The `P003` decision is permanent, so the message states a rule rather than a
+/// gap: nothing in it should read as "not yet".
 #[test]
-fn p004_rejects_a_compound_parameter() {
-    let src = "spec S { fn f(arr: [i32; 3]) forall { let n: i32 = @; assert(n > 0); } }";
-    assert!(err(src).contains("error[P004]"));
+fn p003_states_a_rule_rather_than_a_schedule() {
+    let e = err(
+        "spec S { fn f() forall { let a: i32 = @; let mut b: i32 = a; b = b + 1; assert(b > 0); } }",
+    );
+    assert!(
+        e.contains(
+            "reassignment has no place in a specification body: a specification names values, \
+             not storage"
+        ) && e.contains("bind a new `let` for the new value"),
+        "{e}"
+    );
+    assert!(
+        !e.contains("not supported") && !e.contains("not yet"),
+        "a permanent rule must not be worded as a pending feature: {e}"
+    );
+}
+
+/// A parameter of a supported aggregate shape now leaf-expands; what stays
+/// `P004` is the out-of-surface shape — here an array of structs, the same
+/// boundary A028 draws for the executable `@`.
+#[test]
+fn p004_rejects_an_out_of_surface_compound_parameter() {
+    let src = "\
+struct P { x: i32; }
+spec S { fn f(ps: [P; 2]) forall { let n: i32 = @; assert(n > 0); } }
+";
+    let e = err(src);
+    assert!(e.contains("error[P004]"), "{e}");
+    assert!(
+        e.contains(
+            "type `[P; 2]` cannot appear in a specification term; a term is a bool, an \
+             integer, or an enum value, and the only aggregates a specification names are \
+             arrays of those at any rank and structs whose fields are those or one-dimensional \
+             arrays of those"
+        ),
+        "P004 must name the whole representable surface, not the scalar part of it: {e}"
+    );
+}
+
+/// The surface clause has to be exact about rank, because the two aggregate
+/// kinds differ: an array of scalars nests to any depth, a struct field may be
+/// a scalar or a one-dimensional array of scalars and no deeper. A struct with
+/// a multidimensional array field is rejected, so the clause must not name that
+/// field shape as legal.
+#[test]
+fn the_surface_clause_does_not_promise_a_multidimensional_struct_field() {
+    let deep = err("\
+struct Deep { grid: [[i32; 2]; 2]; tag: i32; }
+spec S { fn f(d: Deep) forall { let n: i32 = @; assert(n > 0); } }
+");
+    assert!(deep.contains("error[P004]"), "{deep}");
+    assert!(
+        deep.contains("structs whose fields are those or one-dimensional arrays of those"),
+        "{deep}"
+    );
+
+    // The rank claim the same clause makes for arrays is the permissive one,
+    // and it is true: a rank-3 scalar array is in surface.
+    let rank_three = "spec S { fn f() forall { let m: [[[i32; 2]; 2]; 2] = @; \
+                      assert(m[0][0][0] >= m[0][0][0]); } }";
+    let _ = ok(rank_three);
+}
+
+/// An aggregate read whole where a term is required is a different mistake from
+/// an unrepresentable type, and says so. Passing an aggregate to a call is the
+/// commonest way to arrive: the compiled callee takes a pointer, so the symbol
+/// a `T_app` names could not be applied to leaves.
+#[test]
+fn an_aggregate_in_term_position_is_told_it_is_not_a_term() {
+    let e = err("\
+fn head(v: [i32; 2]) -> i32 { return v[0]; }
+spec S { fn f() forall { let a: [i32; 2] = @; assert(head(a) == a[0]); } }
+");
+    assert!(e.contains("error[P004]"), "{e}");
+    assert!(
+        e.contains(
+            "type `[i32; 2]` is an aggregate, and a term is one scalar value: a specification \
+             names an aggregate by its scalar leaves rather than as a value of its own"
+        ) && e.contains("name the component you mean"),
+        "{e}"
+    );
+    assert!(
+        !e.contains("the only aggregates a specification names"),
+        "the surface enumeration would contradict this very rejection: {e}"
+    );
 }
 
 #[test]
@@ -1809,21 +1930,28 @@ spec S { fn f() forall { let a: i32 = @; assert(helper() == a); } }
     assert!(err(nondet_src).contains("error[P005]"));
 }
 
+/// A `@` at a supported aggregate shape now leaf-expands; what stays `P008`
+/// is the out-of-surface shape — an array of structs (`A028`'s boundary),
+/// reachable here because this harness runs no analysis.
 #[test]
-fn p007_rejects_a_forall_block_inside_an_exists_block() {
-    let src = "spec S { fn f() forall { let n: i32 = @; exists { forall { assert(n > 0); } } } }";
-    assert!(err(src).contains("error[P007]"));
-}
-
-#[test]
-fn p008_rejects_a_compound_uzumaki() {
-    let src = "spec S { fn f() forall { let arr: [i32; 3] = @; let n: i32 = @; assert(n > 0); } }";
+fn p008_rejects_an_out_of_surface_compound_uzumaki() {
+    let src = "\
+struct P { x: i32; }
+spec S { fn f() forall { let ps: [P; 2] = @; let n: i32 = @; assert(n > 0); } }
+";
     let e = err(src);
     assert!(e.contains("error[P008]"), "{e}");
+    // The universal wording names the *shape* restriction, not a missing
+    // encoding: a compound `@` encodes now, so "has no assertion encoding"
+    // would state a rule the language no longer has.
     assert!(
-        e.contains("has no assertion encoding"),
-        "the universal-mode wording must stay unchanged: {e}"
+        e.contains(
+            "uzumaki (@) over compound type `[P; 2]` quantifies a shape the assertion encoding \
+             cannot take apart"
+        ) && e.contains("structs whose fields are scalars or one-dimensional arrays of those"),
+        "{e}"
     );
+    assert!(!e.contains("has no assertion encoding"), "{e}");
 }
 
 #[test]
@@ -1844,8 +1972,12 @@ spec S {
 
 #[test]
 fn every_diagnostic_is_collected_before_failing() {
-    // A compound parameter (P004) and a loop (P002) in the same body.
-    let src = "spec S { fn f(arr: [i32; 2]) forall { let n: i32 = @; loop { } } }";
+    // An out-of-surface compound parameter (P004) and a loop (P002) in the
+    // same body.
+    let src = "\
+struct P { x: i32; }
+spec S { fn f(ps: [P; 2]) forall { let n: i32 = @; loop { } } }
+";
     let e = err(src);
     assert!(e.contains("error[P004]"), "{e}");
     assert!(e.contains("error[P002]"), "{e}");
@@ -2119,7 +2251,7 @@ fn an_earlier_diagnostic_suppresses_the_vacuity_report() {
     assert!(looped.contains("error[P002]"), "{looped}");
     assert!(!looped.contains("P010"), "{looped}");
 
-    let compound = err("spec S { fn f(arr: [i32; 3]) forall { } }");
+    let compound = err("struct P { x: i32; }\nspec S { fn f(ps: [P; 2]) forall { } }");
     assert!(compound.contains("error[P004]"), "{compound}");
     assert!(!compound.contains("P010"), "{compound}");
 }
@@ -2284,7 +2416,9 @@ fn assert_no_typing_guards(h: &HAssert) {
                 "a reachability payload must carry no typing guard, found HasType({t:?}, {ty:?})"
             )
         }
-        HAssert::Not(inner) | HAssert::Ex(inner) => assert_no_typing_guards(inner),
+        HAssert::Not(inner) | HAssert::Ex(inner) | HAssert::All(inner) => {
+            assert_no_typing_guards(inner);
+        }
         HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
             assert_no_typing_guards(l);
             assert_no_typing_guards(r);
@@ -2516,10 +2650,76 @@ fn p011_rejects_a_call_to_a_reachability_spec_function() {
       }");
     assert!(from_exists.contains("error[P011]"), "{from_exists}");
     assert!(
-        from_exists.contains("`unique`-quantified spec function"),
+        from_exists.contains("is a `unique`-quantified spec function"),
         "{from_exists}"
     );
     assert!(!from_exists.contains("P005"), "{from_exists}");
+}
+
+/// Every message that names a quantifier takes the article the word is spoken
+/// with — `unique` reads as a consonant despite its leading vowel letter, so a
+/// leading-vowel test would write "an `unique`" at each of these sites.
+///
+/// Both quantifiers are pinned at all four families. The article helper's
+/// fallback is `"a"`, so only the `exists` arm can regress silently, and P011
+/// is the family where such a regression would otherwise leave the suite green.
+#[test]
+fn a_named_quantifier_takes_its_spoken_article() {
+    let call = err("spec S {
+        fn u() unique { let n: i32 = @; assert(n == 1); }
+        fn f() exists { u(); assert(1 == 1); }
+      }");
+    let uzumaki =
+        err("spec S { fn f() unique { let a: [i32; 2] = @; let n: i32 = @; assert(n > 0); } }");
+    let parameter = err("spec S { fn f(a: [i32; 2]) unique { let c: i32 = @; assert(c > 0); } }");
+    let nested = err("spec S { fn f() unique { let n: i32 = @; forall { assert(n > 0); } } }");
+    for message in [&call, &uzumaki, &parameter, &nested] {
+        assert!(message.contains("a `unique`-quantified"), "{message}");
+        assert!(!message.contains("an `unique`"), "{message}");
+    }
+
+    let exists_call = err("spec S {
+        fn e() exists { let n: i32 = @; assert(n > 0); }
+        fn f() forall { let a: i32 = @; e(); assert(a >= a); }
+      }");
+    let exists_uzumaki =
+        err("spec S { fn f() exists { let a: [i32; 2] = @; let n: i32 = @; assert(n > 0); } }");
+    let exists_parameter =
+        err("spec S { fn f(a: [i32; 2]) exists { let c: i32 = @; assert(c > 0); } }");
+    let exists_nested =
+        err("spec S { fn f() exists { let n: i32 = @; forall { assert(n > 0); } } }");
+    for message in [
+        &exists_call,
+        &exists_uzumaki,
+        &exists_parameter,
+        &exists_nested,
+    ] {
+        assert!(message.contains("an `exists`-quantified"), "{message}");
+        assert!(!message.contains(" a `exists`"), "{message}");
+    }
+}
+
+/// A compound `@` in *call-argument* position of a reachability body is the
+/// second spelling of the same mistake, and reads the same: the pre-scan plans
+/// only scalar choices, so an unplanned argument lands on its own emit path.
+///
+/// Analysis rule A014 rejects this spelling first whenever analysis runs, but
+/// the corpus and unit pipelines go parse → typecheck → codegen without it, so
+/// the translator's own rejection is the only guard there — the same reason
+/// `P014` exists beside A037.
+#[test]
+fn a_compound_argument_uzumaki_in_a_reach_body_reads_like_the_let_form() {
+    let src = "fn g(v: [i32; 2]) -> i32 { return v[0]; }
+        spec S { fn f() exists { assert(g(@) == 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P008]"), "{e}");
+    assert!(
+        e.contains(
+            "uzumaki (@) over compound type `[i32; 2]` cannot be a reachability choice: this \
+             is an `exists`-quantified spec function"
+        ) && e.contains("state the property in a `forall`-bodied spec function"),
+        "{e}"
+    );
 }
 
 /// The same rejection reaches the term translator through the same resolve
@@ -2564,16 +2764,33 @@ fn p012_rejects_an_anonymous_choice_in_a_unique_body_only() {
 }
 
 /// A compound `@` in a reachability body keeps `P008` but explains the
-/// reachability-specific impossibility: a choice arrives as one scalar WASM
-/// parameter. (The universal-mode wording is pinned unchanged in section 11.)
+/// reachability-specific impossibility: this quantifier's obligation is about
+/// one actual run, whose choices arrive one scalar at a time. The wording must
+/// name the quantifier — the identical declaration leaf-expands in a `forall`
+/// body — and must offer the `forall`-bodied alternative.
 #[test]
 fn p008_speaks_reachability_for_a_compound_choice_in_a_reach_body() {
     let e =
         err("spec S { fn f() exists { let arr: [i32; 2] = @; let n: i32 = @; assert(n > 0); } }");
     assert!(e.contains("error[P008]"), "{e}");
     assert!(
-        e.contains("cannot be a reachability choice")
-            && e.contains("arrives as one scalar WASM parameter"),
+        e.contains(
+            "uzumaki (@) over compound type `[i32; 2]` cannot be a reachability choice: this \
+             is an `exists`-quantified spec function"
+        ) && e.contains("each choice arrives as one scalar parameter of that run")
+            && e.contains("state the property in a `forall`-bodied spec function"),
+        "{e}"
+    );
+}
+
+/// The same rejection in a `unique` body names *its* quantifier, with the
+/// article the word takes when spoken.
+#[test]
+fn p008_names_the_unique_quantifier_in_a_unique_body() {
+    let e =
+        err("spec S { fn f() unique { let arr: [i32; 2] = @; let n: i32 = @; assert(n > 0); } }");
+    assert!(
+        e.contains("this is a `unique`-quantified spec function"),
         "{e}"
     );
 }
@@ -2650,5 +2867,1576 @@ spec S {
             entry_arity: 1,
             visible_locs: vec![0, 1],
         })
+    );
+}
+
+// ----- 15. aggregate values (leaf encoding) -------------------------------
+
+/// The issue's acceptance shape: a compound `@` binds one guarded universal
+/// slot per scalar leaf, and a constant-index read is that leaf's term.
+#[test]
+fn aggregate_uzumaki_binds_one_guarded_slot_per_leaf() {
+    assert_eq!(
+        obligation_of("", "forall { let a: [i32; 3] = @; assert(a[0] <= a[0]); }"),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(rel(HNumType::I32, HRelop::LeS, local(0), local(0)))
+        )
+    );
+}
+
+/// A multi-rank scalar array enumerates row-major — the same order the
+/// runtime unrolling walks — so `m[i][j]` is leaf `i * cols + j`.
+#[test]
+fn multi_rank_array_leaves_enumerate_row_major() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let m: [[i32; 2]; 2] = @; assert(m[1][0] > m[0][1]); }"
+        ),
+        imp(
+            and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+            nz(gts(local(2), local(1)))
+        )
+    );
+}
+
+/// Struct leaves follow field-layout order (declaration order), each guarded
+/// at its own width, and a 1-D scalar-array field contributes its elements in
+/// place — the mixed chain `r.row[k]` lands on the right leaf.
+#[test]
+fn struct_uzumaki_leaves_follow_field_layout_order_and_widths() {
+    let prelude = "struct Rec { lo: i32; wide: i64; row: [i32; 2]; }";
+    assert_eq!(
+        obligation_of(
+            prelude,
+            "forall { let r: Rec = @; assert(r.wide > 0); assert(r.row[1] >= r.row[0]); }"
+        ),
+        imp(
+            and(
+                guard(0),
+                and(hastype(local(1), HNumType::I64), and(guard(2), guard(3)))
+            ),
+            and(
+                nz(rel(HNumType::I64, HRelop::GtS, local(1), i64c(0))),
+                nz(rel(HNumType::I32, HRelop::GeS, local(3), local(2)))
+            )
+        )
+    );
+}
+
+/// A compound parameter takes one slot and one guard per leaf, ahead of the
+/// parameters declared after it, so slot numbers stay source-aligned.
+#[test]
+fn compound_parameter_binds_leaf_slots_before_later_parameters() {
+    let source = "spec S { fn all_ge(a: [i32; 3], b: i32) forall { assert(a[0] >= b); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+            nz(rel(HNumType::I32, HRelop::GeS, local(0), local(3)))
+        )
+    );
+}
+
+/// An ignored compound parameter consumes and guards its leaf slots exactly
+/// like a named one — uniformity keeps later slot numbers source-aligned.
+#[test]
+fn ignored_compound_parameter_still_consumes_and_guards_its_leaf_slots() {
+    let source = "spec S { fn f(_: [i32; 2], b: i32) forall { assert(b > 0); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(2), i32c(0)))
+        )
+    );
+}
+
+/// A struct parameter leaf-expands like a struct `@`.
+#[test]
+fn struct_parameter_binds_leaf_slots() {
+    let source = "\
+struct Pt { x: i32; y: i32; }
+spec S { fn f(p: Pt) forall { assert(p.x == p.y); } }
+";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(and(guard(0), guard(1)), nz(eqs(local(0), local(1))))
+    );
+}
+
+/// A cross-module struct type behaves exactly like an unqualified one: the
+/// `lib::Pair` spelling resolves through the qualified-path lookup and
+/// leaf-expands, both as a parameter and as a `@`.
+#[test]
+fn cross_module_struct_types_leaf_expand_like_unqualified_ones() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use lib;\nspec S {\n  fn f(p: lib::Pair) forall {\n    assert(p.a == p.b);\n  }\n  fn g() forall {\n    let q: lib::Pair = @;\n    assert(q.b >= q.a);\n  }\n}\n",
+        ),
+        (vec!["lib"], "pub struct Pair { a: i32; b: i32; }\n"),
+    ]);
+    let (map, diagnostics) = translate(&ctx);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        obligation_named(&map, "S", "S.f"),
+        imp(and(guard(0), guard(1)), nz(eqs(local(0), local(1))))
+    );
+    assert_eq!(
+        obligation_named(&map, "S", "S.g"),
+        imp(
+            and(guard(0), guard(1)),
+            nz(rel(HNumType::I32, HRelop::GeS, local(1), local(0)))
+        )
+    );
+}
+
+/// An aggregate `@` inside an `assume`/`exists` context binds one nested
+/// `HA_ex` per leaf, levels in enumeration order.
+#[test]
+fn aggregate_uzumaki_in_an_exists_block_binds_nested_ex_binders() {
+    let body = "forall { let n: i32 = @; exists { let a: [i32; 2] = @; assert(a[0] == n && a[1] == a[0]); } }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            ex(ex(and(teq(lvar(1), local(0)), teq(lvar(0), lvar(1)))))
+        )
+    );
+}
+
+/// An array literal is a value tree: a constant-index read of it is the
+/// element's own translated term.
+#[test]
+fn array_literal_elements_resolve_by_constant_index() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let v: [i32; 3] = [1, 2, 3]; assert(v[1] == 2); }"
+        ),
+        nz(eqs(i32c(2), i32c(2)))
+    );
+}
+
+/// A struct literal's fields reorder from source order to field-layout order;
+/// access is by name, so the reordering is unobservable.
+#[test]
+fn struct_literal_fields_resolve_by_name_across_reordering() {
+    let prelude = "struct Pt { x: i32; y: i32; }";
+    assert_eq!(
+        obligation_of(
+            prelude,
+            "forall { let p: Pt = Pt { y: 5, x: 4 }; assert(p.x < p.y); }"
+        ),
+        nz(lts(i32c(4), i32c(5)))
+    );
+}
+
+/// Nested literals are part of the enclosing introduction and resolve through
+/// constant-index chains.
+#[test]
+fn nested_array_literal_resolves_through_a_constant_chain() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let m: [[i32; 2]; 2] = [[1, 2], [3, 4]]; assert(m[1][0] == 3); }"
+        ),
+        nz(eqs(i32c(3), i32c(3)))
+    );
+}
+
+/// A block-local `const` at an aggregate type binds a value tree like a pure
+/// `let`.
+#[test]
+fn aggregate_const_binds_a_value_tree() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { const C: [i32; 2] = [7, 8]; assert(C[0] == 7); }"
+        ),
+        nz(eqs(i32c(7), i32c(7)))
+    );
+}
+
+/// An aggregate copy (`let b: T = a;`) clones the bound value tree —
+/// value-copy semantics make the pure inlining exact.
+#[test]
+fn aggregate_copy_clones_the_bound_value() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 2] = @; let b: [i32; 2] = a; assert(b[1] == a[1]); }"
+        ),
+        imp(and(guard(0), guard(1)), nz(eqs(local(1), local(1))))
+    );
+}
+
+/// Aggregate `==` in assertion position is the leafwise conjunction of
+/// per-leaf `term_eq`, in leaf enumeration order.
+#[test]
+fn aggregate_equality_is_a_leafwise_conjunction() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 2] = @; let b: [i32; 2] = @; assert(a == b); }"
+        ),
+        imp(
+            and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+            and(teq(local(0), local(2)), teq(local(1), local(3)))
+        )
+    );
+}
+
+/// Aggregate `!=` is the De Morgan dual — a disjunction of negated per-leaf
+/// equalities — and a negated `==` flips to the same shape.
+#[test]
+fn aggregate_inequality_and_negated_equality_are_the_leafwise_dual() {
+    let expected = imp(
+        and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+        or(not(teq(local(0), local(2))), not(teq(local(1), local(3)))),
+    );
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 2] = @; let b: [i32; 2] = @; assert(a != b); }"
+        ),
+        expected
+    );
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 2] = @; let b: [i32; 2] = @; assert(!(a == b)); }"
+        ),
+        expected
+    );
+}
+
+/// An aggregate compared against a literal reads the literal's leaf terms.
+#[test]
+fn aggregate_equality_against_a_literal_uses_its_leaf_terms() {
+    let prelude = "struct Pt { x: i32; y: i32; }";
+    assert_eq!(
+        obligation_of(
+            prelude,
+            "forall { let p: Pt = @; assert(p == Pt { x: 1, y: 2 }); }"
+        ),
+        imp(
+            and(guard(0), guard(1)),
+            and(teq(local(0), i32c(1)), teq(local(1), i32c(2)))
+        )
+    );
+}
+
+/// Aggregate comparison in *term* position stays rejected: an aggregate is
+/// not a term.
+#[test]
+fn aggregate_comparison_in_term_position_stays_rejected() {
+    let src = "\
+spec S { fn f() forall { let a: [i32; 2] = @; let b: [i32; 2] = @; let t: bool = a == b; assert(t); } }
+";
+    let e = err(src);
+    assert!(e.contains("error[P004]"), "{e}");
+}
+
+/// A folded-constant in-range index resolves like a literal one.
+#[test]
+fn folded_constant_index_resolves_in_range() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 3] = @; const K: i32 = 2; assert(a[K] > 0); }"
+        ),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(2), i32c(0)))
+        )
+    );
+}
+
+/// A folded-constant out-of-bounds index is `P014` — the same fact A037
+/// states for the direct-literal spelling, at the path A037's pattern cannot
+/// see.
+#[test]
+fn p014_rejects_a_folded_constant_out_of_bounds_index() {
+    let src =
+        "spec S { fn f() forall { let a: [i32; 3] = @; const K: i32 = 5; assert(a[K] > 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P014]"), "{e}");
+    assert!(
+        e.contains("array index 5 is out of bounds for array of length 3; valid indices are 0..3"),
+        "{e}"
+    );
+}
+
+/// An in-range unsigned constant index resolves too: reading the fold at the
+/// index's own signedness must not cost the positive path.
+#[test]
+fn folded_unsigned_constant_index_resolves_in_range() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 3] = @; const K: u32 = 2; assert(a[K] > 0); }"
+        ),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(2), i32c(0)))
+        )
+    );
+}
+
+/// `P014` names the index the source wrote. An unsigned constant rides in the
+/// term language at its signed bit pattern, and reporting that pattern would
+/// name a number found nowhere in the program.
+#[test]
+fn p014_names_an_unsigned_index_as_the_source_wrote_it() {
+    let out_of_bounds = |declaration: &str| {
+        err(&format!(
+            "spec S {{ fn f() forall {{ let a: [i32; 3] = @; {declaration} \
+             assert(a[K] > 0); }} }}"
+        ))
+    };
+    // All ones at 32 bits, which reads back as `-1` when read signed.
+    let max = out_of_bounds("const K: u32 = 4294967295;");
+    assert!(max.contains("error[P014]"), "{max}");
+    assert!(
+        max.contains("array index 4294967295 is out of bounds for array of length 3"),
+        "{max}"
+    );
+    // One past the signed maximum, where a signed reading shows as `i32::MIN`
+    // instead — a different wrong number, so the two cases discriminate.
+    let past_signed_max = out_of_bounds("const K: u32 = 2147483648;");
+    assert!(
+        past_signed_max.contains("array index 2147483648 is out of bounds for array of length 3"),
+        "{past_signed_max}"
+    );
+    // The widest index a program can name still reports whole.
+    let widest = out_of_bounds("const K: u64 = 18446744073709551615;");
+    assert!(
+        widest.contains("array index 18446744073709551615 is out of bounds for array of length 3"),
+        "{widest}"
+    );
+    // An unsigned index small enough to read the same either way.
+    let small = out_of_bounds("const K: u32 = 5;");
+    assert!(
+        small.contains("array index 5 is out of bounds for array of length 3"),
+        "{small}"
+    );
+    // A signed index keeps reading signed.
+    let signed = out_of_bounds("const K: i32 = 7;");
+    assert!(
+        signed.contains("array index 7 is out of bounds for array of length 3"),
+        "{signed}"
+    );
+}
+
+/// This harness runs no analysis, so a direct-literal OOB index (A037's case)
+/// reaches the translator too; `P014` is the only guard on this path.
+#[test]
+fn p014_also_guards_the_direct_literal_spelling_on_no_analysis_paths() {
+    let src = "spec S { fn f() forall { let a: [i32; 3] = @; assert(a[5] > 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P014]"), "{e}");
+}
+
+/// An index computed from constants is as statically certain as one written
+/// out, so it is folded and reported the same way. Left symbolic it would be
+/// defined by cases against a closed term nothing satisfies — an unprovable
+/// goal in place of a diagnostic.
+#[test]
+fn p014_rejects_an_out_of_bounds_arithmetic_index() {
+    let e = err("spec S { fn f() forall { let a: [i32; 2] = @; assert(a[1 + 1] == 0); } }");
+    assert!(e.contains("error[P014]"), "{e}");
+    assert!(
+        e.contains("array index 2 is out of bounds for array of length 2; valid indices are 0..2"),
+        "{e}"
+    );
+}
+
+/// The same for arithmetic over a named constant, which A037 cannot see even
+/// with analysis on.
+#[test]
+fn p014_rejects_an_out_of_bounds_index_computed_from_a_constant() {
+    let e = err(
+        "spec S { fn f() forall { let a: [i32; 2] = @; const K: i32 = 1; assert(a[K + 1] == 0); } }",
+    );
+    assert!(e.contains("error[P014]"), "{e}");
+    assert!(
+        e.contains("array index 2 is out of bounds for array of length 2; valid indices are 0..2"),
+        "{e}"
+    );
+}
+
+/// An in-range arithmetic index descends to its element like any other
+/// constant — the fold must not cost the positive path a real term and hand
+/// back a case split instead.
+#[test]
+fn an_in_range_arithmetic_index_descends_to_its_element() {
+    assert_eq!(
+        obligation_of("", "forall { let a: [i32; 3] = @; assert(a[0 + 1] > 0); }"),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(1), i32c(0)))
+        )
+    );
+}
+
+/// Arithmetic at an unsigned index type folds at that type's own reading, so
+/// an in-range result descends and an out-of-range one is named as the source
+/// computes it.
+#[test]
+fn an_unsigned_arithmetic_index_folds_at_its_own_signedness() {
+    assert_eq!(
+        obligation_of(
+            "",
+            "forall { let a: [i32; 3] = @; const K: u32 = 1; assert(a[K + 1] > 0); }"
+        ),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(2), i32c(0)))
+        )
+    );
+    let e = err(
+        "spec S { fn f() forall { let a: [i32; 3] = @; const K: u32 = 2; \
+         assert(a[K * 2] > 0); } }",
+    );
+    assert!(e.contains("error[P014]"), "{e}");
+    assert!(
+        e.contains("array index 4 is out of bounds for array of length 3"),
+        "{e}"
+    );
+}
+
+/// Arithmetic the source's own width would wrap is not folded: the symbolic
+/// path carries that wrap faithfully, and guessing an unwrapped number would
+/// name an index the program never computes.
+#[test]
+fn arithmetic_that_wraps_its_width_is_left_to_the_case_split() {
+    let source = "forall { let a: [i32; 2] = @; const K: u32 = 4294967295; \
+                  assert(a[K + 1] == a[0]); }";
+    // `K + 1` wraps to `0` at `u32`, which is in range — so no `P014`, and the
+    // index is defined by cases over a closed term the assertion language
+    // evaluates at the same width.
+    let obligation = obligation_of("", source);
+    let index = bin(HNumType::I32, HBinop::Add, i32c(-1), i32c(1));
+    let definition = element_def(&index, &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation,
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(definition, nz(eqs(lvar(0), local(0)))))
+        )
+    );
+}
+
+/// An operation with no reading as a number stays unfolded rather than being
+/// guessed at: a bitwise operator names a bit pattern, not a number the fold
+/// could resolve to an element. A division by zero never arrives here to be
+/// folded — the type checker rejects it — so the fold's guard against it is
+/// defensive only.
+#[test]
+fn an_undecidable_index_operation_is_left_to_the_case_split() {
+    let shift = obligation_of(
+        "",
+        "forall { let a: [i32; 2] = @; assert(a[1 << 1] == a[0]); }",
+    );
+    let index = bin(HNumType::I32, HBinop::Shl, i32c(1), i32c(1));
+    assert_eq!(
+        shift,
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(
+                element_def(&index, &lvar(0), &[local(0), local(1)]),
+                nz(eqs(lvar(0), local(0)))
+            ))
+        )
+    );
+}
+
+// ----- 15a. the cumulative leaf budget (P013) ----------------------------
+
+/// A single introduction past the cap is `P013`, reported from the type
+/// before anything is materialized.
+#[test]
+fn p013_rejects_a_single_oversized_uzumaki() {
+    let src = "spec S { fn f() forall { let big: [i32; 65] = @; assert(big[0] > 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P013]"), "{e}");
+    assert!(
+        e.contains(
+            "uzumaki (@) over compound type `[i32; 65]` quantifies 65 scalar leaves, and this \
+             specification already quantifies 0 of the 64 one function may hold"
+        ),
+        "{e}"
+    );
+}
+
+/// The budget is a per-function running total: introductions each under the
+/// cap still cross it together, and the report lands on the crossing
+/// introduction with the cumulative context — never on the encoder backstop.
+#[test]
+fn p013_reports_the_crossing_introduction_cumulatively() {
+    let src = "spec S { fn f(a: [i32; 40], b: [i32; 40]) forall { assert(a[0] == b[0]); } }";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the sentinel keeps later reads silent: {diagnostics:?}"
+    );
+    assert!(diagnostics[0].contains("error[P013]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "parameter `b` of type `[i32; 40]` contributes 40 scalar leaves, and this \
+             specification already quantifies 40 of the 64 one function may hold"
+        ),
+        "{diagnostics:?}"
+    );
+}
+
+/// A literal introduction counts against the same budget, with its own
+/// remedy wording — and its own reason: a literal's leaves are constants, so
+/// the message names the nesting they cost rather than the quantified
+/// variables and typing guards they never create.
+#[test]
+fn p013_counts_literal_introductions_against_the_same_budget() {
+    let src = "\
+spec S { fn f() forall { let a: [i32; 60] = @; let v: [i32; 8] = [1, 2, 3, 4, 5, 6, 7, 8]; assert(v[0] == a[0]); } }
+";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P013]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "this `[i32; 8]` literal has 8 scalar leaves, and this specification already \
+             quantifies 60 of the 64 one function may hold: each leaf becomes a term of its \
+             own, a comparison against the value nests one conjunct per leaf, and the \
+             assertion encoding caps how deeply one obligation may nest; build a smaller \
+             value, or state the property over the elements it reads"
+        ),
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics[0].contains("quantified variable"),
+        "a literal's leaves bind no variables: {diagnostics:?}"
+    );
+}
+
+/// Through the whole code generator, a budget overrun is the named `P013`
+/// rejection, never the encoder's `HspecTreeTooDeep` backstop — the failure
+/// the cumulative cap exists to preempt.
+#[test]
+fn budget_overrun_never_reaches_the_encoder_backstop() {
+    let source = "spec S { fn f(a: [i32; 64], b: [i32; 64], c: [i32; 64], d: [i32; 64]) \
+                  forall { assert(a[0] == b[0]); } }"
+        .to_string();
+    let err = proof_codegen(source).expect_err("an over-budget spec must fail code generation");
+    match err {
+        CodegenError::UntranslatableSpec(details) => {
+            assert!(details.contains("error[P013]"), "{details}");
+        }
+        other => panic!("expected UntranslatableSpec carrying P013, got: {other:?}"),
+    }
+}
+
+/// Exactly the cap in one function still translates — the budget bounds the
+/// guard chain, and 64 guards fit the encoder with room for the claim.
+#[test]
+fn a_full_budget_introduction_still_translates() {
+    let source = "spec S { fn f(a: [i32; 64]) forall { assert(a[0] == a[63]); } }".to_string();
+    let size = proof_codegen(source)
+        .expect("a spec at exactly the leaf budget must survive the whole code generator");
+    assert!(size > 0, "code generation produced an empty module");
+}
+
+// ----- 15b. sentinels, out-of-surface shapes, kept rejections -------------
+
+/// One rejected aggregate yields exactly one diagnostic: every later read of
+/// the sentinel resolves silently instead of cascading into further errors.
+#[test]
+fn a_rejected_aggregate_is_reported_exactly_once() {
+    let src = "\
+struct P { x: i32; }
+spec S { fn f() forall { let ps: [P; 2] = @; assert(ps[0].x > 0 && ps[1].x > 0); } }
+";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the sentinel must keep reads of a rejected aggregate silent: {diagnostics:?}"
+    );
+    assert!(diagnostics[0].contains("error[P008]"), "{diagnostics:?}");
+}
+
+/// The same one-mistake-one-message discipline for an out-of-surface
+/// parameter.
+#[test]
+fn a_rejected_parameter_is_reported_exactly_once() {
+    let src = "\
+struct P { x: i32; }
+spec S { fn f(ps: [P; 2]) forall { assert(ps[0].x == 1); } }
+";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P004]"), "{diagnostics:?}");
+}
+
+/// A struct containing a struct field is out of the surface on every path —
+/// `@` (P008) and parameter (P004) — the boundary A027 draws for the
+/// executable unrolling.
+#[test]
+fn struct_in_struct_stays_rejected_on_every_path() {
+    let prelude = "struct In { v: i32; }\nstruct Out { a: In; }\n";
+    let via_uzumaki = err(&format!(
+        "{prelude}spec S {{ fn f() forall {{ let o: Out = @; assert(o.a.v > 0); }} }}"
+    ));
+    assert!(via_uzumaki.contains("error[P008]"), "{via_uzumaki}");
+    let via_parameter = err(&format!(
+        "{prelude}spec S {{ fn f(o: Out) forall {{ assert(o.a.v > 0); }} }}"
+    ));
+    assert!(via_parameter.contains("error[P004]"), "{via_parameter}");
+}
+
+/// The `::`-qualified spelling of a struct is rejected exactly like the
+/// unqualified spelling of the same struct: an out-of-surface `@` is `P008`
+/// under both, because one spelling-total classifier answers for every way a
+/// struct type can be named. A partial classifier here would hand the
+/// cross-module spelling the `P004` the byte-identical single-file shape does
+/// not get.
+#[test]
+fn a_qualified_struct_uzumaki_is_rejected_like_the_unqualified_one() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use geom;\nspec S {\n  fn f() forall {\n    let o: geom::Outer = @;\n    \
+             assert(o.a.v > 0);\n  }\n}\n",
+        ),
+        (
+            vec!["geom"],
+            "pub struct In { v: i32; }\npub struct Outer { a: In; }\n",
+        ),
+    ]);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P008]"), "{diagnostics:?}");
+    assert!(
+        diagnostics[0].contains(
+            "uzumaki (@) over compound type `geom::Outer` quantifies a shape the assertion \
+             encoding cannot take apart"
+        ),
+        "{diagnostics:?}"
+    );
+}
+
+/// The call-argument spelling of a compound reachability choice classifies the
+/// same way as the `let` spelling, for every way a struct type can be named.
+/// The two sites read the type from different places — the `let` from its
+/// declaration, the argument from the checker's record for the `@` — so a
+/// classifier that agreed only on the unqualified spelling would hand the
+/// cross-module one the term-surface `P004` instead of the reachability `P008`.
+#[test]
+fn a_qualified_struct_argument_uzumaki_in_a_reach_body_is_rejected_like_the_let_form() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use geom;\nfn take(o: geom::Outer) -> i32 { return o.a.v; }\nspec S {\n  \
+             fn f() exists {\n    assert(take(@) == 0);\n  }\n}\n",
+        ),
+        (
+            vec!["geom"],
+            "pub struct In { v: i32; }\npub struct Outer { a: In; }\n",
+        ),
+    ]);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("error[P008]"), "{diagnostics:?}");
+    // The rendered type is pinned, not just the code: the two sites read the
+    // type from different places, so a classifier that agreed on the code
+    // while the argument form rendered a bare `Outer` would still be two
+    // messages for one mistake.
+    assert!(
+        diagnostics[0].contains(
+            "uzumaki (@) over compound type `geom::Outer` cannot be a reachability choice"
+        ),
+        "{diagnostics:?}"
+    );
+}
+
+/// An out-of-surface declared type keeps its right-hand side's own `P002`:
+/// the aggregate binding translates the literal as a term, and a literal has
+/// no term encoding. Both bindings that take that path — the `let` and the
+/// block-local `const` — are pinned, because routing either shape-miss
+/// through the non-scalar diagnostic would silently downgrade the message to
+/// `P004` with the rest of the suite still green.
+#[test]
+fn an_out_of_surface_literal_keeps_the_pre_existing_p002() {
+    let one_p002 = |binding: &str| {
+        let src = format!(
+            "struct P {{ x: i32; }}\nspec S {{ fn f() forall {{ {binding} \
+             assert(ps[0].x == 1); }} }}\n"
+        );
+        let ctx = type_check(&src);
+        let (_, diagnostics) = translate(&ctx);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("error[P002]"), "{diagnostics:?}");
+        assert!(
+            diagnostics[0].contains(
+                "an array literal has no encoding in the verification assertion language"
+            ),
+            "{diagnostics:?}"
+        );
+    };
+    one_p002("let ps: [P; 2] = [P { x: 1 }, P { x: 2 }];");
+    one_p002("const ps: [P; 2] = [P { x: 1 }, P { x: 2 }];");
+}
+
+/// The other way an out-of-surface literal is reached — as an operand of an
+/// aggregate comparison, where no declared type screens it first — states the
+/// shape restriction rather than borrowing the shared no-encoding template. A
+/// literal of a supported shape encodes now, so "has no encoding" would name a
+/// rule the language dropped, and the template's "move the logic into an
+/// executable helper" remedy dead-ends on a compound result.
+#[test]
+fn an_out_of_surface_literal_operand_states_the_shape_restriction() {
+    let src = "\
+struct P { x: i32; }
+spec S { fn f(a: [P; 2]) forall { assert(a == [P { x: 1 }, P { x: 2 }]); } }
+";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    // Two independent mistakes, two messages: `P004` for the out-of-surface
+    // parameter and `P002` for the literal. The count is the assertion that
+    // matters — this is the one body exercising the sentinel discipline with
+    // two mistakes at once, so a parameter that started cascading into the
+    // comparison would show up here as a third message and nowhere else.
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    let joined = diagnostics.join("\n");
+    assert!(joined.contains("error[P004]"), "{joined}");
+    assert!(joined.contains("error[P002]"), "{joined}");
+    assert!(
+        joined.contains("an array literal of this shape has no assertion encoding")
+            && joined.contains("build the components you need as separate values"),
+        "{joined}"
+    );
+}
+
+/// A struct with a multidimensional-array field is out of the surface too
+/// (A027 permits only 1-D scalar-array fields).
+#[test]
+fn struct_with_multidim_array_field_stays_rejected() {
+    let src = "\
+struct M { g: [[i32; 2]; 2]; }
+spec S { fn f(m: M) forall { assert(m.g[0][0] > 0); } }
+";
+    let e = err(src);
+    assert!(e.contains("error[P004]"), "{e}");
+}
+
+/// A field-less struct type-checks (A045 rejects it only under analysis, and
+/// this harness runs none), and an empty leaf list would silently ⊤-collapse
+/// an introduction — so the zero-leaf shape is classified out of the surface
+/// and keeps the pre-existing rejections instead.
+#[test]
+fn a_zero_leaf_struct_is_out_of_the_surface_on_every_path() {
+    let prelude = "struct E { }\n";
+    let via_parameter = err(&format!(
+        "{prelude}spec S {{ fn f(e: E) forall {{ let n: i32 = @; assert(n > 0); }} }}"
+    ));
+    assert!(via_parameter.contains("error[P004]"), "{via_parameter}");
+    let via_uzumaki = err(&format!(
+        "{prelude}spec S {{ fn f() forall {{ let e: E = @; let n: i32 = @; assert(n > 0); }} }}"
+    ));
+    assert!(via_uzumaki.contains("error[P008]"), "{via_uzumaki}");
+}
+
+/// A zero-length array never reaches the translator at all: the type checker
+/// rejects the type, which is what keeps the other zero-leaf spelling
+/// unreachable.
+#[test]
+fn a_zero_length_array_is_rejected_by_the_type_checker() {
+    let parsed = inference_parser::parse("spec S { fn f(a: [i32; 0]) forall { assert(1 > 0); } }");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(
+        TypeCheckerBuilder::build_typed_context(parsed.arena).is_err(),
+        "a zero-length array type must be rejected before translation"
+    );
+}
+
+/// Reachability mode keeps both rejections: a compound parameter stays
+/// `P004` and a compound `@` stays `P008` (reachability wording). The
+/// parameter rejection is load-bearing alignment, not conservatism: the
+/// downstream judgment reads the k-th choice at frame slot `entry_arity + k`,
+/// so every declared parameter must keep costing exactly one payload slot —
+/// leaf expansion would misalign every choice after it.
+#[test]
+fn reach_mode_keeps_compound_parameter_and_uzumaki_rejections() {
+    let param =
+        err("spec S { fn f(a: [i32; 2], x: i32) exists { let c: i32 = @; assert(x == c); } }");
+    assert!(param.contains("error[P004]"), "{param}");
+    assert!(
+        param.contains(
+            "parameter `a` of type `[i32; 2]` cannot appear in an `exists`-quantified spec \
+             function"
+        ) && param.contains("is one pointer local"),
+        "the reach-mode P004 must name the quantifier, since the same declaration \
+         leaf-expands in a `forall` body: {param}"
+    );
+
+    let uzumaki = err("spec S { fn f(x: i32) exists { let a: [i32; 2] = @; assert(x > 0); } }");
+    assert!(uzumaki.contains("error[P008]"), "{uzumaki}");
+    assert!(
+        uzumaki.contains("cannot be a reachability choice"),
+        "the reachability P008 wording must stay unchanged: {uzumaki}"
+    );
+}
+
+/// A `@` bound after a compound parameter takes the next slot past the
+/// parameter's leaves — source alignment holds across the expansion.
+#[test]
+fn uzumaki_after_a_compound_parameter_takes_the_next_leaf_slot() {
+    let source = "spec S { fn f(a: [i32; 2]) forall { let n: i32 = @; assert(n > a[1]); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(gts(local(2), local(1)))
+        )
+    );
+}
+
+/// A short-circuit witness inside a literal element scopes over the rest of
+/// the block through the same `scoped_over_rest` path a pure `let`'s witness
+/// takes: the binder wraps everything that can read the bound aggregate, and
+/// the slot guards pending at the binding drain around it.
+#[test]
+fn witness_inside_a_literal_element_scopes_over_the_rest() {
+    let body = "forall { let p: bool = @; let q: bool = @; \
+                let flags: [bool; 2] = [p && q, p]; assert(flags[0] == flags[1]); }";
+    let witness_def = or(
+        and(nz(local(0)), teq(lvar(0), local(1))),
+        and(eqz(local(0)), teq(lvar(0), i32c(0))),
+    );
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), guard(1)),
+            ex(and(witness_def, nz(eqs(lvar(0), local(0)))))
+        )
+    );
+}
+
+// ----- 15c. non-constant index access (bounded iteration) -----------------
+
+fn ltu(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::LtU, l, r)
+}
+
+/// The constraint a non-constant index pins its element with: the unsigned
+/// range bound as the *first* conjunct, then one implication per element.
+/// Built independently of the pass, so a change to either half shows up as a
+/// tree mismatch rather than as a silently different obligation.
+fn element_def(index: &HTerm, witness: &HTerm, leaves: &[HTerm]) -> HAssert {
+    let extent = i32::try_from(leaves.len()).expect("test extents are small");
+    let cases = leaves
+        .iter()
+        .enumerate()
+        .rev()
+        .fold(HAssert::True, |acc, (case, leaf)| {
+            let case = i32::try_from(case).expect("test extents are small");
+            HAssert::and(
+                imp(
+                    teq(index.clone(), i32c(case)),
+                    teq(witness.clone(), leaf.clone()),
+                ),
+                acc,
+            )
+        });
+    and(nz(ltu(index.clone(), i32c(extent))), cases)
+}
+
+/// A non-constant index binds one witness for the element, defined by the
+/// index's unsigned range and one case per element of the array.
+#[test]
+fn a_non_constant_index_pins_its_element_by_cases() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; assert(a[i] > 0); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// The range bound leads the definition. A reader of a failing goal meets the
+/// condition under which the element is defined before the case analysis that
+/// says which element it is, so the ordering is pinned on its own rather than
+/// only inside a whole-tree compare.
+#[test]
+fn the_range_bound_is_the_first_conjunct_of_the_definition() {
+    let body = "forall { let a: [i32; 3] = @; let i: i32 = @; assert(a[i] > 0); }";
+    let HAssert::Imp(_, consequent) = obligation_of("", body) else {
+        panic!("a body with slot guards states them as an antecedent");
+    };
+    let HAssert::Ex(atom) = *consequent else {
+        panic!("a non-constant index binds a witness");
+    };
+    let HAssert::And(definition, _) = *atom else {
+        panic!("the witness definition is conjoined with the claim");
+    };
+    let HAssert::And(range, _) = *definition else {
+        panic!("the definition is the range bound and the case split");
+    };
+    assert_eq!(*range, nz(ltu(local(3), i32c(3))));
+}
+
+/// The issue's bounded-iteration acceptance shape, end to end through the
+/// translator: an array `@`, an index `@`, a range `assume`, and a claim about
+/// the element at that index. Each of the two reads binds its own witness,
+/// both pinned to the same element.
+#[test]
+fn the_bounded_iteration_idiom_translates() {
+    let body = "forall { let a: [i32; 3] = @; let i: i32 = @; \
+                assume { assert(0 <= i && i < 3); } assert(a[i] == a[i]); }";
+    let leaves = [local(0), local(1), local(2)];
+    // Both witnesses read as de Bruijn index 0 inside their own binder.
+    let definition = || element_def(&local(3), &lvar(0), &leaves);
+    let filter = and(
+        nz(rel(HNumType::I32, HRelop::LeS, i32c(0), local(3))),
+        nz(lts(local(3), i32c(3))),
+    );
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(guard(1), and(guard(2), and(guard(3), filter)))
+            ),
+            ex(and(
+                definition(),
+                ex(and(definition(), nz(eqs(lvar(1), lvar(0)))))
+            ))
+        )
+    );
+}
+
+/// Constant steps of a chain descend eagerly, so `m[1][j]` splits over the
+/// already-selected row alone — one case per element of that row, not per
+/// element of the matrix.
+#[test]
+fn constant_steps_descend_before_the_non_constant_one() {
+    let body = "forall { let m: [[i32; 2]; 2] = @; let j: i32 = @; assert(m[1][j] > 0); }";
+    let definition = element_def(&local(4), &lvar(0), &[local(2), local(3)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(guard(1), and(guard(2), and(guard(3), guard(4))))
+            ),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// A constant step *after* the non-constant one applies inside the split:
+/// `m[i][0]` is one case per row, each case naming that row's first element —
+/// not a split whose result is indexed again.
+#[test]
+fn a_constant_step_after_the_non_constant_one_applies_inside_the_split() {
+    let body = "forall { let m: [[i32; 2]; 2] = @; let i: i32 = @; assert(m[i][0] > 0); }";
+    let definition = element_def(&local(4), &lvar(0), &[local(0), local(2)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(guard(1), and(guard(2), and(guard(3), guard(4))))
+            ),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// A struct field selects the array before the index splits it.
+#[test]
+fn a_field_step_precedes_the_non_constant_index() {
+    let prelude = "struct Rec { lo: i32; row: [i32; 2]; }";
+    let body = "forall { let r: Rec = @; let k: i32 = @; assert(r.row[k] > 0); }";
+    let definition = element_def(&local(3), &lvar(0), &[local(1), local(2)]);
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            and(guard(0), and(guard(1), and(guard(2), guard(3)))),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// A literal's elements are constants, and a non-constant index over them
+/// splits on those constants — the encoding does not care where a leaf came
+/// from.
+#[test]
+fn a_non_constant_index_reads_a_literal_by_cases() {
+    let body = "forall { let v: [i32; 2] = [7, 8]; let i: i32 = @; assert(v[i] > 0); }";
+    let definition = element_def(&local(0), &lvar(0), &[i32c(7), i32c(8)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(guard(0), ex(and(definition, nz(gts(lvar(0), i32c(0))))))
+    );
+}
+
+/// Two non-constant indices in one chain are rejected: the split would be the
+/// product of the two extents, and one obligation carries one split per chain.
+#[test]
+fn two_non_constant_indices_in_one_chain_are_rejected() {
+    let src = "spec S { fn f() forall { let m: [[i32; 2]; 2] = @; let i: i32 = @; \
+               let j: i32 = @; assert(m[i][j] > 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P002]"), "{e}");
+    assert!(
+        e.contains(
+            "an access chain with more than one non-constant index has no assertion encoding: \
+             each non-constant index defines the element by cases, and one obligation supports \
+             one such case split per chain; make all but one index constant, or assert over the \
+             constant-index elements directly"
+        ),
+        "{e}"
+    );
+}
+
+/// A chain that ends on an aggregate is rejected with its own message: a case
+/// split pins one value, and an aggregate element would need one binder per
+/// leaf of the selected sub-tree. The remedy names the shape that works, since
+/// indexing itself does encode and moving the access into a helper would only
+/// meet `P004` on the aggregate argument.
+#[test]
+fn a_non_constant_index_onto_an_aggregate_is_rejected() {
+    let src = "spec S { fn f() forall { let m: [[i32; 2]; 2] = @; let i: i32 = @; \
+               let row: [i32; 2] = m[i]; assert(row[0] > 0); } }";
+    let e = err(src);
+    assert!(e.contains("error[P002]"), "{e}");
+    assert!(
+        e.contains(
+            "an access chain whose non-constant index selects an aggregate has no assertion \
+             encoding: only a scalar leaf can be named by cases, and every candidate element here \
+             would itself be an aggregate — there is no single term to define; index through to a \
+             scalar (`m[i][0]`), or make the index constant"
+        ),
+        "{e}"
+    );
+}
+
+/// The constraint rides into the arm that evaluates the access, exactly like
+/// any other witness constraint: in the right operand of `&&` it joins the
+/// conjunct the source only evaluates when the left one holds.
+#[test]
+fn a_non_constant_index_in_a_conjunction_rides_into_its_arm() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; assert(i == 0 && a[i] > 0); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(
+                nz(eqs(local(2), i32c(0))),
+                and(definition, nz(gts(lvar(0), i32c(0))))
+            ))
+        )
+    );
+}
+
+/// The same in the right operand of `||`, where the arm is the one the source
+/// reaches only when the left disjunct fails.
+#[test]
+fn a_non_constant_index_in_a_disjunction_rides_into_its_arm() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; assert(i > 1 || a[i] > 0); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(or(
+                nz(gts(local(2), i32c(1))),
+                and(definition, nz(gts(lvar(0), i32c(0))))
+            ))
+        )
+    );
+}
+
+/// In falsiness position the same movement happens through the De Morgan
+/// dual: negating `x || a[i] > 0` puts the access in the second conjunct.
+#[test]
+fn a_non_constant_index_moves_with_its_arm_in_falsiness_position() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; assert(!(i > 1 || a[i] > 0)); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(
+                eqz(gts(local(2), i32c(1))),
+                and(definition, eqz(gts(lvar(0), i32c(0))))
+            ))
+        )
+    );
+}
+
+/// In *both* polarities the definition is **conjoined** with the claim, never
+/// made its antecedent. That is what makes an out-of-range index refute the
+/// atom rather than discharge it vacuously: the range bound is demanded
+/// alongside the claim, so no index outside `0..N` satisfies the existential.
+/// The element is defined only where it exists — a definedness rule, not a
+/// mirror of any runtime check.
+#[test]
+fn an_out_of_range_index_refutes_the_atom_in_both_polarities() {
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    let claim_shape = |source_assert: &str, claim: HAssert| {
+        let body = format!("forall {{ let a: [i32; 2] = @; let i: i32 = @; {source_assert} }}");
+        assert_eq!(
+            obligation_of("", &body),
+            imp(
+                and(guard(0), and(guard(1), guard(2))),
+                ex(and(definition.clone(), claim))
+            )
+        );
+    };
+    claim_shape("assert(a[i] > 0);", nz(gts(lvar(0), i32c(0))));
+    claim_shape("assert(!(a[i] > 0));", eqz(gts(lvar(0), i32c(0))));
+}
+
+/// Inside an `assume` block the access translates the same way; the block's
+/// existential statement semantics change what the atom becomes, not how the
+/// element is defined.
+#[test]
+fn a_non_constant_index_under_assume_keeps_its_definition() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; \
+                assume { assert(a[i] > 0); } assert(i >= 0); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(
+                    guard(1),
+                    and(guard(2), ex(and(definition, nz(gts(lvar(0), i32c(0))))))
+                )
+            ),
+            nz(rel(HNumType::I32, HRelop::GeS, local(2), i32c(0)))
+        )
+    );
+}
+
+/// A pure `let` of an element scopes the witness over the rest of the block,
+/// where the inlined term is read — the `scoped_over_rest` path a
+/// short-circuit witness already takes.
+#[test]
+fn an_element_bound_by_a_pure_let_scopes_over_the_rest() {
+    let body = "forall { let a: [i32; 2] = @; let i: i32 = @; let x: i32 = a[i]; \
+                assert(x > 0); }";
+    let definition = element_def(&local(2), &lvar(0), &[local(0), local(1)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// In an existential context the leaves are logical variables rather than
+/// slots, and the element's own binder takes the level past them.
+#[test]
+fn a_non_constant_index_in_an_exists_block_splits_over_lvar_leaves() {
+    let body = "forall { let n: i32 = @; exists { let a: [i32; 2] = @; let i: i32 = @; \
+                assert(a[i] == n); } }";
+    // Inside the four binders the array's leaves read as indices 3 and 2, the
+    // index variable as 1, and the element's own witness as 0.
+    let definition = element_def(&lvar(1), &lvar(0), &[lvar(3), lvar(2)]);
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            ex(ex(ex(ex(and(definition, teq(lvar(0), local(0)))))))
+        )
+    );
+}
+
+/// The index's own numeric class carries into the range bound and the case
+/// equalities, so a wider index type stays well-typed. (Analysis rule A019
+/// rejects a 64-bit index before this in a real build; this harness runs no
+/// analysis, which is exactly why the translator must still be total here.)
+#[test]
+fn the_index_class_carries_into_the_range_bound() {
+    let body = "forall { let a: [i32; 2] = @; let i: i64 = @; assert(a[i] > 0); }";
+    let index = || local(2);
+    let definition = and(
+        nz(rel(HNumType::I64, HRelop::LtU, index(), i64c(2))),
+        HAssert::and(
+            imp(teq(index(), i64c(0)), teq(lvar(0), local(0))),
+            imp(teq(index(), i64c(1)), teq(lvar(0), local(1))),
+        ),
+    );
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), hastype(local(2), HNumType::I64))),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// An index carries its own signedness into the comparison the source writes,
+/// while the element's range bound is unsigned whatever the index type is.
+///
+/// Nothing downstream can catch a wrong choice here: the type guard records
+/// only the width, so `u32` and `i32` indices are indistinguishable in the
+/// payload apart from these operator spellings, and the range reasoning is
+/// sound only when the source comparison and the range bound agree about which
+/// values are in range.
+#[test]
+fn an_index_comparison_carries_the_index_types_signedness() {
+    let unsigned = obligation_of(
+        "",
+        "forall { let a: [i32; 2] = @; let i: u32 = @; assert(i > 1 || a[i] > 0); }",
+    );
+    let signed = obligation_of(
+        "",
+        "forall { let a: [i32; 2] = @; let i: i32 = @; assert(i > 1 || a[i] > 0); }",
+    );
+    let element = |guard_of_index: HTerm| {
+        ex(HAssert::or(
+            nz(guard_of_index),
+            and(
+                element_def(&local(2), &lvar(0), &[local(0), local(1)]),
+                nz(gts(lvar(0), i32c(0))),
+            ),
+        ))
+    };
+    assert_eq!(
+        unsigned,
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            element(rel(HNumType::I32, HRelop::GtU, local(2), i32c(1)))
+        )
+    );
+    assert_eq!(
+        signed,
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            element(gts(local(2), i32c(1)))
+        )
+    );
+}
+
+/// A non-constant index over an aggregate reachability mode already rejected
+/// adds no second message: the sentinel swallows the read, so one mistake
+/// still yields one diagnostic.
+#[test]
+fn a_non_constant_index_on_a_rejected_aggregate_stays_silent() {
+    let src = "spec S { fn f(x: i32) exists { let a: [i32; 2] = @; let i: i32 = @; \
+               assert(a[i] == x); } }";
+    let ctx = type_check(src);
+    let (_, diagnostics) = translate(&ctx);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "only the rejected compound `@` may be reported: {diagnostics:?}"
+    );
+    assert!(diagnostics[0].contains("error[P008]"), "{diagnostics:?}");
+}
+
+// ----- 16. quantifier alternation (the nested universal binder) ------------
+
+/// A `@` bound inside a `forall` block adds a `+` over the enclosing
+/// existential witness — the canonical `∃k. ∀x. x + k = x`.
+///
+/// Three things are pinned at once. The `Hall` sits *inside* the `HA_ex`, which
+/// is the whole point: a slot standing in for the inner `forall` would be
+/// quantified by the downstream judgment, outside the existential, and the
+/// alternation would silently swap. The universal variable states its own
+/// typing as an antecedent *within* its binder, because a `T_lvar` names
+/// nothing outside the quantifier that introduced it. And the two contexts
+/// read `==` differently in the same obligation — a witness equation under the
+/// `assume`, a refutable relop under the `assert`.
+#[test]
+fn a_forall_block_inside_an_exists_block_binds_a_universal_variable() {
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let x: i32 = @; assert(x + k == x); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                hastype(lvar(0), HNumType::I32),
+                nz(eqs(
+                    bin(HNumType::I32, HBinop::Add, lvar(0), lvar(1)),
+                    lvar(0)
+                ))
+            ))
+        ))
+    );
+}
+
+/// An `assume` block translates existentially even under universal
+/// quantification, so a `forall` nested in one alternates the same way — and
+/// the resulting `Hall` lands in the antecedent the `assume` already builds.
+#[test]
+fn a_forall_block_inside_an_assume_block_alternates_the_same_way() {
+    let body = "forall { let n: i32 = @; assume { forall { let x: i32 = @; assert(x >= x); } } \
+                assert(n >= n); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                all(imp(
+                    hastype(lvar(0), HNumType::I32),
+                    nz(ges(lvar(0), lvar(0)))
+                ))
+            ),
+            nz(ges(local(0), local(0)))
+        )
+    );
+}
+
+/// The `if`-branch twin of the block form: the branch block itself carries the
+/// `forall` kind, so the alternation appears inside one arm of the existential
+/// disjunction rather than beside it.
+#[test]
+fn a_forall_if_branch_alternates_under_an_exists_context() {
+    let body = "forall { let n: i32 = @; exists { if n > 0 forall { let x: i32 = @; \
+                assert(x >= x); } } }";
+    let cond = || gts(local(0), i32c(0));
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            or(
+                and(
+                    nz(cond()),
+                    all(imp(
+                        hastype(lvar(0), HNumType::I32),
+                        nz(ges(lvar(0), lvar(0)))
+                    ))
+                ),
+                eqz(cond())
+            )
+        )
+    );
+}
+
+/// An aggregate `@` under the nested quantifier binds one universal variable
+/// per scalar leaf — the Phase-1 leaf machinery on the level channel — so a
+/// two-element array nests two `Hall`s over one shared guard antecedent.
+#[test]
+fn an_aggregate_uzumaki_under_the_nested_quantifier_binds_one_variable_per_leaf() {
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let a: [i32; 2] = @; assert(a[0] == a[1]); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(all(imp(
+                and(
+                    hastype(lvar(1), HNumType::I32),
+                    hastype(lvar(0), HNumType::I32)
+                ),
+                nz(eqs(lvar(1), lvar(0)))
+            )))
+        ))
+    );
+}
+
+/// The two binder channels share one level counter, so a block that introduces
+/// both a universal variable and a short-circuit witness must nest them in
+/// allocation order and index every read at its own depth. This is the only
+/// place the universal and existential allocators meet, and the lowering pass's
+/// scope assertion is the only thing that would notice a miscount — loudly, but
+/// only if some test walks the shape.
+#[test]
+fn a_universal_variable_and_a_witness_interleave_in_one_block() {
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let x: i32 = @; let safe: bool = x == 0 || x != 0; \
+                assert(safe); } } }";
+    // Inside the `Hall`: x is index 0, the witness index 0 under its own `HA_ex`
+    // and x becomes index 1 there.
+    let witness_def = or_witness(
+        lvar(0),
+        eqs(lvar(1), i32c(0)),
+        rel(HNumType::I32, HRelop::Ne, lvar(1), i32c(0)),
+    );
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                hastype(lvar(0), HNumType::I32),
+                ex(and(witness_def, nz(lvar(0))))
+            ))
+        ))
+    );
+}
+
+/// A call-argument `@` has no name to bind, so its universal binder wraps the
+/// enclosing statement's atom directly — and carries its typing guard with it,
+/// as an antecedent inside the binder rather than through the guard channel the
+/// named form uses. The channel would drain *around* the statement, where the
+/// variable is no longer bound.
+#[test]
+fn a_call_argument_uzumaki_under_the_nested_quantifier_carries_its_own_guard() {
+    let prelude = "fn sq(n: i32) -> i32 {\n  return n * n;\n}";
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { assert(sq(@) >= k); } } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                hastype(lvar(0), HNumType::I32),
+                nz(ges(app("sq", vec![lvar(0)]), lvar(1)))
+            ))
+        ))
+    );
+}
+
+/// The nested universal's typing guard never escapes its binder. Here the
+/// enclosing block continues after the alternation, so the outer drain happens
+/// at a statement the `Hall` does not enclose: what it carries is the *slot*
+/// guard alone, and the logical variable's guard stays inside.
+///
+/// The distinction is not cosmetic. A `T_local` guard is meaningful wherever it
+/// is written; a `T_lvar` guard outside its quantifier names nothing, and the
+/// downstream strictification would collapse it, silently hardening the
+/// obligation.
+#[test]
+fn a_nested_universal_guard_stays_inside_its_binder() {
+    let body = "forall { let n: i32 = @; exists { forall { let x: i32 = @; assert(x >= x); } } \
+                assert(n >= n); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guard(0),
+            and(
+                all(imp(
+                    hastype(lvar(0), HNumType::I32),
+                    nz(ges(lvar(0), lvar(0)))
+                )),
+                nz(ges(local(0), local(0)))
+            )
+        )
+    );
+}
+
+/// Statement semantics inside the nested block are universal throughout: an
+/// `assume` becomes the antecedent of what follows, not a conjunct, and it
+/// fuses with the pending typing guard exactly as it does at the top level.
+/// The `assume`'s own body still translates existentially, one level further
+/// in — alternation recurses.
+#[test]
+fn a_nested_forall_reads_assume_as_an_antecedent() {
+    let body = "forall { exists { let k: i32 = @; forall { let x: i32 = @; \
+                assume { assert(x == 1); } assert(x + k == k + 1); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(all(imp(
+            and(hastype(lvar(0), HNumType::I32), teq(lvar(0), i32c(1))),
+            nz(eqs(
+                bin(HNumType::I32, HBinop::Add, lvar(0), lvar(1)),
+                bin(HNumType::I32, HBinop::Add, lvar(1), i32c(1))
+            ))
+        )))
+    );
+}
+
+/// An `if` inside the nested universal block reads with universal statement
+/// semantics — both arms are implications the payload must satisfy — rather
+/// than the existential reading, where the arms are a disjunction of
+/// conjunctions. Nothing else pins which `t_if` arm the new mode takes: both
+/// arms accept it, so routing it to the existential one would compile and leave
+/// every suite green while silently changing the obligation.
+#[test]
+fn an_if_inside_the_nested_universal_block_reads_universally() {
+    let body = "forall { exists { let k: i32 = @; forall { let x: i32 = @; \
+                if x > 0 { assert(k == 1); } else { assert(k == 2); } } } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(all(imp(
+            hastype(lvar(0), HNumType::I32),
+            and(
+                imp(nz(gts(lvar(0), i32c(0))), nz(eqs(lvar(1), i32c(1)))),
+                imp(
+                    HAssert::eqz(gts(lvar(0), i32c(0))),
+                    nz(eqs(lvar(1), i32c(2)))
+                )
+            )
+        )))
+    );
+}
+
+/// `P007` survives where the lift cannot reach: inside an `exists`/`unique`
+/// body every `@` is a hidden trailing choice parameter the downstream judgment
+/// quantifies operationally, so a universal binder over one would need a
+/// choice-plan and lowering redesign rather than translator work. Both the
+/// block form and the `if`-branch form keep the rejection.
+#[test]
+fn p007_is_kept_for_a_forall_if_branch_in_a_reachability_body() {
+    let src = "spec S { fn f(x: i32) exists { let n: i32 = @; if n > 0 forall { \
+               assert(n > x); } } }";
+    let e = err(src);
+    assert!(e.contains("error[P007]"), "{e}");
+}
+
+/// The surviving `P007` names the quantifier that makes the nesting impossible,
+/// since the identical nesting translates in a `forall`/plain body. Both forms
+/// — the block and the `if` branch — raise the one message, and a `unique` body
+/// names its own word.
+#[test]
+fn p007_names_the_reachability_quantifier_at_both_forms() {
+    let opening = "a `forall` block has no encoding inside an `exists`-quantified spec function";
+    let remedy = "move the universal claim into its own `forall`-bodied spec function";
+
+    let block = err("spec S { fn f() exists { let n: i32 = @; forall { assert(n > 0); } } }");
+    assert!(block.contains(opening) && block.contains(remedy), "{block}");
+
+    let branch_src = "spec S { fn f(x: i32) exists { let n: i32 = @; \
+                      if n > 0 forall { assert(n > x); } } }";
+    let branch = err(branch_src);
+    assert!(
+        branch.contains(opening) && branch.contains(remedy),
+        "{branch}"
+    );
+
+    let unique_opening = "a `forall` block has no encoding inside a `unique`-quantified \
+                          spec function";
+    let unique = err("spec S { fn f() unique { let n: i32 = @; forall { assert(n > 0); } } }");
+    assert!(unique.contains(unique_opening), "{unique}");
+}
+
+/// The nested universal binder is a real `Hall`, never an `HA_ex`. Reading the
+/// binder off the tree rather than comparing the whole obligation keeps this
+/// pinned even if the surrounding shape changes.
+#[test]
+fn the_nested_universal_binder_is_not_an_existential() {
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let x: i32 = @; assert(x >= k); } } }";
+    let HAssert::Ex(outer) = obligation_of("", body) else {
+        panic!("the enclosing `exists` binds the witness");
+    };
+    let HAssert::And(_, inner) = *outer else {
+        panic!("the existential conjoins its filter with the nested claim");
+    };
+    assert!(
+        matches!(*inner, HAssert::All(_)),
+        "the nested `forall` must bind a universal variable, got {inner:?}"
     );
 }

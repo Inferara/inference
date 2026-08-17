@@ -214,6 +214,16 @@ truncation plus its sign/zero-extending typed load already realize the
 domain. See [docs/local-variables-lowering.md](docs/local-variables-lowering.md)
 and [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
 
+In proof mode a compound `@` also has to be given a meaning in the specification
+function's *obligation*, and there the two quantifiers part ways: a `forall`
+specification is a claim about values, so an aggregate can become as many logical
+variables as it has scalar leaves; an `exists`/`unique` specification is a claim
+about one actual run of its own compiled body, where an aggregate is a single
+pointer into memory and each choice arrives as one scalar parameter — so there,
+aggregates must still be taken apart by hand. See
+[docs/specification-obligations.md](docs/specification-obligations.md) for the
+leaf encoding, the slot-allocation rule, and the diagnostics that draw the line.
+
 ### Forall Block
 
 Universal quantification - all execution paths inside the block must be reachable.
@@ -363,6 +373,7 @@ The `codegen` function:
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
+- **Specification obligations** - A specification names aggregates by their ordered scalar leaves, over the same surface the executable aggregate `@` supports: arrays of scalars at any rank, and structs whose fields are scalars or one-dimensional scalar arrays. Arrays of structs (A028) and structs with struct or multidimensional-array fields (A027) are rejected on every specification path — `@`, parameters, literals. One access chain may carry one non-constant index; a spec function may quantify 64 scalar leaves in total (P013). Compound `@` and compound parameters are rejected inside `exists`/`unique`-quantified functions, where each choice arrives as one scalar parameter of the run the obligation talks about, and so is a nested `forall` (P008/P004/P007) — inside a `forall`/plain function the same nesting emits a real universal binder. Reassignment, `loop`/`break`, `**`, string literals, and aggregate call arguments and compound call results stay rejected. Memory-content assertions (addresses, points-to, iterated heaps) are out of scope. See [docs/specification-obligations.md](docs/specification-obligations.md).
 
 ## Documentation
 
@@ -394,6 +405,11 @@ Detailed design documents live in `docs/`:
 - [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
   lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
   tracking, and interaction with non-det blocks, if-statements, and array frames.
+- [docs/specification-obligations.md](docs/specification-obligations.md) - What a `spec`
+  function becomes in proof mode: aggregates as ordered scalar leaves, the slot-allocation
+  rule that fixes every `T_local` index in an emitted goal, one fully expanded obligation,
+  the definedness rule for `a[i]` (and the both-bounds requirement a signed index carries),
+  quantifier alternation, the caps, and the table of kept rejections.
 
 ## Module Organization
 
@@ -403,7 +419,7 @@ Detailed design documents live in `docs/`:
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
-- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`Exist`/`Reach` modes; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `diag.rs`: the `P001`–`P012` diagnostic registry). See [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
+- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`UnivLvl`/`Exist`/`Reach` modes, the `AggValue` leaf tree that aggregate values translate to, and the pinned-witness machinery short-circuit operators and non-constant indices share; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `diag.rs`: the `P001`–`P014` diagnostic registry). See [`docs/specification-obligations.md`](docs/specification-obligations.md) for the obligation shapes a specification author reads, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
 
 ## Testing

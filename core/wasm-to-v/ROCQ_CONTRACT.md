@@ -169,9 +169,10 @@ Within that context, the translator depends on:
 - The sugar `Definition`s built on `hassert`, referenced by name from the
   printer rather than re-derived: `term_eq a b := HA_pred pred_eq (a ::
   b :: nil)`, `Himpl p q := HA_not (HA_and p (HA_not q))`,
-  `Hor p q := HA_not (HA_and (HA_not p) (HA_not q))`. `Hall` (the
-  universal-quantifier sugar) exists in the library but is not emitted by
-  this milestone (see [Translation scheme summary](#translation-scheme-summary)).
+  `Hor p q := HA_not (HA_and (HA_not p) (HA_not q))`, and
+  `Hall body := HA_not (HA_ex (HA_not body))` — the universal-quantifier
+  sugar, whose body binds logical de Bruijn index 0 exactly as `HA_ex`
+  does. A `forall` block nested inside an `exists` context emits it.
 
   **Real library versus vendored stub.** Both bullets above describe
   wasm-verifier's own `theories/Assertions.v` — the library an emitted
@@ -179,8 +180,8 @@ Within that context, the translator depends on:
   contract *with*. The vendored signature stub in
   [`rocq-stub/`](rocq-stub/README.md) is deliberately **strictly
   smaller**: it declares only the subset the emitter can actually print,
-  so `T_global`, the entire heap fragment (`HA_emp`, `HA_star`,
-  `HA_iter`, `HA_pto`, `HA_size`) and `Hall` are absent from it. That is
+  so `T_global` and the entire heap fragment (`HA_emp`, `HA_star`,
+  `HA_iter`, `HA_pto`, `HA_size`) are absent from it. That is
   not a contract gap. A name the real library has and the stub omits is a
   name no emitted module may mention, and the local `coqc` gate turns any
   accidental mention of one into an unbound-constructor error instead of
@@ -1074,7 +1075,7 @@ entries are matched by name, not position.
   declaration. The check is purely lexical (mode-independent) and fires
   in both compile and proof modes, so no Inference-compiled program can
   reach the codegen stage with non-det syntax outside a spec.
-- **P001–P012** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
+- **P001–P014** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
   specification function that cannot be encoded as an obligation — or
   whose obligation says nothing — aborts code generation
   (`CodegenError::UntranslatableSpec`) rather than silently emitting an
@@ -1084,17 +1085,19 @@ entries are matched by name, not position.
   | Code | Condition |
   | --- | --- |
   | P001 | Body is `assume`-quantified. `assume` is not a quantifier — it only reinterprets a failing path as a filtered-out one for an enclosing `forall` — so a standalone `assume` body states no property. (`forall`/plain bodies translate to `ValidSpec` obligations; `exists`/`unique` bodies to reachability obligations; nested `exists`/`assume` blocks are supported in every translatable body) |
-  | P002 | A construct with no assertion encoding: `loop`, `break`, a nested `unique` *block*, `**`, array indexing, struct field access, a struct/array/string literal |
-  | P003 | Reassignment (`Stmt::Assign`) in a specification body |
-  | P004 | A non-scalar type in a term, parameter, or `@` position (only bool, integer, and enum values are representable) |
+  | P002 | A construct with no assertion encoding: `loop`, `break`, a nested `unique` *block*, `**`, a string literal, an array/struct literal read in scalar term position or written at a shape outside the representable surface, or an access chain the element encoding cannot pin — one carrying more than one non-constant index, or one whose non-constant index lands on an aggregate rather than a scalar leaf. Four of these carry their own message rather than the shared no-encoding template, because the template's "this has no encoding; move the logic into a helper" is false or useless for them: `loop` (a loop's purpose in a specification is exactly what quantifying an index and constraining it says directly), an out-of-surface literal (literals encode now — the restriction is the shape, and the helper remedy dead-ends because a compound call result is P005 and a compound call argument P004: a `T_app` symbol resolves to the compiled function, whose real signature takes and returns pointers, so leaf-expanding an application would change its arity and detach the symbol from the function it names), and each of the two access-chain cases |
+  | P003 | Reassignment (`Stmt::Assign`) in a specification body. A permanent rule, not a pending feature: a specification names values, not storage, so every name stands for one value throughout the claim — which is what lets the translation read a name as the same term wherever it appears. Mutation would need per-branch value versioning across quantifier scopes for no expressive gain over a fresh `let` |
+  | P004 | A type with no place in a specification term — `unit`, a string, a function type — or an aggregate outside the representable surface: arrays of scalars at any rank and structs whose fields are scalars or one-dimensional scalar arrays (the executable aggregate `@` surface, bounded by analysis rules A027/A028). Two further wordings live under this code: an aggregate read *whole* where a term is required (an aggregate call argument, most often — its type is nameable, it is just not a term) and any *aggregate* parameter of an `exists`/`unique` body, whose obligation denotes against a real frame in which the parameter is one pointer local. A non-scalar, non-aggregate parameter there is unrepresentable for the first reason instead, and takes the first wording |
   | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an external function, an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
-  | P007 | A `forall` block nested inside an `exists` context — an `exists`/`unique` body included (needs `Hall`, deferred past this milestone; lifting it must also restore the `Hall` `Definition` to `rocq-stub/wasm_verifier/Assertions.v`, which omits it as unemittable) |
-  | P008 | `@` at a compound (array/struct) type. In an `exists`/`unique` body the message explains the reachability-specific reason: a choice arrives as one scalar WASM parameter, and a compound value lives in linear memory — quantify its scalar components individually |
+  | P007 | A `forall` block nested inside an `exists`/`unique`-quantified body. Inside a `forall`/plain body the same nesting translates: the inner block binds a `Hall` logical variable per `@` and the alternation is emitted as written. A reachability body cannot: there every `@` is a hidden trailing choice parameter the judgment quantifies operationally, and a universal binder over one would need a choice-plan and lowering redesign |
+  | P008 | `@` at a compound (array/struct) type outside the representable surface, or at any compound type in an `exists`/`unique` body. In a `forall`/plain body a supported-shape compound `@` quantifies one universal slot per scalar leaf instead of raising this; in a reachability body the message names the quantifier, since the identical declaration translates in a `forall` body — the obligation there is about one actual run, each of whose choices arrives as one scalar parameter, and a compound value lives in linear memory |
   | P009 | A specification *method* that carries a proof obligation the translation cannot deliver — quantified (any kind, `exists`/`unique` included: a method has no obligation channel), or plain but carrying an `assert` at any depth. Never silently dropped, since a method has no free-function fallback path. A plain method that asserts nothing stays a helper and is not reported, a non-deterministic block that claims nothing included |
   | P010 | A specification function whose obligation collapses to the vacuous `HA_true`: an empty or assert-free body, a body that only computes (`return`, pure `let`/`const`), a trailing `assume` (`Imp(p, ⊤) = ⊤`), or an `if` whose branches all vacuate. An obligation any proof discharges without reading the program is indistinguishable from no verification at all, so a computing helper belongs at file scope, where a specification function can still apply it as a `T_app`. Applies to every kind — an `exists`/`unique` body that asserts nothing is P010, not P001 |
   | P011 | A call from any specification body to an `exists`/`unique`-quantified spec function. Such a function is the subject of a reachability judgment about running its own body with its own choices — not a callable predicate — and its compiled form carries hidden trailing choice parameters no call site supplies. State the property directly, or move the shared part into an ordinary function both spec functions can call |
   | P012 | An anonymous (call-argument) `@` in a `unique`-quantified body: a choice nothing names has no source-visible face, so it cannot distinguish exit states — bind it first (`let c: i32 = @;`). Legal in `exists` bodies, where the visible-locals projection is inert |
+  | P013 | An aggregate introduction — a compound `@`, a compound parameter, or an array/struct literal — whose scalar leaves would push the specification function past `SPEC_FN_MAX_QUANTIFIED_LEAVES` (64). A quantified leaf brings a binder and a typing guard, one assertion-tree level each, and a literal's leaves still nest one level apiece through a leafwise comparison; the levels accumulate across every introduction in the function, so the budget is a per-function running total rather than a per-introduction cap, and it is checked from the declared type before any leaf is materialized |
+  | P014 | A constant-*folded* array index that is out of bounds — `const K: i32 = 5; a[K]`, or `a[1 + 4]`, on `[i32; 3]`. States the same fact analysis rule A037 states for a direct-literal index; A037's pattern requires the literal directly under the access, so a named or computed constant reaches the translator even with analysis on, and the codegen paths that skip analysis make this the only guard for any of the spellings |
 
 - **The reachability pre-scan's no-return rule** (fatal,
   `core/wasm-codegen/src/hassert/reach.rs`): an `exists`/`unique` body
@@ -1197,12 +1200,20 @@ If a downstream proof consumed either of the earlier shapes:
 ## Translation scheme summary
 
 Each specification free function translates to one `hassert` via a
-right-folded statement translator with three modes
+right-folded statement translator with four modes
 (`core/wasm-codegen/src/hassert/translate.rs`): universal
-(`Mode::Univ`, a `forall`/plain body's own statements), existential
-(`Mode::Exist`, statements inside a nested `exists` block), and
+(`Mode::Univ`, a `forall`/plain body's own statements), nested universal
+(`Mode::UnivLvl`, a `forall` block inside an `exists`/`assume` context),
+existential (`Mode::Exist`, statements inside a nested `exists` block), and
 reachability (`Mode::Reach`, the whole body of an `exists`/`unique`
-function). `Mode::Reach` reuses `Mode::Exist`'s statement semantics —
+function). `Mode::UnivLvl` keeps `Mode::Univ`'s statement semantics — an
+`assume` is an antecedent, an `if` a conjunction of guarded implications —
+but binds on the logical-variable channel instead of the slot channel: each
+`@` takes a `T_lvar` level under a `Hall` wrap, carrying its own
+`HA_has_type (T_lvar n)` guard. That is what keeps an alternating claim
+alternating; binding a nested `forall`'s `@` to a slot would read as
+`∀x ∃m` under `ValidSpec`'s outer universal, silently weakening the
+claim the source wrote. `Mode::Reach` reuses `Mode::Exist`'s statement semantics —
 an `assume` block is a conjunct, an `if` a strict disjunction of guarded
 conjunctions — but binds every `@` to the `T_local` slot of its own
 choice parameter (no `HA_ex` binder, no `HA_has_type` guard; see
@@ -1213,7 +1224,13 @@ The table below shows the two payload polarities:
 | --- | --- | --- |
 | Parameter / forall-context `@` | `T_local` slot (sequential, never rewound), plus a pending `HA_has_type (T_local i) T_i32`/`T_i64` typing guard for the slot (64-bit for `i64`/`u64`, i32 for every other scalar) | — |
 | Pending slot guards | Discharged at the next structural statement: fused into an immediately-following `assume`'s antecedent as `HA_and (guard, …, assume-body)`, otherwise an `Himpl` antecedent over the statement's claim conjoined with the rest of the block; a slot introduced after the last structural statement guards nothing (an unread slot introduced earlier is still guarded — uniformity beats a use analysis). A pure `let`/`const` is not structural, but one that binds a short-circuit witness drains here too, so the guard dominates the `HA_ex` instead of sitting inside it — the witness constraint reads the very slot the guard types | — (a prover-chosen `HA_ex` variable needs no typing guard) |
-| Call-argument / `let`-bound `@` | (not applicable — only forall context takes slots) | `HA_ex` binder at the binding point; body uses `T_lvar` at its de Bruijn index, resolved by a final level-to-index pass (no shifting needed while building) |
+| Call-argument / `let`-bound `@` | `Mode::Univ` takes a slot as above; under `Mode::UnivLvl` it takes a `Hall` binder instead, with its `HA_has_type (T_lvar n)` guard as that binder's own antecedent | `HA_ex` binder at the binding point; body uses `T_lvar` at its de Bruijn index, resolved by a final level-to-index pass (no shifting needed while building) |
+| Universal binder (`Mode::UnivLvl`) | `Hall` (the derived `HA_not (HA_ex (HA_not _))`, declared in the stub) wrapping the rest of the block; an aggregate `@` binds one level per scalar leaf, each guarded. **A `T_lvar` guard must be drained inside its own `Hall`**: `term_unsafe d (T_lvar n)` holds once the index escapes its binder, and `strictify` then collapses that guard to `HA_false`, deleting the antecedent and leaving a strictly harder obligation that still compiles. Guard placement here is a soundness-of-meaning rule, not a formatting choice | — |
+| Aggregate introduction (compound `@`, compound parameter, array/struct literal) | No aggregate term exists: the value becomes a shape-preserving tree of scalar leaves, one slot and one `HA_has_type` guard per leaf in enumeration order (arrays row-major, struct fields in layout order, recursing). Allocation across a function is parameters in declaration order, then each `@` in binding order. A literal's leaves are constants — no slot, no guard — but still count against the budget, since a leafwise comparison nests one conjunct per leaf whichever side it came from. Capped at 64 leaves per spec function (`P013`) | One `HA_ex` binder per leaf, consecutive levels, the block's translation wrapped in that many binders; no typing guard, since a prover-chosen value states none |
+| Aggregate *copy* (`let b = a;`) | Clones the bound leaf tree — value-copy semantics make the pure inlining exact. No slot, no guard, no binder, and nothing charged to the leaf budget | same |
+| `e.f`, `e[k]` with a foldable constant `k` | Resolved at translation time against the leaf tree; the access never appears in the obligation, only the selected leaf's term. A folded out-of-bounds `k` is `P014` | same |
+| `e[i]` with a non-constant `i` | A fresh `HA_ex` witness `v` pinned by `HA_and (nz (relop LtU i N)) (⋀_{c<N} Himpl (term_eq i c) (term_eq v (leaf c)))` — the unsigned range bound **first**, then one implication per element. Out of range the definition is unsatisfiable and the enclosing atom is refuted: `a[i]` denotes *the element at index `i`, which exists*. Constant steps of a chain descend first, so `m[1][j]` splits over the selected row. Two `P002`s guard the shape: a chain with two non-constant steps (the split would be their product), and a chain whose non-constant step selects an aggregate rather than a scalar leaf (there is no single term for the cases to define) | same |
+| `a == b` / `a != b` at aggregate type, assertion position | Leafwise: the conjunction of per-leaf `term_eq`, or its De Morgan dual for the negation. `==` compares values, and an aggregate's value is exactly its ordered scalar leaves | same |
 | `assume { … }` | Implication antecedent (`Himpl`) | Conjunct (`HA_and`) |
 | `if c { A } else { B }` | `HA_and (Himpl (nz c) A') (Himpl (eqz c) B')` | Strict `HA_or (HA_and (nz c) A') (HA_and (eqz c) B')` — no witness is fabricated via undefinedness |
 | `&&` (assertion position) | `HA_and (left', HA_and (Cᵣ, right'))` | same |
@@ -1225,6 +1242,32 @@ The table below shows the two payload polarities:
 | `!=` | `nz(relop Ne …)` — no per-side `HA_defined` conjunct: the strictified negation already demands both sides denote, so an emitted conjunct would be implied | same |
 | A call in term position | `T_app` (single scalar result required) | same |
 | A bare call statement | `HA_app_ok`, any result arity | same |
+
+The `==`/`!=` split in that table is deliberate, not an oversight, and a
+consumer feels it: an assumption `a[0] != 3` arrives as "the `ne` relop is
+nonzero" while a leafwise aggregate conclusion is stated with `term_eq`, so a
+proof relating the two pays a bridging step.
+
+The rule behind the split is **positional, not operator-wise**. The existential
+column above — which `Mode::Reach` shares — holds the positions that *pin* a
+value: an existential
+`@`'s witness, and — since an `assume` body translates existentially even inside
+a `forall` function — the antecedent of a universal claim. `term_eq` is the
+pinning form, so `==` takes it in those positions and the refutable relop in a
+claim position; that is why the same operator appears in both columns with
+different encodings. `!=` pins nothing — there is no value it names, only a
+computation whose result must be nonzero — so it stays with the operator the
+program executes, at that operator's own width and signedness. Encoding it as
+`¬term_eq` would state a disequality of mathematical values where the program
+compares two registers, the same class of divergence the eager `&&`/`||` term
+had before it became a pinned witness. The bridging step is the cost of that
+fidelity.
+
+Aggregate `==`/`!=` is not an exception to that rule but a different question,
+answered by the language rather than by the encoding: `==` at aggregate type
+compares *values*, and an aggregate's value is its ordered scalar leaves, so it
+is leafwise in every mode. The compiled comparison of frame pointers is the side
+that must change; it is tracked as a separate defect.
 
 The binary-operator table (`+`, `-`, `*`, `/`, `%`, bitwise, shifts,
 comparisons) mirrors `lower_binary_expression` exactly: number class and
@@ -1274,6 +1317,11 @@ whole translation.
   against locally, and how the `coqc` gate uses it.
 - `core/hassert/src/ir.rs`, `core/hassert/src/codec.rs` — the `HAssert`/
   `HTerm` IR and the `inference.hspecs` wire format.
+- [`core/wasm-codegen/docs/specification-obligations.md`](../wasm-codegen/docs/specification-obligations.md)
+  — the same translation read from the specification author's side: what
+  each construct becomes, which slot each value gets, and which
+  properties are provable as a result. Start there if you are reading an
+  emitted obligation because a proof did not close.
 - `core/wasm-codegen/src/hassert/` — the specification-to-`hassert`
   translation pass and its `P0xx` diagnostics.
 - `core/wasm-to-v/src/translator.rs`, `src/hassert_print.rs` — the

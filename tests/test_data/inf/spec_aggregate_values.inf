@@ -1,0 +1,61 @@
+// Aggregate values in specification bodies: compound `@` and compound
+// parameters quantify one universal slot per scalar leaf (arrays row-major,
+// struct fields in layout order), array/struct literals and copies bind leaf
+// value trees, field and constant-index access resolve against those trees at
+// translation time, and aggregate `==`/`!=` in assertion position is leafwise.
+fn sum_pair(a: i32, b: i32) -> i32 {
+  return a + b;
+}
+
+struct Rec {
+  lo: i32;
+  wide: i64;
+  row: [i32; 2];
+}
+
+spec AggregateValues {
+  fn leaf_bounds() forall {
+    let a: [i32; 3] = @;
+    assert(a[0] <= a[0]);
+  }
+
+  fn matrix_order() forall {
+    let m: [[i32; 2]; 2] = @;
+    assume { assert(m[0][1] > m[1][0]); }
+    assert(m[0][1] >= m[1][0]);
+  }
+
+  fn record_fields(r: Rec) forall {
+    assume { assert(r.wide > 0); }
+    assert(r.row[1] >= r.row[0] || r.wide > 0);
+  }
+
+  fn literal_values() forall {
+    let v: [i32; 3] = [1, 2, 3];
+    let w: [i32; 3] = v;
+    assert(sum_pair(w[0], v[1]) == 3);
+  }
+
+  fn leafwise_equality() forall {
+    let a: [i32; 2] = @;
+    let b: [i32; 2] = @;
+    assume { assert(a[0] == b[0] && a[1] == b[1]); }
+    assert(a == b);
+  }
+
+  fn leafwise_inequality() forall {
+    let a: [i32; 2] = @;
+    let c: [i32; 2] = [3, 4];
+    assume { assert(a[0] != 3); }
+    assert(a != c);
+  }
+
+  fn exists_leaves() forall {
+    let n: i32 = @;
+    assume { assert(n == 3); }
+    exists {
+      let pair: [i32; 2] = @;
+      assert(pair[0] + pair[1] == n);
+    }
+  }
+}

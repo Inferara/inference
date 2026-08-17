@@ -29,10 +29,13 @@ pub enum HAssert {
     Ex(Box<HAssert>),
     TermEq(HTerm, HTerm), HasType(HTerm, HNumType), Defined(HTerm),
     AppOk(HFnRef, Vec<HTerm>),
+    All(Box<HAssert>),
 }
 ```
 
-Each variant mirrors a wasm-verifier inductive (`HA_not`, `HA_and`, `Himpl`, `Hor`, `HA_ex`, `term_eq`, `HA_has_type`, `HA_defined`, `HA_app_ok`) — the variant doc comments name the counterpart.
+Each variant mirrors a wasm-verifier inductive (`HA_not`, `HA_and`, `Himpl`, `Hor`, `HA_ex`, `term_eq`, `HA_has_type`, `HA_defined`, `HA_app_ok`, `Hall`) — the variant doc comments name the counterpart.
+
+`All` sits last against its meaning: the wire tags follow declaration order and are part of the format, so a new variant is appended rather than filed beside the relative it reads like.
 
 Each obligation entry carries its quantifier kind alongside the tree:
 
@@ -53,7 +56,9 @@ The IR omits everything an Inference specification can never contain, so an ill-
 - **No heap fragment.** `HA_emp`/`HA_star`/`HA_iter`/`HA_pto`/`HA_size` are absent; memory constructs are not translatable.
 - **No general `HA_pred`.** `TermEq` is the only predicate form, enforcing wasm-verifier's `pred_eq`/2 discipline by construction.
 
-**Implication and disjunction are explicit nodes** (`Imp`, `Or`), not their classical De Morgan encodings. wasm-verifier's `Himpl`/`Hor` are definitionally-transparent `Definition`s, so a downstream printer can render these nodes as `Himpl`/`Hor` without ever pattern-matching an encoding.
+**Implication, disjunction and universal quantification are explicit nodes** (`Imp`, `Or`, `All`), not their classical De Morgan encodings. wasm-verifier's `Himpl`/`Hor`/`Hall` are definitionally-transparent `Definition`s, so a downstream printer can render these nodes by name without ever pattern-matching an encoding.
+
+`All` earns its place twice over. Beyond legibility, the downstream `ValidSpec` judgment quantifies the payload's free variables universally from outside, so an inner universal encoded as anything but a binder of its own would be bound out there instead — turning `∃x. ∀y. P` into `∀y. ∃x. P` without a trace.
 
 ### Symbolic function references
 
@@ -69,6 +74,7 @@ Constructors on `HAssert` apply the `True`-simplifications that keep a translate
 | `imp(p, q)` | `⊤ → q = q`, `p → ⊤ = ⊤` |
 | `or(a, b)`  | `⊤ ∨ x = ⊤`, `x ∨ ⊤ = ⊤` (`⊤` absorbing, the dual of its being the identity for `and`) |
 | `ex(body)`  | `∃x. ⊤ = ⊤` |
+| `all(body)` | `∀x. ⊤ = ⊤` (the dual of `ex`, sound because the domain is never empty) |
 | `nz(t)`     | `¬(t = 0)` |
 | `eqz(t)`    | `t = 0` |
 
