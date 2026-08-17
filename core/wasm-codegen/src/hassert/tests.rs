@@ -2031,6 +2031,7 @@ fn proof_codegen(source: String) -> Result<usize, CodegenError> {
                     mode: CompilationMode::Proof,
                     opt_level: crate::Target::Wasm32.default_opt_level(),
                     features: crate::EmitFeatures::default(),
+                    layout: crate::MemoryLayout::default(),
                 },
             )
             .map(|output| output.wasm().len())
@@ -2839,6 +2840,7 @@ spec S {
             mode: CompilationMode::Proof,
             opt_level: crate::Target::Wasm32.default_opt_level(),
             features: crate::EmitFeatures::default(),
+            layout: crate::MemoryLayout::default(),
         },
     )
     .expect("proof-mode codegen should succeed");

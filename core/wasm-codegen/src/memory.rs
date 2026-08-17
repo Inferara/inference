@@ -3,16 +3,20 @@
 //! This module provides the data structures and helpers for managing linear memory
 //! in the WebAssembly codegen pipeline. Arrays are stored in linear memory using a
 //! shadow stack with a `__stack_pointer` global that grows downward from the top of
-//! the first memory page.
+//! the stack region.
 //!
 //! # Memory Layout
 //!
+//! How large the memory is and how much of it is stack are not decided here:
+//! [`crate::MemoryLayout`] carries both, and this module works in terms of
+//! whatever it says. The default layout is one page that is entirely stack.
+//!
 //! ```text
-//! Stack-first layout (1 page = 64KB, no data sections yet)
-//! +--------------------------------------------+  0x10000 (64KB)
-//! |              (free space)                   |
-//! |     (future: data sections, heap)           |
-//! +-- __stack_pointer --------------------------+  STACK_SIZE
+//! Stack-first layout
+//! +--------------------------------------------+  pages * 64KB
+//! |     Data region (empty by default, where    |
+//! |     data sections and a heap would live)    |
+//! +-- __stack_pointer --------------------------+  stack size
 //! |                                             |
 //! |         Stack (grows downward)              |
 //! |                                             |
@@ -55,27 +59,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// One WASM memory page in bytes.
+///
+/// The unit [`crate::MemoryLayout::pages`] counts in, and the size of the default
+/// layout's single page.
 pub(crate) const PAGE_SIZE: u32 = 65536;
-
-/// Size of the stack region in bytes.
-///
-/// In the stack-first layout, the stack occupies addresses `[0, STACK_SIZE)` and grows
-/// downward from `STACK_SIZE` toward 0. Overflow below address 0 traps automatically
-/// via WASM out-of-bounds memory access — specifically, the prologue's first
-/// zero-fill store is at the frame pointer itself, so a wrapped SP addresses far
-/// past the end of memory and the store traps before writing anything.
-///
-/// Must not exceed `PAGE_SIZE`. When data sections are added (constant arrays, strings),
-/// reduce this to leave room above the stack region: `STACK_SIZE + data_size <= PAGE_SIZE`.
-pub(crate) const STACK_SIZE: u32 = PAGE_SIZE;
-
-/// Initial value for `__stack_pointer`: one past the last valid stack address.
-///
-/// This is a "past-the-end" value (like C++ `vector::end()`). Address `STACK_SIZE`
-/// itself is never accessed — the prologue subtracts `frame_size` before any memory
-/// operation, so the first actual access is at `STACK_SIZE - frame_size`.
-#[allow(clippy::cast_possible_wrap)]
-pub(crate) const STACK_POINTER_INIT: i32 = STACK_SIZE as i32;
 
 /// Stack frame alignment in bytes (matches LLVM/Rust WASM convention).
 pub(crate) const FRAME_ALIGNMENT: u32 = 16;
@@ -1017,11 +1004,30 @@ fn copy_memarg(offset: u32) -> MemArg {
 ///
 /// `i32.sub` uses modular arithmetic and never traps. If the subtraction wraps
 /// (SP goes "below 0"), the result is a large unsigned value: the frame is at
-/// most `STACK_SIZE` bytes, so a wrapped frame pointer is at least
-/// `2^32 - STACK_SIZE`, far beyond the one-page memory. WebAssembly computes an
+/// most the configured stack size and SP is at least 0, so a wrapped frame
+/// pointer is at least `2^32 - stack_size`. `MemoryLayout::validate` requires
+/// `memory_bytes + stack_size <= 2^32`, which is exactly the statement that
+/// `2^32 - stack_size` is at or past the end of memory. WebAssembly computes an
 /// effective address as `base + offset` without 32-bit wraparound, so the first
 /// zero-fill store — the one at offset 0, emitted first in both the unrolled and
-/// the looped form — fails its bounds check and traps before any byte is written.
+/// the looped form — fails its bounds check and traps before any byte is
+/// written.
+///
+/// That headroom invariant is what a larger memory would otherwise cost. The
+/// out-of-bounds region a wrapped pointer must land in shrinks as the declared
+/// memory grows, and at 65536 pages it vanishes entirely — the layout is
+/// rejected rather than allowed to emit a prologue whose overflow writes into
+/// the top of memory instead of trapping.
+///
+/// Growing the memory also changes the stack's upper neighbour: with more than
+/// one page, addresses just above the stack region are valid data memory rather
+/// than out of bounds, so an overflow *upward* past `stack_size` would corrupt
+/// data instead of trapping. No code this compiler emits moves the stack pointer
+/// above its initial value — the prologue only subtracts, and the epilogue adds
+/// back exactly the frame size the prologue took — so that direction is
+/// unreachable from a compiled program. `__stack_pointer` is an exported mutable
+/// global, so a host can still set it anywhere; that was equally true before the
+/// layout was configurable.
 ///
 /// That ordering is what makes the lowered fill observationally equal to the
 /// `memory.fill` a bulk-memory build emits instead, whose up-front bounds check
@@ -1037,7 +1043,8 @@ fn copy_memarg(offset: u32) -> MemArg {
 /// The trap is defense in depth. Analysis rules A035 (recursion) and A036
 /// (stack depth) statically reject any program whose frames could exhaust the
 /// stack, and `compute_frame_layout` independently asserts a single frame fits
-/// in `STACK_SIZE`, so an accepted program never reaches the wrapping case.
+/// in the configured stack size, so an accepted program never reaches the
+/// wrapping case.
 ///
 /// **Optimization opportunity**: When all array elements are explicitly initialized
 /// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the zero-fill is redundant since
@@ -1634,20 +1641,23 @@ mod tests {
 
     #[test]
     fn stack_pointer_init_equals_stack_size() {
-        assert_eq!(STACK_SIZE, 65536);
-        assert_eq!(STACK_POINTER_INIT, STACK_SIZE.cast_signed());
+        let layout = crate::MemoryLayout::default();
+        assert_eq!(layout.stack_size, 65536);
+        assert_eq!(layout.stack_pointer_init(), layout.stack_size.cast_signed());
     }
 
     #[test]
-    fn stack_size_fits_in_one_page() {
-        const _: () = assert!(STACK_SIZE <= PAGE_SIZE);
+    fn default_stack_fills_exactly_one_page() {
+        let layout = crate::MemoryLayout::default();
+        assert_eq!(layout.pages, 1);
+        assert_eq!(layout.stack_size, PAGE_SIZE);
     }
 
     #[test]
     fn stack_pointer_init_fits_in_i32() {
         assert!(
-            i32::try_from(STACK_SIZE).is_ok(),
-            "STACK_SIZE must fit in i32 for STACK_POINTER_INIT cast"
+            i32::try_from(crate::MemoryLayout::default().stack_size).is_ok(),
+            "the stack size must fit in i32 for the stack pointer initializer"
         );
     }
 

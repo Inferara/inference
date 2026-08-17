@@ -688,6 +688,7 @@ fn run() {
                 mode,
                 opt_level,
                 features: emit_features,
+                layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         ) {
             Ok(o) => o,

@@ -86,10 +86,11 @@
 //! ### Stack Depth (A036)
 //!
 //! - A036: Cumulative shadow-stack usage along a call chain must not exceed the
-//!   64 KB stack budget. Because A035 makes the call graph acyclic, the
-//!   worst-case usage is the maximum-weight root-to-leaf path (node weight =
-//!   that function's compound-frame size). The estimator over-approximates each
-//!   frame to stay sound against codegen; see [`rules::stack_depth`].
+//!   configured stack budget (64 KB by default). Because A035 makes the call
+//!   graph acyclic, the worst-case usage is the maximum-weight root-to-leaf path
+//!   (node weight = that function's compound-frame size). The estimator
+//!   over-approximates each frame to stay sound against codegen; see
+//!   [`rules::stack_depth`].
 //!
 //! ### Array Bounds (A037)
 //!
@@ -178,7 +179,50 @@ pub use rules::stack_depth::estimate_frame_sizes;
 /// direct dependency on the type checker to name the field's type.
 pub use inference_type_checker::errors::TypeMismatchContext;
 
-/// Performs static analysis on the typed AST.
+/// The facts about the artifact a program will be compiled into that some rules
+/// must measure the program against.
+///
+/// A rule of this kind is not checking a property of the source alone: A036 asks
+/// whether a call chain's frames fit the shadow stack the emitted module will
+/// actually declare, which is a code generation setting. Carrying the setting
+/// here is what lets the answer follow the build instead of a constant that has
+/// to be kept in sync by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalysisOptions {
+    /// The shadow-stack size in bytes A036 measures cumulative call-chain frame
+    /// usage against. Must equal the stack region code generation emits for the
+    /// same build, or the rule polices a budget the artifact does not have.
+    pub stack_budget_bytes: u32,
+}
+
+/// Implemented by hand rather than derived: a derived `Default` would give a
+/// zero-byte budget, under which every program that touches memory fails. The
+/// value here is the stack region a default build emits.
+impl Default for AnalysisOptions {
+    fn default() -> Self {
+        Self {
+            stack_budget_bytes: 65_536,
+        }
+    }
+}
+
+/// Performs static analysis on the typed AST under the default artifact
+/// settings.
+///
+/// This is the *default-layout* entry point. A caller that configures the
+/// memory layout code generation emits must call [`analyze_with_options`]
+/// instead and pass the matching budget, or A036 polices a shadow stack the
+/// artifact does not have — accepting a program that overflows a smaller stack,
+/// or rejecting one a larger stack accommodates.
+///
+/// # Errors
+///
+/// See [`analyze_with_options`].
+pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
+    analyze_with_options(typed_context, AnalysisOptions::default())
+}
+
+/// Performs static analysis on the typed AST under the given artifact settings.
 ///
 /// Runs all registered analysis rules and collects findings. Rules cover
 /// control flow validation, lint warnings, and codegen restrictions. See the
@@ -190,12 +234,15 @@ pub use inference_type_checker::errors::TypeMismatchContext;
 /// All findings are collected before returning, allowing the user to see all
 /// issues at once. `Warning`-severity findings are returned via `AnalysisResult`
 /// on both success and error paths.
-pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
+pub fn analyze_with_options(
+    typed_context: &TypedContext,
+    options: AnalysisOptions,
+) -> Result<AnalysisResult, AnalysisErrors> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
     for &r in rules::all_rules() {
-        let findings = r.check(typed_context);
+        let findings = r.check(typed_context, options);
         match r.severity() {
             Severity::Error => errors.extend(findings),
             Severity::Warning => warnings.extend(findings),

@@ -10,7 +10,7 @@
 //! Typed AST (TypedContext)
 //!         |
 //!         v
-//!   codegen(tc, module_name, CodegenOptions { target, mode, opt_level, features })
+//!   codegen(tc, module_name, CodegenOptions { target, mode, opt_level, features, layout })
 //!         |
 //!         v
 //!   CodegenOutput { wasm, target, mode, opt_level, module_name, has_main }
@@ -42,7 +42,7 @@
 //! - [`compiler`] - WASM binary generation via wasm-encoder (private)
 //! - [`memory`] - Linear memory infrastructure for stack-allocated compound types (private)
 //! - [`output`] - `CodegenOutput` struct definition
-//! - [`target`] - `Target`, `CompilationMode`, and `OptLevel` enums
+//! - [`target`] - `Target`, `CompilationMode`, `OptLevel`, and `MemoryLayout`
 
 #![warn(clippy::pedantic)]
 
@@ -67,7 +67,7 @@ mod spec_section;
 pub mod target;
 
 pub use output::CodegenOutput;
-pub use target::{CodegenOptions, CompilationMode, EmitFeatures, OptLevel, Target};
+pub use target::{CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, OptLevel, Target};
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
 /// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
@@ -101,13 +101,15 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 /// for the field-by-field contract. Its `features` apply identically in both
 /// compilation modes, so the `.v` always describes the same program as the
 /// `.wasm`; [`CodegenOptions::default()`] compiles an executable Wasm32 module
-/// inside WebAssembly 1.0 at the target's default optimization level.
+/// inside WebAssembly 1.0 at the target's default optimization level, into a
+/// single all-stack page of linear memory.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - Validation fails (proof + non-Wasm32, Soroban + non-det, or a feature the
-///   target does not accept)
+/// - Validation fails (proof + non-Wasm32, Soroban + non-det, a feature the
+///   target does not accept, or a memory layout that cannot describe a real
+///   linear memory)
 /// - Code generation fails
 pub fn codegen(
     typed_context: &TypedContext,
@@ -119,7 +121,20 @@ pub fn codegen(
         mode,
         opt_level,
         features,
+        layout,
     } = options;
+
+    // Refuse a memory the module could not declare, or a stack that could not
+    // live in it, before a single byte is emitted: every frame is laid out
+    // against this stack size, so a layout rejected later would be rejected only
+    // after the whole program had been lowered against it. This is the first
+    // refusal because it is the only one that depends on neither the target nor
+    // the mode: a layout that is wrong on its own terms stays wrong whatever
+    // else the build is fixed to.
+    if let Err(reason) = layout.validate() {
+        cov_mark::hit!(wasm_codegen_invalid_memory_layout);
+        return Err(anyhow::anyhow!("invalid memory layout: {reason}"));
+    }
 
     // Refuse a feature the target's runtime does not accept before a single byte
     // is emitted: a build-time refusal names the manifest entry to remove, where
@@ -164,6 +179,7 @@ pub fn codegen(
 
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
+    compiler.set_memory_layout(layout);
 
     // Runtime array bounds checks are emitted for every Compile-mode build
     // (Debug and Release, Wasm32 and Soroban): the executed/deployed artifact is
@@ -850,6 +866,71 @@ fn collect_emittable_functions(
 }
 
 #[cfg(test)]
+mod memory_layout_validation_tests {
+    use super::{CodegenOptions, MemoryLayout, codegen};
+    use inference_type_checker::typed_context::TypedContext;
+
+    /// The refusal is reached before anything is emitted, so an empty program is
+    /// enough to exercise it.
+    fn compile_empty(layout: MemoryLayout) -> anyhow::Result<crate::CodegenOutput> {
+        codegen(
+            &TypedContext::default(),
+            "output",
+            CodegenOptions {
+                layout,
+                ..CodegenOptions::default()
+            },
+        )
+    }
+
+    #[test]
+    fn an_unusable_layout_is_refused_before_emission() {
+        cov_mark::check!(wasm_codegen_invalid_memory_layout);
+        let err = compile_empty(MemoryLayout {
+            pages: 1,
+            stack_size: 131_072,
+        })
+        .expect_err("a stack larger than its memory must be refused");
+        assert_eq!(
+            err.to_string(),
+            "invalid memory layout: the shadow stack (131072 bytes) does not fit in the \
+             linear memory it lives in (1 × 64 KiB = 65536 bytes)"
+        );
+    }
+
+    /// The layout refusal precedes every target- and mode-dependent one, which
+    /// this pins by handing `codegen` a build that violates the layout rule and a
+    /// target rule at once.
+    #[test]
+    fn the_layout_refusal_precedes_the_feature_refusal() {
+        let err = codegen(
+            &TypedContext::default(),
+            "output",
+            CodegenOptions {
+                target: crate::Target::Soroban,
+                opt_level: crate::Target::Soroban.default_opt_level(),
+                features: crate::EmitFeatures { bulk_memory: true },
+                layout: MemoryLayout {
+                    pages: 0,
+                    stack_size: 65_536,
+                },
+                ..CodegenOptions::default()
+            },
+        )
+        .expect_err("both rules reject this build");
+        assert!(
+            err.to_string().contains("invalid memory layout"),
+            "the layout refusal must win, got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_default_layout_compiles() {
+        assert!(compile_empty(MemoryLayout::default()).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod feature_validation_tests {
     use super::{CodegenOptions, CompilationMode, EmitFeatures, Target, codegen};
     use inference_type_checker::typed_context::TypedContext;
@@ -870,6 +951,7 @@ mod feature_validation_tests {
                 mode,
                 opt_level: target.default_opt_level(),
                 features,
+                layout: crate::MemoryLayout::default(),
             },
         )
     }

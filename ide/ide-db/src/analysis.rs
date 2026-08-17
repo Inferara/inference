@@ -7,6 +7,7 @@ use std::sync::Arc;
 use inference_project_model::{
     FileParseErrors, ImportProblem, LoadedFile, load_project_resilient_with_root,
 };
+use inference_analysis::AnalysisOptions;
 use inference_analysis::errors::{LabeledDiagnostic, Severity};
 use inference_analysis::rules::all_rules;
 use inference_ast::arena::AstArena;
@@ -370,12 +371,19 @@ fn build_closure_files(
 /// recovers from errors — because findings on a partially-typed program are
 /// still valid. A rule is trusted not to panic on partial data; a panic here is
 /// a compiler bug to surface, not to suppress.
+///
+/// The settings are the defaults: the editor reports on a program, not on a
+/// configured build, so a rule that measures the program against the artifact
+/// (A036 against the shadow stack) answers for a default-layout build. A file
+/// whose project configures a different layout would want that layout threaded
+/// in here.
 fn run_analysis_rules(typed_context: &TypedContext) -> Vec<AnalysisFinding> {
+    let options = AnalysisOptions::default();
     let mut findings = Vec::new();
     for rule in all_rules() {
         let rule_id = rule.id();
         let severity = rule.severity();
-        for labeled in rule.check(typed_context) {
+        for labeled in rule.check(typed_context, options) {
             findings.push(AnalysisFinding {
                 rule_id,
                 severity,

@@ -14,9 +14,10 @@ mod codegen_validation_tests {
         codegen_output_with_mode_no_analysis, codegen_with_full_config,
         codegen_with_full_config_no_analysis, codegen_with_target_mode,
         codegen_with_target_mode_no_analysis, wasm_codegen, wasm_codegen_no_analysis,
+        wasm_codegen_with_layout,
     };
     use inf_wasmparser::{Operator, Parser, Payload};
-    use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
+    use inference_wasm_codegen::{CompilationMode, MemoryLayout, OptLevel, Target};
 
     // WASM content tests ---
 
@@ -38,6 +39,65 @@ mod codegen_validation_tests {
         assert!(
             wasm_contains_bytes(wasm, b"hello_world"),
             "WASM should contain 'hello_world' export name"
+        );
+    }
+
+    // Memory layout tests ---
+
+    /// A program that allocates an array frame, so both places the layout is
+    /// read are emitted: the memory section exists only for a module that needs
+    /// memory, and `__stack_pointer` only accompanies it.
+    const FRAME_ALLOCATING_SOURCE: &str = r#"
+pub fn read_first() -> i32 {
+    let arr: [i32; 4] = [1, 2, 3, 4];
+    return arr[0];
+}
+"#;
+
+    /// A requested layout must survive the whole pipeline and reach the emitted
+    /// module, in both of the numbers it carries.
+    ///
+    /// The page count and the stack size are asserted together because they are
+    /// read independently — the memory section takes one, the stack-pointer
+    /// global takes the other — so pinning a single number would leave the other
+    /// free to be ignored. A layout whose stack is half its memory is what
+    /// separates them: under the default the two are numerically equal, and an
+    /// emitter that confused one for the other would still look correct.
+    ///
+    /// The default-layout half is the control. It is what makes the first half
+    /// evidence about the layout rather than about this particular source: the
+    /// same program compiled twice differs in exactly these two numbers, and
+    /// differs in them only because the layout asked it to.
+    #[test]
+    fn a_configured_layout_reaches_the_emitted_module() {
+        let configured = wat_of(&wasm_codegen_with_layout(
+            FRAME_ALLOCATING_SOURCE,
+            MemoryLayout {
+                pages: 2,
+                stack_size: 32_768,
+            },
+        ));
+        assert!(
+            configured.contains("(memory (;0;) 2 2)"),
+            "the memory section must declare the requested 2 fixed pages:\n{configured}"
+        );
+        assert!(
+            configured.contains("(global (;0;) (mut i32) i32.const 32768)"),
+            "the stack pointer must start at the requested stack size:\n{configured}"
+        );
+
+        let default = wat_of(&wasm_codegen_with_layout(
+            FRAME_ALLOCATING_SOURCE,
+            MemoryLayout::default(),
+        ));
+        assert!(
+            default.contains("(memory (;0;) 1 1)"),
+            "the same source under the default layout must declare one page:\n{default}"
+        );
+        assert!(
+            default.contains("(global (;0;) (mut i32) i32.const 65536)"),
+            "the same source under the default layout must start the stack pointer at one \
+             page:\n{default}"
         );
     }
 
@@ -1811,6 +1871,12 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
     }
 
     // Helper functions ---
+
+    /// Renders a module as WAT, for assertions about a section's shape rather
+    /// than its bytes.
+    fn wat_of(wasm: &[u8]) -> String {
+        wasmprinter::print_bytes(wasm).expect("layout fixtures are printable WebAssembly 1.0")
+    }
 
     /// Checks if a byte slice contains a given subsequence of bytes.
     fn wasm_contains_bytes(wasm: &[u8], needle: &[u8]) -> bool {

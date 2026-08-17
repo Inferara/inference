@@ -106,6 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
+- The linear memory layout is now a value on `CodegenOptions` rather than two constants: `MemoryLayout { pages, stack_size }` is the single source for the memory section (`minimum == maximum`, so the memory is fixed rather than growable), the `__stack_pointer` initializer, and the per-frame size assertion. `validate` rejects a layout that cannot describe a real memory, including one whose memory and stack together span more than the 32-bit address space — the headroom a wrapped stack pointer needs to land out of bounds and trap. No user-facing knob yet; the default (one page, all stack) leaves every golden artifact byte-identical ([#363])
+
 - Compound (struct/array) parameters the callee provably never writes are now passed by reference — no frame slot, entry copy, or (when nothing else needs memory) frame at all; a copy remains only for written parameters or those passed to an `external fn`, recovering part of the size growth from [#315] ([#220])
 - An immutable `self` receiver forwarded to a compound-parameter `external fn` now copies into the method's frame on entry, so foreign writes no longer mutate the caller's struct through an immutable receiver; a checked write-set contract on `external fn` parameters is deferred to [#333] ([#329])
 - Bulk-memory-free output by default: codegen emits no `memory.fill`/`memory.copy` unless a build opts in, so Compile-mode modules are plain WebAssembly 1.0 (+ mutable-globals); frame zero-fill and compound copies lower to inline stores/loops, and artifacts that carried no bulk op stay byte-identical ([#315])
@@ -148,6 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add base WASM code generation from typed AST ([#29])
 
 ### Analysis
+
+- A036's shadow-stack budget now travels in a new `AnalysisOptions`, threaded through `Rule::check` to every rule, replacing a `STACK_BUDGET_BYTES` constant that had to be hand-synced with codegen's stack size and could not be checked from either crate. `analyze` keeps its signature and means "default layout"; `analyze_with_options` is the entry point a configured build must use. A cross-crate test now asserts the two defaults agree ([#363])
 
 - Whole-program call graph for the module hierarchy, keyed on the structured `FnKey` from `inference-fn-key`: A035 (recursion) and A036 (stack depth) now span files, catching cross-file recursion and >64 KB cross-file stack chains ([#63])
 - Restore the duplicate-`FnKey` debug tripwire in `resolve_adjacency` dropped by the LSP server rewrite ([#239]); it now exempts parse-recovered keys (`is_parse_recovered`), and keep-first behavior is unchanged in every build ([#255])

@@ -263,6 +263,11 @@
 //! - [Inference Grammar](https://github.com/Inferara/tree-sitter-inference)
 
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
+
+/// Re-export of the analysis settings so a caller that configures code
+/// generation can hand [`analyze_with_options`] a budget matching the artifact
+/// it is about to emit, without a direct dependency on `inference-analysis`.
+pub use inference_analysis::AnalysisOptions;
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
 /// Re-export of the lossless type-check entry point and its result types so
@@ -655,6 +660,23 @@ pub fn type_check_with_diagnostics(arena: AstArena) -> TypeCheckOutcome {
 /// informational findings collected during analysis.
 pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
     inference_analysis::analyze(typed_context)
+}
+
+/// Performs static analysis on the typed AST under the given artifact settings.
+///
+/// [`analyze`] assumes the default memory layout. A caller that compiles with a
+/// different one must use this entry point and pass the matching stack budget,
+/// or A036 measures call-chain depth against a shadow stack the emitted module
+/// does not have.
+///
+/// # Errors
+///
+/// Returns `AnalysisErrors` on the same conditions as [`analyze`].
+pub fn analyze_with_options(
+    typed_context: &TypedContext,
+    options: AnalysisOptions,
+) -> Result<AnalysisResult, AnalysisErrors> {
+    inference_analysis::analyze_with_options(typed_context, options)
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)

@@ -281,6 +281,7 @@ mod gate {
                 mode: CompilationMode::Proof,
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
+                layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"));

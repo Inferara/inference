@@ -1,9 +1,10 @@
 //! A036: Cumulative shadow-stack depth must not exceed the stack budget.
 //!
 //! Inference compiles to WebAssembly with a downward-growing shadow stack
-//! (`__stack_pointer`) of [`STACK_BUDGET_BYTES`]. Only functions that allocate
-//! array or struct frames consume it; scalar locals live in WASM locals and
-//! never touch linear memory. Codegen already bounds each *individual* frame,
+//! (`__stack_pointer`) whose size the build configures and
+//! [`AnalysisOptions::stack_budget_bytes`] carries here. Only functions that
+//! allocate array or struct frames consume it; scalar locals live in WASM locals
+//! and never touch linear memory. Codegen already bounds each *individual* frame,
 //! but the *cumulative* depth across a call chain is unchecked and only traps
 //! opaquely at runtime (an out-of-bounds store in the frame prologue's
 //! zero-fill).
@@ -41,6 +42,8 @@
 //! over-approximation — it may flag a heavy chain that no real entry point can
 //! reach — and keeps the rule independent of entry-point discovery. A future
 //! refinement could restrict the roots to reachable entry points.
+//!
+//! [`AnalysisOptions::stack_budget_bytes`]: crate::AnalysisOptions::stack_budget_bytes
 
 use std::collections::HashSet;
 
@@ -55,14 +58,6 @@ use rustc_hash::FxHashMap;
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 use crate::rule::TypedContext;
-
-/// The shadow-stack budget in bytes.
-///
-/// Mirrors `core/wasm-codegen/src/memory.rs::STACK_SIZE` (one WASM page). The
-/// two constants must stay in sync: a cross-crate `const` import would require
-/// a new shared dependency, so the value is duplicated here deliberately. If
-/// codegen's stack region size changes, update this constant to match.
-const STACK_BUDGET_BYTES: u32 = 65_536;
 
 /// Frame alignment in bytes, mirroring
 /// `core/wasm-codegen/src/memory.rs::FRAME_ALIGNMENT`. Every per-function frame
@@ -90,18 +85,22 @@ crate::rule! {
     #[name = "Stack depth exceeded"]
     #[severity = error]
     pub struct StackDepthExceeded;
-    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
+    fn check(ctx: &TypedContext, options: AnalysisOptions) -> Vec<LabeledDiagnostic> {
         let nodes = build_call_graph(ctx);
-        check_stack_depth(ctx, &nodes)
+        check_stack_depth(ctx, &nodes, options.stack_budget_bytes)
     }
 }
 
 /// Computes each node's frame weight and reports the deepest weighted path when
-/// it exceeds the budget.
+/// it exceeds `budget_bytes`.
 ///
 /// The diagnostic is anchored at the chain's first function; that function's
 /// defining file names the finding.
-fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<LabeledDiagnostic> {
+fn check_stack_depth(
+    ctx: &TypedContext,
+    nodes: &[FnNode],
+    budget_bytes: u32,
+) -> Vec<LabeledDiagnostic> {
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -114,7 +113,7 @@ fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<LabeledDiagnos
     let Some((depth_bytes, path)) = deepest_path(&adj, &weights) else {
         return Vec::new();
     };
-    if depth_bytes <= STACK_BUDGET_BYTES {
+    if depth_bytes <= budget_bytes {
         return Vec::new();
     }
     vec![LabeledDiagnostic::new(
@@ -122,7 +121,7 @@ fn check_stack_depth(ctx: &TypedContext, nodes: &[FnNode]) -> Vec<LabeledDiagnos
         AnalysisDiagnostic::StackDepthExceeded {
             chain: render_chain(nodes, &path),
             depth_bytes,
-            budget_bytes: STACK_BUDGET_BYTES,
+            budget_bytes,
             location: nodes[path[0]].location,
         },
     )]
@@ -755,7 +754,7 @@ mod tests {
         let weights = vec![1000, 2000];
         let adj = adj(&[&[1], &[]]);
         let (bytes, _) = deepest_path(&adj, &weights).unwrap();
-        assert!(bytes <= STACK_BUDGET_BYTES);
+        assert!(bytes <= crate::AnalysisOptions::default().stack_budget_bytes);
     }
 
     #[test]
@@ -763,7 +762,7 @@ mod tests {
         let weights = vec![40_000, 40_000];
         let adj = adj(&[&[1], &[]]);
         let (bytes, path) = deepest_path(&adj, &weights).unwrap();
-        assert!(bytes > STACK_BUDGET_BYTES);
+        assert!(bytes > crate::AnalysisOptions::default().stack_budget_bytes);
         assert_eq!(bytes, 80_000);
         assert_eq!(path, vec![0, 1]);
     }

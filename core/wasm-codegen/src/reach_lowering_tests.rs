@@ -328,6 +328,7 @@ fn codegen_rejects_a_declared_return_type_on_an_exists_body() {
             mode: CompilationMode::Proof,
             opt_level: crate::OptLevel::O0,
             features: crate::EmitFeatures::default(),
+            layout: crate::MemoryLayout::default(),
         },
     )
     .expect_err("a declared return type on an exists body must fail codegen");
@@ -358,6 +359,7 @@ fn codegen_rejects_a_return_statement_in_a_unique_body() {
             mode: CompilationMode::Proof,
             opt_level: crate::OptLevel::O0,
             features: crate::EmitFeatures::default(),
+            layout: crate::MemoryLayout::default(),
         },
     )
     .expect_err("a return statement in a unique body must fail codegen");
