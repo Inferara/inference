@@ -942,4 +942,103 @@ pub fn probe_named_array() -> i32 {
              round-trip; .v was:\n{rocq}"
         );
     }
+
+    /// The end-to-end proof path for a linked external: one `.wasm` merged in,
+    /// one `spec` naming it, one obligation applying it.
+    ///
+    /// This is the case the whole linker envelope exists for. An obligation
+    /// about an `external fn` is only meaningful post-merge — before it the
+    /// external is an import, and the downstream realization obligation has no
+    /// body to reduce — so the symbol codegen writes must be the name the
+    /// linker gives the merged body, and the resolution must happen against the
+    /// linked module.
+    ///
+    /// The three assertions cover the three ways this can silently go wrong:
+    /// the merged body must appear in the module record (an obligation about a
+    /// function the record omits is unprovable), the application must resolve
+    /// to *its* index rather than the main-side function's, and the claim's
+    /// right-hand side must survive so the obligation says something the
+    /// program can be wrong about.
+    #[test]
+    fn an_obligation_about_a_linked_extern_resolves_to_its_merged_body() {
+        let lib_wasm = compile_wasm("pub fn double(a: i32) -> i32 { return a + a; }", "mathlib");
+        let lib_dir = TempLibDir::new("extern_obligation");
+        lib_dir.write_module(Path::new("mathlib.wasm"), &lib_wasm);
+
+        let main_source = "external fn double(x: i32) -> i32;\n\
+             use { double } from mathlib;\n\
+             pub fn twice(x: i32) -> i32 { return double(x); }\n\
+             spec DoubleSpec {\n\
+                 fn doubles() forall {\n\
+                     let x: i32 = @;\n\
+                     assert(double(x) == x + x);\n\
+                 }\n\
+             }";
+
+        let arena = parse(main_source).expect("main parses");
+        let typed = type_check(arena).expect("main type-checks");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let externals =
+            resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
+        let external_bytes: Vec<(&str, &[u8])> = externals
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+
+        let codegen_output = inference_wasm_codegen::codegen(
+            &typed,
+            "linked_double",
+            inference_wasm_codegen::CodegenOptions {
+                mode: inference_wasm_codegen::CompilationMode::Proof,
+                ..Default::default()
+            },
+        )
+        .expect("proof-mode codegen succeeds");
+
+        // Before the merge the obligation names a function the module only
+        // imports, and translation names the missing step rather than emitting
+        // a `T_app` that resolves to nothing.
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let pre_link = wasm_to_v(
+            "linked_double",
+            codegen_output.wasm(),
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect_err("an unlinked module cannot resolve an obligation about its extern");
+        assert!(
+            pre_link
+                .to_string()
+                .contains("Link the module before translating it"),
+            "the pre-link rejection must name the missing step; got: {pre_link}"
+        );
+
+        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
+        let rocq = wasm_to_v(
+            "linked_double",
+            &unified,
+            &empty,
+            &inference::HSpecMap::default(),
+        )
+        .expect("wasm-to-v succeeds on the linked module");
+
+        // Post-link order is twice=0, merged `mathlib.double`=1.
+        assert!(
+            rocq.contains("Definition mathlib_double : module_func"),
+            "the merged extern body must be an ordinary definition in the record; \
+             .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("T_app 1 ((T_local 0%N) :: nil)"),
+            "the obligation must apply the merged extern at its own defined-fn \
+             index; .v was:\n{rocq}"
+        );
+        assert!(
+            rocq.contains("T_binop T_i32 (Binop_i BOI_add) (T_local 0%N) (T_local 0%N)"),
+            "the claim the extern is measured against must survive; .v was:\n{rocq}"
+        );
+    }
 }

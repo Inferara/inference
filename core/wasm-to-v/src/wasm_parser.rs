@@ -389,10 +389,10 @@ fn parse(
                                     // Retain the RAW, unsanitized name-section
                                     // string too: an `inference.hspecs`
                                     // obligation references a callee by exactly
-                                    // this symbol (`FnKey::Display`, e.g.
-                                    // `lib.arith.add`), and `T_app` resolution
-                                    // keys on it — sanitization would break the
-                                    // match.
+                                    // this symbol (`is_prime`, `Point.new`, or
+                                    // a merged external's `mathlib.sum`), and
+                                    // `T_app` resolution keys on it —
+                                    // sanitization would break the match.
                                     raw_func_names_map
                                         .insert(func_name.index, func_name.name.to_string());
                                 }

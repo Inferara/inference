@@ -1,0 +1,11 @@
+// The external `.wasm` behind `spec_linked_extern.inf`, compiled on its own and
+// merged into it. It is deliberately trivial: the fixture pair exists to cover
+// the link and the obligation that names the merged body, not this arithmetic.
+//
+// It carries no `spec` of its own and no data segment — the corpus rejects a
+// data segment in any module it gates, and the failure would be reported against
+// the main fixture's name rather than this one.
+
+pub fn double(a: i32) -> i32 {
+  return a + a;
+}

@@ -12,6 +12,7 @@ categories = ["compilers", "wasm"]
 [dependencies]
 wasm-encoder.workspace = true
 inf-wasmparser.workspace = true
+inference-fn-key.workspace = true
 inference-hassert.workspace = true
 thiserror.workspace = true
 

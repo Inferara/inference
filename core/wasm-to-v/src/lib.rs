@@ -2510,6 +2510,182 @@ mod reachability_emission {
         );
     }
 
+    /// The two ways an obligation can name an *imported* function, and the two
+    /// different rejections they get.
+    ///
+    /// Both are live, and which one fires turns on the name section. Inference
+    /// code generation names only the functions it compiles, so a symbol
+    /// naming one of its imports matches nothing and takes the unresolved arm —
+    /// which recognizes the symbol as one of this module's function imports and
+    /// says the merge has not run. A module whose name section *does* name the
+    /// import (hand-assembled, or third-party) resolves the symbol to an
+    /// import index, and the arithmetic in `mod_funcs_index` rejects it there
+    /// instead. Deleting either arm leaves one of these applications printing a
+    /// `T_app` into an index space it does not belong to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_obligation_naming_an_import_is_rejected_on_both_paths() {
+        let applier = |symbol: &str| {
+            spec_maps(
+                "Applied",
+                vec![],
+                vec![HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::AppOk(HFnRef(symbol.to_string()), vec![]),
+                    SpecKind::Forall,
+                )],
+            )
+        };
+
+        // Unnamed import: no name-section entry to match, and the symbol is
+        // recognizably this module's own import.
+        let (spec_funcs, hspecs) = applier("mathlib.sum");
+        let err = translate(
+            r#"(module (import "mathlib" "sum" (func)) (func $applier))"#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("an obligation about an unmerged import must be rejected");
+        assert!(
+            err.to_string()
+                .contains("Link the module before translating it"),
+            "the rejection must name the missing merge; got: {err}",
+        );
+
+        // Named import: the symbol resolves, to an index below the defined
+        // functions, and the index arithmetic rejects it.
+        let (spec_funcs, hspecs) = applier("imported");
+        let err = translate(
+            r#"(module (import "mathlib" "sum" (func $imported)) (func $applier))"#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("an obligation applying a named import must be rejected");
+        assert!(
+            err.to_string().contains("imports rather than defines"),
+            "the rejection must say the target is imported; got: {err}",
+        );
+    }
+
+    /// An application whose argument count is not its target's parameter count
+    /// is rejected before emission, in both the `T_app` and `HA_app_ok`
+    /// positions and in both directions (too few, too many).
+    ///
+    /// Nothing downstream can catch this. `T_app`'s arguments are a `seq term`,
+    /// so a wrong-width application is well-formed Gallina: it elaborates, the
+    /// `coqc` gate passes, and the obligation goes on to say something about a
+    /// function other than the one it names.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_wrong_arity_application_is_rejected() {
+        let module = r#"
+            (module
+              (func $pair (param i32) (param i32) (result i32)
+                local.get 0)
+              (func $applier))
+            "#;
+        for (label, payload, arity) in [
+            (
+                "T_app, one argument short",
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0)],
+                )),
+                1,
+            ),
+            (
+                "T_app, one argument too many",
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                )),
+                3,
+            ),
+            (
+                "HA_app_ok, no arguments at all",
+                HAssert::AppOk(HFnRef("pair".to_string()), vec![]),
+                0,
+            ),
+            (
+                "HA_app_ok, one argument too many",
+                HAssert::AppOk(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                ),
+                3,
+            ),
+        ] {
+            let (spec_funcs, hspecs) = spec_maps(
+                "Applied",
+                vec![],
+                vec![HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    payload,
+                    SpecKind::Forall,
+                )],
+            );
+            let msg = translate(module, &spec_funcs, &hspecs)
+                .err()
+                .unwrap_or_else(|| panic!("{label}: a wrong-arity application must be rejected"))
+                .to_string();
+            assert!(
+                msg.contains(&format!(
+                    "to {arity} argument(s), but the function it names takes 2"
+                )) && msg.contains("pair"),
+                "{label}: the rejection must name the symbol and both counts; got: {msg}",
+            );
+        }
+
+        // The control: the same symbol at its real arity translates.
+        let (spec_funcs, hspecs) = spec_maps(
+            "Applied",
+            vec![],
+            vec![HSpecEntry::new(
+                HFnRef("applier".to_string()),
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1)],
+                )),
+                SpecKind::Forall,
+            )],
+        );
+        translate(module, &spec_funcs, &hspecs)
+            .expect("an application at the function's own arity translates");
+
+        // One symbol applied at two arities: the collection de-duplicates whole
+        // applications, not symbols, so the wrong-arity one is still seen. Keyed
+        // on the symbol alone it would be absorbed by the correct application
+        // that sorts before it and reach emission unchecked.
+        let (spec_funcs, hspecs) = spec_maps(
+            "Applied",
+            vec![],
+            vec![
+                HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::Defined(HTerm::App(
+                        HFnRef("pair".to_string()),
+                        vec![HTerm::Local(0), HTerm::Local(1)],
+                    )),
+                    SpecKind::Forall,
+                ),
+                HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::Defined(HTerm::App(
+                        HFnRef("pair".to_string()),
+                        vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                    )),
+                    SpecKind::Forall,
+                ),
+            ],
+        );
+        let err = translate(module, &spec_funcs, &hspecs)
+            .expect_err("a wrong-arity application beside a correct one must still be rejected");
+        assert!(
+            err.to_string().contains("to 3 argument(s)"),
+            "the rejection must name the wrong-arity application; got: {err}",
+        );
+    }
+
     /// Reachability classification hard-depends on the name section: a module
     /// with `exists`/`unique` obligations but no function names is rejected,
     /// where a forall-only module without `T_app` still translates.

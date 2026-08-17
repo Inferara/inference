@@ -112,12 +112,120 @@ pub(crate) use diag::HassertDiagnostic;
 use diag::PCode;
 
 /// A map from a function's structured key to its definition, for every
-/// module-defined function a specification term may call.
+/// function compiled from Inference source a specification term may call.
 ///
-/// Imports (`external fn`s) are deliberately excluded: a `T_app` names a
-/// *defined* function only, so an extern call is rejected rather than resolved.
+/// `external fn`s are deliberately absent: they have no structured key and no
+/// body here, and are resolved through [`ExternIndex`] instead.
 pub(crate) struct CalleeIndex {
     defs: FxHashMap<FnKey, DefId>,
+}
+
+/// The `external fn` declarations visible from a specification function body,
+/// keyed by the scope that introduces them.
+///
+/// Resolution must be by *declaration*, not by name. Two `external fn`s may
+/// share a name — a bound top-level `sum` and an unbound spec-inner `sum` — and
+/// only the declaration a given call site actually names decides whether that
+/// call has a linked body and which module it comes from. A `use … from` clause
+/// binds top-level declarations only, so a spec-inner one is never bound; a
+/// name-keyed lookup would hand it the top-level declaration's origin and emit
+/// an obligation naming a merged body the call does not reach.
+///
+/// This mirrors `A024`, which resolves unbound-extern calls through the same
+/// two-layer walk, so those two passes agree on which declaration a call names.
+/// Through the full pipeline `A024` rejects such a call before this pass runs,
+/// which makes the agreement defense in depth rather than the sole guard; a
+/// pipeline that skips analysis, as the proof-mode test gates do, has nothing
+/// else.
+///
+/// Code generation does **not** make the same distinction. It reads an
+/// extern's *provenance* off the declaration, keyed by `DefId`, but the table
+/// its call sites probe (`Compiler::extern_name_to_idx`) is keyed by the bare
+/// extern name, whole program: neither file-scoped nor spec-scoped, and unable
+/// to hold two same-named declarations at once. A bound `external fn scale` in
+/// one file therefore claims the name `scale` for every call site in the
+/// program, a sibling file's call to its own local `fn scale` included. This
+/// index is strictly the more precise of the two, so where they disagree the
+/// obligation names one function and the emitted `call` reaches another. That
+/// divergence is pre-existing and tracked by
+/// [#423](https://github.com/Inferara/inference/issues/423); the precision here
+/// neither causes it nor depends on it.
+///
+/// Two scopes exhaust the language: a file's top level and a `spec` block
+/// inside it. Specs do not nest, so an inner scope is keyed by its spec name
+/// and the lookup is a two-step walk rather than a stack.
+pub(crate) struct ExternIndex {
+    decls: FxHashMap<ExternScope, FxHashMap<String, DefId>>,
+}
+
+/// A file, or a `spec` block within it — the two places an `external fn` may be
+/// declared.
+#[derive(PartialEq, Eq, Hash)]
+struct ExternScope {
+    module_path: Vec<String>,
+    spec: Option<String>,
+}
+
+impl ExternIndex {
+    /// Collects every `external fn` declaration in the program, in the scope
+    /// that introduces it. A scope that declares none records no entry.
+    fn build(arena: &AstArena) -> Self {
+        let mut decls: FxHashMap<ExternScope, FxHashMap<String, DefId>> = FxHashMap::default();
+        for file in arena.source_files() {
+            let spec_scopes = file
+                .defs
+                .iter()
+                .filter_map(|&def_id| match &arena[def_id].kind {
+                    Def::Spec { name, defs, .. } => {
+                        Some((Some(arena[*name].name.clone()), defs.as_slice()))
+                    }
+                    _ => None,
+                });
+            for (spec, defs) in std::iter::once((None, file.defs.as_slice())).chain(spec_scopes) {
+                let externs = extern_decls(arena, defs);
+                if !externs.is_empty() {
+                    decls.insert(
+                        ExternScope {
+                            module_path: file.module_path.clone(),
+                            spec,
+                        },
+                        externs,
+                    );
+                }
+            }
+        }
+        Self { decls }
+    }
+
+    /// The `external fn` a bare `name` resolves to from inside `spec` in the
+    /// file at `module_path`, innermost scope first, or `None` when the name is
+    /// not an extern there.
+    fn lookup(&self, module_path: &[String], spec: &str, name: &str) -> Option<DefId> {
+        let inner = ExternScope {
+            module_path: module_path.to_vec(),
+            spec: Some(spec.to_string()),
+        };
+        let outer = ExternScope {
+            module_path: module_path.to_vec(),
+            spec: None,
+        };
+        [inner, outer]
+            .iter()
+            .find_map(|scope| self.decls.get(scope)?.get(name).copied())
+    }
+}
+
+/// The `external fn` declarations `defs` introduces directly, keeping the first
+/// of a repeated name — a repeat within one scope is a type error reported
+/// earlier, so which one wins cannot matter to a valid program.
+fn extern_decls(arena: &AstArena, defs: &[DefId]) -> FxHashMap<String, DefId> {
+    let mut externs = FxHashMap::default();
+    for &def_id in defs {
+        if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
+            externs.entry(arena[*name].name.clone()).or_insert(def_id);
+        }
+    }
+    externs
 }
 
 impl CalleeIndex {
@@ -194,13 +302,19 @@ pub(crate) fn translate_spec_fns(
 ) -> (HSpecMap, Vec<HassertDiagnostic>) {
     let arena = ctx.arena();
     let callee = CalleeIndex::build(arena, buckets);
+    let externs = ExternIndex::build(arena);
     let mut map = HSpecMap::default();
     let mut diagnostics = Vec::new();
 
     for entry in &buckets.spec_funcs {
         let plan = reach_plans.get(entry.def_id);
-        let mut translator =
-            translate::SpecFnTranslator::new(ctx, &entry.module_path, &entry.spec_name, &callee);
+        let mut translator = translate::SpecFnTranslator::new(
+            ctx,
+            &entry.module_path,
+            &entry.spec_name,
+            &callee,
+            &externs,
+        );
         let hassert = translator.translate_fn(entry.def_id, plan);
         let fn_diagnostics = translator.take_diagnostics();
         if !fn_diagnostics.is_empty() {

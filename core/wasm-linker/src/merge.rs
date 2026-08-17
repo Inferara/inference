@@ -459,9 +459,9 @@ impl Plan {
                     external_idx: ext_idx,
                     source_func_idx: src_func,
                     out_type_idx,
-                    name: external
-                        .func_name(src_func)
-                        .map(|name| format!("{}.{name}", external.logical_module)),
+                    name: external.func_name(src_func).map(|name| {
+                        inference_fn_key::merged_name::callee(&external.logical_module, name)
+                    }),
                 });
             }
 
@@ -484,10 +484,17 @@ impl Plan {
             // `Type.method` convention. An explicit debug name on the source module
             // would otherwise win, but a codegen-produced external typically
             // exports the field under that same name, so this is stable.
+            //
+            // A proof-mode obligation that applies this external writes the same
+            // string, so the name comes from the shared producer rather than a
+            // second `format!` that could drift from it.
             if let Some(root_merged) = merged.iter_mut().find(|m| {
                 merged_index.get(&(m.external_idx, m.source_func_idx)) == Some(&root_output)
             }) {
-                root_merged.name = Some(format!("{}.{field}", external.logical_module));
+                root_merged.name = Some(inference_fn_key::merged_name::root(
+                    &external.logical_module,
+                    field,
+                ));
             }
         }
 
@@ -509,7 +516,10 @@ impl Plan {
         for (i, m) in merged.iter_mut().enumerate() {
             if m.name.is_none() {
                 let logical_module = &externals[m.external_idx].logical_module;
-                m.name = Some(format!("{}.func_{}", logical_module, merged_base + i as u32));
+                m.name = Some(inference_fn_key::merged_name::anonymous(
+                    logical_module,
+                    merged_base + i as u32,
+                ));
             }
         }
 

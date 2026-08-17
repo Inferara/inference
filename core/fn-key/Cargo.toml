@@ -5,7 +5,7 @@ edition = { workspace = true }
 license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
-description = "Canonical WASM function identity shared by the Inference codegen and analysis passes"
+description = "Canonical WASM function identity and shared name-section namespace for the Inference compiler's codegen, analysis, linker and proof translation"
 keywords = ["compiler", "wasm", "codegen", "analysis"]
 categories = ["compilers"]
 

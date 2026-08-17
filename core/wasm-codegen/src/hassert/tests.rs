@@ -125,6 +125,52 @@ fn obligation_named(map: &HSpecMap, spec: &str, symbol: &str) -> HAssert {
         .clone()
 }
 
+/// Every function symbol an obligation applies, in first-encounter order with
+/// duplicates removed — the names that must resolve against the emitted
+/// module's name section.
+fn applied_symbols(a: &HAssert) -> Vec<String> {
+    fn walk_assert(a: &HAssert, acc: &mut Vec<String>) {
+        match a {
+            HAssert::True | HAssert::False => {}
+            HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => walk_assert(x, acc),
+            HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+                walk_assert(l, acc);
+                walk_assert(r, acc);
+            }
+            HAssert::TermEq(l, r) => {
+                walk_term(l, acc);
+                walk_term(r, acc);
+            }
+            HAssert::HasType(t, _) | HAssert::Defined(t) => walk_term(t, acc),
+            HAssert::AppOk(f, args) => {
+                acc.push(f.0.clone());
+                for arg in args {
+                    walk_term(arg, acc);
+                }
+            }
+        }
+    }
+    fn walk_term(t: &HTerm, acc: &mut Vec<String>) {
+        match t {
+            HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => {}
+            HTerm::App(f, args) => {
+                acc.push(f.0.clone());
+                for arg in args {
+                    walk_term(arg, acc);
+                }
+            }
+            HTerm::Binop(_, _, l, r) | HTerm::Relop(_, _, l, r) => {
+                walk_term(l, acc);
+                walk_term(r, acc);
+            }
+        }
+    }
+    let mut acc = Vec::new();
+    walk_assert(a, &mut acc);
+    acc.dedup();
+    acc
+}
+
 /// Translates one spec free function whose body is `body`, wrapped in the
 /// boilerplate `spec S { fn f() <body> }`, and returns its obligation. `prelude`
 /// is emitted ahead of the spec (helper functions, enums, …).
@@ -1913,12 +1959,17 @@ spec S { fn f() forall { let a: [i32; 2] = @; assert(head(a) == a[0]); } }
 }
 
 #[test]
-fn p005_rejects_extern_and_nondeterministic_callees() {
+fn p005_rejects_unbound_extern_and_nondeterministic_callees() {
     let extern_src = "\
 external fn ext(x: i32) -> i32;
 spec S { fn f() forall { let a: i32 = @; assert(ext(a) == a); } }
 ";
-    assert!(err(extern_src).contains("error[P005]"));
+    let e = err(extern_src);
+    assert!(e.contains("error[P005]"), "{e}");
+    assert!(
+        e.contains("no `use … from` binding"),
+        "the rejection must name what is missing — a binding, not the extern itself: {e}"
+    );
 
     let nondet_src = "\
 fn helper() -> i32 {
@@ -1928,6 +1979,224 @@ fn helper() -> i32 {
 spec S { fn f() forall { let a: i32 = @; assert(helper() == a); } }
 ";
     assert!(err(nondet_src).contains("error[P005]"));
+}
+
+/// A *bound* `external fn` is a legitimate specification subject: the static
+/// merge splices its body into the emitted module, so the obligation applies it
+/// under the name the merge gives that body.
+#[test]
+fn a_bound_extern_applies_under_its_merged_symbol() {
+    let map = ok("\
+external fn double(x: i32) -> i32;
+use { double } from mathlib;
+spec S { fn f() forall { let a: i32 = @; assert(double(a) == a + a); } }
+");
+    let applied = applied_symbols(&sole_obligation(&map, "S"));
+    assert_eq!(
+        applied,
+        vec!["mathlib.double".to_string()],
+        "the obligation must apply the extern under the linker's merged-body name"
+    );
+}
+
+/// An extern bound under a `::`-joined logical module keeps that module in its
+/// symbol: the merged name is per source module, not per export field, because
+/// two modules may export the same field.
+#[test]
+fn a_bound_extern_keeps_its_logical_module_in_the_symbol() {
+    let map = ok("\
+external fn hash(x: i32) -> i32;
+use { hash } from crypto::digest;
+spec S { fn f() forall { let a: i32 = @; assert(hash(a) == a); } }
+");
+    assert_eq!(
+        applied_symbols(&sole_obligation(&map, "S")),
+        vec!["crypto::digest.hash".to_string()]
+    );
+}
+
+/// Resolution is by *declaration*, not by name. A spec-inner `external fn`
+/// shadows a same-named bound one at file scope, and it is unbound — so the
+/// call inside that spec is rejected, while the identical call in a sibling
+/// spec resolves to the bound declaration.
+///
+/// A name-keyed lookup passes the first half of this and fails the second: it
+/// would hand the inner declaration the outer one's origin and emit an
+/// obligation naming a merged body the call does not reach. Reachable here
+/// because this harness runs no analysis — through the full pipeline `A024`
+/// rejects the call first.
+#[test]
+fn a_spec_inner_extern_shadows_the_bound_one_of_the_same_name() {
+    let shadowed = "\
+external fn probe(x: i32) -> i32;
+use { probe } from sensors;
+spec Inner {
+  external fn probe(x: i32) -> i32;
+  fn f() forall { let a: i32 = @; assert(probe(a) == a); }
+}
+";
+    let e = err(shadowed);
+    assert!(e.contains("error[P005]"), "{e}");
+    assert!(
+        e.contains("no `use … from` binding"),
+        "the spec-inner declaration is the one in scope, and it is unbound: {e}"
+    );
+
+    let sibling = "\
+external fn probe(x: i32) -> i32;
+use { probe } from sensors;
+spec Inner {
+  external fn probe(x: i32) -> i32;
+  fn g() forall { let a: i32 = @; assert(a == a + 0); }
+}
+spec Outer { fn f() forall { let a: i32 = @; assert(probe(a) == a); } }
+";
+    let map = ok(sibling);
+    assert_eq!(
+        applied_symbols(&sole_obligation(&map, "Outer")),
+        vec!["sensors.probe".to_string()],
+        "the sibling spec sees only the bound file-scope declaration"
+    );
+}
+
+/// An `external fn` is visible only in the file that declares it. A sibling
+/// file's spec that calls a same-named *local* function resolves to its own
+/// function, not to the other file's extern.
+///
+/// The scope key is `(defining file, enclosing spec)`, and this pins the file
+/// half of it: drop that component and the extern in `side` captures `main`'s
+/// call, emitting an obligation about a body the call never reaches — which
+/// resolves post-link and elaborates under `coqc`, so nothing downstream would
+/// notice.
+///
+/// Code generation is *not* this precise on the very program below. Its
+/// call-site extern table (`Compiler::extern_name_to_idx`) is keyed by bare
+/// name across the whole program, so `side`'s bound `scale` claims the name and
+/// the entry file's own `scale(a)` lowers to `call $libA.scale`. The obligation
+/// this test pins is the correct reading; the emitted call is not, and the two
+/// describe different functions. That is pre-existing and tracked by
+/// [#423](https://github.com/Inferara/inference/issues/423) — recorded here so
+/// the assertion below is not mistaken for agreement between the two passes.
+#[test]
+fn an_extern_in_one_file_does_not_capture_a_sibling_files_call() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use side;\nfn scale(x: i32) -> i32 { return x * 10; }\nspec MainSpec { fn f() forall \
+             { let a: i32 = @; assert(scale(a) == a * 10); } }\n",
+        ),
+        (
+            vec!["side"],
+            "external fn scale(x: i32) -> i32;\nuse { scale } from libA;\npub fn use_side(x: i32) \
+             -> i32 { return scale(x); }\n",
+        ),
+    ]);
+    let (map, diagnostics) = translate(&ctx);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        applied_symbols(&sole_obligation(&map, "MainSpec")),
+        vec!["scale".to_string()],
+        "the entry file's own `scale` — `libA.scale` would be the sibling file's extern"
+    );
+}
+
+/// The invariant that lets callee resolution check externs before defined
+/// functions: a spec-inner function may not shadow a top-level one of the same
+/// name, external or not, so a name is one or the other and the order decides
+/// nothing.
+///
+/// Pinned here rather than left to the type checker's own suite because it is
+/// this pass that depends on it: were the rule relaxed, a file-scope extern
+/// would hide the spec-sibling function that shadows it, and the obligation
+/// would name a body the call does not reach.
+#[test]
+fn a_spec_inner_function_cannot_shadow_a_top_level_name() {
+    for source in [
+        "external fn probe(x: i32) -> i32;\nuse { probe } from sensors;\nspec S {\n  fn probe(x: \
+         i32) -> i32 { return x; }\n  fn f() forall { let a: i32 = @; assert(probe(a) == a); }\n}",
+        "fn probe(x: i32) -> i32 { return x; }\nspec S {\n  fn probe(x: i32) -> i32 { return x; }\n \
+         fn f() forall { let a: i32 = @; assert(probe(a) == a); }\n}",
+    ] {
+        let parsed = inference_parser::parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let error = TypeCheckerBuilder::build_typed_context(parsed.arena)
+            .err()
+            .expect("a spec-inner function shadowing a top-level name must be rejected");
+        assert!(
+            error.to_string().contains("shadows a top-level function"),
+            "the rejection must be the shadowing rule, got: {error}"
+        );
+    }
+}
+
+/// The second invariant the extern symbol rests on: one `external fn` name may
+/// not be bound to two modules.
+///
+/// Code generation keys its import table on the bare extern *name*, program
+/// wide, while an obligation names the module its declaration was bound to. Two
+/// bindings for one name would leave every call site invoking a single import
+/// while the obligations named two different merged bodies — the executable and
+/// the claim would then describe different functions.
+#[test]
+fn one_extern_name_cannot_be_bound_to_two_modules() {
+    let mut arena = AstArena::default();
+    for (module_path, source) in [
+        (
+            "a",
+            "external fn scale(x: i32) -> i32;\nuse { scale } from libA;\npub fn ua(x: i32) -> \
+             i32 { return scale(x); }\n",
+        ),
+        (
+            "b",
+            "external fn scale(x: i32) -> i32;\nuse { scale } from libB;\npub fn ub(x: i32) -> \
+             i32 { return scale(x); }\n",
+        ),
+    ] {
+        let parsed = inference_parser::parse_into(arena, source, vec![module_path.to_string()]);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        arena = parsed.arena;
+    }
+    let error = TypeCheckerBuilder::build_typed_context(arena)
+        .err()
+        .expect("one extern name bound to two modules must be rejected");
+    assert!(
+        error.to_string().contains("bound to multiple modules"),
+        "the rejection must be the multiple-binding rule, got: {error}"
+    );
+}
+
+/// A bare statement call to a bound extern becomes `HA_app_ok` under the same
+/// symbol — the void-result path through the same resolution.
+///
+/// Asserted structurally rather than by the applied-symbol list, because that
+/// list cannot tell `HA_app_ok f τs` from a `T_app f τs` buried in some other
+/// atom, and those are different claims: one says the call is defined, the
+/// other names its result.
+#[test]
+fn a_bound_extern_statement_call_becomes_app_ok() {
+    let map = ok("\
+external fn emit(x: i32);
+use { emit } from telemetry;
+spec S { fn f() forall { let a: i32 = @; emit(a); } }
+");
+    assert_eq!(
+        sole_obligation(&map, "S"),
+        imp(
+            guard(0),
+            HAssert::AppOk(HFnRef("telemetry.emit".to_string()), vec![local(0)])
+        )
+    );
 }
 
 /// A `@` at a supported aggregate shape now leaf-expands; what stays `P008`

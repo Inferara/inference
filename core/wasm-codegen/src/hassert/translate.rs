@@ -200,15 +200,15 @@ use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgKind, BlockKind, Def, Expr, Location, OperatorKind, Stmt, UnaryOperatorKind,
 };
-use inference_fn_key::FnKey;
+use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
-use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
 use super::reach::ChoicePlan;
+use super::{CalleeIndex, ExternIndex};
 
 /// Polarity of the surrounding quantification.
 ///
@@ -448,6 +448,41 @@ impl AggShape {
     }
 }
 
+/// A callee a specification claim can name, resolved to the symbol its
+/// application carries and the declaration whose signature classifies its
+/// result.
+///
+/// The two cases differ in where the body comes from — this module's own
+/// compilation, or a static merge that has not happened yet — and therefore in
+/// who names it, which is why the symbol travels rather than being re-derived
+/// at the application site.
+enum Callee {
+    /// A function compiled from this program's source, named by the identity
+    /// code generation registered it under.
+    Defined { key: FnKey, def_id: DefId },
+    /// A bound `external fn`, named by the symbol the static-merge linker gives
+    /// its merged body.
+    External { symbol: String, decl: DefId },
+}
+
+impl Callee {
+    /// The name-section symbol the application references.
+    fn symbol(self) -> String {
+        match self {
+            Callee::Defined { key, .. } => key.to_string(),
+            Callee::External { symbol, .. } => symbol,
+        }
+    }
+
+    /// The declaration whose declared return type classifies the result.
+    fn def_id(&self) -> DefId {
+        match self {
+            Callee::Defined { def_id, .. } => *def_id,
+            Callee::External { decl, .. } => *decl,
+        }
+    }
+}
+
 /// Why a callee cannot serve a specification claim, deciding which diagnostic
 /// the call site raises.
 enum CalleeError {
@@ -516,6 +551,7 @@ pub(super) struct SpecFnTranslator<'a> {
     module_path: &'a [String],
     spec_name: &'a str,
     callee: &'a CalleeIndex,
+    externs: &'a ExternIndex,
     /// Next universal slot number. Parameters take `0..P-1`; each universal `@`
     /// takes the next in encounter order. Never rewound — slots are global to
     /// the function.
@@ -556,6 +592,7 @@ impl<'a> SpecFnTranslator<'a> {
         module_path: &'a [String],
         spec_name: &'a str,
         callee: &'a CalleeIndex,
+        externs: &'a ExternIndex,
     ) -> Self {
         Self {
             arena: ctx.arena(),
@@ -563,6 +600,7 @@ impl<'a> SpecFnTranslator<'a> {
             module_path,
             spec_name,
             callee,
+            externs,
             slots: 0,
             depth: 0,
             pending: Vec::new(),
@@ -1889,10 +1927,11 @@ impl<'a> SpecFnTranslator<'a> {
     fn call_term(&mut self, call_expr: ExprId, mode: Mode) -> HTerm {
         let (function, args) = self.call_parts(call_expr);
         match self.resolve_callee(function) {
-            Ok((key, def_id)) => match self.result_class(call_expr, def_id) {
+            Ok(callee) => match self.result_class(call_expr, callee.def_id()) {
                 ResultClass::Scalar => {
+                    let symbol = callee.symbol();
                     let arg_terms = self.arg_terms(&args, mode);
-                    HTerm::App(HFnRef(key.to_string()), arg_terms)
+                    HTerm::App(HFnRef(symbol), arg_terms)
                 }
                 ResultClass::Void | ResultClass::Compound => {
                     self.error_call(function, "its result is not a single scalar");
@@ -1910,9 +1949,10 @@ impl<'a> SpecFnTranslator<'a> {
     fn app_ok(&mut self, call_expr: ExprId, mode: Mode) -> HAssert {
         let (function, args) = self.call_parts(call_expr);
         match self.resolve_callee(function) {
-            Ok((key, _)) => {
+            Ok(callee) => {
+                let symbol = callee.symbol();
                 let arg_terms = self.arg_terms(&args, mode);
-                HAssert::AppOk(HFnRef(key.to_string()), arg_terms)
+                HAssert::AppOk(HFnRef(symbol), arg_terms)
             }
             Err(error) => {
                 self.emit_callee_error(function, &error);
@@ -2001,22 +2041,29 @@ impl<'a> SpecFnTranslator<'a> {
         }
     }
 
-    /// Resolves a call's callee to a `(FnKey, DefId)` for a module-defined,
-    /// deterministic function, or the [`CalleeError`] the call site raises.
+    /// Resolves a call's callee to the [`Callee`] its application names, or the
+    /// [`CalleeError`] the call site raises.
     ///
-    /// Mirrors code generation's resolution: a bare same-file call (including a
-    /// spec-sibling helper) is resolved spec-first then by the current file's
+    /// Mirrors code generation's resolution: an `external fn` visible in the
+    /// enclosing scope resolves by declaration; a bare same-file call (including
+    /// a spec-sibling helper) is resolved spec-first then by the current file's
     /// free key; a cross-file item import, a `::`-qualified free function, and an
     /// associated function use the type-checker-recorded target; an instance
     /// method has no term encoding.
-    fn resolve_callee(&self, function: ExprId) -> Result<(FnKey, DefId), CalleeError> {
+    fn resolve_callee(&self, function: ExprId) -> Result<Callee, CalleeError> {
         match &self.arena[function].kind {
             Expr::Identifier(ident_id) => {
                 let name = self.arena[*ident_id].name.clone();
-                if self.ctx.is_extern_function(&name) {
-                    return Err(CalleeError::NotApplicable(
-                        "external functions carry no verified body",
-                    ));
+                // Ahead of the defined-function arms, and safe there only
+                // because the type checker rejects a spec-inner function that
+                // shadows a top-level one of the same name — extern or not. A
+                // name reaching this point is therefore an extern or a defined
+                // function, never both, so the order decides nothing. If that
+                // rule is ever relaxed, this must become a real innermost-first
+                // walk over both kinds: a file-scope extern would otherwise
+                // hide a spec-sibling function that shadows it.
+                if let Some(decl) = self.externs.lookup(self.module_path, self.spec_name, &name) {
+                    return self.resolve_external(decl);
                 }
                 // A cross-file item import (`use lib::arith::{add}; add()`)
                 // resolves to its defining file via the recorded target.
@@ -2051,7 +2098,7 @@ impl<'a> SpecFnTranslator<'a> {
                     return self.validate_body(free_key, def_id);
                 }
                 Err(CalleeError::NotApplicable(
-                    "external functions carry no verified body",
+                    "it does not resolve to a function this module defines or links",
                 ))
             }
             // `Point::new()` / `math::arith::add()`: the recorded target names the
@@ -2081,26 +2128,47 @@ impl<'a> SpecFnTranslator<'a> {
         }
     }
 
-    /// Confirms a `FnKey` names a module-defined function (not an import) and
-    /// validates its body.
-    fn validate_defined(&self, key: FnKey) -> Result<(FnKey, DefId), CalleeError> {
+    /// Confirms a `FnKey` names a function compiled from source and validates
+    /// its body.
+    fn validate_defined(&self, key: FnKey) -> Result<Callee, CalleeError> {
         match self.callee.get(&key) {
             Some(def_id) => self.validate_body(key, def_id),
             None => Err(CalleeError::NotApplicable(
-                "external functions carry no verified body",
+                "it does not resolve to a function this module defines or links",
             )),
         }
     }
 
     /// Rejects a callee whose body contains non-deterministic constructs — it can
     /// carry no realized claim.
-    fn validate_body(&self, key: FnKey, def_id: DefId) -> Result<(FnKey, DefId), CalleeError> {
+    fn validate_body(&self, key: FnKey, def_id: DefId) -> Result<Callee, CalleeError> {
         if self.arena.def_is_non_det(def_id) {
             return Err(CalleeError::NotApplicable(
                 "its body is non-deterministic and has no executable meaning",
             ));
         }
-        Ok((key, def_id))
+        Ok(Callee::Defined { key, def_id })
+    }
+
+    /// Resolves an `external fn` declaration to the symbol its linked body
+    /// carries, or rejects it when nothing binds the declaration to a module.
+    ///
+    /// A bound extern is a legitimate specification subject: the static merge
+    /// splices its body into the emitted module, where the downstream
+    /// realization obligation reduces it like any other. An *unbound* one is
+    /// not — no module supplies a body, so an application of it would name a
+    /// function the proof can never reach.
+    fn resolve_external(&self, decl: DefId) -> Result<Callee, CalleeError> {
+        let Some(origin) = self.ctx.extern_origin_by_decl(decl) else {
+            return Err(CalleeError::NotApplicable(
+                "it is an external function with no `use … from` binding, so no module supplies \
+                 the body an obligation about it would reduce",
+            ));
+        };
+        Ok(Callee::External {
+            symbol: merged_name::root(&origin.logical_module, &origin.export_field),
+            decl,
+        })
     }
 
     /// The quantifier word of an `exists`/`unique`-quantified function body,
@@ -2127,7 +2195,7 @@ impl<'a> SpecFnTranslator<'a> {
             return self.classify_type_kind(&kind);
         }
         match &self.arena[def_id].kind {
-            Def::Function { returns, .. } => match returns {
+            Def::Function { returns, .. } | Def::ExternFunction { returns, .. } => match returns {
                 None => ResultClass::Void,
                 Some(ty) => self.classify_type_kind(&TypeInfo::from_type_id(self.arena, *ty).kind),
             },
@@ -3878,7 +3946,8 @@ mod tests {
 
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee);
+        let externs = ExternIndex::build(ctx.arena());
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, &externs);
         let unwound = catch_unwind(AssertUnwindSafe(|| translator.number_literal(orphan, "7")));
         let payload = unwound.expect_err("an untyped literal must abort translation");
         let text = panic_text(payload.as_ref());
@@ -3899,7 +3968,8 @@ mod tests {
 
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee);
+        let externs = ExternIndex::build(ctx.arena());
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, &externs);
         assert_eq!(
             translator.number_literal(orphan, "7"),
             zero_sentinel(),

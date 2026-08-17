@@ -94,6 +94,59 @@ mod gate {
         ),
     ];
 
+    /// One external `.wasm` a linked fixture merges: the logical module its
+    /// `use … from` clause names, and the fixture whose own compilation
+    /// produces the bytes.
+    struct LinkedExternal {
+        /// The name the main fixture's `use … from` clause binds against, and
+        /// the key the linker merges under.
+        logical_module: &'static str,
+        /// The fixture whose own compilation produces the bytes.
+        source: &'static str,
+        /// The module name the external is compiled under — deliberately not
+        /// the logical module, so a confusion between the two cannot pass: the
+        /// merged body's symbol tracks the binding, not the external's own
+        /// name for itself.
+        module_name: &'static str,
+    }
+
+    /// Corpus fixtures that only type-check once their externals are merged in,
+    /// paired with the module name and the externals to link.
+    ///
+    /// They are kept apart from [`CORPUS`] because they are a different
+    /// pipeline, not a different fixture: a linked entry runs codegen twice and
+    /// the linker once, and the module the gate compiles is the merged one.
+    /// `spec_linked_extern.inf` is the minimal end-to-end proof path for a real
+    /// toolchain external — one linked `.wasm`, one `spec` naming it, one
+    /// obligation applying it — and is the only producer of a `T_app` whose
+    /// target is a body the compiler never emitted.
+    ///
+    /// What that buys, stated honestly so the entry is not read as broader
+    /// coverage than it is: no new *constructor* reaches `coqc` through it —
+    /// an Inference-compiled external goes through the same emitter as
+    /// everything else. What is new is that the module record `coqc`
+    /// elaborates contains a body the linker produced, under a `Definition`
+    /// name that came out of `sanitize_rocq_identifier` over a symbol
+    /// containing `.`, with an obligation applying it at that body's own index.
+    /// [`linked_corpus_carries_a_merged_body`] is the floor that keeps this
+    /// block from being deleted unnoticed — `REQUIRED_CONSTRUCTS` cannot serve
+    /// as one, because every needle it lists is already produced by a
+    /// single-file fixture.
+    ///
+    /// One constraint an entry here inherits: the corpus-wide checks apply to
+    /// linked modules too, and one of them rejects a data segment in any corpus
+    /// module — so an external fixture that used a string or array literal
+    /// would trip it, reported against the *main* fixture's name.
+    const LINKED_CORPUS: &[(&str, &str, &[LinkedExternal])] = &[(
+        "spec_linked_extern.inf",
+        "spec_linked_extern",
+        &[LinkedExternal {
+            logical_module: "mathlib",
+            source: "spec_linked_extern_mathlib.inf",
+            module_name: "mathlib_impl",
+        }],
+    )];
+
     /// Constructs the corpus must keep exercising, in the emitted `.v`. Two
     /// families: WASM instructions that survive in the module record's
     /// *executable* function bodies (`BI_*`), and the `hassert` obligation shapes
@@ -264,8 +317,8 @@ mod gate {
         ("ge_u", "(ROI_ge SX_U)"),
     ];
 
-    /// Proof-mode `.v` for one fixture, driven entirely in-process.
-    fn generate_v(file: &str, module_name: &str) -> String {
+    /// Compiles one fixture under `tests/test_data/inf/` and returns its WASM.
+    fn compile_fixture(file: &str, module_name: &str, mode: CompilationMode) -> Vec<u8> {
         let path = get_test_data_path().join("inf").join(file);
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -273,24 +326,71 @@ mod gate {
         let typed_context = TypeCheckerBuilder::build_typed_context(arena)
             .unwrap_or_else(|e| panic!("type check failed for {file}: {e}"))
             .typed_context();
-        let output = inference_wasm_codegen::codegen(
+        inference_wasm_codegen::codegen(
             &typed_context,
             module_name,
             inference_wasm_codegen::CodegenOptions {
                 target: Target::Wasm32,
-                mode: CompilationMode::Proof,
+                mode,
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
                 layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         )
-        .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"));
+        .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"))
+        .wasm()
+        .to_vec()
+    }
+
+    /// Proof-mode `.v` for one single-file fixture, driven entirely in-process.
+    fn generate_v(file: &str, module_name: &str) -> String {
+        let wasm = compile_fixture(file, module_name, CompilationMode::Proof);
+        translate(file, module_name, &wasm)
+    }
+
+    /// Proof-mode `.v` for a fixture that links external `.wasm` modules,
+    /// running the same three steps a real `infc -L` build does: compile each
+    /// external on its own, compile the main fixture, statically merge, and
+    /// translate the *merged* module.
+    ///
+    /// The merge is what makes an obligation about an `external fn` resolvable
+    /// at all: before it the external is an import, and an import carries no
+    /// body for the downstream realization obligation to reduce.
+    fn generate_linked_v(file: &str, module_name: &str, externals: &[LinkedExternal]) -> String {
+        let libs: Vec<(&str, Vec<u8>)> = externals
+            .iter()
+            .map(|external| {
+                (
+                    external.logical_module,
+                    compile_fixture(
+                        external.source,
+                        external.module_name,
+                        CompilationMode::Compile,
+                    ),
+                )
+            })
+            .collect();
+        let lib_refs: Vec<(&str, &[u8])> = libs
+            .iter()
+            .map(|(name, bytes)| (*name, bytes.as_slice()))
+            .collect();
+        let main = compile_fixture(file, module_name, CompilationMode::Proof);
+        let linked = inference::link(&main, &lib_refs)
+            .unwrap_or_else(|e| panic!("link failed for {file}: {e}"));
+        translate(file, module_name, &linked)
+    }
+
+    /// The translation step both generators share.
+    fn translate(file: &str, module_name: &str, wasm: &[u8]) -> String {
         // Empty explicit maps: the per-spec indices and the hassert obligations
         // both ride along in the embedded `inference.spec_funcs` /
-        // `inference.hspecs` custom sections (see ROCQ_CONTRACT.md).
+        // `inference.hspecs` custom sections (see ROCQ_CONTRACT.md). For a
+        // linked module they are also the only correct source — the linker
+        // rewrote the embedded indices into the post-merge space, leaving
+        // codegen's own record stale.
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let empty_hspecs = inference::HSpecMap::default();
-        inference::wasm_to_v(module_name, output.wasm(), &empty, &empty_hspecs)
+        inference::wasm_to_v(module_name, wasm, &empty, &empty_hspecs)
             .unwrap_or_else(|e| panic!("wasm_to_v failed for {file}: {e}"))
     }
 
@@ -404,7 +504,8 @@ mod gate {
         }
     }
 
-    /// Proof-mode `.v` for every corpus fixture, in [`CORPUS`] order.
+    /// Proof-mode `.v` for every corpus fixture: [`CORPUS`] in order, then
+    /// [`LINKED_CORPUS`].
     fn corpus_modules() -> Vec<GatedModule> {
         CORPUS
             .iter()
@@ -413,6 +514,15 @@ mod gate {
                 module,
                 v: admit_open_proofs(&generate_v(source, module)),
             })
+            .chain(
+                LINKED_CORPUS
+                    .iter()
+                    .map(|&(source, module, externals)| GatedModule {
+                        source,
+                        module,
+                        v: admit_open_proofs(&generate_linked_v(source, module, externals)),
+                    }),
+            )
             .collect()
     }
 
@@ -539,6 +649,76 @@ mod gate {
             }
         }
         work
+    }
+
+    /// The `module_func` definitions of an emitted `.v`, in the order the
+    /// module record lists them — which is the order that fixes every `T_app`
+    /// index, so a function's position here *is* the ordinal an obligation
+    /// applying it must carry.
+    fn module_func_names(v: &str) -> Vec<&str> {
+        v.lines()
+            .filter_map(|line| {
+                line.strip_prefix("Definition ")?
+                    .strip_suffix(" : module_func := {|")
+            })
+            .collect()
+    }
+
+    /// The floor under [`LINKED_CORPUS`]: every entry must actually reach the
+    /// linker and come back with a merged body its obligation applies.
+    ///
+    /// Without this, deleting the whole block leaves every other gate green —
+    /// `REQUIRED_CONSTRUCTS` is measured over the corpus concatenated, and each
+    /// needle it lists is already produced by a single-file fixture, so the one
+    /// thing these entries exist to cover is the one thing nothing measures.
+    ///
+    /// The application is checked by *index*, because neither half of the
+    /// obvious pair of substrings ties one to the other. A `Definition` named
+    /// after the logical module appears as soon as the merge runs at all, which
+    /// the fixture's own executable `pub fn` forces regardless of what the
+    /// obligation names; and a bare `T_app ` matches any application, which is
+    /// exactly why `REQUIRED_CONSTRUCTS` cannot serve as this floor. A fixture
+    /// whose spec applies a *local* helper satisfies both and carries zero
+    /// linked coverage. The merged body's own ordinal is the one thing only a
+    /// linked obligation produces.
+    #[test]
+    fn linked_corpus_carries_a_merged_body() {
+        assert!(
+            !LINKED_CORPUS.is_empty(),
+            "the linked corpus is the only place an obligation names a body the \
+             compiler did not emit; an empty list silently drops that coverage"
+        );
+        for &(source, module, externals) in LINKED_CORPUS {
+            let v = generate_linked_v(source, module, externals);
+            let defined = module_func_names(&v);
+            for external in externals {
+                // The linker names a merged body `<logical module>.<field>`,
+                // which `wasm-to-v` sanitizes into the `Definition` name; every
+                // body spliced in from this external shares that prefix.
+                let prefix = format!("{}_", external.logical_module.replace(['.', ':'], "_"));
+                let merged: Vec<usize> = defined
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| name.starts_with(&prefix))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                assert!(
+                    !merged.is_empty(),
+                    "{source}: no definition came from merging `{}`; the fixture is \
+                     not exercising the link. Defined functions: {defined:?}",
+                    external.logical_module
+                );
+                assert!(
+                    merged
+                        .iter()
+                        .any(|idx| v.contains(&format!("T_app {idx} "))),
+                    "{source}: merging `{}` produced bodies at record indices {merged:?}, \
+                     and no obligation applies any of them — the entry claims linked \
+                     coverage it does not have. Defined functions: {defined:?}",
+                    external.logical_module
+                );
+            }
+        }
     }
 
     #[test]
