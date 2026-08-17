@@ -307,11 +307,13 @@ The translator emits only what the vendored WasmCert proof stub in `rocq-stub/` 
 |-----------|--------------------------|
 | Any `f32`/`f64` instruction | the wasm-verifier proof contract covers no floating-point surface |
 | Any SIMD/vector instruction | SIMD proposal — the wasm-verifier proof contract covers no vector types |
-| Any conversion instruction, **integer width conversions included** | the wasm-verifier proof contract covers no conversion instructions, integer width conversions included |
+| Any conversion instruction naming a float on either side (`trunc`, `trunc_sat`, `convert`, `demote`, `promote`, `reinterpret`) | the contract declares no floating-point number type, so a conversion naming one has no lowering |
 | `f32`, `f64`, or `v128` as a value type, in any position | as above, per type, plus the position it occupies |
 | GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops | no lowering under the wasm-verifier proof contract |
 
-No Inference program can reach any of these: the language has no floating-point types, no vectors, and emits no conversion instruction, so `coqc` gating over Inference sources can never cover them. They are reachable only through foreign bytes — the external linking path (`infc -L` / `--wasm-dep`) and the public `translate_bytes` API — which is exactly why the refusal has to be explicit. This is the second layer of a two-layer defense: `core/wasm-linker` already refuses float, SIMD, conversion, sign-extension, and tail-call content in external modules, so on the CLI path the linker's mnemonic-bearing diagnostic normally fires first.
+The **integer-to-integer** width conversions are not on this list. `i32.wrap_i64` and `i64.extend_i32_s/u` translate to `BI_cvtop` with the contract's `CVO_wrap`/`CVO_extend`, and the five sign-extension operators (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s`) translate to `BI_unop t (Unop_extend n)` — the contract classifies sign-extension as a *unop*, not a conversion, so the WASM mnemonics group them misleadingly. `Unop_extend`'s argument is the source width in **bits**; a byte count would type-check and denote a constant-zero extension, so the emitter's spelling is pinned by byte comparison rather than left to `coqc`.
+
+No Inference program can reach any of the rejected constructs: the language has no floating-point types, no vectors, and emits no conversion instruction (it narrows sub-`i32` values with shifts and masks), so `coqc` gating over Inference sources can never cover them. They are reachable only through foreign bytes — the external linking path (`infc -L` / `--wasm-dep`) and the public `translate_bytes` API — which is exactly why the refusal has to be explicit. This is the second layer of a two-layer defense: `core/wasm-linker` already refuses float, SIMD, float-naming conversion, and tail-call content in external modules, so on the CLI path the linker's mnemonic-bearing diagnostic normally fires first.
 
 Two consequences worth stating plainly. Rejecting on a *value type* means a module carrying an unused float signature stops translating even with no float instruction anywhere — correct, because the type-section entry is emitted wholesale and would be ill-typed regardless. And translation stops at the first offending construct, so a module with many unsupported constructs reports them one at a time.
 
@@ -489,9 +491,10 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
    - Typed function references (`ref.as_non_null`, `br_on_null`, `call_ref`) and the GC reference types are rejected, not translated
    - See [WebAssembly Reference Types proposal](https://github.com/WebAssembly/reference-types)
 
-4. **Floating point, SIMD, and conversions**: not supported, rejected
-   - `f32`/`f64`/`v128` value types and every float, vector, and conversion instruction are refused with `UnsupportedFeature`; see [Rejection Policy](#rejection-policy) for why, including why integer-to-integer conversions are refused too
-   - Supporting any of them means growing the wasm-verifier proof contract first; the translator's grouped rejection arms are one arm per class, so the eventual change is localized
+4. **Floating point and SIMD**: not supported, rejected
+   - `f32`/`f64`/`v128` value types and every float, vector, and float-naming conversion instruction are refused with `UnsupportedFeature`; see [Rejection Policy](#rejection-policy) for why
+   - The integer-to-integer width conversions and the five sign-extension operators *are* supported, because the contract declares `CVO_wrap`/`CVO_extend` and `Unop_extend`
+   - Supporting the rest means growing the wasm-verifier proof contract first; the translator's grouped rejection arms are one arm per class, so the eventual change is localized
    - See [WebAssembly SIMD proposal](https://github.com/WebAssembly/simd)
 
 5. **Bulk Memory**: partially supported
@@ -501,7 +504,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 ### Known Issues
 
 - **One error at a time**: only one error surfaces per run — a function body stops at its first offending construct, and the module-level walk reports only the first error it accumulated — so a module with several unsupported constructs has to be fixed (or refused) one at a time
-- **Debug names, not mnemonics**: the float, vector, and conversion messages name the operator in its `wasmparser` debug form (`F32Add`), not its wat mnemonic (`f32.add`). Unambiguous, but not the spelling a reader of the `.wat` sees. Value types are the exception: they are spelled `f32`/`f64`/`v128`
+- **Debug names, not mnemonics**: the float, vector, and rejected-conversion messages name the operator in its `wasmparser` debug form (`F32Add`), not its wat mnemonic (`f32.add`). Unambiguous, but not the spelling a reader of the `.wat` sees. Value types are the exception: they are spelled `f32`/`f64`/`v128`
 - **Control flow complexity**: Some complex control flow patterns (deeply nested blocks, unusual branch targets) may generate suboptimal or incorrect Rocq code
 - **Large data segments**: Memory initialization with large data segments produces verbose output that may be difficult to work with in Rocq
 - **Name conflicts**: Generated Rocq identifiers may conflict with reserved keywords in edge cases
@@ -520,7 +523,7 @@ Planned improvements for future releases:
 8. **Better Diagnostics**: Include WASM byte offsets and section names in error messages
 9. **Name Sanitization**: Automatically handle Rocq keyword conflicts in generated identifiers
 10. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
-11. **Float, SIMD, and conversion support**: requires the wasm-verifier proof model to grow those surfaces first; until then the translator refuses them rather than emitting terms the model cannot type
+11. **Float and SIMD support**: requires the wasm-verifier proof model to grow those surfaces first; until then the translator refuses them — and the float-naming conversions that depend on them — rather than emitting terms the model cannot type
 
 ## Integration with Inference Compiler
 

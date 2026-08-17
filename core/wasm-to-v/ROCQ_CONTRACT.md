@@ -1120,27 +1120,60 @@ entries are matched by name, not position.
   from Inference-compiled code, so this is defense-in-depth against a
   foreign or hand-crafted `.wasm` that reintroduces one.
 
-- **Float, SIMD/vector, and conversion constructs** (`translator.rs`,
-  the three grouped operator arms plus `translate_value_type`): rejected
-  as `WasmToVError::UnsupportedFeature`. The context in "Required Rocq
+- **Float, SIMD/vector, and float-naming conversion constructs**
+  (`translator.rs`, the grouped operator arms plus
+  `translate_value_type`): rejected as
+  `WasmToVError::UnsupportedFeature`. The context in "Required Rocq
   context" is the whole vocabulary the emitted `.v` may use, and it
-  contains no `T_f32`/`T_f64`, no vector type or vector instruction, and
-  no `cvtop`/`BI_cvtop`. Emitting any of them would produce a file that
-  fails `coqc` at the consumer, so the translator refuses instead:
+  contains no `T_f32`/`T_f64` and no vector type or vector instruction.
+  Emitting any of them would produce a file that fails `coqc` at the
+  consumer, so the translator refuses instead:
 
   | Rejected | Scope |
   |---|---|
   | float instructions | all loads, stores, constants, comparisons, unops, binops |
   | vector instructions | the entire SIMD proposal, relaxed-SIMD included |
-  | conversion instructions | the whole `cvtop` block — sign-extension, saturating float-to-int, **and the integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s/u`), since the contract covers no conversion at all |
+  | float-naming conversions | `trunc`, `trunc_sat`, `convert`, `demote`, `promote` and every `reinterpret` — each names a float on one side, and the contract's `cvtop` declares only the two integer-to-integer constructors |
   | `f32`, `f64`, `v128` value types | every position: parameters, results, locals, globals, block result types |
   | unmodeled proposal families | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
 
-  Like the non-det rule above, this is unreachable from
+  The **integer-to-integer** width conversions are not rejected. They
+  emit `BI_cvtop`, whose four arguments are the target number type, the
+  `cvtop`, the source number type, and an `option sx`. Only three
+  instances are well-typed under the model's `cvtop_valid`, and the
+  emitter writes exactly those:
+
+  | WASM | Emitted |
+  |---|---|
+  | `i32.wrap_i64` | `BI_cvtop T_i32 CVO_wrap T_i64 None` |
+  | `i64.extend_i32_s` | `BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)` |
+  | `i64.extend_i32_u` | `BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)` |
+
+  Sign-extension is **not** a conversion in the contract. The five
+  `extendN_s` operators emit `BI_unop`, alongside `clz`/`ctz`/`popcnt`:
+
+  | WASM | Emitted |
+  |---|---|
+  | `i32.extend8_s` | `BI_unop T_i32 (Unop_extend 8%N)` |
+  | `i32.extend16_s` | `BI_unop T_i32 (Unop_extend 16%N)` |
+  | `i64.extend8_s` | `BI_unop T_i64 (Unop_extend 8%N)` |
+  | `i64.extend16_s` | `BI_unop T_i64 (Unop_extend 16%N)` |
+  | `i64.extend32_s` | `BI_unop T_i64 (Unop_extend 32%N)` |
+
+  `Unop_extend`'s argument is the source width in **bits**, not bytes.
+  A consumer reading these terms should know that the distinction is
+  invisible to type-checking: the model's `unop_type_agree` ignores the
+  argument, while its `app_unop` divides by eight, so `Unop_extend 1`
+  elaborates and denotes the constant zero. The emitter pins the bit
+  convention by byte comparison in `tests/src/rocq_typecheck.rs` and
+  `core/wasm-to-v/src/lib.rs`, because no `coqc` gate can.
+
+  Like the non-det rule above, the rejected set is unreachable from
   Inference-compiled code — the language has no floating-point or vector
-  types and its codegen emits no conversion — so the `coqc` gate over
-  the Inference corpus can never exercise it. It is reachable only
-  through foreign bytes: the external linking path and the public
+  types, and its codegen emits no conversion or sign-extension at all
+  (it narrows sub-`i32` values with shifts and masks) — so the `coqc`
+  gate over the Inference corpus can never exercise it. It is reachable
+  only through foreign bytes: the external linking path and the public
   `translate_bytes` API. `core/wasm-linker` refuses the same content in
   external modules, so this is the second of two layers, and on the CLI
   path the linker's diagnostic normally arrives first.

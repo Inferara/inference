@@ -4527,12 +4527,12 @@ fn main_module_with_an_element_segment_is_rejected_cleanly() {
 
 // -- WASM 1.0 feature gate: supported post-MVP additions link ------------------
 //
-// `SUPPORTED_WASM_FEATURES` is the integer WASM 1.0 core plus exactly one scalar
-// post-MVP addition the merge models: bulk memory. An external using only this
-// must pass the link gate and merge normally — the gate rejects *every* other
-// post-1.0 proposal, including sign-extension and saturating float-to-int (the
-// Rocq translator models neither), and all floating point (the Inference language
-// has no `f32`/`f64` types).
+// `SUPPORTED_WASM_FEATURES` is the integer WASM 1.0 core plus the two scalar
+// post-MVP additions the merge models: bulk memory and sign-extension. An
+// external using only these must pass the link gate and merge normally — the
+// gate rejects *every* other post-1.0 proposal, including saturating
+// float-to-int (the Rocq translator has no lowering for it), and all floating
+// point (the Inference language has no `f32`/`f64` types).
 
 /// A main module importing a pure `f:(i32)->i32` from `lib` and calling it. The
 /// shared shape for the feature-gate fixtures, each of which supplies a `lib`
@@ -4552,13 +4552,15 @@ fn main_importing_f() -> Vec<u8> {
 }
 
 #[test]
-fn sign_extension_external_is_rejected_at_the_feature_gate() {
-    // The sign-extension proposal (`i32.extend8_s`) is outside the supported
-    // subset: the Rocq translator has no lowering for it, and Inference codegen
-    // narrows sub-i32 values with shifts/masks instead of emitting it. The gate's
-    // feature pass rejects such an external up front with the validator's
-    // sign-extension diagnostic — before the closure scanner's allow-list (the
-    // defense-in-depth backstop, tested directly in `safety.rs`) is reached.
+fn sign_extension_external_passes_the_gate_and_merges() {
+    // The sign-extension proposal is in the supported subset: the Rocq
+    // translator lowers all five opcodes to `BI_unop t (Unop_extend n)`.
+    // Inference codegen still emits none of them — it narrows sub-i32 values
+    // with shifts and masks — but a real toolchain emits them constantly, and
+    // this gate is what decides whether such an external gets as far as the
+    // allow-list at all. Without `WasmFeatures::SIGN_EXTENSION` the validator
+    // refuses the module before any body is scanned, so the allow-list entry
+    // alone would be unreachable.
     let main = main_importing_f();
     let lib = wasm(
         r#"
@@ -4566,15 +4568,54 @@ fn sign_extension_external_is_rejected_at_the_feature_gate() {
           (type (;0;) (func (param i32) (result i32)))
           (func (;0;) (type 0) (param i32) (result i32)
             local.get 0
-            i32.extend8_s)
+            i32.extend8_s
+            i32.extend16_s)
           (export "f" (func 0)))
         "#,
     );
-    let err = assert_clean_rejection(&main, &lib, "sign extension");
-    assert!(
-        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("sign extension")),
-        "expected an UnsupportedWasmFeature naming sign extension, got {err:?}"
+    let linked = link(&main, &[&lib]).expect("a sign-extension external must link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+}
+
+#[test]
+fn integer_width_conversion_external_passes_the_gate_and_merges() {
+    // The three integer-to-integer width conversions are MVP instructions, so no
+    // feature flag ever gated them; the allow-list was the only thing that
+    // refused them, and it no longer does. Paired with the sign-extension case
+    // above because the two halves of the numeric envelope were refused in
+    // different places — one at the validator, one at the allow-list — and a
+    // change that lifted only one would leave this pair split.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i64) (result i32)))
+          (import "lib" "f" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i64) (result i32)
+            local.get 0
+            call 0)
+          (export "run" (func 1)))
+        "#,
     );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i64) (result i32)))
+          (func (;0;) (type 0) (param i64) (result i32)
+            local.get 0
+            i32.wrap_i64
+            i64.extend_i32_s
+            i32.wrap_i64
+            i64.extend_i32_u
+            i32.wrap_i64)
+          (export "f" (func 0)))
+        "#,
+    );
+    let linked = link(&main, &[&lib]).expect("an integer-width-conversion external must link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
 }
 
 #[test]

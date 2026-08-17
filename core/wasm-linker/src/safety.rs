@@ -18,15 +18,23 @@
 //! "floating-point" diagnostic. The merge thus never copies a float instruction,
 //! from either module role.
 //!
+//! The scalar integer set the merge models does extend past the MVP in two
+//! places, because the Rocq translator lowers both: the sign-extension operators
+//! (`i32.extend8_s`, …), which the proof model spells as ordinary unops, and the
+//! three integer-to-integer width conversions (`i32.wrap_i64`,
+//! `i64.extend_i32_s/u`), which it spells as `BI_cvtop`. Inference codegen emits
+//! neither; they are here so a foreign external compiled by a real toolchain can
+//! link.
+//!
 //! Every *other* operator family — atomics, SIMD, exception handling, typed
-//! function references, GC, stack switching, tail calls, sign-extension,
-//! saturating float-to-int, and segment-indexed table initialization — carries
+//! function references, GC, stack switching, tail calls, saturating
+//! float-to-int, and segment-indexed table initialization — carries
 //! semantics the merge or the Rocq translator cannot satisfy: a shared/atomic
 //! memory it does not reconcile, a tag section it drops, a type index it never
-//! interns, a reference type it cannot encode, or a conversion the translator
-//! has no lowering for. Copying such an operator verbatim produces a
-//! structurally-invalid module, an untranslatable proof artifact, or a silent
-//! miscompile.
+//! interns, a reference type it cannot encode, or a conversion naming a float
+//! type the translator has no lowering for. Copying such an operator verbatim
+//! produces a structurally-invalid module, an untranslatable proof artifact, or
+//! a silent miscompile.
 //!
 //! ## Verification-only constructs are not executable
 //!
@@ -151,8 +159,8 @@ pub(crate) struct OpEffect {
 /// Returns [`LinkError::UnsupportedConstruct`] for any operator outside the
 /// proven-safe set: any floating-point instruction (the Inference language has
 /// no `f32`/`f64` types, see [`is_float`]), atomics, SIMD, exception handling,
-/// typed references, GC, stack switching, tail calls, sign-extension, saturating
-/// float-to-int, segment-indexed table initialization, multi-memory access (a
+/// typed references, GC, stack switching, tail calls, saturating float-to-int,
+/// segment-indexed table initialization, multi-memory access (a
 /// non-zero memarg memory index), the verification-only non-det/uzumaki opcodes
 /// (which have no executable semantics, see [`is_verification_only`]), and any
 /// other operator family the merge does not model.
@@ -357,18 +365,26 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
 }
 
 /// Whether `op` is a pure integer numeric operator: an integer comparison,
-/// arithmetic, or bitwise instruction. These carry no index and no effect, so
-/// they are always safe to copy verbatim.
+/// arithmetic, bitwise, sign-extension, or integer-to-integer width-conversion
+/// instruction. These carry no index and no effect, so they are always safe to
+/// copy verbatim.
 ///
 /// Float numeric operators are deliberately excluded — they are rejected up
 /// front by [`is_float`] (the Inference language has no `f32`/`f64` types). So
-/// is the whole conversion block: sign-extension (`i32.extend8_s`, …),
-/// saturating float-to-int (`i32.trunc_sat_f32_s`, …), and the integer width
-/// conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`). The Rocq translator
-/// declares no `cvtop` family at all, so not even an integer-to-integer
-/// conversion has a lowering, and Inference codegen emits none of them; they
-/// reject as unmodeled families rather than copy into a body the `-v` proof
-/// path cannot render.
+/// are the conversions that name a float on either side: saturating and
+/// non-saturating float-to-int (`i32.trunc_sat_f32_s`, `i32.trunc_f32_s`, …),
+/// int-to-float (`f32.convert_i32_s`, …), the float-to-float
+/// `demote`/`promote`, and the reinterprets. The Rocq translator declares no
+/// float number type, so a conversion mentioning one has no lowering; it rejects
+/// as an unmodeled family rather than copying into a body the `-v` proof path
+/// cannot render.
+///
+/// Inference codegen emits none of the eight admitted here — it narrows sub-i32
+/// values with shifts and masks — so they arrive only from a foreign external.
+/// Each has a `BI_unop`/`BI_cvtop` lowering in `wasm-to-v`, which is the
+/// standard this list is held to: an allow-listed operator must be one the
+/// translator can render. `core/wasm-linker/tests/v_alignment.rs` pins that
+/// agreement for both groups.
 fn is_numeric(op: &Operator) -> bool {
     use Operator::*;
     matches!(
@@ -387,6 +403,11 @@ fn is_numeric(op: &Operator) -> bool {
             | I64Clz | I64Ctz | I64Popcnt | I64Add | I64Sub | I64Mul | I64DivS | I64DivU
             | I64RemS | I64RemU | I64And | I64Or | I64Xor | I64Shl | I64ShrS | I64ShrU | I64Rotl
             | I64Rotr
+        // sign-extension (`BI_unop … (Unop_extend n)` in the proof model, not a
+        // conversion — the model groups it with clz/ctz/popcnt)
+            | I32Extend8S | I32Extend16S | I64Extend8S | I64Extend16S | I64Extend32S
+        // integer-to-integer width conversions (`BI_cvtop`)
+            | I32WrapI64 | I64ExtendI32S | I64ExtendI32U
     )
 }
 
@@ -543,17 +564,6 @@ fn operator_family(op: &Operator) -> &'static str {
         // a plain `call`); an external using either is the only source.
         ReturnCall { .. } => "tail calls (return_call)",
         ReturnCallIndirect { .. } => "tail calls (return_call_indirect)",
-        // Sign-extension proposal. Not modeled by the Rocq translator; Inference
-        // codegen narrows sub-i32 values with shifts/masks instead.
-        I32Extend8S | I32Extend16S | I64Extend8S | I64Extend16S | I64Extend32S => {
-            "sign-extension (not supported by the Rocq translator)"
-        }
-        // Integer width conversions. The Rocq translator declares no `cvtop`
-        // family, so a conversion has no lowering even between two integer
-        // types; Inference codegen emits none of them.
-        I32WrapI64 | I64ExtendI32S | I64ExtendI32U => {
-            "integer width conversions (not supported by the Rocq translator)"
-        }
         // Segment-indexed table initialization. Carries element segments the
         // merge cannot relocate, and the Rocq translator has no lowering for it.
         TableInit { .. } | ElemDrop { .. } | TableCopy { .. } => {
@@ -887,15 +897,55 @@ mod tests {
         );
     }
 
+    /// Asserts every operator of the body passes [`check_operator`], and that the
+    /// operators `expected` names are among them — so a fixture that quietly
+    /// stopped assembling the instruction under test cannot pass by carrying only
+    /// `local.get`/`end`. `expected` is matched against each operator's debug
+    /// spelling.
+    fn assert_body_accepts_including(wat: &str, expected: &[&str]) {
+        let ops = ops(wat);
+        for op in &ops {
+            let effect = check_operator(op)
+                .unwrap_or_else(|e| panic!("`{op:?}` must be allow-listed, got {e:?}"));
+            assert!(
+                !effect.uses_memory
+                    && !effect.uses_memory_grow
+                    && !effect.uses_globals
+                    && !effect.uses_data_segments
+                    && !effect.uses_tables,
+                "`{op:?}` is a pure numeric operator and must carry no effect, got {effect:?}"
+            );
+        }
+        let spellings: Vec<String> = ops.iter().map(|op| format!("{op:?}")).collect();
+        for want in expected {
+            assert!(
+                spellings.iter().any(|s| s == want),
+                "`{wat}` must assemble a `{want}` operator; got {spellings:?}"
+            );
+        }
+    }
+
     #[test]
-    fn sign_extension_op_is_rejected() {
-        // Sign-extension is an integer op, so it is not flagged by `is_float`; it
-        // reaches the fail-closed wildcard and rejects as the sign-extension
-        // family, named by `operator_family`.
-        assert_body_rejects_with(
-            r#"(module (func (param i32) (result i32)
+    fn sign_extension_ops_are_allow_listed() {
+        // The five sign-extension opcodes. The Rocq translator lowers each to
+        // `BI_unop t (Unop_extend n)` — the proof model treats them as unops
+        // rather than conversions — so they meet the standard every allow-listed
+        // operator is held to. Inference codegen still emits none of them; a
+        // foreign external compiled by a real toolchain is the source.
+        assert_body_accepts_including(
+            r#"(module (func (param i32) (param i64) (result i32)
+                 local.get 1 i64.extend8_s drop
+                 local.get 1 i64.extend16_s drop
+                 local.get 1 i64.extend32_s drop
+                 local.get 0 i32.extend16_s drop
                  local.get 0 i32.extend8_s) (export "f" (func 0)))"#,
-            &["sign-extension"],
+            &[
+                "I32Extend8S",
+                "I32Extend16S",
+                "I64Extend8S",
+                "I64Extend16S",
+                "I64Extend32S",
+            ],
         );
     }
 
@@ -926,27 +976,50 @@ mod tests {
     }
 
     #[test]
-    fn integer_width_conversions_are_rejected() {
-        // The last conversions to leave the allow-list. They were kept because
-        // the translator did have an arm for each, but that arm emitted
-        // `BI_cvtop` — a constructor the Rocq proof model never declares — so
-        // the "allow-listed implies lowerable" premise held only at the Rust
-        // level. The model declares no conversion at all, integer-to-integer
-        // included.
-        assert_body_rejects_with(
+    fn integer_width_conversions_are_allow_listed() {
+        // The three conversions with an integer on both sides. The proof model
+        // declares `CVO_wrap` and `CVO_extend` and the translator emits
+        // `BI_cvtop` for each, so the "allow-listed implies lowerable" premise
+        // holds at the Rocq level and not merely at the Rust one.
+        assert_body_accepts_including(
             r#"(module (func (param i64) (result i32)
+                 local.get 0 i64.extend_i32_s drop
+                 local.get 0 i32.wrap_i64 i64.extend_i32_u drop
                  local.get 0 i32.wrap_i64) (export "f" (func 0)))"#,
-            &["integer width conversions"],
+            &["I32WrapI64", "I64ExtendI32S", "I64ExtendI32U"],
+        );
+    }
+
+    #[test]
+    fn float_naming_conversions_stay_rejected() {
+        // The other half of the conversion block still has no lowering: each of
+        // these names a float type the proof contract does not declare. They are
+        // classified as float operators (`is_float`), not as an unmodeled family,
+        // so the diagnostic carries the exact mnemonic. Pinned beside the
+        // admissions above so a future widening of the allow-list has to step
+        // over this test rather than past a gap.
+        for (wat, mnemonic) in [
+            ("i32.trunc_f32_s", "i32.trunc_f32_s"),
+            ("i32.trunc_sat_f32_s", "i32.trunc_sat_f32_s"),
+            ("i32.reinterpret_f32", "i32.reinterpret_f32"),
+        ] {
+            assert_body_rejects_with(
+                &format!(
+                    r#"(module (func (param f32) (result i32)
+                         local.get 0 {wat}) (export "f" (func 0)))"#
+                ),
+                &["floating-point", mnemonic],
+            );
+        }
+        assert_body_rejects_with(
+            r#"(module (func (param i32) (result f32)
+                 local.get 0 f32.convert_i32_s) (export "f" (func 0)))"#,
+            &["floating-point", "f32.convert_i32_s"],
         );
         assert_body_rejects_with(
-            r#"(module (func (param i32) (result i64)
-                 local.get 0 i64.extend_i32_s) (export "f" (func 0)))"#,
-            &["integer width conversions"],
-        );
-        assert_body_rejects_with(
-            r#"(module (func (param i32) (result i64)
-                 local.get 0 i64.extend_i32_u) (export "f" (func 0)))"#,
-            &["integer width conversions"],
+            r#"(module (func (param f64) (result f32)
+                 local.get 0 f32.demote_f64) (export "f" (func 0)))"#,
+            &["floating-point", "f32.demote_f64"],
         );
     }
 }

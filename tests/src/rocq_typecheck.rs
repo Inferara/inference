@@ -942,6 +942,14 @@ mod gate {
     /// and every one is a distinct arm printing a distinct `Tp_i8`/`Tp_i16`/
     /// `Tp_i32` and `SX_S`/`SX_U` combination that only a hand-written module
     /// can request.
+    ///
+    /// The eight width-changing operators are here for the same reason and are
+    /// the module's only producer of `Unop_extend`, `cvtop` and `BI_cvtop`:
+    /// Inference codegen narrows sub-i32 values with shifts and masks and emits
+    /// no conversion at all, so nothing in the corpus reaches them. They also
+    /// split across two constructors along a line the WASM mnemonics obscure —
+    /// the five `extendN_s` are unops, the three `wrap`/`extend_i32` are cvtops —
+    /// which is exactly the kind of shape only elaboration settles.
     #[test]
     fn instruction_surface_type_checks_against_vendored_stub() {
         let module = HandbuiltModule::InstructionSurface.build();
@@ -1017,6 +1025,23 @@ mod gate {
             "BI_unop T_i64 (Unop_i UOI_popcnt)",
             "BI_testop T_i32 TO_eqz",
             "BI_testop T_i64 TO_eqz",
+            // Sign extension. The contract spells it as a unop carrying a bare
+            // `N`, not as a conversion — the same `BI_unop` constructor as
+            // `clz`/`ctz`/`popcnt` above, with a different operator family. The
+            // argument is the source width in BITS; see
+            // `sign_extension_widths_are_bit_counts_not_byte_counts`.
+            "BI_unop T_i32 (Unop_extend 8%N)",
+            "BI_unop T_i32 (Unop_extend 16%N)",
+            "BI_unop T_i64 (Unop_extend 8%N)",
+            "BI_unop T_i64 (Unop_extend 16%N)",
+            "BI_unop T_i64 (Unop_extend 32%N)",
+            // The three integer-to-integer conversions, and the only three
+            // well-typed `BI_cvtop` instances the contract has: `cvtop_valid`
+            // admits `CVO_wrap` at `(i32, i64, None)` and `CVO_extend` at
+            // `(i64, i32, Some sx)` and nothing else.
+            "BI_cvtop T_i32 CVO_wrap T_i64 None",
+            "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)",
+            "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)",
             // Memory operators, including the bulk forms and the passive
             // segment they read from.
             "BI_memory_size ::",
@@ -1068,6 +1093,22 @@ mod gate {
             "BI_load T_i64 (Tp_i32",
             // A store given the load's pair shape.
             "BI_store T_i32 (Some (Tp_i8",
+            // Sign extension written as a conversion — the misclassification
+            // that grouped these five with `BI_cvtop` in the first place. Both
+            // spellings below are what that mistake produces: the whole
+            // instruction as a cvtop, and the operator wrapped in `Unop_i`
+            // (which takes a `unop_i`, not an `N`).
+            "BI_cvtop T_i32 CVO_extend T_i32",
+            "Unop_i (Unop_extend",
+            // `BI_cvtop` with its two number types collapsed to one, the arity
+            // slip a four-argument constructor invites. `cvtop_valid` rejects
+            // both, and the source type is what distinguishes wrap from extend.
+            "BI_cvtop T_i32 CVO_wrap None",
+            "BI_cvtop T_i64 CVO_extend (Some",
+            // `CVO_extend` without its sign, and `CVO_wrap` with one. The
+            // contract requires `sx` on exactly one of the two.
+            "CVO_extend T_i32 None",
+            "CVO_wrap T_i64 (Some",
         ] {
             assert!(
                 !v.contains(wrong),
@@ -1080,6 +1121,51 @@ mod gate {
             "Instruction-surface fixture generated and its operator, memory, \
              table and reference shapes verified",
         );
+    }
+
+    /// `Unop_extend`'s argument is the source width in **bits**, and this is the
+    /// only test that can say so.
+    ///
+    /// **Do not delete this as redundant with the gate above.** That was checked,
+    /// not assumed: emitting `Unop_extend 1%N` was measured against this repo's
+    /// `coqc`, and the resulting `.v` **compiled clean**. Only the byte
+    /// comparison below caught it. The gate is structurally incapable of
+    /// catching an argument-*value* error in this constructor — it proves a term
+    /// elaborates, never that the term means what the instruction means —
+    /// so these two literal comparisons (here and
+    /// `sign_extension_operators_translate_with_bit_widths` in
+    /// `core/wasm-to-v/src/lib.rs`) are the entire guard.
+    ///
+    /// `Unop_extend 1` type-checks just as
+    /// well as `Unop_extend 8` — the model's `unop_type_agree` ignores the
+    /// argument entirely — while its `app_unop` divides the argument by eight
+    /// before extending, so a byte count denotes a zero-bit extension: the
+    /// constant zero, for every input, at every one of the five opcodes. Every
+    /// obligation written over such a body is provable and false.
+    ///
+    /// So the convention is pinned by byte comparison, in both directions: the
+    /// bit spellings must be present, and the byte spellings they would collapse
+    /// to must be absent. Absence is the load-bearing half — a wrong constant is
+    /// a well-formed term no amount of elaboration objects to.
+    #[test]
+    fn sign_extension_widths_are_bit_counts_not_byte_counts() {
+        let v = HandbuiltModule::InstructionSurface.build().v;
+
+        for bits in ["Unop_extend 8%N", "Unop_extend 16%N", "Unop_extend 32%N"] {
+            assert!(
+                v.contains(bits),
+                "the instruction-surface fixture must emit `{bits}`; got:\n{v}"
+            );
+        }
+        for bytes in ["Unop_extend 1%N", "Unop_extend 2%N", "Unop_extend 4%N"] {
+            assert!(
+                !v.contains(bytes),
+                "`{bytes}` is a byte count where the proof contract takes a bit \
+                 width. It elaborates, satisfies the model's typing side \
+                 condition, and denotes a constant-zero extension — so no `coqc` \
+                 gate can catch it and this assertion is the only guard:\n{v}"
+            );
+        }
     }
 
     /// The WAT for [`instruction_surface_type_checks_against_vendored_stub`].
@@ -1226,6 +1312,32 @@ mod gate {
                 drop
                 local.get $wide
                 i64.eqz
+                drop
+
+                local.get $narrow
+                i32.extend8_s
+                drop
+                local.get $narrow
+                i32.extend16_s
+                drop
+                local.get $wide
+                i64.extend8_s
+                drop
+                local.get $wide
+                i64.extend16_s
+                drop
+                local.get $wide
+                i64.extend32_s
+                drop
+
+                local.get $wide
+                i32.wrap_i64
+                drop
+                local.get $narrow
+                i64.extend_i32_s
+                drop
+                local.get $narrow
+                i64.extend_i32_u
                 drop
 
                 memory.size

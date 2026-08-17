@@ -2262,6 +2262,17 @@ fn translate_basic_operator(
         Operator::I32Clz => "BI_unop T_i32 (Unop_i UOI_clz)".to_string(),
         Operator::I32Ctz => "BI_unop T_i32 (Unop_i UOI_ctz)".to_string(),
         Operator::I32Popcnt => "BI_unop T_i32 (Unop_i UOI_popcnt)".to_string(),
+        // Sign-extension is a *unop*, not a conversion: the proof model spells
+        // it `BI_unop t (Unop_extend n)`, alongside `clz`/`ctz`/`popcnt`, and
+        // covers it with the same `sem_unop` rule. Its argument is the source
+        // width in BITS — the model divides by eight before extending — so a
+        // byte count here would type-check, satisfy the model's typing side
+        // condition (which ignores the argument), and denote a constant-zero
+        // extension for every input.
+        // `sign_extension_operators_translate_with_bit_widths` in `lib.rs`
+        // byte-compares these strings for exactly that reason.
+        Operator::I32Extend8S => "BI_unop T_i32 (Unop_extend 8%N)".to_string(),
+        Operator::I32Extend16S => "BI_unop T_i32 (Unop_extend 16%N)".to_string(),
         Operator::I32Add => "BI_binop T_i32 (Binop_i BOI_add)".to_string(),
         Operator::I32Sub => "BI_binop T_i32 (Binop_i BOI_sub)".to_string(),
         Operator::I32Mul => "BI_binop T_i32 (Binop_i BOI_mul)".to_string(),
@@ -2280,6 +2291,9 @@ fn translate_basic_operator(
         Operator::I64Clz => "BI_unop T_i64 (Unop_i UOI_clz)".to_string(),
         Operator::I64Ctz => "BI_unop T_i64 (Unop_i UOI_ctz)".to_string(),
         Operator::I64Popcnt => "BI_unop T_i64 (Unop_i UOI_popcnt)".to_string(),
+        Operator::I64Extend8S => "BI_unop T_i64 (Unop_extend 8%N)".to_string(),
+        Operator::I64Extend16S => "BI_unop T_i64 (Unop_extend 16%N)".to_string(),
+        Operator::I64Extend32S => "BI_unop T_i64 (Unop_extend 32%N)".to_string(),
         Operator::I64Add => "BI_binop T_i64 (Binop_i BOI_add)".to_string(),
         Operator::I64Sub => "BI_binop T_i64 (Binop_i BOI_sub)".to_string(),
         Operator::I64Mul => "BI_binop T_i64 (Binop_i BOI_mul)".to_string(),
@@ -2355,18 +2369,31 @@ fn translate_basic_operator(
                 ),
             }));
         }
-        // The wasm-verifier proof contract covers no conversion surface
-        // (`cvtop`/`BI_cvtop`), so every conversion is untranslatable —
-        // including the three integer width conversions, which involve no float
-        // type at all. Inference codegen emits no conversion of any kind, so
-        // this arm is reachable only from foreign or hand-crafted `.wasm`.
-        Operator::I32WrapI64
-        | Operator::I32TruncF32S
+        // The three integer-to-integer width conversions. The proof contract's
+        // `cvtop_valid` admits `CVO_wrap` at exactly `(i32, i64, None)` and
+        // `CVO_extend` at exactly `(i64, i32, Some sx)`, which is why each
+        // operand triple below is written out rather than derived: these three
+        // are every well-typed instance the two constructors have. The first
+        // number type is the TARGET and the third is the SOURCE — the model's
+        // `bet_cvtop` types `BI_cvtop t2 op t1 sx` as `Tf [t1] [t2]` — so a
+        // transposition here is a well-formed term denoting the wrong
+        // conversion.
+        Operator::I32WrapI64 => "BI_cvtop T_i32 CVO_wrap T_i64 None".to_string(),
+        Operator::I64ExtendI32S => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)".to_string(),
+        Operator::I64ExtendI32U => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)".to_string(),
+        // The conversions that remain untranslatable. Each names a float on one
+        // side or the other — `trunc` and `trunc_sat` consume one, `convert`
+        // produces one, `demote`/`promote` are float-to-float, and `reinterpret`
+        // crosses the two representations — and the proof contract declares no
+        // float number type for them to mention, nor any rule that would give
+        // them meaning. Admitting them would put a term in the emitted `.v` that
+        // has no constructor, which is the divergence the allow-list on the
+        // linker side exists to prevent. Inference codegen emits none of them,
+        // so this arm is reachable only from foreign or hand-crafted `.wasm`.
+        Operator::I32TruncF32S
         | Operator::I32TruncF32U
         | Operator::I32TruncF64S
         | Operator::I32TruncF64U
-        | Operator::I64ExtendI32S
-        | Operator::I64ExtendI32U
         | Operator::I64TruncF32S
         | Operator::I64TruncF32U
         | Operator::I64TruncF64S
@@ -2385,11 +2412,6 @@ fn translate_basic_operator(
         | Operator::I64ReinterpretF64
         | Operator::F32ReinterpretI32
         | Operator::F64ReinterpretI64
-        | Operator::I32Extend8S
-        | Operator::I32Extend16S
-        | Operator::I64Extend8S
-        | Operator::I64Extend16S
-        | Operator::I64Extend32S
         | Operator::I32TruncSatF32S
         | Operator::I32TruncSatF32U
         | Operator::I32TruncSatF64S
@@ -2400,7 +2422,7 @@ fn translate_basic_operator(
         | Operator::I64TruncSatF64U => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "conversion instruction {operator:?} (the wasm-verifier proof contract covers no conversion instructions, integer width conversions included)"
+                    "conversion instruction {operator:?} (the wasm-verifier proof contract declares no floating-point number type, so a conversion naming one has no lowering; the integer-to-integer width conversions are supported)"
                 ),
             }));
         }

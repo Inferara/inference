@@ -134,7 +134,7 @@ Inference closes that gap by re-narrowing the result at the producing instructio
 - **Signed (`i8`, `i16`)**: `shl <32-width>` then `shr_s <32-width>` — shifting the value up so the sub-type's sign bit lands in bit 31, then an arithmetic shift back down, which sign-extends from that bit. For `i8` this is `shl 24` / `shr_s 24`; for `i16`, `shl 16` / `shr_s 16`.
 - **Unsigned (`u8`, `u16`)**: `and 0xFF` / `and 0xFFFF` — a zero-extending bitmask.
 
-`i32.extend8_s`/`i32.extend16_s` would express the signed case more directly, but Inference does not use them: the `wasm-to-v` translator has no case for those opcodes (`Operator::I32Extend8S | Operator::I32Extend16S => todo!()` in `core/wasm-to-v/src/translator.rs:1534-1535`, similarly for the `i64` variants at 1536-1538). `shl`/`shr_s` decompose the same sign-extension into two instructions the translator already handles as ordinary binops, keeping the emitted code translatable to Rocq in proof mode.
+`i32.extend8_s`/`i32.extend16_s` would express the signed case more directly, but Inference does not use them. The historical reason was that the `wasm-to-v` translator had no case for those opcodes, so `shl`/`shr_s` was the only spelling that stayed translatable to Rocq; the translator now lowers all five sign-extension opcodes to `BI_unop t (Unop_extend n)`, so the constraint no longer binds and the two-instruction decomposition is simply what codegen still emits. Changing it would move every golden `.wasm` for no semantic gain.
 
 This narrowing is emitted at every place a sub-i32 value is produced, not just arithmetic:
 

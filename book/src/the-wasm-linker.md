@@ -326,9 +326,14 @@ float instruction. The linker enforces this at two gates:
    naming the exact mnemonic (e.g. `floating-point instruction 'f32.add' is not
    supported`).
 
-Sign-extension (`i32.extend8_s`, `i64.extend32_s`, etc.) and saturating
-float-to-int (`i32.trunc_sat_f32_s`, etc.) are also excluded: the Rocq
-translator has no lowering for either, and Inference codegen emits neither.
+Saturating float-to-int (`i32.trunc_sat_f32_s`, etc.) is also excluded: its
+operands are floats, and the Rocq translator declares no float number type.
+
+Sign-extension (`i32.extend8_s`, `i64.extend32_s`, etc.) is *not* excluded,
+though Inference codegen still emits none of it. The Rocq translator lowers all
+five opcodes to `BI_unop t (Unop_extend n)` — the proof model classifies
+sign-extension as a unop, beside `clz`/`ctz`/`popcnt`, not as a conversion — so
+an external compiled by a real toolchain can carry them.
 
 ## Name Preservation
 
@@ -362,8 +367,8 @@ the module prefix removes the common case rather than every possible one.
 | `LinkError::UnsatisfiedImport { field }` | No external module tagged with the right logical module name exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists each signal (e.g. "defines or initializes its own static data segments") |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a sign-extension op, a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, data/element segments) |
-| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, sign-extension, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, data/element segments) |
+| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |
 | `LinkError::InvalidMergedModule(msg)` | The post-merge structural validator rejected the merged output; this is a guard against allow-list gaps — it converts a potential silent miscompile into a clean diagnostic |
@@ -376,7 +381,9 @@ in `src/lib.rs`):
 - Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons,
   loads/stores, and the three integer width conversions (`i32.wrap_i64`,
   `i64.extend_i32_s/u`).
-- Mutable globals and bulk memory (`memory.copy`/`memory.fill`).
+- Mutable globals, bulk memory (`memory.copy`/`memory.fill`), and sign-extension
+  (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`,
+  `i64.extend32_s`).
 
 Everything else is rejected at the feature gate or the operator allow-list before
 any body is copied.

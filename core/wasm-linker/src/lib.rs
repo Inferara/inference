@@ -57,13 +57,15 @@ use thiserror::Error;
 /// linear memory, re-indexing only the handful of index-bearing operators, and
 /// the paired Rocq translator (`wasm-to-v`) models exactly this machine. That is
 /// sound only for the integer **WebAssembly 1.0** core (the MVP plus
-/// `mutable-global`) and the single scalar post-MVP addition the merge models:
+/// `mutable-global`) and the two scalar post-MVP additions the merge models:
 ///
-/// - **bulk memory** (`memory.copy` / `memory.fill` over the single memory).
+/// - **bulk memory** (`memory.copy` / `memory.fill` over the single memory);
+/// - **sign-extension** (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`,
+///   `i64.extend16_s`, `i64.extend32_s`).
 ///
 /// Every other *proposal* — reference types, multi-value, tail calls, SIMD,
 /// threads/atomics, exception handling, `memory64`, multi-memory, the GC
-/// proposal, stack switching, sign-extension, and saturating float-to-int — is
+/// proposal, stack switching, and saturating float-to-int — is
 /// **off**. An external using any of them is rejected up front at the link gate
 /// with a feature-named [`LinkError::UnsupportedWasmFeature`], rather than late
 /// and indirectly when a specific unmodeled opcode happens to reach the merge.
@@ -95,19 +97,28 @@ use thiserror::Error;
 /// it reaches the merge.
 /// `STACK_SWITCHING` is likewise off (and defaults off in the fork).
 ///
-/// Sign-extension and saturating float-to-int are *not* in this set even though
-/// they are scalar integer-adjacent proposals: the Rocq translator does not
-/// model them (it has no lowering for `i32.extend8_s` or `i32.trunc_sat_f32_s`),
-/// and Inference codegen emits neither, so admitting them at the gate would let a
-/// third-party external carry an opcode the `-v` proof path cannot render. An
-/// external using either is rejected at this gate with the validator's
+/// `SIGN_EXTENSION` is on because the Rocq translator lowers all five of its
+/// opcodes (as `BI_unop t (Unop_extend n)` — the proof model treats them as
+/// unops, not conversions). Inference codegen still emits none of them, but a
+/// real toolchain emits them constantly, and without the flag the validator
+/// refuses such an external at this gate *before* the allow-list in [`safety`]
+/// ever sees the body. The three integer-to-integer width conversions
+/// (`i32.wrap_i64`, `i64.extend_i32_s/u`) need no flag: they are MVP
+/// instructions, gated only by the allow-list.
+///
+/// `SATURATING_FLOAT_TO_INT` stays off. Its operands are floats, the translator
+/// declares no float number type, and admitting it here would recreate the
+/// allow-listed-but-unlowerable divergence — an external accepted at the gate
+/// and at the merge, then failing on the `-v` proof path — that this gate exists
+/// to close. An external using it is rejected here with the validator's
 /// feature-named diagnostic.
 ///
 /// This is the linker's explicit, enforced supported-version contract: a feature
 /// added to the parser later cannot quietly become linkable.
 pub const SUPPORTED_WASM_FEATURES: WasmFeatures = WasmFeatures::GC_TYPES
     .union(WasmFeatures::MUTABLE_GLOBAL)
-    .union(WasmFeatures::BULK_MEMORY);
+    .union(WasmFeatures::BULK_MEMORY)
+    .union(WasmFeatures::SIGN_EXTENSION);
 
 /// Why a static merge could not be produced.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -119,7 +130,7 @@ pub enum LinkError {
     /// An external module is well-formed WebAssembly but uses a feature outside
     /// the supported [`SUPPORTED_WASM_FEATURES`] subset (e.g. any floating-point
     /// type or instruction, reference types, SIMD, atomics, exceptions,
-    /// `memory64`, multi-memory, multi-value, tail calls, sign-extension, or
+    /// `memory64`, multi-memory, multi-value, tail calls, or
     /// saturating float-to-int). The merge cannot soundly fold such a module onto
     /// the single shared memory the output models — and the Rocq translator does
     /// not model these constructs — so it is rejected at the link gate with the
