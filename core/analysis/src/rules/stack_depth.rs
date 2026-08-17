@@ -59,10 +59,15 @@ use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 use crate::rule::TypedContext;
 
-/// Frame alignment in bytes, mirroring
-/// `core/wasm-codegen/src/memory.rs::FRAME_ALIGNMENT`. Every per-function frame
-/// size is rounded up to this boundary.
-const FRAME_ALIGNMENT: u32 = 16;
+/// Stack frame alignment in bytes.
+///
+/// This rule is sound only while its per-function estimate never falls below the
+/// frame code generation really allocates, and the last step on both sides is a
+/// rounding to this grid. A grid of the rule's own would carry that guarantee
+/// only for as long as the two numbers happened to agree: a coarser grid in code
+/// generation would leave the estimate below the frame it is meant to bound, and
+/// the rule would admit a chain that overflows the shadow stack.
+use inference_compiler_interface::FRAME_ALIGNMENT;
 
 /// Worst-case alignment padding charged per compound slot.
 ///

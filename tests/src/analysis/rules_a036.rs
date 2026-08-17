@@ -346,15 +346,14 @@ mod analysis_rules_tests {
     /// cumulative overflow. Running the analysis pass on the same source yields
     /// an A036 error, proving the rule closes that gap.
     ///
-    /// Exact numeric per-function parity against codegen's private
-    /// `FrameLayout.total_size` is validated by-construction rather than
-    /// asserted here: that field is not exposed across crates, and the
-    /// estimator's documented soundness argument (it charges worst-case padding,
-    /// `size + 7` per slot rounded up to 16, so its per-function estimate is
-    /// always >= codegen's real layout) is what guarantees A036 never
-    /// under-approximates. This cross-crate behavioral test is the guard that the
-    /// over-approximation is still tight enough to flag a real cumulative
-    /// overflow that codegen would have emitted as a runtime trap.
+    /// The `estimate >= codegen` direction is not this test's job, and it is not
+    /// left to the estimator's soundness argument either: it is asserted
+    /// per-function over a corpus by
+    /// [`a036_estimate_is_sound_upper_bound_of_codegen_frame`] below, which reads
+    /// codegen's real layout through `CodegenOutput::frame_sizes()`. What this
+    /// test adds is the opposite direction — that the over-approximation stays
+    /// tight enough to still flag a real cumulative overflow, rather than being
+    /// merely safe by being enormous.
     #[test]
     fn a036_closes_gap_codegen_leaves_open() {
         let source = r#"
