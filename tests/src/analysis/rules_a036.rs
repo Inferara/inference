@@ -1,16 +1,21 @@
 /// Integration tests for analysis rule A036.
 ///
 /// - A036: StackDepthExceeded — the cumulative shadow-stack usage along a
-///   root-to-leaf call chain must not exceed the stack budget
-///   (`STACK_BUDGET_BYTES = 65_536`). Only array/struct frames consume the
-///   shadow stack; scalars live in WASM locals. Because A035 forbids recursion
-///   the call graph is a DAG, so A036 reports the maximum-weight call chain.
+///   root-to-leaf call chain must not exceed the stack budget carried by
+///   `AnalysisOptions::stack_budget_bytes` (65_536 by default). Only
+///   array/struct frames consume the shadow stack; scalars live in WASM locals.
+///   Because A035 forbids recursion the call graph is a DAG, so A036 reports the
+///   maximum-weight call chain.
 ///
-/// These tests are the cross-crate guard for two properties that the rule's
+/// These tests are the cross-crate guard for four properties that the rule's
 /// in-crate unit tests cannot exercise: (1) the rule fires through a real
-/// parse -> type-check -> analyze pipeline on Inference source, and (2) the
+/// parse -> type-check -> analyze pipeline on Inference source, (2) the
 /// rule closes a gap that codegen alone leaves open — codegen bounds each
-/// *individual* frame but not the *cumulative* depth across a chain.
+/// *individual* frame but not the *cumulative* depth across a chain, (3) the
+/// budget is a setting the verdict follows in both directions rather than a
+/// constant of the rule's own, and (4) the default budget is the stack codegen
+/// actually emits — see [`budget_matches_emitted_stack`] at the end of this
+/// file.
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::{
@@ -30,6 +35,126 @@ mod analysis_rules_tests {
     fn analyze(source: &str) -> Result<AnalysisResult, AnalysisErrors> {
         let ctx = type_check(source);
         inference_analysis::analyze(&ctx)
+    }
+
+    /// The budget A036 measures against is the one it is given, not a constant
+    /// of its own. A single ~40 KB frame fits the default 64 KB shadow stack and
+    /// does not fit a 32 KB one, so the same program must be accepted under one
+    /// budget and rejected under the other. A rule that ignored its options
+    /// could not satisfy both halves at once, and the reported `budget_bytes`
+    /// pins that the configured number reached the diagnostic rather than only
+    /// the comparison.
+    #[test]
+    fn the_verdict_follows_the_configured_budget() {
+        const SOURCE: &str = r#"
+            spec S {
+                fn heavy() -> i32 {
+                    forall {
+                        let arr: [i64; 5000] = @;
+                        let x: i64 = arr[0];
+                    }
+                    return 0;
+                }
+            }
+        "#;
+        let ctx = type_check(SOURCE);
+
+        let under = inference_analysis::analyze_with_options(
+            &ctx,
+            inference_analysis::AnalysisOptions::default(),
+        );
+        assert!(
+            stack_depth_errors(&under).next().is_none(),
+            "a 40 KB frame fits the default 64 KB shadow stack"
+        );
+
+        let over = inference_analysis::analyze_with_options(
+            &ctx,
+            inference_analysis::AnalysisOptions {
+                stack_budget_bytes: 32_768,
+            },
+        );
+        let reported = stack_depth_errors(&over)
+            .next()
+            .expect("a 40 KB frame must not fit a 32 KB shadow stack");
+        assert_eq!(
+            reported, 32_768,
+            "the diagnostic must report the configured budget"
+        );
+    }
+
+    /// The other direction of the same claim: a budget can also *clear* a
+    /// finding, not only produce one.
+    ///
+    /// A chain of three ~24 KB frames overflows the default 64 KB shadow stack
+    /// and fits a 128 KB one — the stack a two-page all-stack layout emits, so
+    /// the larger budget is one a real build can actually be configured with.
+    /// Without this half, a rule that ignored its options and always reported
+    /// the default would still satisfy the firing direction, because firing more
+    /// readily than configured is indistinguishable from a hard-coded budget
+    /// that happens to be smaller.
+    #[test]
+    fn a_larger_budget_clears_a_chain_the_default_rejects() {
+        const SOURCE: &str = r#"
+            fn a() -> i32 {
+                forall {
+                    let arr: [i32; 6000] = @;
+                    let x: i32 = arr[0];
+                }
+                return b();
+            }
+            fn b() -> i32 {
+                forall {
+                    let arr: [i32; 6000] = @;
+                    let x: i32 = arr[0];
+                }
+                return c();
+            }
+            fn c() -> i32 {
+                forall {
+                    let arr: [i32; 6000] = @;
+                    let x: i32 = arr[0];
+                }
+                return 0;
+            }
+        "#;
+        let ctx = type_check(SOURCE);
+
+        let under = inference_analysis::analyze_with_options(
+            &ctx,
+            inference_analysis::AnalysisOptions::default(),
+        );
+        assert_eq!(
+            stack_depth_errors(&under).next(),
+            Some(65_536),
+            "a ~72 KB chain must not fit the default 64 KB shadow stack"
+        );
+
+        let over = inference_analysis::analyze_with_options(
+            &ctx,
+            inference_analysis::AnalysisOptions {
+                stack_budget_bytes: 131_072,
+            },
+        );
+        assert!(
+            stack_depth_errors(&over).next().is_none(),
+            "a ~72 KB chain fits a 128 KB shadow stack"
+        );
+    }
+
+    /// The `budget_bytes` of every A036 error in `result`.
+    fn stack_depth_errors(
+        result: &Result<AnalysisResult, AnalysisErrors>,
+    ) -> impl Iterator<Item = u32> + '_ {
+        result
+            .as_ref()
+            .err()
+            .into_iter()
+            .flat_map(|errors| errors.errors().iter())
+            .filter_map(|e| match e {
+                AnalysisDiagnostic::StackDepthExceeded { budget_bytes, .. } => Some(*budget_bytes),
+                _ => None,
+            })
     }
 
     /// Returns true if any analysis error is a `StackDepthExceeded` (A036).
@@ -221,15 +346,14 @@ mod analysis_rules_tests {
     /// cumulative overflow. Running the analysis pass on the same source yields
     /// an A036 error, proving the rule closes that gap.
     ///
-    /// Exact numeric per-function parity against codegen's private
-    /// `FrameLayout.total_size` is validated by-construction rather than
-    /// asserted here: that field is not exposed across crates, and the
-    /// estimator's documented soundness argument (it charges worst-case padding,
-    /// `size + 7` per slot rounded up to 16, so its per-function estimate is
-    /// always >= codegen's real layout) is what guarantees A036 never
-    /// under-approximates. This cross-crate behavioral test is the guard that the
-    /// over-approximation is still tight enough to flag a real cumulative
-    /// overflow that codegen would have emitted as a runtime trap.
+    /// The `estimate >= codegen` direction is not this test's job, and it is not
+    /// left to the estimator's soundness argument either: it is asserted
+    /// per-function over a corpus by
+    /// [`a036_estimate_is_sound_upper_bound_of_codegen_frame`] below, which reads
+    /// codegen's real layout through `CodegenOutput::frame_sizes()`. What this
+    /// test adds is the opposite direction — that the over-approximation stays
+    /// tight enough to still flag a real cumulative overflow, rather than being
+    /// merely safe by being enormous.
     #[test]
     fn a036_closes_gap_codegen_leaves_open() {
         let source = r#"
@@ -1342,5 +1466,28 @@ mod analysis_rules_tests {
             "the heavy spec chain must be detected despite the same-folded sibling, got: {msg}"
         );
         assert_eq!(diag.rule_id(), "A036");
+    }
+}
+
+/// The cross-crate guard the two hand-synced constants behind A036 used to ask
+/// for in prose and could not express.
+///
+/// A036's budget and the shadow stack codegen emits are two values in two crates
+/// that neither depends on the other, so nothing brings them together at the
+/// point of use: the rule compares call-chain depth against its own number and
+/// codegen sizes the stack from its own. Changing one alone leaves the rule
+/// policing a stack the artifact does not have — rejecting programs a larger
+/// stack accommodates, or, in the dangerous direction, accepting programs that
+/// overflow a smaller one. This test crate depends on both, which makes it the
+/// only place the equality can be stated.
+#[cfg(test)]
+mod budget_matches_emitted_stack {
+    #[test]
+    fn default_stack_budget_equals_default_emitted_stack_size() {
+        assert_eq!(
+            inference_analysis::AnalysisOptions::default().stack_budget_bytes,
+            inference_wasm_codegen::MemoryLayout::default().stack_size(),
+            "A036's default budget must be the stack region a default build emits"
+        );
     }
 }

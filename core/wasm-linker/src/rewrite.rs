@@ -9,7 +9,15 @@
 //!
 //! The verbatim-copy default keeps the body byte-identical wherever no index
 //! changes, which both minimizes surface area and makes round-trips exact for
-//! the common (Tier-A/B) case where the only remapped operator is `call`.
+//! the common case where the only remapped operator is `call`.
+//!
+//! That default is also the pass's one sharp edge, and it cuts hardest on the
+//! operators whose index space the output *rearranges*. `call`, `call_indirect`,
+//! `global.get` and `global.set` each name a space the merge rebuilds, so each
+//! needs an arm of its own; an operator that quietly lacked one would be copied
+//! with a stale index that still resolves — against the wrong entity. Adding a
+//! remapped index space to the merge therefore means adding an arm here in the
+//! same change, never afterwards.
 
 use inf_wasmparser::{BinaryReader, FunctionBody, Operator, ValType};
 use wasm_encoder::{Encode, Function, Instruction};
@@ -61,6 +69,21 @@ pub(crate) struct IndexMap<'a> {
     /// index in an adversarial body), which must surface as a [`LinkError`]
     /// rather than panic.
     pub ty: &'a dyn Fn(u32) -> Result<u32, LinkError>,
+    /// `source_global_idx -> merged_global_idx` for every global the body may
+    /// name.
+    ///
+    /// Fallible, following `ty` rather than `func`. The distinction between the
+    /// other two is not stylistic: `func`'s infallible signature cannot report a
+    /// missing mapping, so both call sites in [`crate::merge`] smuggle the error
+    /// out through a `RefCell` — a workaround this field has no reason to
+    /// inherit. Fallibility is also what makes a *dropped* global space safe. The
+    /// merge contributes an external's globals only when its closure reads or
+    /// writes one; for every other external the mapping is empty, so a body that
+    /// named a global against the closure scanner's verdict fails this lookup
+    /// with a clean [`LinkError`] instead of rebinding onto the main module's
+    /// state. An infallible `global` would have to invent an index there, which
+    /// is the silent miscompile this whole path exists to prevent.
+    pub global: &'a dyn Fn(u32) -> Result<u32, LinkError>,
 }
 
 /// Re-encodes one function body under `map`, returning a `wasm-encoder`
@@ -179,6 +202,20 @@ fn emit_operator(
                 type_index: (map.ty)(*type_index)?,
                 table_index: *table_index,
             });
+        }
+        // The global accessors must be re-indexed for the same reason `call` is,
+        // and they are the index-bearing operators where falling through to the
+        // verbatim arm is *least* visible. The output global space puts the main
+        // module's globals first and appends each contributing external's after
+        // them, so a copied `global.get 0` from an external would name main's
+        // first global — which in real toolchain output is the stack pointer.
+        // Two `i32` globals agree in type, so the merged module still validates
+        // and still runs: wrong value, no diagnostic anywhere.
+        Operator::GlobalGet { global_index } => {
+            function.instruction(&Instruction::GlobalGet((map.global)(*global_index)?));
+        }
+        Operator::GlobalSet { global_index } => {
+            function.instruction(&Instruction::GlobalSet((map.global)(*global_index)?));
         }
         // The tail-call forms (`return_call` / `return_call_indirect`) have no
         // arm of their own: the Rocq translator has no lowering for them, and
@@ -397,13 +434,23 @@ mod tests {
         module.finish()
     }
 
-    /// An index map that adds 10 to every function index and 100 to every type
-    /// index, so a remap is unmistakable in the output.
-    fn shifting_map() -> (
-        impl Fn(u32) -> u32,
-        impl Fn(u32) -> Result<u32, LinkError>,
-    ) {
-        (|f: u32| f + 10, |t: u32| Ok(t + 100))
+    /// Shifts every function index by 10, every type index by 100 and every
+    /// global index by 1000. The shifts differ by an order of magnitude apiece so
+    /// that a remapped index is unmistakable in the output *and* names its own
+    /// space: an arm that fed an operand through the wrong map would land on a
+    /// value no assertion accepts, rather than on a plausible one.
+    static SHIFT_FUNC: fn(u32) -> u32 = |f| f + 10;
+    static SHIFT_TYPE: fn(u32) -> Result<u32, LinkError> = |t| Ok(t + 100);
+    static SHIFT_GLOBAL: fn(u32) -> Result<u32, LinkError> = |g| Ok(g + 1000);
+
+    /// The index map the re-encoder tests drive, ready to pass to
+    /// [`reencode_body`].
+    fn shifting_map() -> IndexMap<'static> {
+        IndexMap {
+            func: &SHIFT_FUNC,
+            ty: &SHIFT_TYPE,
+            global: &SHIFT_GLOBAL,
+        }
     }
 
     #[test]
@@ -423,8 +470,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let out = reencode_body(&body, &map, BodyOrigin::External).expect("re-encode call_indirect");
         let wrapped = wrap(&out);
 
@@ -449,8 +495,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let out = reencode_body(&body, &map, BodyOrigin::External).expect("re-encode ref.func");
         let wrapped = wrap(&out);
 
@@ -458,6 +503,84 @@ mod tests {
             .into_iter()
             .any(|op| matches!(op, Operator::RefFunc { function_index } if function_index == 10));
         assert!(has_remapped, "ref.func function index must be remapped to 10");
+    }
+
+    #[test]
+    fn reencodes_global_get_and_set_indices() {
+        // The output global space is rebuilt — main's globals first, each
+        // contributing external's appended — so both accessors must carry the
+        // remapped index. Two distinct source indices are used, and each is
+        // checked against its own image, so an arm that remapped the operand of
+        // one accessor onto the other's would not pass.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (global (;0;) (mut i32) (i32.const 0))
+              (global (;1;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0)
+                global.get 0
+                global.set 1)
+              (export "f" (func 0)))
+            "#,
+        )
+        .unwrap();
+        let body = body_bytes(&module, 0);
+
+        let map = shifting_map();
+        let out = reencode_body(&body, &map, BodyOrigin::External)
+            .expect("re-encode the global accessors");
+        let wrapped = wrap(&out);
+
+        let indices: Vec<(&str, u32)> = operators(&wrapped, 0)
+            .into_iter()
+            .filter_map(|op| match op {
+                Operator::GlobalGet { global_index } => Some(("get", global_index)),
+                Operator::GlobalSet { global_index } => Some(("set", global_index)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indices,
+            vec![("get", 1000), ("set", 1001)],
+            "both global accessors must carry their own remapped index"
+        );
+    }
+
+    #[test]
+    fn unmapped_global_index_surfaces_a_clean_error() {
+        // The fail-closed half of the global remap. The merge leaves the mapping
+        // empty for an external whose closure was admitted as touching no global,
+        // so a body that names one anyway must surface a `LinkError` — never fall
+        // back to an index that would resolve against the main module's state.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0)
+                global.get 0
+                drop)
+              (export "f" (func 0)))
+            "#,
+        )
+        .unwrap();
+        let body = body_bytes(&module, 0);
+
+        let func = |f: u32| f;
+        let ty = |t: u32| Ok(t);
+        let global = |idx: u32| {
+            Err::<u32, LinkError>(LinkError::UnsupportedConstruct(format!(
+                "unmapped global {idx}"
+            )))
+        };
+        let map = IndexMap { func: &func, ty: &ty, global: &global };
+        let err = reencode_body(&body, &map, BodyOrigin::External)
+            .expect_err("an unmapped global must error");
+        assert!(
+            matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("unmapped global")),
+            "expected the map's own error to propagate, got {err:?}"
+        );
     }
 
     #[test]
@@ -483,8 +606,7 @@ mod tests {
         let Ok(module) = module else { return };
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("return_call_indirect must be rejected");
         assert!(
@@ -513,8 +635,7 @@ mod tests {
         let Ok(module) = module else { return };
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         for origin in [BodyOrigin::External, BodyOrigin::Main] {
             let err = reencode_body(&body, &map, origin).expect_err("return_call must be rejected");
             assert!(
@@ -543,8 +664,7 @@ mod tests {
         let Ok(module) = module else { return };
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let out = reencode_body(&body, &map, BodyOrigin::External)
             .expect("re-encode function-typed block");
         let wrapped = wrap(&out);
@@ -577,8 +697,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let out = reencode_body(&body, &map, BodyOrigin::External).expect("re-encode plain blocks");
         let wrapped = wrap(&out);
 
@@ -613,8 +732,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("ref-typed local must be rejected");
         assert!(
@@ -649,7 +767,8 @@ mod tests {
                 "unmapped type {idx}"
             )))
         };
-        let map = IndexMap { func: &func, ty: &ty };
+        let global = |idx: u32| Ok(idx);
+        let map = IndexMap { func: &func, ty: &ty, global: &global };
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("unmapped block type must error");
         assert!(
@@ -676,8 +795,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let out = reencode_body(&body, &map, BodyOrigin::External)
             .expect("re-encode supported value-type locals");
         let wrapped = wrap(&out);
@@ -723,8 +841,7 @@ mod tests {
         .unwrap();
         let body = body_bytes(&module, 0);
 
-        let (func, ty) = shifting_map();
-        let map = IndexMap { func: &func, ty: &ty };
+        let map = shifting_map();
         let err = reencode_body(&body, &map, BodyOrigin::External)
             .expect_err("v128 local must be rejected");
         assert!(
@@ -752,11 +869,7 @@ mod tests {
             .unwrap();
             let body = body_bytes(&module, 0);
 
-            let (func, ty_map) = shifting_map();
-            let map = IndexMap {
-                func: &func,
-                ty: &ty_map,
-            };
+            let map = shifting_map();
             let err = reencode_body(&body, &map, BodyOrigin::External)
                 .expect_err("float local must be rejected");
             assert!(
@@ -819,8 +932,7 @@ mod tests {
                 nondet_block_body(sub_opcode, 1),
                 vec![0x00, 0xfc, sub_opcode, 0x40, 0x0b, 0x0b],
             ] {
-                let (func, ty) = shifting_map();
-                let map = IndexMap { func: &func, ty: &ty };
+                let map = shifting_map();
                 let err = reencode_body(&body, &map, BodyOrigin::External)
                     .err()
                     .unwrap_or_else(|| panic!("external {name} block must be rejected"));
@@ -839,8 +951,7 @@ mod tests {
         // reject them rather than copy them verbatim.
         for &(sub_opcode, name) in UZUMAKI_OPS {
             let body = uzumaki_body(sub_opcode);
-            let (func, ty) = shifting_map();
-            let map = IndexMap { func: &func, ty: &ty };
+            let map = shifting_map();
             let err = reencode_body(&body, &map, BodyOrigin::External)
                 .err()
                 .unwrap_or_else(|| panic!("external {name} must be rejected"));
@@ -860,8 +971,7 @@ mod tests {
         for &(sub_opcode, name) in NONDET_OPS {
             // Empty form round-trips unchanged.
             let empty_body = vec![0x00, 0xfc, sub_opcode, 0x40, 0x0b, 0x0b];
-            let (func, ty) = shifting_map();
-            let map = IndexMap { func: &func, ty: &ty };
+            let map = shifting_map();
             let out = reencode_body(&empty_body, &map, BodyOrigin::Main)
                 .unwrap_or_else(|e| panic!("main empty {name} block: {e:?}"));
             let wrapped = wrap(&out);
@@ -879,8 +989,7 @@ mod tests {
 
             // Function-typed form has its block-type index remapped (+100).
             let functype_body = nondet_block_body(sub_opcode, 1);
-            let (func, ty) = shifting_map();
-            let map = IndexMap { func: &func, ty: &ty };
+            let map = shifting_map();
             let out = reencode_body(&functype_body, &map, BodyOrigin::Main)
                 .unwrap_or_else(|e| panic!("main function-typed {name} block: {e:?}"));
             let wrapped = wrap(&out);
@@ -907,8 +1016,7 @@ mod tests {
         // copied through the main re-encode path verbatim, never rejected.
         for &(sub_opcode, name) in UZUMAKI_OPS {
             let body = uzumaki_body(sub_opcode);
-            let (func, ty) = shifting_map();
-            let map = IndexMap { func: &func, ty: &ty };
+            let map = shifting_map();
             let out = reencode_body(&body, &map, BodyOrigin::Main)
                 .unwrap_or_else(|e| panic!("main {name}: {e:?}"));
             let wrapped = wrap(&out);

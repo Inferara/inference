@@ -88,21 +88,23 @@ During `lower_statement()` and `lower_expression()`, arrays are lowered to:
 
 In `finish()`, if any function uses arrays (`self.has_memory == true`):
 
-1. **Memory Section** - Declares 1 linear memory page (64 KB initial)
+1. **Memory Section** - Declares the linear memory, with minimum and maximum both set to the configured page count (one 64 KB page by default), so the memory is fixed rather than growable
 2. **Global Section** - Exports `__stack_pointer` (mutable i32 global)
-   - Initialized to `0x10000` (65536 = STACK_SIZE, top of the stack region)
+   - Initialized to the configured stack size — `0x10000` (65536) by default, the top of the stack region
    - Stack grows downward toward address 0 (stack-first layout)
 
 ## Memory Layout
 
-WebAssembly linear memory is a flat byte array accessed via load/store instructions.
+WebAssembly linear memory is a flat byte array accessed via load/store instructions. Its
+size and the share of it given to the stack come from `MemoryLayout` (`target.rs`), whose
+default is a single page that is entirely stack.
 
 ```
-+------ 0x10000 (65536 bytes = 1 page)
++------ pages * 65536 bytes  (default: 0x10000, one page)
 |
-|  [ Free space: future data sections, heap ]
+|  [ Data region: future data sections, heap — empty by default ]
 |
-+-- STACK_SIZE (65536) = __stack_pointer initial value
++-- stack size (default 65536) = __stack_pointer initial value
 |
 |  [ Stack grows downward ]
 |
@@ -110,7 +112,7 @@ WebAssembly linear memory is a flat byte array accessed via load/store instructi
   overflow below 0 = WASM OOB trap
 ```
 
-This is the stack-first layout used by Rust and Zig: the stack occupies the bottom of the address space so that any overflow that pushes `__stack_pointer` below address 0 triggers a WASM out-of-bounds memory trap automatically. Future data sections will be placed above the stack region, starting at STACK_SIZE.
+This is the stack-first layout used by Rust and Zig: the stack occupies the bottom of the address space so that any overflow that pushes `__stack_pointer` below address 0 triggers a WASM out-of-bounds memory trap automatically. Future data sections will be placed above the stack region, starting at the stack size.
 
 **Frame allocation**:
 
@@ -269,13 +271,13 @@ that check before any byte was written. The replacement fill has no single up-fr
 check, so the ordering of its own stores has to reproduce the same property. Both the
 unrolled and looped fill shapes emit the store at frame offset 0 first — WebAssembly
 computes `base + offset` without 32-bit wraparound, so a frame pointer that wrapped past
-the end of the one-page memory fails that first store's bounds check and traps before
+the end of memory fails that first store's bounds check and traps before
 writing anything, exactly as `memory.fill` did.
 
 This is defense in depth, not the primary safeguard: analysis rules A035 (recursion) and
 A036 (stack depth) statically reject any program whose frames could exhaust the stack,
 and `compute_frame_layout` independently asserts a single frame fits within
-`STACK_SIZE`, so an accepted program never reaches the wrapping case at all.
+the configured stack size, so an accepted program never reaches the wrapping case at all.
 
 ## Implementation Details
 

@@ -731,11 +731,71 @@ assertions are the load-bearing check for remap correctness.
 ## T_app resolution discipline
 
 `hassert` obligations reference callees **symbolically**, by the exact
-name-section string codegen wrote via `FnKey::Display` (e.g. `is_prime`,
-`lib.arith.add`, `Point.new`) — the static-merge linker carries an
-`inference.hspecs` section verbatim (index-free) precisely so this
-resolution can happen once, post-link, when the final function layout is
-known.
+name-section string the emitted module carries for them — the
+static-merge linker carries an `inference.hspecs` section verbatim
+(index-free) precisely so this resolution can happen once, post-link,
+when the final function layout is known.
+
+Two producers write those strings, and an obligation may name either:
+
+- **compiled from source** — code generation's own mangled name
+  (`is_prime`, `Point.new`);
+- **linked from an external `.wasm`** — the name the merge gives the
+  body it splices in for a satisfied import,
+  `inference_fn_key::merged_name::root` (`mathlib.sum`). Code generation
+  writes that same string for a call to a bound `external fn`, resolving
+  the declaration by `DefId` rather than by name: two `external fn`s may
+  share a name across scopes and only one of them be bound (a `use … from`
+  clause binds top-level declarations only), so a name-keyed lookup would
+  hand a spec-inner declaration the top-level one's origin and name a
+  merged body the call does not reach. `A024` resolves unbound-extern
+  calls through the same scope walk and rejects such a call first, so the
+  agreement is defense in depth — except on a pipeline that skips
+  analysis, where it is the only guard. An *unbound* extern stays `P005`
+  — no module supplies a body for the downstream realization obligation
+  to reduce.
+
+An obligation about a linked external therefore resolves only against
+the **merged** module. Translating the compiler's direct output instead
+leaves the symbol naming an import, which `resolve_app_symbols` rejects
+with a message naming the missing link step.
+
+### What a linked body brings that compiled code cannot
+
+A merged body is translated by exactly the paths a compiled one is —
+there is no separate lowering for foreign functions, and the module
+record cannot tell them apart. What differs is the *instruction
+selection*: the body was chosen by whatever compiler produced the
+external, so it can spell things the Inference emitter has no way to
+emit. Nothing here relaxes the contract; the accepted surface is the
+same for both, and it is `core/wasm-linker`'s envelope — not this
+translator — that decides which foreign bodies arrive at all.
+
+The gap is worth stating because it is the only reason the accepted
+surface is more than a description of one emitter's output.
+`tests/test_data/wasmlib/rustlib.wasm`, a committed
+`wasm32-unknown-unknown` artifact, is merged into
+`tests/test_data/inf/spec_linked_toolchain.inf` by the `coqc` corpus so
+these shapes are elaborated rather than merely permitted. Through it the
+gate sees a `BI_select` standing in for a branch LLVM removed, a
+`BI_loop` carrying a result type where Inference's `while` lowering
+always emits `BT_valtype None`, `BI_cvtop` in both directions from a
+32x32 high-product whose 64-bit intermediate no narrower lowering
+computes, and a `BI_load` off a pointer walked by a loop-carried local.
+The `BI_cvtop` pair matters most of the four: the integer width
+conversions are accepted by this translator, and until that artifact
+existed every module elaborating one was hand-assembled. An obligation applying such a body — `T_app` at the
+merged function's own index — is what makes the claim about it a claim
+about the bytes that will run.
+
+The module record changes shape too, in one place. Code generation emits
+its linear memory with the minimum and the maximum equal, so a module it
+produced alone always reads `Mm {|lim_min := N%N; lim_max := Some(N%N)|}`.
+A memoryless main that adopts a Tier-B external's memory takes that
+external's limits verbatim, and a `wasm32-unknown-unknown` artifact
+declares no maximum — so `lim_max := None` is a shape only a link
+produces, and `spec_linked_toolchain.inf` is the first corpus module to
+put it in front of `coqc`.
 
 `WasmParseData::resolve_app_symbols` (`src/translator.rs`) resolves every
 symbol any obligation applies, up front, before any output is built:
@@ -761,6 +821,12 @@ symbol any obligation applies, up front, before any output is built:
    the arithmetic below. The resolved absolute index then passes through
    `remap.mod_funcs_index`, which fails closed on an omitted (spec) or
    imported target.
+5. The application's **arity** must equal the resolved function's
+   parameter count. This is the only place that can be checked: a
+   `T_app`'s arguments are a `seq term`, so an application of the wrong
+   width is still well-formed Gallina — it elaborates, the `coqc` gate
+   passes, and the obligation goes on to state something about a
+   function other than the one it names.
 
 This mirrors wasm-verifier's soundness discipline for the obligation
 language:
@@ -1088,7 +1154,7 @@ entries are matched by name, not position.
   | P002 | A construct with no assertion encoding: `loop`, `break`, a nested `unique` *block*, `**`, a string literal, an array/struct literal read in scalar term position or written at a shape outside the representable surface, or an access chain the element encoding cannot pin — one carrying more than one non-constant index, or one whose non-constant index lands on an aggregate rather than a scalar leaf. Four of these carry their own message rather than the shared no-encoding template, because the template's "this has no encoding; move the logic into a helper" is false or useless for them: `loop` (a loop's purpose in a specification is exactly what quantifying an index and constraining it says directly), an out-of-surface literal (literals encode now — the restriction is the shape, and the helper remedy dead-ends because a compound call result is P005 and a compound call argument P004: a `T_app` symbol resolves to the compiled function, whose real signature takes and returns pointers, so leaf-expanding an application would change its arity and detach the symbol from the function it names), and each of the two access-chain cases |
   | P003 | Reassignment (`Stmt::Assign`) in a specification body. A permanent rule, not a pending feature: a specification names values, not storage, so every name stands for one value throughout the claim — which is what lets the translation read a name as the same term wherever it appears. Mutation would need per-branch value versioning across quantifier scopes for no expressive gain over a fresh `let` |
   | P004 | A type with no place in a specification term — `unit`, a string, a function type — or an aggregate outside the representable surface: arrays of scalars at any rank and structs whose fields are scalars or one-dimensional scalar arrays (the executable aggregate `@` surface, bounded by analysis rules A027/A028). Two further wordings live under this code: an aggregate read *whole* where a term is required (an aggregate call argument, most often — its type is nameable, it is just not a term) and any *aggregate* parameter of an `exists`/`unique` body, whose obligation denotes against a real frame in which the parameter is one pointer local. A non-scalar, non-aggregate parameter there is unrepresentable for the first reason instead, and takes the first wording |
-  | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an external function, an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
+  | P005 | A call that cannot be represented as a `T_app`/`HA_app_ok` term: an *unbound* external function (a bound one resolves — see [T_app resolution discipline](#t_app-resolution-discipline)), an instance method, an unresolved target, a non-deterministic-bodied callee, or (in term position specifically) a non-scalar result |
   | P006 | A bare `@` outside a `let` right-hand side or a call-argument position |
   | P007 | A `forall` block nested inside an `exists`/`unique`-quantified body. Inside a `forall`/plain body the same nesting translates: the inner block binds a `Hall` logical variable per `@` and the alternation is emitted as written. A reachability body cannot: there every `@` is a hidden trailing choice parameter the judgment quantifies operationally, and a universal binder over one would need a choice-plan and lowering redesign |
   | P008 | `@` at a compound (array/struct) type outside the representable surface, or at any compound type in an `exists`/`unique` body. In a `forall`/plain body a supported-shape compound `@` quantifies one universal slot per scalar leaf instead of raising this; in a reachability body the message names the quantifier, since the identical declaration translates in a `forall` body — the obligation there is about one actual run, each of whose choices arrives as one scalar parameter, and a compound value lives in linear memory |
@@ -1120,30 +1186,70 @@ entries are matched by name, not position.
   from Inference-compiled code, so this is defense-in-depth against a
   foreign or hand-crafted `.wasm` that reintroduces one.
 
-- **Float, SIMD/vector, and conversion constructs** (`translator.rs`,
-  the three grouped operator arms plus `translate_value_type`): rejected
-  as `WasmToVError::UnsupportedFeature`. The context in "Required Rocq
+- **Float, SIMD/vector, and float-naming conversion constructs**
+  (`translator.rs`, the grouped operator arms plus
+  `translate_value_type`): rejected as
+  `WasmToVError::UnsupportedFeature`. The context in "Required Rocq
   context" is the whole vocabulary the emitted `.v` may use, and it
-  contains no `T_f32`/`T_f64`, no vector type or vector instruction, and
-  no `cvtop`/`BI_cvtop`. Emitting any of them would produce a file that
-  fails `coqc` at the consumer, so the translator refuses instead:
+  contains no `T_f32`/`T_f64` and no vector type or vector instruction.
+  Emitting any of them would produce a file that fails `coqc` at the
+  consumer, so the translator refuses instead:
 
   | Rejected | Scope |
   |---|---|
   | float instructions | all loads, stores, constants, comparisons, unops, binops |
   | vector instructions | the entire SIMD proposal, relaxed-SIMD included |
-  | conversion instructions | the whole `cvtop` block — sign-extension, saturating float-to-int, **and the integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s/u`), since the contract covers no conversion at all |
+  | float-naming conversions | `trunc`, `trunc_sat`, `convert`, `demote`, `promote` and every `reinterpret` — each names a float on one side, and the contract's `cvtop` declares only the two integer-to-integer constructors |
   | `f32`, `f64`, `v128` value types | every position: parameters, results, locals, globals, block result types |
   | unmodeled proposal families | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
 
-  Like the non-det rule above, this is unreachable from
+  The **integer-to-integer** width conversions are not rejected. They
+  emit `BI_cvtop`, whose four arguments are the target number type, the
+  `cvtop`, the source number type, and an `option sx`. Only three
+  instances are well-typed under the model's `cvtop_valid`, and the
+  emitter writes exactly those:
+
+  | WASM | Emitted |
+  |---|---|
+  | `i32.wrap_i64` | `BI_cvtop T_i32 CVO_wrap T_i64 None` |
+  | `i64.extend_i32_s` | `BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)` |
+  | `i64.extend_i32_u` | `BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)` |
+
+  Sign-extension is **not** a conversion in the contract. The five
+  `extendN_s` operators emit `BI_unop`, alongside `clz`/`ctz`/`popcnt`:
+
+  | WASM | Emitted |
+  |---|---|
+  | `i32.extend8_s` | `BI_unop T_i32 (Unop_extend 8%N)` |
+  | `i32.extend16_s` | `BI_unop T_i32 (Unop_extend 16%N)` |
+  | `i64.extend8_s` | `BI_unop T_i64 (Unop_extend 8%N)` |
+  | `i64.extend16_s` | `BI_unop T_i64 (Unop_extend 16%N)` |
+  | `i64.extend32_s` | `BI_unop T_i64 (Unop_extend 32%N)` |
+
+  `Unop_extend`'s argument is the source width in **bits**, not bytes.
+  A consumer reading these terms should know that the distinction is
+  invisible to type-checking: the model's `unop_type_agree` ignores the
+  argument, while its `app_unop` divides by eight, so `Unop_extend 1`
+  elaborates and denotes the constant zero. The emitter pins the bit
+  convention by byte comparison in `tests/src/rocq_typecheck.rs` and
+  `core/wasm-to-v/src/lib.rs`, because no `coqc` gate can.
+
+  Like the non-det rule above, the rejected set is unreachable from
   Inference-compiled code — the language has no floating-point or vector
-  types and its codegen emits no conversion — so the `coqc` gate over
-  the Inference corpus can never exercise it. It is reachable only
-  through foreign bytes: the external linking path and the public
+  types, and its codegen emits no conversion or sign-extension at all
+  (it narrows sub-`i32` values with shifts and masks). It is reachable
+  only through foreign bytes: the external linking path and the public
   `translate_bytes` API. `core/wasm-linker` refuses the same content in
   external modules, so this is the second of two layers, and on the CLI
   path the linker's diagnostic normally arrives first.
+
+  The `coqc` corpus does carry foreign bytes — a linked
+  `wasm32-unknown-unknown` artifact, see [What a linked body
+  brings](#what-a-linked-body-brings-that-compiled-code-cannot) — but
+  that changes nothing here: an external carrying any of the above is
+  refused by the linker before translation, so no corpus module can ever
+  exercise the rejected set. These arms stay covered by the translator's
+  own unit tests, which feed the bytes directly.
 
   A value-type rejection is safe at any position because the
   section-level error accumulator is checked fail-closed: a rejected

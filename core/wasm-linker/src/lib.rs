@@ -25,19 +25,41 @@
 //!
 //! ## Feasibility tiers
 //!
-//! - **Tier A** — pure functions (no memory, globals, data, tables). Merged.
+//! - **Tier A** — the closure touches no linear memory and names no table.
+//!   Merged.
 //! - **Tier B** — memory through caller-passed pointers only. Merged onto the
 //!   single shared linear memory; no address relocation needed.
-//! - **Tier C** — own static data, mutable globals, or absolute addresses.
-//!   Merging would require relocation metadata the static merge does not
-//!   consume, so it is **rejected** with
+//! - **Tier C** — the module declares a data or element segment, or the closure
+//!   names the table space. Merging would require relocation metadata the static
+//!   merge does not consume, so it is **rejected** with
 //!   [`LinkError::RequiresRelocatableBuild`] rather than producing an unsound
-//!   module.
+//!   module. A table the module merely *declares* and no body touches is inert
+//!   and is not a reason; see [`tier`].
+//!
+//! Globals are classified on use, not declaration: a closure that reads or
+//! writes one is Tier A — or Tier B if it also touches memory — and the
+//! external's globals are merged into the output above main's with its accessors
+//! remapped, an admission kept sound by address provenance tagging a
+//! global-derived value `NotParam`, so a closure that computes a memory address
+//! through a global is still rejected.
+//!
+//! That is worth reading before touching either half of it, because two
+//! safeguards in this crate exist *for* the global-touching closure and read as
+//! redundant to anyone who believes it was excluded here. The provenance rule
+//! above is one. The other is that placing an external's data segments at their
+//! original addresses stays mutually exclusive with merging globals: an
+//! external's shadow-stack region is claimed by nothing this crate parses except
+//! the initializer of a mutable global, so a disjointness proof over declared
+//! segments and memory limits cannot see it, and a merged global carries that
+//! invisible claim into the output. Both arguments are written out in full in the
+//! `tier` module documentation. Relaxing either is a soundness change, not a
+//! cleanup.
 //!
 //! ## Entry point
 //!
 //! [`link`] takes the main module bytes and the external module bytes and
-//! returns the unified module bytes.
+//! returns the unified module bytes. [`link_with_warnings`] is the same merge
+//! with the [`LinkWarning`]s it raised, for callers that report them.
 
 mod closure;
 mod merge;
@@ -48,6 +70,8 @@ mod safety;
 mod spec_funcs;
 mod tier;
 
+use std::fmt;
+
 use inf_wasmparser::WasmFeatures;
 use thiserror::Error;
 
@@ -57,13 +81,15 @@ use thiserror::Error;
 /// linear memory, re-indexing only the handful of index-bearing operators, and
 /// the paired Rocq translator (`wasm-to-v`) models exactly this machine. That is
 /// sound only for the integer **WebAssembly 1.0** core (the MVP plus
-/// `mutable-global`) and the single scalar post-MVP addition the merge models:
+/// `mutable-global`) and the two scalar post-MVP additions the merge models:
 ///
-/// - **bulk memory** (`memory.copy` / `memory.fill` over the single memory).
+/// - **bulk memory** (`memory.copy` / `memory.fill` over the single memory);
+/// - **sign-extension** (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`,
+///   `i64.extend16_s`, `i64.extend32_s`).
 ///
 /// Every other *proposal* — reference types, multi-value, tail calls, SIMD,
 /// threads/atomics, exception handling, `memory64`, multi-memory, the GC
-/// proposal, stack switching, sign-extension, and saturating float-to-int — is
+/// proposal, stack switching, and saturating float-to-int — is
 /// **off**. An external using any of them is rejected up front at the link gate
 /// with a feature-named [`LinkError::UnsupportedWasmFeature`], rather than late
 /// and indirectly when a specific unmodeled opcode happens to reach the merge.
@@ -95,19 +121,28 @@ use thiserror::Error;
 /// it reaches the merge.
 /// `STACK_SWITCHING` is likewise off (and defaults off in the fork).
 ///
-/// Sign-extension and saturating float-to-int are *not* in this set even though
-/// they are scalar integer-adjacent proposals: the Rocq translator does not
-/// model them (it has no lowering for `i32.extend8_s` or `i32.trunc_sat_f32_s`),
-/// and Inference codegen emits neither, so admitting them at the gate would let a
-/// third-party external carry an opcode the `-v` proof path cannot render. An
-/// external using either is rejected at this gate with the validator's
+/// `SIGN_EXTENSION` is on because the Rocq translator lowers all five of its
+/// opcodes (as `BI_unop t (Unop_extend n)` — the proof model treats them as
+/// unops, not conversions). Inference codegen still emits none of them, but a
+/// real toolchain emits them constantly, and without the flag the validator
+/// refuses such an external at this gate *before* the allow-list in [`safety`]
+/// ever sees the body. The three integer-to-integer width conversions
+/// (`i32.wrap_i64`, `i64.extend_i32_s/u`) need no flag: they are MVP
+/// instructions, gated only by the allow-list.
+///
+/// `SATURATING_FLOAT_TO_INT` stays off. Its operands are floats, the translator
+/// declares no float number type, and admitting it here would recreate the
+/// allow-listed-but-unlowerable divergence — an external accepted at the gate
+/// and at the merge, then failing on the `-v` proof path — that this gate exists
+/// to close. An external using it is rejected here with the validator's
 /// feature-named diagnostic.
 ///
 /// This is the linker's explicit, enforced supported-version contract: a feature
 /// added to the parser later cannot quietly become linkable.
 pub const SUPPORTED_WASM_FEATURES: WasmFeatures = WasmFeatures::GC_TYPES
     .union(WasmFeatures::MUTABLE_GLOBAL)
-    .union(WasmFeatures::BULK_MEMORY);
+    .union(WasmFeatures::BULK_MEMORY)
+    .union(WasmFeatures::SIGN_EXTENSION);
 
 /// Why a static merge could not be produced.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -119,7 +154,7 @@ pub enum LinkError {
     /// An external module is well-formed WebAssembly but uses a feature outside
     /// the supported [`SUPPORTED_WASM_FEATURES`] subset (e.g. any floating-point
     /// type or instruction, reference types, SIMD, atomics, exceptions,
-    /// `memory64`, multi-memory, multi-value, tail calls, sign-extension, or
+    /// `memory64`, multi-memory, multi-value, tail calls, or
     /// saturating float-to-int). The merge cannot soundly fold such a module onto
     /// the single shared memory the output models — and the Rocq translator does
     /// not model these constructs — so it is rejected at the link gate with the
@@ -139,9 +174,19 @@ pub enum LinkError {
     #[error("merged function transitively imports `{module}::{field}`, which has no body to merge")]
     TransitiveHostImport { module: String, field: String },
 
-    /// The external function requires relocation support (Tier C): it carries
-    /// its own static data, globals, or table/element entries, so merging it
-    /// into the shared memory would need relocation metadata.
+    /// The external function requires relocation support (Tier C): its module
+    /// declares a data or element segment, or its closure names the table space,
+    /// so merging it into the shared memory would need relocation metadata. A
+    /// table the module merely *declares* and no body touches is not a reason.
+    ///
+    /// Globals are classified on use, not declaration: a closure that reads or
+    /// writes one is Tier A — or Tier B if it also touches memory — and the
+    /// external's globals are merged into the output above main's with its
+    /// accessors remapped, an admission kept sound by address provenance tagging
+    /// a global-derived value `NotParam`, so a closure that computes a memory
+    /// address through a global is still rejected. Such a rejection arrives
+    /// through the provenance clause of [`crate::tier`] and never names a global
+    /// in `reasons`.
     #[error(
         "external function `{field}` requires a relocatable build: {}",
         .reasons.join("; ")
@@ -177,6 +222,98 @@ pub enum LinkError {
     IncompatibleMemory { field: String, reason: String },
 }
 
+/// Something a *successful* link owes the user: the merge produced a valid
+/// module, and a guarantee a reader would reasonably expect it to carry does not
+/// extend as far as the output does.
+///
+/// A warning is never a defect the linker found in the merged program. It states
+/// where the merge's own proofs stop, at a point where the emitted artifact
+/// makes that limit reachable.
+///
+/// Every variant so far concerns a **merged external**, and a wrapper in the
+/// `inference` crate leans on that: its no-externals fast path returns an empty
+/// warning list without calling the linker at all, which stays equivalent only
+/// while no variant can arise from the main module or the reconciled memory
+/// alone. A variant that can must be raised on that path too, or it is silently
+/// dropped for every program that links no external.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkWarning {
+    /// One or more externals were admitted at Tier B — their memory accesses
+    /// are proven to *derive from* the caller's pointers — into an output
+    /// reserving more than one 64 KiB page.
+    ///
+    /// Tier B carries no sizes, so it cannot show an access *stays within* the
+    /// buffer the caller granted (see [`provenance`]). With a single page, an
+    /// address past that buffer is usually past the memory too and traps; that
+    /// backstop is incidental, and a larger memory removes it.
+    ///
+    /// `fields` names the satisfied import fields, which is how the user knows
+    /// these functions.
+    TierBInMultiPageMemory { fields: Vec<String>, pages: u64 },
+}
+
+impl fmt::Display for LinkWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinkWarning::TierBInMultiPageMemory { fields, pages } => {
+                let names = fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (subject, verb) = if fields.len() == 1 {
+                    ("external", "addresses")
+                } else {
+                    ("externals", "address")
+                };
+                write!(
+                    f,
+                    "merged {subject} {names} {verb} linear memory through caller-supplied \
+                     pointers: the merge proves every address derives from a parameter of the \
+                     call, not that it stays within the buffer that parameter points into — the \
+                     analysis carries no sizes. The reconciled memory reserves {pages} pages, so \
+                     an address past the caller's buffer lands in valid memory, possibly a region \
+                     another merged module owns, where a single page would usually have trapped. \
+                     This states the limit of what the merge proves, not a fault found in the \
+                     merged code; issue #420 tracks the containment analysis that would close it."
+                )
+            }
+        }
+    }
+}
+
+/// A completed merge: the unified module bytes and every [`LinkWarning`] the
+/// merge raised.
+///
+/// Named fields rather than a tuple because the two halves are not
+/// interchangeable at a call site — `out.warnings` says what it is, `out.1` does
+/// not — and because the warning list is the half a caller may legitimately
+/// ignore, which positional access would hide.
+#[derive(Debug, Clone)]
+pub struct LinkOutput {
+    /// The unified, self-contained module.
+    pub wasm: Vec<u8>,
+    /// Warnings raised during the merge. Empty is the common case.
+    pub warnings: Vec<LinkWarning>,
+}
+
+/// Merges the satisfiable imports of `main_wasm` from `externals`, returning the
+/// unified module together with every warning the merge raised.
+///
+/// Identical to [`link`] in every respect but the return type; see [`link`] for
+/// the resolution rules, the fail-closed contract, and the error conditions.
+/// Use this form wherever the warnings can reach the user.
+///
+/// # Errors
+///
+/// The same conditions as [`link`].
+pub fn link_with_warnings(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+) -> Result<LinkOutput, LinkError> {
+    merge::link(main_wasm, externals)
+}
+
 /// Merges the satisfiable imports of `main_wasm` from `externals`, returning a
 /// single self-contained module with those imports removed.
 ///
@@ -200,6 +337,12 @@ pub enum LinkError {
 /// self-defending against a malformed or adversarial external even when the
 /// caller did not pre-validate it.
 ///
+/// This is the **warning-discarding** form of [`link_with_warnings`], kept for
+/// callers with nowhere to report a warning to — the test suite, whose subject
+/// is the merged bytes, and embedders that only want the artifact. Anything that
+/// speaks to a user should call [`link_with_warnings`] instead: a discarded
+/// [`LinkWarning`] is a claim about the artifact the user never hears.
+///
 /// # Errors
 ///
 /// Returns a [`LinkError`] if any module fails to parse or an external fails
@@ -208,7 +351,7 @@ pub enum LinkError {
 /// external is bound under the same `(module, field)` pair an import names
 /// ([`LinkError::AmbiguousImport`]).
 pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> Result<Vec<u8>, LinkError> {
-    merge::link(main_wasm, externals)
+    link_with_warnings(main_wasm, externals).map(|out| out.wasm)
 }
 
 /// Validates one external `.wasm` against the linker's supported-version

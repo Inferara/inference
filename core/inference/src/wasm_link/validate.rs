@@ -14,11 +14,24 @@
 //!
 //! ## Signature lowering
 //!
-//! Inference primitive types lower to WASM value types exactly as `wasm-codegen`
-//! does: `bool`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, arrays, and struct/enum
-//! pointers become `i32`; `i64`/`u64` become `i64`; `unit` produces no value.
-//! Keeping this in lock-step with codegen is what makes validation meaningful —
-//! a mismatch here is a real mismatch at link time.
+//! Inference primitive types lower to WASM value types as `wasm-codegen` does:
+//! `bool`, `i8`/`u8`, `i16`/`u16`, `i32`/`u32`, arrays, and struct/enum pointers
+//! become `i32`; `i64`/`u64` become `i64`; `unit` produces no value. Keeping this
+//! in lock-step with codegen is what makes validation meaningful — a mismatch
+//! here is a real mismatch at link time.
+//!
+//! The two lowerings are not yet identical, and what keeps the difference
+//! harmless is a rejection elsewhere rather than agreement here. Codegen lowers a
+//! `::`-qualified type that resolves to a struct or enum to an `i32` pointer,
+//! where this module has no arm for one and reports it unsupported; and codegen
+//! errors on a `Custom` name it cannot resolve, where this module lowers any
+//! `Custom` to `i32` on sight. Neither divergence is reachable today, because a
+//! `::`-qualified type on an `external fn` is rejected by the type checker before
+//! validation runs, and an unknown type name is rejected outright. That standoff
+//! is what [#425](https://github.com/Inferara/inference/issues/425) tracks: the
+//! rejection and these two arms have to move together, since lifting the
+//! rejection on its own would admit a declaration this module refuses and codegen
+//! accepts.
 
 use inf_wasmparser::{
     CompositeInnerType, Export, ExternalKind, FuncType, Parser, Payload, RecGroup, ValType,
@@ -71,7 +84,7 @@ pub struct DeclaredSignature {
 pub enum LowerSignatureError {
     /// A parameter was declared `unit`, which has no WASM value representation.
     UnitParameter,
-    /// A type form that codegen does not lower to a scalar value type
+    /// A type form this lowering does not map to a scalar value type
     /// (e.g. a generic or function type) appeared in the signature.
     UnsupportedType { rendered: String },
 }
@@ -93,7 +106,9 @@ impl std::error::Error for LowerSignatureError {}
 
 /// Lowers an Inference type to its WASM value type, mirroring
 /// `wasm-codegen`'s `val_type_from_type_id`. `unit` lowers to `None`
-/// (no value); struct/enum and qualified names lower to an `i32` pointer.
+/// (no value); a struct or enum name lowers to an `i32` pointer. The mirror is
+/// not yet exact; see the module documentation for where it parts company and
+/// why that is currently unobservable.
 fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>, LowerSignatureError> {
     match &arena[ty].kind {
         TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
@@ -110,9 +125,12 @@ fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>,
         // Struct / enum values are i32 pointers into linear memory, matching codegen.
         | TypeNode::Custom(_) => Ok(Some(WasmValType::I32)),
         TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(WasmValType::I64)),
-        // `Generic`, `Function`, and qualified-name forms are not lowered to a
-        // scalar value type by codegen (it `todo!()`s on them); reject them here
-        // with a clear error rather than guessing a representation.
+        // What remains: `Generic` and `Function`, which codegen reaches only as a
+        // `todo!()`; `QualifiedName`, the dead AST variant codegen also rejects;
+        // and `Qualified`, which codegen *does* lower, to an `i32` pointer, once
+        // the path resolves to a struct or enum. Refusing the last of these is a
+        // divergence the type checker keeps out of reach — see the module
+        // documentation. Erroring beats guessing a representation.
         other => Err(LowerSignatureError::UnsupportedType {
             rendered: format!("{other:?}"),
         }),

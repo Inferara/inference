@@ -153,8 +153,10 @@ use clap::Parser;
 use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
 };
-use inference::{analyze, link, parse_project, type_check, wasm_to_v};
-use inference_wasm_codegen::EmitFeatures;
+use inference::{
+    AnalysisOptions, analyze_with_options, link_with_warnings, parse_project, type_check, wasm_to_v,
+};
+use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -565,6 +567,22 @@ fn run() {
         }
     };
 
+    // Resolve the memory layout here for the same reason, and because both the
+    // analysis phase and code generation need it: A036 measures call chains
+    // against this stack size and the emitter lays every frame out in it, so the
+    // two must be handed one value rather than each reaching for a default.
+    let layout = match MemoryLayout::resolve(
+        args.memory_pages,
+        args.stack_size,
+        MemoryLayoutSource::Flag,
+    ) {
+        Ok(layout) => layout,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+
     let output_path = args
         .out_dir
         .clone()
@@ -631,7 +649,12 @@ fn run() {
                 process::exit(1);
             }
             Ok(tctx) => {
-                match analyze(&tctx) {
+                // A036's budget is the stack this build will actually emit, not
+                // the default one. Analysis runs ahead of code generation on
+                // every `infc` path that reaches it, which is what keeps a
+                // program whose frame exceeds the stack a diagnostic here rather
+                // than a panic in frame layout later.
+                match analyze_with_options(&tctx, AnalysisOptions { stack_budget_bytes: layout.stack_size() }) {
                     Err(e) => {
                         eprintln!("{e}");
                         process::exit(1);
@@ -688,6 +711,7 @@ fn run() {
                 mode,
                 opt_level,
                 features: emit_features,
+                layout,
             },
         ) {
             Ok(o) => o,
@@ -707,13 +731,20 @@ fn run() {
             .iter()
             .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
             .collect();
-        let wasm_owned = match link(codegen_output.wasm(), &external_bytes) {
-            Ok(bytes) => bytes,
+        // The warning-carrying entry point, not the discarding `link`: the merge
+        // reports where its own guarantee stops short of what a reader would
+        // assume, and a diagnostic nobody prints is one nobody acts on.
+        let linked = match link_with_warnings(codegen_output.wasm(), &external_bytes) {
+            Ok(linked) => linked,
             Err(e) => {
                 eprintln!("Linking external modules failed: {e}");
                 process::exit(1);
             }
         };
+        for warning in &linked.warnings {
+            eprintln!("warning: {warning}");
+        }
+        let wasm_owned = linked.wasm;
         if !external_modules.is_empty() {
             println!("Linked {} external module(s)", external_modules.len());
         }
@@ -799,6 +830,7 @@ fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference_wasm_codegen::MemoryLayoutError;
     use std::path::{Path, PathBuf};
 
     fn make_args(parse: bool, analyze: bool, codegen: bool) -> Cli {
@@ -814,6 +846,8 @@ mod tests {
             wasm_lib_dirs: Vec::new(),
             wasm_deps: Vec::new(),
             wasm_features: Vec::new(),
+            memory_pages: None,
+            stack_size: None,
             commit_hash: false,
             abi_version: false,
         }
@@ -1082,5 +1116,104 @@ mod tests {
         let cli = Cli::try_parse_from(["infc", "x.inf", "--wasm-features", "bulk-memory,simd"])
             .expect("a comma list parses into entries");
         assert_eq!(cli.wasm_features, ["bulk-memory", "simd"]);
+    }
+
+    // Memory layout flags ---
+
+    /// The layout the flags on `argv` resolve to, or the rejection.
+    fn layout_from(argv: &[&str]) -> Result<MemoryLayout, MemoryLayoutError> {
+        let mut full = vec!["infc", "x.inf"];
+        full.extend_from_slice(argv);
+        let cli = Cli::try_parse_from(full).expect("the flags under test parse");
+        MemoryLayout::resolve(cli.memory_pages, cli.stack_size, MemoryLayoutSource::Flag)
+    }
+
+    #[test]
+    fn no_memory_flags_yields_the_default_layout() {
+        assert_eq!(layout_from(&[]), Ok(MemoryLayout::default()));
+    }
+
+    /// Each flag is independently settable, and the unset one keeps its default.
+    /// Without this a user who wants a larger memory would have to restate the
+    /// stack size — and would silently get a different stack if they got it wrong.
+    #[test]
+    fn each_memory_flag_can_be_given_alone() {
+        let pages_only = layout_from(&["--memory-pages", "4"]).expect("four pages is admissible");
+        assert_eq!(pages_only.pages(), 4);
+        assert_eq!(
+            pages_only.stack_size(),
+            MemoryLayout::default().stack_size(),
+            "an unset --stack-size must keep the default stack"
+        );
+
+        let stack_only =
+            layout_from(&["--stack-size", "32768"]).expect("half a page of stack is admissible");
+        assert_eq!(
+            stack_only.pages(),
+            MemoryLayout::default().pages(),
+            "an unset --memory-pages must keep the default memory"
+        );
+        assert_eq!(stack_only.stack_size(), 32_768);
+    }
+
+    #[test]
+    fn both_memory_flags_together_reach_the_layout() {
+        let layout =
+            layout_from(&["--memory-pages", "2", "--stack-size", "32768"]).expect("admissible");
+        assert_eq!(layout.pages(), 2);
+        assert_eq!(layout.stack_size(), 32_768);
+    }
+
+    /// A rejection names the flag spelling rather than the manifest one, which is
+    /// the only thing the surface changes — the verdict itself is shared.
+    #[test]
+    fn an_unusable_layout_is_rejected_naming_the_flags() {
+        let err = layout_from(&["--memory-pages", "0"]).expect_err("a zero-page memory is refused");
+        let rendered = err.to_string();
+        assert!(rendered.contains("`--memory-pages`"), "{rendered}");
+        assert!(rendered.contains("at least one 64 KiB page"), "{rendered}");
+
+        let err = layout_from(&["--stack-size", "1000"])
+            .expect_err("a stack off the frame-alignment grid is refused");
+        let rendered = err.to_string();
+        assert!(rendered.contains("`--stack-size`"), "{rendered}");
+        assert!(
+            rendered.contains("multiple of the 16-byte frame alignment"),
+            "{rendered}"
+        );
+    }
+
+    /// A flag value legal on its own is still judged against the layout it
+    /// completes to, so the fill-then-check order survives the flag surface.
+    #[test]
+    fn a_stack_larger_than_the_default_memory_is_rejected_alone() {
+        let err = layout_from(&["--stack-size", "131072"])
+            .expect_err("a 128 KiB stack does not fit the default single page");
+        assert!(
+            err.reason.contains("does not fit in the linear memory"),
+            "{err}"
+        );
+        assert!(
+            layout_from(&["--memory-pages", "4", "--stack-size", "131072"]).is_ok(),
+            "the same stack is fine once --memory-pages makes room for it"
+        );
+    }
+
+    /// A non-numeric or negative value is refused by the parser rather than
+    /// reaching the resolver, so the two flags cannot carry a nonsense value.
+    #[test]
+    fn memory_flags_reject_a_non_numeric_value() {
+        for argv in [
+            ["--memory-pages", "many"],
+            ["--stack-size", "-16"],
+            ["--memory-pages", "1.5"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["infc", "x.inf", argv[0], argv[1]]).is_err(),
+                "`{} {}` must not parse",
+                argv[0],
+                argv[1]
+            );
+        }
     }
 }

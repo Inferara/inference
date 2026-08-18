@@ -151,9 +151,9 @@ classifies each closure:
 
 | Tier | What the closure may touch | Merged? | Admission condition |
 |------|---------------------------|---------|---------------------|
-| A | No memory, globals, data segments, or tables — pure arithmetic | Yes | None beyond the operator allow-list |
-| B | Linear memory **only through caller-supplied pointers**; no own globals, data segments, or tables | Yes | Provenance proof: every memory address is parameter-derived (see below) |
-| C | Own static data segments, defined globals, or table/element entries | No | Rejected with `LinkError::RequiresRelocatableBuild` |
+| A | No memory, no global or table access, no data segments — pure arithmetic | Yes | None beyond the operator allow-list |
+| B | Linear memory **only through caller-supplied pointers**; no own data segments, no global or table access | Yes | Provenance proof: every memory address is parameter-derived (see below) |
+| C | Own static data segments, global access, or table/element use | No | Rejected with `LinkError::RequiresRelocatableBuild` |
 
 ### What Each Tier May Touch
 
@@ -163,11 +163,43 @@ The classification logic inspects the parsed module structure and the closure's
 | Signal | Forces Tier C |
 |--------|---------------|
 | `module.data_count > 0` or closure uses `memory.init` / `data.drop` | owns static data segments |
-| `!module.globals.is_empty()` or closure uses `global.get` / `global.set` | defines or accesses module globals |
-| `!module.tables.is_empty()` or `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+
+Reading or writing a module global is **not** a Tier-C signal: the closure's
+globals are merged into the output alongside the main module's, with every
+`global.get` / `global.set` remapped onto the merged index space. A global used
+to *address* memory is still rejected, because the address it produces is not
+parameter-derived.
 
 If no Tier-C signals are present, the closure is Tier B when any body accesses
 linear memory (load, store, copy, fill, size, or grow), and Tier A otherwise.
+
+Globals and table *use* are gated on **use**; data and element segments on
+**declaration**. A global no body reads or writes, and a table with no element
+segment that no instruction names, are inert — and they are exactly what real
+toolchains emit unconditionally (lld puts a `__stack_pointer` global into every
+`wasm32-unknown-unknown` artifact, and an empty `(table 1 1 funcref)` into every
+`std` one), so rejecting on their declaration would exclude every such artifact.
+
+The two declaration-gated signals rest on different arguments. An *active* data
+segment writes memory at instantiation whether or not any instruction names it,
+so an unreferenced one still changes program behavior — a correctness argument.
+An *element* segment is rejected as conservatism: dropping one is unobservable,
+since the merged output declares no table for it to initialize, but it marks a
+module built around indirect dispatch and admitting it would silently discard a
+construct the author wrote.
+
+Dropping an admitted external's globals and tables is sound because
+`ClosureEffects` is closure-scoped: a closure admitted with no global or table
+effect contains no operator naming either index space. That matters most for
+globals — the merge re-emits main's global section, so a leaked `global.get 0`
+would rebind to main's first global and, the types agreeing, still pass
+post-merge validation. A leaked *table* operator is fail-safe by comparison: no
+table section is emitted, so validation rejects it as an unknown table.
+
+Clearing the tier gate is not the same as linking. A stock artifact also declares
+a multi-page memory that the merge will not reconcile against an Inference main's
+fixed one-page `(memory 1 1)`; see the memory reconciliation rules below.
 
 A Tier-A function carries no shared-memory surface at all: it reads its parameters,
 does arithmetic, and returns. Merge cost is a body copy, a type dedup, and an
@@ -326,9 +358,14 @@ float instruction. The linker enforces this at two gates:
    naming the exact mnemonic (e.g. `floating-point instruction 'f32.add' is not
    supported`).
 
-Sign-extension (`i32.extend8_s`, `i64.extend32_s`, etc.) and saturating
-float-to-int (`i32.trunc_sat_f32_s`, etc.) are also excluded: the Rocq
-translator has no lowering for either, and Inference codegen emits neither.
+Saturating float-to-int (`i32.trunc_sat_f32_s`, etc.) is also excluded: its
+operands are floats, and the Rocq translator declares no float number type.
+
+Sign-extension (`i32.extend8_s`, `i64.extend32_s`, etc.) is *not* excluded,
+though Inference codegen still emits none of it. The Rocq translator lowers all
+five opcodes to `BI_unop t (Unop_extend n)` — the proof model classifies
+sign-extension as a unop, beside `clz`/`ctz`/`popcnt`, not as a conversion — so
+an external compiled by a real toolchain can carry them.
 
 ## Name Preservation
 
@@ -362,8 +399,8 @@ the module prefix removes the common case rather than every possible one.
 | `LinkError::UnsatisfiedImport { field }` | No external module tagged with the right logical module name exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists each signal (e.g. "defines or initializes its own static data segments") |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a sign-extension op, a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, data/element segments) |
-| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, sign-extension, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (with the exact mnemonic), a proof-only non-det or uzumaki opcode in an external body, a tail call (`return_call` / `return_call_indirect`), a segment-indexed table op (`table.init` / `elem.drop` / `table.copy`), a float or `v128` value type in a merged signature or local, multi-memory access, or a main module section the merge cannot preserve (start function, table section, non-function imports, data/element segments) |
+| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature beyond the supported subset (floats, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls); `details` carries the validator's feature-named diagnostic |
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |
 | `LinkError::InvalidMergedModule(msg)` | The post-merge structural validator rejected the merged output; this is a guard against allow-list gaps — it converts a potential silent miscompile into a clean diagnostic |
@@ -376,7 +413,9 @@ in `src/lib.rs`):
 - Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons,
   loads/stores, and the three integer width conversions (`i32.wrap_i64`,
   `i64.extend_i32_s/u`).
-- Mutable globals and bulk memory (`memory.copy`/`memory.fill`).
+- Mutable globals, bulk memory (`memory.copy`/`memory.fill`), and sign-extension
+  (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`,
+  `i64.extend32_s`).
 
 Everything else is rejected at the feature gate or the operator allow-list before
 any body is copied.

@@ -310,6 +310,52 @@ mod multi_file_golden_codegen_tests {
         }
     }
 
+    /// FIXME: a cross-file `T_app` symbol does not resolve against the module
+    /// the compiler emits, so no multi-file program whose specification calls a
+    /// function in another file can be translated to Rocq at all.
+    ///
+    /// The obligation writes `FnKey::Display` (`lib.checks.lib_value`), while
+    /// the name section records the item's bare name (`lib_value`) — the two
+    /// producers agree only for the entry file, whose `module_path` is empty.
+    /// `resolve_app_symbols` looks the symbol up verbatim and fails closed, so
+    /// the failure is loud rather than a wrong resolution.
+    ///
+    /// This asserts the defect rather than the behavior anyone wants, so that
+    /// it runs: an ignored aspirational test states the goal but pins nothing,
+    /// and would not notice the failure mode moving. **When this starts
+    /// failing, the defect is fixed — invert it.** Fixing it means changing
+    /// what code generation writes into the name section, which moves every
+    /// multi-file `.wasm` golden and needs a collision rule for the qualified
+    /// namespace: a change of its own, not a fix in passing.
+    ///
+    /// A *linked external* is the one cross-file symbol that does resolve,
+    /// because the linker writes its merged name into the same name section the
+    /// obligation reads.
+    #[test]
+    fn cross_file_obligation_symbols_do_not_resolve_yet() {
+        let wasm = proof_wasm_codegen_project(module_path!(), "proof_specs");
+        let error = inference::wasm_to_v(
+            "proof_specs",
+            &wasm,
+            &inference::FxHashMap::default(),
+            &inference::HSpecMap::default(),
+        )
+        .expect_err(
+            "cross-file obligation symbols now resolve — the defect this pins is \
+             fixed; invert this test",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("obligation applies function symbol `lib.checks.lib_value`")
+                && error
+                    .to_string()
+                    .contains("no defined function in the module carries"),
+            "the defect moved: it is still unresolvable, but for a different \
+             reason than the name-section mismatch this pins — {error}"
+        );
+    }
+
     /// Proof-mode byte golden for the `exists`-kind reachability lowering.
     /// The spec function's WASM type carries its hidden trailing choice
     /// parameters (i32, i64, i32 after the declared i32), which changes the

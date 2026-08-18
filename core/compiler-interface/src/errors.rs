@@ -1,16 +1,15 @@
-//! Consolidated error type for the compiler-interface crate.
+//! Consolidated error types for the compiler-interface crate.
 //!
-//! Every rejection of a requested WebAssembly feature set is one of these
-//! variants, and the `#[error(...)]` renderings are the single source of the
-//! wording: `infs` (validating `Inference.toml`) and `infc` (validating
-//! `--wasm-features`) both surface a variant's `Display`, so the same mistake
-//! reads identically whichever front end catches it. Each variant carries the
-//! offending entry and the surface it was written on, so the message can name
-//! the exact thing the user has to edit.
+//! Every rejection of a build setting a user selected is one of these, and the
+//! `#[error(...)]` renderings are the single source of the wording: `infs`
+//! (validating `Inference.toml`) and `infc` (validating its flags) both surface
+//! a `Display`, so the same mistake reads identically whichever front end
+//! catches it. Each error carries the surface the setting was written on, so the
+//! message can name the exact thing the user has to edit.
 
 use thiserror::Error;
 
-use crate::{WasmFeatureName, WasmFeatureSource, supported_features_listing};
+use crate::{MemoryLayoutSource, WasmFeatureName, WasmFeatureSource, supported_features_listing};
 
 /// A requested WebAssembly feature set that cannot be honored.
 ///
@@ -66,6 +65,25 @@ pub enum WasmFeatureError {
         entry: String,
         surface: WasmFeatureSource,
     },
+}
+
+/// A requested linear memory that cannot be honored.
+///
+/// A struct rather than an enum because there is exactly one way a layout
+/// request fails — the two numbers do not describe a memory a module can
+/// declare — and the invariant that was broken is already spelled out in
+/// `reason`. Splitting that into variants would duplicate the rules in a second
+/// place without telling a caller anything the message does not.
+///
+/// `surface` is deliberately not named `source`: `thiserror` reserves that name
+/// for a wrapped causal error, which this is not.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("Invalid {}: {reason}", surface.label())]
+pub struct MemoryLayoutError {
+    /// The violated invariant, phrased as an explanation of the numbers the
+    /// build asked for and naming the offending one.
+    pub reason: String,
+    pub surface: MemoryLayoutSource,
 }
 
 /// The extra sentence an unknown name earns when it is a supported name with

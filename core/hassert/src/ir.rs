@@ -65,14 +65,22 @@ pub enum HConst {
     I64(i64),
 }
 
-/// A symbolic reference to a module-defined function: its WASM name-section
-/// symbol (what codegen writes via `FnKey::Display`, e.g. `is_prime`,
-/// `lib.arith.add`, `Point.new`).
+/// A symbolic reference to a function defined in the *emitted* module: the WASM
+/// name-section symbol that function carries there.
+///
+/// Two producers write those names, and a reference may name either:
+///
+/// * code generation, for a function compiled from Inference source (the
+///   mangled name it records alongside the function index — `is_prime`,
+///   `Point.new`);
+/// * the static-merge linker, for the body of a linked `external fn`, whose
+///   merged name is `inference_fn_key::merged_name::root`.
 ///
 /// This crate treats the string as opaque and non-empty; it never resolves it.
 /// `wasm-to-v` maps the symbol to a `mod_funcs` (defined-function) index after
 /// linking. The reference is guaranteed by the producer never to name an
-/// import.
+/// import: an `external fn` is a symbol only once its body has been merged in,
+/// at which point it is defined like any other.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct HFnRef(pub String);
 

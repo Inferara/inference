@@ -142,13 +142,15 @@ Whether an external function can be merged depends on what its transitive closur
 touches. The tier model ships the common cases first and gates the hard case
 behind a clear error rather than attempting an unsound merge.
 
-### Tier A — Pure Functions
+### Tier A — No Linear-Memory Access
 
-No memory accesses, no globals, no data segments, no tables. Examples: `sum`,
-`sub`, `abs`, any function that only reads its parameters and does arithmetic.
+No memory accesses, no table access, no data segments. The closure may read and
+write its own module's globals. Examples: `sum`, `sub`, `abs`, any function that
+only reads its parameters and does arithmetic, and a function that keeps a
+counter or a mode flag in a global.
 
-Merge cost: copy the body, dedup the type, rewrite `call` targets. No address
-relocation needed.
+Merge cost: copy the body, dedup the type, rewrite `call` targets and global
+indices. No address relocation needed.
 
 ```wat
 ;; Tier A: pure arithmetic — trivially mergeable
@@ -161,8 +163,8 @@ relocation needed.
 ### Tier B — Memory Through Caller-Passed Pointers
 
 The closure loads or stores through addresses the caller supplies, but defines no
-static data of its own, no mutable globals, and no table or element entries.
-Examples: `sort(ptr, len)`, `memcpy(dst, src, n)`.
+static data of its own and names no table or element entry. Examples:
+`sort(ptr, len)`, `memcpy(dst, src, n)`.
 
 Merge cost: same as Tier A. The function shares the single linear memory the main
 module owns; no address relocation is required because all addresses are
@@ -176,14 +178,64 @@ caller-supplied at runtime.
   i32.store)
 ```
 
-### Tier C — Own Static Data, Globals, or Tables
+#### What Tier B guarantees — and what it does not
 
-The closure carries its own baked-in data segments (lookup tables, string
-constants), defines or accesses module globals (per-module mutable state), or
-uses table and element entries for indirect calls. Merging these without
-relocation metadata would silently produce an incorrect module because the
-absolute addresses and per-module state would alias unpredictably with the main
-module.
+Tier B proves **derivation**, not **containment**. Every address is shown to
+flow from a caller-supplied parameter; nothing shows it stays inside the region
+the caller intended to grant, and nothing can, because the analysis carries no
+sizes. All of these are admitted by design:
+
+| Admitted form | Where it actually lands |
+|---|---|
+| `p + 1048576` | 1 MiB past the caller's pointer |
+| `p + q` (two parameters, no constant) | anywhere the caller's two values sum to |
+| `p + (q << 2)` (a scaled index) | equally unbounded, in strides |
+| `ptr = p; loop { store ptr; ptr += 4 }` | off the end of any buffer |
+
+`Param + Param` is a deliberate, test-pinned admission: the caller supplied both
+operands, so under the derivation property their sum is the caller's business.
+It is also why bounding the *constant* displacement would buy nothing — the
+cheapest way to address arbitrarily far from `p` uses no constant at all.
+
+`p + p` is **not** admitted, though an earlier revision admitted it. Two copies
+of one parameter sum to `2p`, and thirty-two chained doublings reach
+`2^32 * p == 0` — a fixed absolute address built from `i32.add` alone. What
+separates it from `p + q` is not magnitude but *coefficient parity*, which is why
+the lattice tracks that and rejects a sum whose two operands may share a
+parameter.
+
+**In practice this means an admitted external can address anywhere in the shared
+linear memory.** What limits the damage today is not this analysis but a single
+declared page: an out-of-region address is usually out of bounds and traps. That
+is an accidental backstop, not a guarantee, and it weakens as the declared memory
+grows beyond what the program uses. Issue #420 tracks closing the gap (a
+numeric/interval domain plus declared pointee sizes for `external fn`
+parameters); #333 would supply part of the same channel.
+
+Because the memory is now configurable, a link that admits a Tier-B external into
+a reconciled memory of more than one page raises a
+`LinkWarning::TierBInMultiPageMemory` naming those externals — see
+[Entry Point](#entry-point). The condition is the *reconciled* page count, not a
+raised manifest setting: a main configured to two pages and a memoryless main
+adopting a seventeen-page external memory have lost the same backstop.
+
+### Tier C — Own Static Data, Table Use, or an Address the Caller Did Not Supply
+
+Any of three signals puts a candidate here: the module carries its own baked-in
+data segments (lookup tables, string constants) or an element segment that
+initializes a table; the closure names the table space (indirect calls,
+`table.*`, `ref.func`); or a memory access reaches an address the provenance
+analysis cannot trace back to a parameter of the exported function. The first two
+would silently produce an incorrect module, because the absolute addresses and
+dispatch tables would alias unpredictably with the main module. The third is the
+same hazard arriving through a body rather than a section: an address the caller
+never supplied is an address in whatever the merged module's memory happens to
+hold at that offset.
+
+Global access is **not** among them. The merge carries the whole global section
+of every external whose closure touches one into the output, re-indexed above the
+main module's; see [Merged globals](#merged-globals) for what that is and is not
+sound for.
 
 The linker rejects Tier-C inputs with `LinkError::RequiresRelocatableBuild` and
 a list of specific reasons. Build the external module with a
@@ -196,17 +248,136 @@ error: external function `lookup` requires a relocatable build:
 
 ### Classification Logic
 
-The `tier` module collects "Tier-C reasons" by inspecting the parsed module
-structure and the closure's `ClosureEffects`:
+`tier::classify` decides in two steps. First `tier_c_reasons` inspects the parsed
+module structure and the closure's `ClosureEffects`, accumulating every signal
+that applies so one error names all of them:
 
 | Signal | Tier-C reason |
 |--------|---------------|
-| `module.data_count > 0` or closure uses `memory.init` / `data.drop` | own static data segments |
-| `!module.globals.is_empty()` or closure uses `global.get` / `global.set` | defines or accesses module globals |
-| `!module.tables.is_empty()` or `module.element_count > 0` or closure uses `call_indirect` / `table.*` / `ref.func` / `elem.drop` | uses a table or element segment |
+| `module.data_count > 0` or closure uses `memory.init` / `data.drop` | defines or initializes its own static data segments |
+| closure uses `call_indirect` / `table.*` / `ref.func` | performs an indirect call or otherwise names the table space |
+| `module.element_count > 0` | declares an element segment |
 
-If no Tier-C reasons are collected, the closure is Tier B when any body accesses
-memory (load/store/copy/fill/size/grow), and Tier A otherwise.
+If that list is empty and no body accesses memory (load/store/copy/fill/size/grow),
+the closure is Tier A and the decision is over. Otherwise
+`provenance::verify_param_addressing` runs, and it is the second half of the same
+decision rather than a check applied to a settled tier: it either admits the
+closure as Tier B or produces the fourth Tier-C reason, *accesses memory at an
+address not derived from the exported function's parameters*. A rejection there is
+reported as `RequiresRelocatableBuild` exactly like the three above, and is always
+alone — the analysis stops at the first address it cannot account for.
+
+Global use contributes no reason and decides no tier.
+
+#### Declaration versus use
+
+Table use is gated on **use**; data and element segments on **declaration**. The
+asymmetry is deliberate.
+
+A global no closure body reads or writes, and a table with no element segment
+that no instruction names, are inert — nothing observes them, so dropping them
+from the merged output changes nothing. This matters because real toolchain
+output is full of exactly that boilerplate: lld puts a `__stack_pointer` mutable
+global into every `wasm32-unknown-unknown` artifact, and an empty
+`(table 1 1 funcref)` into every `std` one. Rejecting on the declaration would
+exclude every such artifact over state a leaf integer function never touches.
+
+That claim is checked rather than asserted. `tests/test_data/wasmlib/rustlib.wasm`
+is a committed `cargo build --release --target wasm32-unknown-unknown` artifact
+carrying exactly that `__stack_pointer` global, and
+`tests/src/codegen/wasm/extern_link_toolchain.rs` merges it into `infc`-produced
+mains and executes the result. Its `README.md` records what makes a stock
+`#![no_std]` crate fit — chiefly that `std` is what brings the data segments and
+the function table the envelope actually rejects, and that optimization is
+load-bearing: at `opt-level = 0` every function gets a stack frame and addresses
+memory through `__stack_pointer`, which provenance rejects even for a function
+that touches no memory once optimized.
+
+The two declaration-gated signals rest on different arguments and should not be
+collapsed into one.
+
+An *active* **data segment** writes linear memory at instantiation whether or not
+any instruction names it, so an unreferenced one still changes what the merged
+program observes. That is a correctness argument. A *passive* segment would be
+inert, but the parser retains only `data_count` and discards each segment's kind,
+so the two cannot be distinguished here and both are rejected.
+
+An **element segment** is rejected as *conservatism*, not on the data-segment
+argument. Dropping one is in fact unobservable: the merged output declares no
+table for it to initialize, so nothing can read what it wrote. It stays rejected
+because an element segment marks a module built around indirect dispatch, and
+admitting one would silently discard a construct the author wrote. Relaxing it is
+a deliberate decision, not an oversight.
+
+Dropping an admitted external's inert globals and its tables is sound because
+`ClosureEffects` is **closure-scoped**: it is accumulated over the bodies
+reachable from the root export, so a closure admitted with no global or table
+effect contains no operator naming either index space.
+
+Both halves are fail-safe if that were ever violated, for different reasons. A
+closure whose globals were dropped as untouched has an **empty** global remap, so
+a leaked `global.get` finds no mapping and surfaces a clean `LinkError`. For
+**tables** no table section is emitted at all, so a leaked table operator names a
+table the output does not have and validation rejects it as unknown.
+
+### Merged globals
+
+The output global space is the main module's globals at indices `0..`, followed
+by the whole global section of each external whose merged closure reads or writes
+one. Main's indices never shift, so its bodies and its global exports need no
+rewriting. Externals are appended in slice order, so the layout depends only on
+the input.
+
+Structurally identical globals are **not** deduplicated the way signatures are. A
+type is a description — two modules naming the same shape mean the same thing by
+it — but a global is a variable. Two externals that each declare
+`(global (mut i32) (i32.const 0))` have a counter apiece, and collapsing them
+would splice two modules' independent state into one cell, where each module's
+writes silently become the other's reads.
+
+**A globals lift is sound only for globals used as pure scalar state.** The merge
+re-indexes a global correctly and relocates its *value* not at all, and in real
+toolchain output that value is often an address: `__stack_pointer` and
+`__heap_base` hold positions in the layout the external was compiled for. Two
+things keep the admitted set narrow. A closure that touches memory is Tier B, so
+address provenance runs and treats a value read from a global as not
+parameter-derived — which rejects the shadow-stack idiom outright. And the main
+module cannot name an external's globals at all, since its own indices are
+unchanged and a main that *imports* a global is rejected up front.
+
+That protection is conditional: provenance runs only for a memory-touching
+closure. An external that merely *returns* `global.get $__stack_pointer` to a
+caller which then dereferences it is Tier A, admitted, and hands over an address
+that means something else after the merge. This is not opened by merging globals
+— nothing analyzes a scalar an external returns, and the same function written as
+`i32.const 1048576` links today with no global anywhere — but merging globals
+makes the shape common rather than exotic.
+
+For why this capability and a future one that places external data segments at
+their original addresses are mutually exclusive, see the module documentation of
+`src/tier.rs`.
+
+### What this does not buy
+
+Clearing the tier gate is necessary for linking stock toolchain output, not
+sufficient. A `wasm32-unknown-unknown` artifact also declares a multi-page linear
+memory, and reconciliation never relaxes the anchor module's declared bound — so
+against an Inference main, which emits a fixed one-page `(memory 1 1)`, such an
+artifact now passes tier classification and fails at memory reconciliation
+instead:
+
+```text
+error: cannot reconcile linear memory for `sum`: the reconciled minimum
+       (17 pages) exceeds the declared maximum (1 pages) of the memory it is
+       merged into; the kept memory bound is not relaxed. Give the main module
+       a memory large enough to hold the external: `pages` in the `[memory]`
+       table of `Inference.toml`, or `infc --memory-pages <N>`
+```
+
+This is reachable only for an external whose closure actually addresses memory.
+A pure leaf function does not contribute its module's declared memory at all, so
+a `wasm32-unknown-unknown` artifact whose merged closure only computes links
+against a single-page main with main's own memory kept unchanged.
 
 ## Entry Point
 
@@ -224,6 +395,16 @@ pairs — each external is tagged with the logical module name codegen emitted f
 it. It returns the unified module bytes, or a `LinkError` if any module fails to
 parse, a merged closure reaches a transitive host import, or a closure is Tier C.
 
+`link_with_warnings` is the same merge, returning a `LinkOutput` that keeps the
+`LinkWarning`s the merge raised alongside the bytes. `link` is its
+warning-discarding form. A warning is never a defect found in the merged
+program: it states where the merge's own proofs stop, at a point where the
+emitted artifact makes that limit reachable — today, a Tier-B external merged
+into a memory of more than one page, where an address past the caller's buffer
+lands in valid memory instead of trapping (see
+[What Tier B guarantees — and what it does not](#what-tier-b-guarantees--and-what-it-does-not),
+and issue #420).
+
 Every import in the main module must be satisfiable by one of the supplied
 external modules. The match is by **both** the logical module name and the export
 field name: `find_export` (in `src/merge.rs`) only considers externals whose
@@ -239,29 +420,27 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
-| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a sign-extension op, an integer width conversion (`i32.wrap_i64`/`i64.extend_i32_s/u`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
-| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, sign-extension, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
+| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
 
 ## Supported Subset
 
 The linker accepts only the following WebAssembly feature set (see `SUPPORTED_WASM_FEATURES` in `src/lib.rs`):
 
-- Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons, and loads/stores. No conversion instruction of any kind, integer width conversions included.
-- Mutable globals and bulk memory (`memory.copy`/`memory.fill`).
+- Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons, and loads/stores, plus the integer-to-integer width conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`). No conversion naming a float on either side.
+- Mutable globals, bulk memory (`memory.copy`/`memory.fill`), and sign-extension (`i32.extend8_s`, …).
 
 Rejected at the feature gate (external modules using any of these produce `UnsupportedWasmFeature`):
 
 - **Floats** — `f32`/`f64` value types in any signature, local, or global; any float instruction. The Inference language has no `f32`/`f64` types and the Rocq translator models none.
-- **Sign-extension** (`i32.extend8_s`, `i64.extend32_s`, etc.) — the Rocq translator has no lowering.
-- **Saturating float-to-int** (`i32.trunc_sat_f32_s`, etc.) — the Rocq translator has no lowering.
+- **Saturating float-to-int** (`i32.trunc_sat_f32_s`, etc.) — its operands are floats, and the Rocq translator has no lowering.
 - Reference types, SIMD, atomics/threads, exceptions, `memory64`, multi-memory, multi-value, GC, tail calls.
 
 The safety allow-list (`src/safety.rs`) provides an independent per-opcode backstop. It additionally rejects, as `UnsupportedConstruct`:
 
 - Tail calls (`return_call`/`return_call_indirect`) — the Rocq translator has no lowering.
 - Segment-indexed table ops (`table.init`/`elem.drop`/`table.copy`) — carry element segments the merge cannot relocate, and the Rocq translator has no lowering.
-- Integer width conversions (`i32.wrap_i64`/`i64.extend_i32_s/u`) — the Rocq translator declares no `cvtop` family, so a conversion has no lowering even between two integer types. These are ordinary MVP instructions, so the feature gate cannot reject them; the allow-list is the only place they are refused.
-- Float instructions that reach the allow-list from the main-module re-encode path (which bypasses the feature gate), diagnosed with the exact mnemonic.
+- Float instructions that reach the allow-list from the main-module re-encode path (which bypasses the feature gate), diagnosed with the exact mnemonic. This includes every conversion naming a float — `trunc`, `trunc_sat`, `convert`, `demote`, `promote`, `reinterpret` — because the Rocq translator declares no float number type for such a term to mention.
 - Verification-only constructs (`forall`/`exists`/`assume`/`unique` blocks, `i32.uzumaki`/`i64.uzumaki`) in an external body — they have no executable semantics.
 
 ## Current Limitations
@@ -305,6 +484,12 @@ the `wat` crate and assert on the linked module structure via `inf-wasmparser`:
 cargo test -p inference-wasm-linker
 ```
 
+Fixtures written here are inputs the envelope was designed around, so they cannot
+answer whether a *foreign* compiler's output fits. That question is settled in the
+`inference-tests` crate, against a committed `wasm32-unknown-unknown` artifact:
+`extern_link_toolchain.rs` links and executes its merged bodies, and
+`rocq_typecheck.rs` compiles their Rocq translation with `coqc`.
+
 Test coverage includes:
 
 - **Tier A** — two pure functions (`sum`, `sub`) merged from one external
@@ -315,7 +500,7 @@ Test coverage includes:
 - **Dead-code exclusion** — an unreferenced `unused` function is not merged
 - **Tier B** — `store_at` writes to a caller address; merge succeeds; memory export survives
 - **Tier C (data segment)** — `lookup` using `memory.init` is rejected with a data-segment reason
-- **Tier C (global)** — `counter` accessing a module global is rejected with a global reason
+- **Merged globals** — a global-reading external links and its body names the *external's* remapped global, not main's; two externals' structurally identical globals stay distinct; a global-bearing external merges onto a globalless main; a global used to address memory is still rejected by provenance
 - **Tier C (indirect call)** — `call_indirect` use is rejected with a table/element reason
 - **Multiple externals** — `sum` from one library and `sub` from another; both satisfied
 - **Unsatisfied import** — missing `sub` fails with `UnsatisfiedImport`

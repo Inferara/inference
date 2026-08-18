@@ -1223,6 +1223,508 @@ fn ext6_copy_param_extent_plus_const_accepted() {
 }
 
 // ===========================================================================
+// 8j — the scaled-index idiom. `base + index * elem_size` (and its shift form)
+// is what every LLVM-derived array access looks like, and an unconditionally
+// `NotParam` multiply rejected all of it. Scaling an affine form by a constant
+// keeps it affine; the constant's PARITY decides whether the result can still
+// address memory. Odd keeps the bijection, even (`p*0`) does not.
+// ===========================================================================
+
+#[test]
+fn sc1_base_plus_shifted_index_accepted() {
+    // `p0 + (p1 << 2)`: the shift makes p1's coefficient even, the base keeps an
+    // odd one, and odd + even is odd. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32 i32) (result i32)
+             local.get 0 local.get 1 i32.const 2 i32.shl i32.add i32.load)
+           (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn sc2_base_plus_scaled_index_accepted() {
+    // The multiply spelling of sc1: `p0 + p1 * 4`. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32 i32) (result i32)
+             local.get 0 local.get 1 i32.const 4 i32.mul i32.add i32.load)
+           (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn sc3_odd_multiplier_keeps_the_bijection() {
+    // `p * 3` is still a bijection modulo 2^32 (3 is a unit), so it addresses
+    // memory in its own right. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 3 i32.mul i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn sc4_scaled_value_alone_is_not_an_address() {
+    // `p << 2` on its own has only even coefficients, and an even coefficient
+    // may be zero. Without an odd-coefficient base it cannot address. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 2 i32.shl i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn sc5_multiply_by_zero_still_rejected() {
+    // The cancelling form the parity rule must keep closed: `p * 0 == 0`, so
+    // `p * 0 + 4096` is the absolute address 4096. Zero is even, so the product
+    // is `Scaled` and never an address. REJECT. (n2 asserts the same shape; this
+    // one re-asserts it inside the family that made `mul` a modeled operator.)
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32)
+             local.get 0 i32.const 0 i32.mul i32.const 4096 i32.add
+             local.get 1 i32.store) (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn sc6_even_multiplier_via_local_still_rejected() {
+    // `p * 8` parked in a local and used as an address: the demotion has to
+    // survive the round trip through the local. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32) (result i32) (local i32)
+             local.get 0 i32.const 8 i32.mul local.set 1
+             local.get 1 i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn sc7_multiply_of_two_params_rejected() {
+    // Neither operand is constant, so the product is not an affine form at all
+    // (`p * q` is quadratic) and nothing about it is provable. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32) (result i32)
+             local.get 0 local.get 1 i32.mul i32.load) (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn sc8_shift_by_variable_count_rejected() {
+    // A non-constant shift count decides nothing about the resulting parity —
+    // it may be zero, leaving the value untouched. Fail closed. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32) (result i32)
+             local.get 0 local.get 1 i32.shl i32.load) (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+// ===========================================================================
+// 8j' — WebAssembly reduces a shift count modulo the operand width, so a count
+// of 32 on an i32 shifts by ZERO. Tagging that `Scaled` would assert "every
+// coefficient is even" about a value whose coefficients are untouched, and a
+// later `Param + Scaled` would re-promote a pair that cancels. These pin the
+// modulo.
+// ===========================================================================
+
+#[test]
+fn mod1_i32_shift_by_width_is_the_identity() {
+    // `p << 32` IS `p`, so `(p * -1) + (p << 32) == 0`. If the shift were taken
+    // for a real scaling the sum would look like odd + even and re-promote to a
+    // valid address; taking the modulo makes it odd + odd on the same parameter,
+    // which the disjointness rule rejects. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32)
+             local.get 0 i32.const -1 i32.mul
+             local.get 0 i32.const 32 i32.shl
+             i32.add
+             i32.const 4096 i32.add
+             local.get 1 i32.store) (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn mod2_i32_shift_by_width_still_addresses() {
+    // The positive half of the modulo: `p << 32 == p` remains a perfectly good
+    // address, so taking the modulo must not demote it either. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 32 i32.shl i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn mod3_the_modulo_is_width_specific() {
+    // Asserted against the transfer function directly. Every linear-memory
+    // address in wasm32 is an i32, and the only i64-to-i32 conversions are unary
+    // ops that erase provenance outright, so an i64 shift can never reach an
+    // address through a WAT body — a module-level test of the i64 width would
+    // reject for the conversion and prove nothing about the modulo.
+    let p = Prov::Param(Linear::of_param(0));
+    let shift = |count: i64, bits: u32| shl_prov(p, Prov::Const(Some(count)), bits);
+
+    // At the i32 width, 32 reduces to zero and leaves the form untouched.
+    assert_eq!(shift(0, 32), p);
+    assert_eq!(shift(32, 32), p);
+    assert!(matches!(shift(1, 32), Prov::Scaled(_)));
+
+    // The same count of 32 is a REAL shift at the i64 width; only 64 is the
+    // identity there. A width-blind modulo would get one of these two wrong.
+    assert!(matches!(shift(32, 64), Prov::Scaled(_)));
+    assert_eq!(shift(64, 64), p);
+
+    // The count is read as unsigned: -1 is 31 modulo 32 (a real shift), while
+    // -32 is 0 modulo 32 (the identity).
+    assert!(matches!(shift(-1, 32), Prov::Scaled(_)));
+    assert_eq!(shift(-32, 32), p);
+}
+
+#[test]
+fn mod4_shift_by_zero_is_the_identity() {
+    // The degenerate count: `p << 0` is `p` and still addresses. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 0 i32.shl i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+// ===========================================================================
+// 8k — coefficient parity under repeated addition. `p + p` is `2p`, and
+// thirty-two chained doublings reach `2^32 * p == 0` — a fixed absolute address
+// built from `i32.add` alone, in one function, with no calls. An `add` may
+// union two `Param` operands only when their odd supports are disjoint.
+// ===========================================================================
+
+#[test]
+fn dbl1_param_plus_itself_rejected() {
+    // The one-step form. The two odd coefficients land on the same parameter and
+    // sum to an even one, which may be zero after enough doublings. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 local.get 0 i32.add i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn dbl2_thirty_two_doublings_reach_a_fixed_address() {
+    // The payload: `t = p; 32 x (t = t + t)` leaves `t == 2^32 * p == 0` for
+    // every caller pointer, so the store lands on the absolute address 4096.
+    // REJECT.
+    assert!(!accepts(&doubling_to_zero_wat(), 1));
+}
+
+#[test]
+fn dbl3_param_plus_shifted_self_accepted() {
+    // Disjointness is about parity, not about naming two different parameters:
+    // `p + (p << 1)` is `3p`, coefficient 3, still a bijection. The `Scaled`
+    // addend carries no odd coefficient to collide with. ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 local.get 0 i32.const 1 i32.shl i32.add i32.load)
+           (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+// ===========================================================================
+// 8l — correlated parameters. An odd coefficient proves the address is a
+// bijection in one of THIS function's parameters, which is worth something only
+// if the host can move that parameter. Two odd coefficients can cancel whenever
+// a caller correlates the two parameters — and the closure root is not exempt,
+// because a recursive call re-enters it with arguments the host never chose.
+// ===========================================================================
+
+#[test]
+fn cor1_recursive_root_with_correlated_arguments_rejected() {
+    // The counterexample in full: `r(a, b)` stores at `a + b + 4096` and calls
+    // itself as `r(a, -a)`, with `-a` built from `i32.add` alone. Both arguments
+    // are caller-derived, so the trusted-parameter fixpoint keeps both of `r`'s
+    // parameters — and the recursive invocation still stores at the absolute
+    // address 4096 for every host input. REJECT.
+    let m = module(&correlated_recursive_root_wat(NegateWith::Doubling));
+    assert!(
+        verify_param_addressing(&m, &[0], 0, "f").is_err(),
+        "a root re-entered with correlated arguments must not be admitted"
+    );
+}
+
+#[test]
+fn cor2_recursive_root_with_multiplied_negation_rejected() {
+    // The same gadget with `-a` spelled `a * -1`. An odd multiplier keeps the
+    // bijection, so the argument is live and the fixpoint trusts both parameters
+    // exactly as before; only the correlation rule stands between this module
+    // and a fabricated address. REJECT.
+    let m = module(&correlated_recursive_root_wat(NegateWith::Multiply));
+    assert!(
+        verify_param_addressing(&m, &[0], 0, "f").is_err(),
+        "an odd-multiplier negation must not launder a correlated argument"
+    );
+}
+
+#[test]
+fn cor3_same_root_without_the_recursive_call_accepted() {
+    // The control that makes cor1/cor2 mean something. Delete the self-call and
+    // the root is entered only by the host, whose two arguments are independent
+    // coordinates; `a + b + 4096` is then the caller's business (the `a6`
+    // admission). ACCEPT — so the rejection above is about correlation, not
+    // about the store.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.add i32.const 4096 i32.add
+            i32.const 0 i32.store)
+          (export "r" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0], 0, "r").is_ok());
+}
+
+#[test]
+fn cor4_two_odd_parameters_in_a_called_helper_rejected() {
+    // A helper is correlated by construction: its caller chooses both arguments.
+    // Summing two of its parameters is exactly what a correlating caller can
+    // cancel, so an address doing so is rejected even though both parameters are
+    // trusted. REJECT.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 call 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.add i32.const 0 i32.store)
+          (export "root" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0, 1], 0, "root").is_err());
+}
+
+#[test]
+fn cor5_scaled_index_in_a_called_helper_accepted() {
+    // The point of scoping the rule to ODD coefficients rather than to the whole
+    // support: the LLVM idiom must keep working in the factored-out helper, which
+    // is where real toolchain output puts it. `p0 + (p1 << 2)` carries one odd
+    // coefficient however the caller correlates the two. ACCEPT.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 call 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.const 2 i32.shl i32.add
+            i32.const 0 i32.store)
+          (export "root" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0, 1], 0, "root").is_ok());
+}
+
+#[test]
+fn cor6_select_of_two_parameters_in_a_helper_accepted() {
+    // A control-flow merge of two pointers still resolves to exactly one of them
+    // at runtime, so exactly one odd coefficient is live whichever arm ran. The
+    // single-odd knowledge survives the join, and the helper stays linkable —
+    // the `a11`/`sl2` shape, moved into a correlated function. ACCEPT.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 call 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.const 1 select
+            i32.const 0 i32.store)
+          (export "root" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0, 1], 0, "root").is_ok());
+}
+
+// ===========================================================================
+// 8m — the correlation rule is an ADDRESS rule. A bulk-memory extent bounds the
+// region touched rather than naming it, and a helper that legitimately adds two
+// caller-supplied lengths must keep linking. See "Address masks and extent masks
+// are checked differently".
+// ===========================================================================
+
+#[test]
+fn ext7_two_parameter_extent_in_a_helper_accepted() {
+    // `memory.fill(dst, v, n + m)` inside a called helper: the destination rests
+    // on one odd coefficient, the extent on two. Holding the extent to the
+    // address rule would reject this real `(base, len, len)` shape while closing
+    // nothing a store loop cannot already do. ACCEPT.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 local.get 1 local.get 2 call 1)
+          (func (;1;) (type 0) (param i32 i32 i32)
+            local.get 0
+            i32.const 0
+            local.get 1 local.get 2 i32.add
+            memory.fill)
+          (export "root" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0, 1], 0, "root").is_ok());
+}
+
+#[test]
+fn ext8_two_parameter_address_in_the_same_helper_rejected() {
+    // The other half of the asymmetry, on the same module shape: move the
+    // two-parameter sum from the extent to the DESTINATION and the helper is
+    // rejected. Without this, ext7 could be passing because the rule was dropped
+    // altogether rather than scoped. REJECT.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 local.get 1 local.get 2 call 1)
+          (func (;1;) (type 0) (param i32 i32 i32)
+            local.get 0 local.get 1 i32.add
+            i32.const 0
+            local.get 2
+            memory.fill)
+          (export "root" (func 0)))
+        "#,
+    );
+    assert!(verify_param_addressing(&m, &[0, 1], 0, "root").is_err());
+}
+
+#[test]
+fn ext9_scaled_extent_rejected() {
+    // A documented over-rejection: `len * 4` carries no odd coefficient, so it
+    // cannot satisfy the (unchanged) extent rule that the caller must supply the
+    // bound. `p * 0` would be a constant extent, and the lattice cannot tell the
+    // two apart. REJECT.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32 i32)
+             local.get 0 local.get 1 local.get 2 i32.const 4 i32.mul memory.fill)
+           (export "f" (func 0)))"#,
+        3,
+    ));
+}
+
+#[test]
+fn fold1_constant_operands_of_a_multiply_are_folded() {
+    // `16 * 2` must reach the shift as the value 32, not as "some constant":
+    // only a folded value can be reduced modulo the width, and only that makes
+    // this shift the identity on `p`. A multiply that passed its constant
+    // through instead of folding would leave the count unmodeled and reject.
+    // ACCEPT.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 16 i32.const 2 i32.mul i32.shl i32.load)
+           (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn cap1_fixpoint_round_cap_covers_the_lattice_height() {
+    // The cap has to exceed the tallest descent a slot can make, or a loop that
+    // has not finished settling would be cut short. Each slot walks at most
+    // `2p + 2` steps, and they can descend one at a time.
+    assert_eq!(super::fixpoint_round_cap(0, 0), 2);
+    assert_eq!(super::fixpoint_round_cap(1, 1), 6);
+    assert_eq!(super::fixpoint_round_cap(3, 2), 20);
+
+    // Parameters past the mask's range never enter a mask, so they add no
+    // height: 64 and 4096 parameters yield the same per-slot bound.
+    assert_eq!(
+        super::fixpoint_round_cap(2, 64),
+        super::fixpoint_round_cap(2, 4096)
+    );
+
+    // The resource ceiling clamps the bound rather than the bound growing
+    // without limit; every round re-walks the whole loop body.
+    assert_eq!(
+        super::fixpoint_round_cap(usize::MAX, 64),
+        super::MAX_FIXPOINT_ROUNDS
+    );
+}
+
+/// A body that drives one parameter's coefficient to `2^32` with `i32.add`
+/// alone: `t = p`, then thirty-two `t = t + t`. The result is `0` for every
+/// caller pointer, so the store lands on the absolute address 4096.
+pub(super) fn doubling_to_zero_wat() -> String {
+    let mut wat = String::from(
+        "(module (memory (export \"mem\") 1) \
+         (func (export \"f\") (param i32) (local i32) local.get 0 local.set 1 ",
+    );
+    for _ in 0..32 {
+        wat.push_str("local.get 1 local.get 1 i32.add local.set 1 ");
+    }
+    wat.push_str("local.get 1 i32.const 4096 i32.add i32.const 170 i32.store8))");
+    wat
+}
+
+/// How the correlated-recursion gadget builds `-a` from `a`.
+pub(super) enum NegateWith {
+    /// `a * (2^32 - 1)`, accumulated from thirty-one doublings — `i32.add` only,
+    /// so it needs no modeled multiply to be classified caller-derived.
+    Doubling,
+    /// `a * -1`, a single odd multiplier.
+    Multiply,
+}
+
+/// The root `r(a, b, depth)` that stores at `a + b + 4096` and, when `depth` is
+/// non-zero, calls itself as `r(a, -a, 0)`. The recursive invocation stores at
+/// the absolute address 4096 whatever the host passes.
+pub(super) fn correlated_recursive_root_wat(negate: NegateWith) -> String {
+    let mut wat = String::from(
+        r#"(module
+             (memory (export "mem") 1)
+             (type (;0;) (func (param i32 i32 i32)))
+             (func (export "f") (type 0) (param i32 i32 i32) (local i32 i32)
+               local.get 0 local.get 1 i32.add i32.const 4096 i32.add
+               i32.const 170 i32.store8
+               local.get 2
+               (if (then
+                 local.get 0
+        "#,
+    );
+    match negate {
+        NegateWith::Doubling => {
+            // acc = t = a; repeat: t += t; acc += t  =>  acc = a*(2^32 - 1) = -a.
+            wat.push_str("local.get 0 local.set 3 local.get 0 local.set 4 ");
+            for _ in 0..31 {
+                wat.push_str(
+                    "local.get 3 local.get 3 i32.add local.set 3 \
+                     local.get 4 local.get 3 i32.add local.set 4 ",
+                );
+            }
+            wat.push_str("local.get 4 ");
+        }
+        NegateWith::Multiply => wat.push_str("local.get 0 i32.const -1 i32.mul "),
+    }
+    wat.push_str(
+        r#"i32.const 0
+                 call 0))))"#,
+    );
+    wat
+}
+
+// ===========================================================================
 // 8g — select-laundered & nested-block edge cases
 // ===========================================================================
 

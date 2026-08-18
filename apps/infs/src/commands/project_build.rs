@@ -52,7 +52,7 @@ use std::process::{Command, Stdio};
 use crate::commands::build::{BuildMode, format_wasm_dep_arg};
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
-use crate::project::manifest::MANIFEST_FILE_NAME;
+use crate::project::manifest::{MANIFEST_FILE_NAME, MemoryConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
     COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, WasmFeatureName, render_feature_list,
@@ -127,6 +127,7 @@ use inference_compiler_interface::{
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - the manifest requests `wasm-features` the resolved `infc` cannot honor
+/// - the manifest declares a `[memory]` table the resolved `infc` cannot honor
 /// - a `[wasm-dependencies]` key is not a well-formed logical module name
 /// - a resolved `[wasm-dependencies]` path is not valid UTF-8
 /// - lib dirs were passed and the current working directory cannot be determined
@@ -192,13 +193,10 @@ pub(crate) fn run_project_build(
             .arg(format_wasm_dep_arg(&name, &path)?);
     }
 
+    let manifest_path = ctx.root.join(MANIFEST_FILE_NAME);
     let features = ctx.manifest.build.resolved_wasm_features()?;
-    forward_wasm_features(
-        &mut cmd,
-        compat,
-        &features,
-        Some(&ctx.root.join(MANIFEST_FILE_NAME)),
-    )?;
+    forward_wasm_features(&mut cmd, compat, &features, Some(&manifest_path))?;
+    forward_memory_layout(&mut cmd, compat, &ctx.manifest.memory, Some(&manifest_path))?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -264,6 +262,23 @@ impl CompilerCompat {
         self.supports_abi_minor(2)
     }
 
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--memory-pages` / `--stack-size` flags, which landed together at ABI
+    /// minor 3.
+    ///
+    /// One predicate covers both flags because they are one capability: a layout
+    /// is the pair of numbers, they shipped in the same minor, and no request
+    /// forwards one without the gate having cleared the other. Splitting them
+    /// would name the same minor twice with nothing to distinguish the two.
+    ///
+    /// The conservative reading is the same as for `--wasm-features`: an `infc`
+    /// that predates the flags cannot honor a layout request, and refusing to
+    /// build beats emitting a module whose memory is not the one the manifest
+    /// asked for.
+    pub fn supports_memory_layout(self) -> bool {
+        self.supports_abi_minor(3)
+    }
+
     /// Whether the resolved `infc` is known to have the additive feature
     /// introduced at `minor`: either it is the same build (`commit_matched`, the
     /// strongest signal) or it advertises at least that minor within the
@@ -325,6 +340,71 @@ pub(crate) fn forward_wasm_features(
     let list = render_feature_list(features);
     println!("wasm-features: {list}");
     cmd.arg("--wasm-features").arg(list);
+    Ok(())
+}
+
+/// Appends `--memory-pages` / `--stack-size` to `cmd` for the keys the project
+/// actually declared, after confirming the resolved `infc` can honor them, and
+/// echoes the resolved layout to stdout.
+///
+/// Every path that spawns `infc` on behalf of a project routes through here, for
+/// the same reason [`forward_wasm_features`] exists once: a project must get the
+/// same memory whether it was built, run, or built from a bare source path.
+///
+/// Only the declared keys are forwarded. Sending the resolved layout instead
+/// would be simpler and wrong: a project with no `[memory]` table would forward
+/// the defaults, which turns every build into a layout request and refuses to
+/// build against an `infc` that the project never needed anything from. What is
+/// forwarded is therefore the request, not its resolution — and since `infc`
+/// fills an omitted flag from the same default, the layout it resolves is the one
+/// echoed here.
+///
+/// The declared-nothing check lives inside rather than at the call sites so no
+/// caller can reach the ABI gate on behalf of a project that asked for nothing.
+///
+/// `manifest_path` names the file the remediation tells the user to edit, which
+/// matters as soon as a walk was involved: single-file mode may have found a
+/// manifest several directories up. `None` can only accompany an empty request —
+/// a memory can only have been requested by some manifest — and the fallback
+/// keeps the message well-formed regardless.
+///
+/// # Errors
+///
+/// Returns the layout diagnostic when the declared keys do not describe a usable
+/// memory, or a remediation-bearing error when they do and the resolved `infc`
+/// predates the flags. Neither flag is ever emitted blind.
+pub(crate) fn forward_memory_layout(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    memory: &MemoryConfig,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    if memory.is_default() {
+        return Ok(());
+    }
+    let layout = memory.resolved_layout()?;
+    if !compat.supports_memory_layout() {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "the resolved infc does not support `--memory-pages` / `--stack-size` \
+             (requires infc ABI ≥ 1.3); update the toolchain or remove the \
+             `[memory]` table from {manifest}."
+        );
+    }
+    println!(
+        "memory: {} page(s), {}-byte stack",
+        layout.pages(),
+        layout.stack_size()
+    );
+    if let Some(pages) = memory.pages {
+        cmd.arg("--memory-pages").arg(pages.to_string());
+    }
+    if let Some(stack_size) = memory.stack_size {
+        cmd.arg("--stack-size").arg(stack_size.to_string());
+    }
     Ok(())
 }
 
@@ -775,6 +855,214 @@ mod project_tests {
             args_of(&cmd).is_empty(),
             "a refused request must leave no flag on the command"
         );
+    }
+
+    // Memory layout forwarding ---
+
+    #[test]
+    fn supports_memory_layout_capability_matrix() {
+        // Commit match alone is sufficient (ABI not even probed).
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_memory_layout(),
+            "a same-build infc supports every flag this infs knows"
+        );
+
+        // Same major, minor >= 3 → supported.
+        for minor in [3, 9] {
+            assert!(
+                CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_memory_layout(),
+                "minor {minor} must support the memory flags"
+            );
+        }
+
+        // The flags landed at minor 3, so 0..=2 are unsupported. Minor 2 is the
+        // interesting one: the capabilities must not be conflated.
+        for minor in [0, 1, 2] {
+            assert!(
+                !CompilerCompat {
+                    commit_matched: false,
+                    abi: Some((COMPILER_ABI_MAJOR, minor)),
+                }
+                .supports_memory_layout(),
+                "minor {minor} predates the memory flags"
+            );
+        }
+        let minor_two = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 2)),
+        };
+        assert!(
+            minor_two.supports_wasm_features() && minor_two.supports_out_dir(),
+            "minor 2 still supports the older flags; only the newer pair is gated out"
+        );
+
+        // Different major → not supported even at a high minor.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 9)),
+            }
+            .supports_memory_layout(),
+            "a foreign major is incompatible regardless of its minor"
+        );
+
+        // Unknown ABI → not supported.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            }
+            .supports_memory_layout(),
+            "an infc that cannot report its ABI must not be sent the flags"
+        );
+    }
+
+    /// A project that declared no `[memory]` table forwards nothing, and so never
+    /// reaches the ABI gate. This is what keeps every existing project buildable
+    /// against an older `infc`: without it, adding the table to the schema would
+    /// have turned every build into a layout request.
+    #[test]
+    fn forward_memory_layout_appends_nothing_when_nothing_was_declared() {
+        let mut cmd = Command::new("infc");
+        let predates_the_flags = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 0)),
+        };
+        forward_memory_layout(&mut cmd, predates_the_flags, &MemoryConfig::default(), None)
+            .expect("an undeclared memory asks nothing of the compiler");
+        assert!(
+            args_of(&cmd).is_empty(),
+            "an undeclared memory must not put a flag on the command"
+        );
+    }
+
+    /// Only the declared keys are forwarded. Sending the resolved layout would
+    /// send both flags always, which is the same mistake as forwarding defaults
+    /// for a project that declared nothing — one step smaller.
+    #[test]
+    fn forward_memory_layout_appends_only_the_declared_keys() {
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            same_build,
+            &MemoryConfig {
+                pages: Some(4),
+                stack_size: None,
+            },
+            None,
+        )
+        .expect("a same-build infc supports the flags");
+        assert_eq!(args_of(&cmd), ["--memory-pages", "4"]);
+
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            same_build,
+            &MemoryConfig {
+                pages: None,
+                stack_size: Some(32_768),
+            },
+            None,
+        )
+        .expect("a same-build infc supports the flags");
+        assert_eq!(args_of(&cmd), ["--stack-size", "32768"]);
+
+        let mut cmd = Command::new("infc");
+        forward_memory_layout(
+            &mut cmd,
+            same_build,
+            &MemoryConfig {
+                pages: Some(2),
+                stack_size: Some(32_768),
+            },
+            None,
+        )
+        .expect("a same-build infc supports the flags");
+        assert_eq!(
+            args_of(&cmd),
+            ["--memory-pages", "2", "--stack-size", "32768"]
+        );
+    }
+
+    /// The gate refuses rather than forwards, and leaves the command untouched so
+    /// a caller that mishandled the error could not still spawn with the flags.
+    #[test]
+    fn forward_memory_layout_refuses_an_infc_that_predates_the_flags() {
+        let mut cmd = Command::new("infc");
+        let minor_two = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 2)),
+        };
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        let err = forward_memory_layout(
+            &mut cmd,
+            minor_two,
+            &MemoryConfig {
+                pages: Some(2),
+                stack_size: None,
+            },
+            Some(&manifest),
+        )
+        .expect_err("ABI minor 2 predates the memory flags");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--memory-pages") && msg.contains("--stack-size") && msg.contains("1.3"),
+            "the error must name both flags and the required ABI, got: {msg}"
+        );
+        assert!(
+            msg.contains("update the toolchain") && msg.contains("[memory]"),
+            "the error must offer both remediations, got: {msg}"
+        );
+        assert!(
+            msg.contains(&manifest.display().to_string()),
+            "the error must name which manifest to edit — single-file mode may \
+             have found one several directories up; got: {msg}"
+        );
+        assert!(
+            args_of(&cmd).is_empty(),
+            "a refused request must leave no flag on the command"
+        );
+    }
+
+    /// An unusable memory is refused before the ABI gate, so a user with an old
+    /// toolchain and a bad value is told about the value — which they must fix
+    /// either way — rather than being sent to upgrade first.
+    #[test]
+    fn forward_memory_layout_reports_a_bad_value_ahead_of_the_abi_gate() {
+        let mut cmd = Command::new("infc");
+        let minor_two = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 2)),
+        };
+        let err = forward_memory_layout(
+            &mut cmd,
+            minor_two,
+            &MemoryConfig {
+                pages: Some(0),
+                stack_size: None,
+            },
+            None,
+        )
+        .expect_err("a zero-page memory is unusable");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one 64 KiB page"),
+            "the value must be diagnosed, not the toolchain, got: {msg}"
+        );
+        assert!(args_of(&cmd).is_empty());
     }
 
     /// The entry point is resolved as `<root>/src/main.inf` using path joins,

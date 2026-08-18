@@ -1,0 +1,26 @@
+// A specification about a linked external. `double` has no body here — it
+// arrives from `spec_linked_extern_mathlib.inf`, compiled separately and spliced
+// in by the static-merge linker under the name section symbol `mathlib.double`,
+// which is what the obligation applies.
+//
+// Every unlinked fixture applies a function from its own translation unit, so
+// only a linked one puts a merged definition, its sanitized `Definition` name,
+// and an application at its post-merge index in front of `coqc`. This is the
+// smaller of the two that do, and the one whose external the suite builds
+// itself: its bodies come out of this compiler's emitter, which makes it the
+// entry that isolates the *linking* from the foreign instruction selection
+// `spec_linked_toolchain.inf` adds on top.
+
+external fn double(x: i32) -> i32;
+use { double } from mathlib;
+
+pub fn twice(x: i32) -> i32 {
+  return double(x);
+}
+
+spec DoubleSpec {
+  fn doubles() forall {
+    let x: i32 = @;
+    assert(double(x) == x + x);
+  }
+}

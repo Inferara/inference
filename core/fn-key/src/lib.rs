@@ -1,5 +1,5 @@
-//! Canonical WASM function identity shared by code generation and static
-//! analysis.
+//! Canonical WASM function identity, and the name-section namespace it shares
+//! with the static-merge linker.
 //!
 //! A multi-file Inference program flattens every file into one WASM module, so
 //! two files may each define a `fn add`, and a struct's associated function may
@@ -10,10 +10,17 @@
 //! (`a.mid.make`). [`FnKey`] is the structured key that partitions the namespace
 //! so the collision cannot happen by construction.
 //!
-//! Both the code generator (when assigning WASM function indices) and the
-//! analysis passes (when building the whole-program call graph for A035/A036)
-//! key functions on this single type, so the two phases agree on function
-//! identity without re-deriving it from parallel string schemes.
+//! The code generator (when assigning WASM function indices) and the analysis
+//! passes (when building the whole-program call graph for A035/A036) both key
+//! functions on this single type, so the two agree on function identity without
+//! re-deriving it from parallel string schemes.
+//!
+//! The static-merge linker and the proof translation are the other two
+//! consumers, and they use the crate differently: neither keys anything on
+//! [`FnKey`]. They format and read *strings* in the WASM name section, through
+//! [`merged_name`], which is the second scheme composed over the same `.`
+//! separator. Both schemes live here so the one namespace they write into can
+//! be read in one place.
 
 #![warn(clippy::pedantic)]
 
@@ -21,8 +28,16 @@
 ///
 /// Dot is used because it matches Zig's convention and is standard across the
 /// WASM ecosystem. Since `.` is a syntax token in Inference (member access), it
-/// cannot appear in user-defined identifiers, making collisions impossible
-/// without any additional validation.
+/// cannot appear in user-defined identifiers, so no single *identifier* can
+/// forge a join.
+///
+/// That argument covers identifiers, and it is no longer the whole story: a
+/// second scheme, [`merged_name`], composes `{logical_module}.{export_field}`
+/// over this same separator. Two joins over one separator can meet — a struct
+/// named `mathlib` and a `use { double } from mathlib;` binding both render
+/// `mathlib.double` — so a collision surfaces in the *name section*, between
+/// schemes, where it cannot within either one. See [`merged_name`] for what
+/// does and does not catch it.
 const METHOD_SEPARATOR: &str = ".";
 
 /// Folds a defining file's module path into a spec name, producing the
@@ -54,6 +69,62 @@ pub fn fold_spec_name(module_path: &[String], spec: &str) -> String {
         spec.to_string()
     } else {
         format!("{}_{spec}", module_path.join("_"))
+    }
+}
+
+/// Names for the bodies the static-merge linker splices in from an external
+/// `.wasm`.
+///
+/// These share the WASM name section with [`FnKey`]'s own rendering, so they
+/// live beside it: the section is one namespace, and collocating its producers
+/// is what makes that namespace *reviewable*. It does not make it injective.
+/// All three keep the `logical_module` prefix because the export field alone is
+/// not unique — two externals bound under different logical modules may export
+/// the same field, and their merged bodies would then collide — but that prefix
+/// only closes the collisions *within* this scheme.
+///
+/// Across the two schemes injectivity does not hold, because both join over the
+/// same `.`: `{StructName}.{method}` and `{logical_module}.{export_field}`
+/// render to one string whenever a struct is named after a bound logical
+/// module. A `struct mathlib` carrying a `double` method, beside
+/// `use { double } from mathlib;`, compiles and links with two functions named
+/// `mathlib.double` in the name section.
+///
+/// The guard that exists is `wasm-to-v`'s `resolve_app_symbols`, whose
+/// ambiguity arm refuses a symbol several defined functions share. It fires
+/// only when an obligation *applies* the name, so it covers the obligation path
+/// and nothing else: in compile mode the duplicate ships unremarked.
+///
+/// [`merged_name::root`] additionally carries a *contract*: a proof-mode
+/// obligation that applies a linked `external fn` writes exactly this string,
+/// and `wasm-to-v` resolves it verbatim against the linked module's name
+/// section. Code generation and the linker therefore both call it rather than
+/// formatting the name themselves — a drift between the two would leave the
+/// obligation naming a function the module does not carry, or a different one.
+pub mod merged_name {
+    /// The body that satisfies an import of `export_field` from
+    /// `logical_module` — the closure root, and the only merged function an
+    /// Inference declaration names.
+    #[must_use = "returns the merged body's name-section symbol"]
+    pub fn root(logical_module: &str, export_field: &str) -> String {
+        format!("{logical_module}{}{export_field}", super::METHOD_SEPARATOR)
+    }
+
+    /// A function reachable from a merged root, keeping the debug name its own
+    /// module gave it.
+    #[must_use = "returns the merged body's name-section symbol"]
+    pub fn callee(logical_module: &str, source_name: &str) -> String {
+        format!("{logical_module}{}{source_name}", super::METHOD_SEPARATOR)
+    }
+
+    /// A merged function whose source module carried no name section, named
+    /// from its deterministic output index so the artifact stays reproducible.
+    #[must_use = "returns the merged body's name-section symbol"]
+    pub fn anonymous(logical_module: &str, out_func_idx: u32) -> String {
+        format!(
+            "{logical_module}{}func_{out_func_idx}",
+            super::METHOD_SEPARATOR
+        )
     }
 }
 

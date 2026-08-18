@@ -6874,3 +6874,419 @@ fn doctor_reports_managed_wasm_opt_as_ok() {
         "a healthy managed wasm-opt must be OK naming the managed tier; stdout:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [memory] forwarding
+//
+// The manifest table reaches `infc` as flags, and it must reach it identically
+// from every route that spawns the compiler: a project built, a project run, a
+// source file built by path, and a source file run by path. A project that
+// declares nothing must forward nothing, which is what keeps the table's
+// existence from gating every build on a newer compiler.
+// ---------------------------------------------------------------------------
+
+/// A project source that allocates an array frame, so the emitted module carries
+/// both a memory section and a `__stack_pointer` global to assert on.
+const PROJECT_MAIN_ARRAY_SRC: &str = "pub fn main() -> i32 {\n    \
+     let arr: [i32; 4] = [1, 2, 3, 4];\n    return arr[0];\n}\n";
+
+/// A `[memory]` table declaring both keys.
+const MEMORY_TABLE: &str = "[memory]\npages = 2\nstack-size = 32768\n";
+
+/// The `memory:` line `forward_memory_layout` echoes for [`MEMORY_TABLE`].
+const MEMORY_ECHO: &str = "memory: 2 page(s), 32768-byte stack";
+
+/// Asserts the resolved layout is echoed exactly once, as its own whole line.
+///
+/// Whole-line equality rather than `contains`, so a future echo that merely
+/// embeds this text cannot satisfy it, and a count so a second forwarding site
+/// added to one route shows up as a duplicate rather than passing silently.
+fn assert_echoes_memory_once(stdout: &str) {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.trim() == MEMORY_ECHO)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the resolved layout must be echoed exactly once, got stdout:\n{stdout}"
+    );
+}
+
+/// Asserts `wasm` declares two fixed pages and starts its stack pointer at 32768.
+fn assert_artifact_carries_the_declared_layout(wasm: &[u8]) {
+    let wat = wasmprinter::print_bytes(wasm).expect("the artifact must be printable");
+    assert!(
+        wat.contains("(memory (;0;) 2 2)"),
+        "the artifact must declare the manifest's 2 fixed pages:\n{wat}"
+    );
+    assert!(
+        wat.contains("(global (;0;) (mut i32) i32.const 32768)"),
+        "the artifact's stack pointer must start at the manifest's stack size:\n{wat}"
+    );
+}
+
+/// The baseline this feature is measured against: with no `[memory]` table the
+/// artifact keeps the single all-stack page, and nothing is echoed.
+#[test]
+fn project_build_without_a_memory_table_keeps_the_default_layout() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_ARRAY_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert!(
+        !stdout.contains("memory:"),
+        "a project that declared no memory must echo nothing, got:\n{stdout}"
+    );
+
+    let wat = wasmprinter::print_bytes(&read_project_artifact(&temp))
+        .expect("the artifact must be printable");
+    assert!(
+        wat.contains("(memory (;0;) 1 1)") && wat.contains("i32.const 65536"),
+        "the default artifact must keep one all-stack page:\n{wat}"
+    );
+}
+
+/// The declared table reaches the artifact through a project build.
+#[test]
+fn project_build_honors_the_memory_table() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_memory_once(&stdout_of(&cmd.assert().success()));
+
+    assert_artifact_carries_the_declared_layout(&read_project_artifact(&temp));
+}
+
+/// Single-file `build` by path honors the enclosing project's table, so one
+/// project cannot emit two different memories depending on how it was invoked.
+#[test]
+fn single_file_build_honors_the_enclosing_memory_table() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("src/main.inf");
+    assert_echoes_memory_once(&stdout_of(&cmd.assert().success()));
+
+    let artifact = temp.child("out").child("main.wasm");
+    assert!(
+        artifact.path().exists(),
+        "single-file build must write out/main.wasm"
+    );
+    assert_artifact_carries_the_declared_layout(&std::fs::read(artifact.path()).unwrap());
+}
+
+/// A source outside any project declares nothing, so the default layout stands
+/// and no handshake-gated flag is sent.
+#[test]
+fn single_file_build_outside_a_project_keeps_the_default_layout() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("solo.inf");
+    source.write_str(PROJECT_MAIN_ARRAY_SRC).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("solo.inf");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert!(
+        !stdout.contains("memory:"),
+        "a manifest-free source must echo nothing, got:\n{stdout}"
+    );
+}
+
+/// `infs run` in project mode honors the table and still executes: a configured
+/// memory must not merely reach the artifact but leave it runnable.
+#[test]
+fn project_run_honors_the_memory_table_and_executes() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert_echoes_memory_once(&stdout);
+    assert!(
+        stdout.contains('1'),
+        "main returns arr[0] == 1, got stdout:\n{stdout}"
+    );
+
+    assert_artifact_carries_the_declared_layout(&read_project_artifact(&temp));
+}
+
+/// Single-file `run` by path honors the enclosing table — the fourth and last
+/// route, and the one whose compiler handshake is otherwise skipped.
+#[test]
+fn single_file_run_honors_the_enclosing_memory_table() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("src/main.inf");
+    assert_echoes_memory_once(&stdout_of(&cmd.assert().success()));
+
+    let artifact = temp.child("out").child("main.wasm");
+    assert_artifact_carries_the_declared_layout(&std::fs::read(artifact.path()).unwrap());
+}
+
+/// The wire spelling: each declared key reaches `infc` as its own argv entry
+/// immediately followed by its value, and each appears exactly once.
+///
+/// A fused `--memory-pages=2` would satisfy a `contains` check and be accepted by
+/// clap, so this is not merely belt and braces — it pins the shape `infc`'s
+/// argument list is asserted against elsewhere.
+#[cfg(unix)]
+#[test]
+fn memory_table_reaches_infc_as_adjacent_argv_entries() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    assert_echoes_memory_once(&stdout_of(&cmd.assert().success()));
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        argv_values_after(&argv, "--memory-pages"),
+        [Some("2")],
+        "`--memory-pages` must be forwarded once with its value adjacent, got argv: {argv:?}"
+    );
+    assert_eq!(
+        argv_values_after(&argv, "--stack-size"),
+        [Some("32768")],
+        "`--stack-size` must be forwarded once with its value adjacent, got argv: {argv:?}"
+    );
+}
+
+/// Only the declared key is forwarded. Sending the resolved layout would put both
+/// flags on every request, which is the same defect as forwarding defaults for a
+/// project that declared nothing.
+#[cfg(unix)]
+#[test]
+fn an_undeclared_memory_key_is_not_forwarded() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_ARRAY_SRC,
+        "[memory]\nstack-size = 32768\n",
+    );
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert_eq!(
+        argv_values_after(&argv, "--stack-size"),
+        [Some("32768")],
+        "the declared key must be forwarded, got argv: {argv:?}"
+    );
+    assert!(
+        argv_values_after(&argv, "--memory-pages").is_empty(),
+        "an undeclared key must not be forwarded, got argv: {argv:?}"
+    );
+}
+
+/// A project that declared no `[memory]` table forwards neither flag, which is
+/// what lets it keep building against an `infc` that predates them.
+#[cfg(unix)]
+#[test]
+fn a_project_without_a_memory_table_forwards_no_memory_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_ARRAY_SRC);
+
+    let argv_log = temp.child("argv.log");
+    let stub = write_argv_logging_infc_stub(&temp, argv_log.path());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &stub)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    let logged = logged_argv(argv_log.path());
+    let argv: Vec<&str> = logged.lines().collect();
+    assert!(
+        argv_values_after(&argv, "--memory-pages").is_empty()
+            && argv_values_after(&argv, "--stack-size").is_empty(),
+        "an undeclared memory must put no flag on the command, got argv: {argv:?}"
+    );
+}
+
+/// An `infc` one minor short of the flags is refused with remediation rather
+/// than sent a flag its argument parser would reject with a message naming a
+/// flag the user never typed.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_a_memory_table_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.2\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--memory-pages")
+            .and(predicate::str::contains("--stack-size"))
+            .and(predicate::str::contains("1.3"))
+            .and(predicate::str::contains("update the toolchain"))
+            .and(predicate::str::contains("[memory]")),
+    );
+}
+
+/// The same gate on the single-file `build` route, which finds its manifest by
+/// walking up rather than by discovery.
+#[cfg(unix)]
+#[test]
+fn single_file_build_old_infc_with_a_memory_table_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_ARRAY_SRC, MEMORY_TABLE);
+
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.2\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("src/main.inf");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--memory-pages")
+            .and(predicate::str::contains("1.3"))
+            .and(predicate::str::contains("Inference.toml")),
+    );
+}
+
+/// An unusable table is rejected when the manifest loads, before the compiler is
+/// even located — the same verdict `infc` would reach, reported against the
+/// manifest spelling the user actually wrote.
+#[test]
+fn project_build_rejects_an_unusable_memory_table() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_ARRAY_SRC,
+        "[memory]\nstack-size = 131072\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("`[memory] stack-size`").and(predicate::str::contains(
+                "does not fit in the linear memory",
+            )),
+        );
+}
+
+/// An unknown key in the table is a build error, not a setting that silently
+/// does nothing.
+#[test]
+fn project_build_rejects_an_unknown_memory_key() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_ARRAY_SRC,
+        "[memory]\nstack_size = 32768\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("unknown field")
+            .and(predicate::str::contains("stack_size"))
+            .and(predicate::str::contains("stack-size")),
+    );
+}

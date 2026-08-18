@@ -1,0 +1,24 @@
+# Its own workspace root, deliberately. The empty table is what lets `cargo`
+# run inside this directory at all: the crate sits under the `tests` package,
+# and a package nested inside a workspace member is neither a member nor
+# excludable from the root manifest — `workspace.exclude` does not reach it.
+# The same table is what makes the `[profile.release]` settings below apply;
+# without it cargo would ignore them as a non-root package's profiles and
+# silently produce different bytes than the committed artifact.
+[workspace]
+
+[package]
+name = "rustlib"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Every setting here moves bytes in the committed artifact, so they live in the
+# manifest rather than in a build command a reader has to be told about.
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true

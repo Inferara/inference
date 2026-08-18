@@ -1,4 +1,12 @@
-//! Compiler interface version constants shared by `infs` and `infc`.
+//! The vocabulary `infs` and `infc` share: the interface version they handshake
+//! on, and the build settings a user selects on either surface.
+//!
+//! A setting belongs here once more than one front end can express it, so that
+//! the manifest and the command line accept the same values and reject the rest
+//! with the same words. What each setting then *means* to a later phase stays
+//! with that phase.
+//!
+//! # Compiler ABI version
 //!
 //! The ABI (application binary interface) here means the set of CLI flags,
 //! stdin/stdout contract, and exit codes that `infs` relies on when
@@ -18,10 +26,24 @@
 //! from what any downstream consumer *tolerates* — the linker's validation
 //! envelope and Binaryen's flag set are both strictly wider than what code
 //! generation knows how to emit.
+//!
+//! # Memory layout vocabulary
+//!
+//! [`MemoryLayout`] is the linear memory a build asks for — the page count and
+//! the shadow stack's share of it — together with the invariants that make those
+//! two numbers a memory a module can actually declare. It lives here for the
+//! same reason the feature vocabulary does: the surfaces that select a layout
+//! and the code generation that emits one must agree on which layouts exist, and
+//! a rejection has to read the same whether the numbers came from a manifest or
+//! a command line.
+//!
+//! [`MemoryLayout::resolve`] is the only way to name a layout other than the
+//! default, so the invariants hold by construction rather than by a check every
+//! consumer has to remember to run.
 
 pub mod errors;
 
-pub use crate::errors::WasmFeatureError;
+pub use crate::errors::{MemoryLayoutError, WasmFeatureError};
 
 /// Breaking ABI changes: incompatible CLI flag removal/rename, stdout contract
 /// changes, exit-code semantics changes.
@@ -44,7 +66,20 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// an `infs` that forwards the flag must first confirm the minor it is talking
 /// to, and refuse rather than silently ship a module at the wrong instruction
 /// level.
-pub const COMPILER_ABI_MINOR: u32 = 2;
+///
+/// Minor 3 adds the additive `--memory-pages <N>` and `--stack-size <BYTES>`
+/// flags to `infc`, selecting the linear memory the emitted module declares and
+/// the share of it the shadow stack occupies. It is backward compatible in the
+/// same sense: omitting both yields the single all-stack page every earlier
+/// minor emitted, so a minor-2 `infs` still pairs with a minor-3 `infc`. The
+/// reverse pairing is the one callers must gate on. A minor-2 `infc` cannot
+/// honor a layout request at all, so an `infs` that forwards must first confirm
+/// the minor it is talking to, and refuse rather than ship a module whose memory
+/// is not the one the manifest asked for. What an ungated forward produces is
+/// not silence but an argument-parser error naming a flag the user never typed;
+/// the gate is what turns that into a message naming the `[memory]` table to
+/// remove or the toolchain to update.
+pub const COMPILER_ABI_MINOR: u32 = 3;
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///
@@ -295,6 +330,257 @@ pub fn resolve_wasm_features(
     Ok(resolved)
 }
 
+/// One WASM memory page in bytes.
+///
+/// The unit [`MemoryLayout::pages()`] counts in, and the size of the default
+/// layout's single page.
+pub const PAGE_SIZE: u32 = 65536;
+
+/// Stack frame alignment in bytes (matches LLVM/Rust WASM convention).
+///
+/// A shadow stack must be a whole number of frames wide, so a layout is checked
+/// against the same grid code generation rounds every frame to.
+pub const FRAME_ALIGNMENT: u32 = 16;
+
+/// Which surface a layout request was written on, so a diagnostic can name the
+/// exact thing the user has to edit.
+///
+/// Both keys of a surface are named together because [`MemoryLayout::resolve`]
+/// checks the two numbers jointly: several invariants — a stack that outgrows
+/// its memory, a memory that leaves the overflow trap no room — are properties
+/// of the pair, and attributing those to one key would name the wrong one half
+/// the time. The `reason` on [`MemoryLayoutError`] identifies the offending
+/// value; this identifies where it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLayoutSource {
+    /// The `pages` / `stack-size` keys of a project's `Inference.toml`
+    /// `[memory]` table.
+    Manifest,
+    /// The `--memory-pages` / `--stack-size` flags on an `infc` command line.
+    Flag,
+}
+
+impl MemoryLayoutSource {
+    /// The backtick-quoted keys a message points the user at.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manifest => "`[memory] pages` / `[memory] stack-size`",
+            Self::Flag => "`--memory-pages` / `--stack-size`",
+        }
+    }
+}
+
+/// The linear memory a generated module declares, and the share of it the shadow
+/// stack occupies.
+///
+/// This is shared vocabulary rather than a code-generation detail: a project's
+/// manifest, the compiler flags that override it, and the emitter that turns the
+/// two numbers into a memory section and a `__stack_pointer` initializer all read
+/// this one type. A layout a build accepts is therefore exactly a layout that can
+/// be emitted.
+///
+/// It is deliberately not mirrored by a code-generation twin the way
+/// [`WasmFeatureName`] is by `EmitFeatures`. That mirror earns its place because
+/// a requested proposal and an emission permission are genuinely different
+/// things: the set a user may ask for is not the set an emitter knows how to
+/// produce. A layout has no such second reading — the pages and stack bytes a
+/// user writes are the pages and stack bytes emitted — so a mirror would buy
+/// nothing but a second place for the invariants below to drift apart.
+///
+/// Code generation places the shadow stack at the bottom of memory: it spans
+/// `[0, stack_size)` and `__stack_pointer` grows downward from `stack_size`
+/// toward 0. Whatever lies between `stack_size` and `pages * 64 KiB` is the data
+/// region — nothing this compiler emits reads or writes it today, and it is the
+/// reason the stack size is an independent value rather than simply the whole
+/// memory. It is ordinary addressable memory, not a hole: an access that strays
+/// into it succeeds rather than trapping, so a stack larger than the program
+/// needs is not free (see `core/wasm-linker`, which today leans on an
+/// out-of-region address usually being out of bounds).
+///
+/// The two numbers form one type because neither is checkable alone: a stack
+/// size is only sane relative to the memory it must fit in, a page count is only
+/// sane relative to the stack it must hold, and the overflow trap needs the two
+/// together to leave headroom below 2^32. [`Self::resolve`] is where that joint
+/// contract lives, and it is the only way to name a layout other than
+/// [`Self::default`]. The fields are private so that holding a value of this
+/// type *is* the guarantee that the contract holds — a consumer reads the two
+/// numbers through [`Self::pages()`] and [`Self::stack_size()`] without owing
+/// anyone a validation step, and no caller can assemble a memory the emitter
+/// would have to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLayout {
+    /// Linear memory size in 64 KiB pages. Emitted as both the minimum and the
+    /// maximum, so the memory is fixed rather than growable.
+    pages: u32,
+    /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
+    stack_size: u32,
+}
+
+/// Implemented by hand rather than derived: a derived `Default` would produce a
+/// zero-page, zero-byte memory, which is not a layout any program can run in.
+/// These are instead exactly the values every build emitted before the layout
+/// became configurable — one page, entirely stack — so a default build's bytes
+/// are unchanged.
+impl Default for MemoryLayout {
+    fn default() -> Self {
+        Self {
+            pages: 1,
+            stack_size: PAGE_SIZE,
+        }
+    }
+}
+
+/// The largest linear memory a 32-bit WebAssembly module may declare: 65536
+/// pages of 64 KiB each is the whole 4 GiB address space.
+const MAX_PAGES: u32 = 65_536;
+
+/// The 32-bit address space in bytes.
+///
+/// The stack-overflow trap depends on a wrapped frame pointer landing past the
+/// end of memory, so the memory and the stack must fit inside this together —
+/// see the headroom invariant enforced by [`MemoryLayout::resolve`]. That is a stricter
+/// bound than [`MAX_PAGES`] alone, and it is why a module may not declare the
+/// whole address space.
+const ADDRESS_SPACE: u64 = 1 << 32;
+
+impl MemoryLayout {
+    /// The layout a build asked for, with every dimension the request left unset
+    /// taken from [`Self::default`].
+    ///
+    /// This is the checked constructor: partial specification is meaningful — a
+    /// project that sets only `pages` wants the default stack inside a larger
+    /// memory — so the filling happens before the check rather than after, and a
+    /// request is judged as the whole layout it produces. That ordering is what
+    /// lets a single well-formed number still be rejected: a 128 KiB stack is
+    /// fine on its own terms and impossible inside the default one page.
+    ///
+    /// `surface` selects only the spelling a rejection names. The same two
+    /// numbers are accepted or refused identically whether they came from a
+    /// manifest or a command line, which is the property that makes this the one
+    /// definition of a legal layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the violated invariant, rendered against `surface`.
+    pub fn resolve(
+        pages: Option<u32>,
+        stack_size: Option<u32>,
+        surface: MemoryLayoutSource,
+    ) -> Result<Self, MemoryLayoutError> {
+        let defaults = Self::default();
+        let layout = Self {
+            pages: pages.unwrap_or(defaults.pages),
+            stack_size: stack_size.unwrap_or(defaults.stack_size),
+        };
+        layout
+            .validate()
+            .map_err(|reason| MemoryLayoutError { reason, surface })?;
+        Ok(layout)
+    }
+
+    /// Linear memory size in 64 KiB pages.
+    #[must_use]
+    pub fn pages(self) -> u32 {
+        self.pages
+    }
+
+    /// Size of the shadow-stack region in bytes, occupying `[0, stack_size)`.
+    #[must_use]
+    pub fn stack_size(self) -> u32 {
+        self.stack_size
+    }
+
+    /// Checks that the two sizes describe a linear memory a module can actually
+    /// declare and code generation can actually address.
+    ///
+    /// Private because [`Self::resolve`] is the only caller that can exist: a
+    /// value of this type has already passed here, so a public re-check would
+    /// invite consumers to guard against a state the type forbids.
+    ///
+    /// Destructuring `Self` makes a newly added field a compile error here, so a
+    /// dimension of the layout cannot reach code generation without a decision
+    /// about its valid range having been recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first violated invariant as a message naming the offending
+    /// value. Callers surface it verbatim, so it must read as an explanation of
+    /// the number the build asked for, not of the check that rejected it.
+    fn validate(self) -> Result<(), String> {
+        let Self { pages, stack_size } = self;
+        let page_size = u64::from(PAGE_SIZE);
+        let memory_bytes = u64::from(pages) * page_size;
+
+        if pages == 0 {
+            return Err(
+                "linear memory must be at least one 64 KiB page, but 0 pages were requested"
+                    .to_string(),
+            );
+        }
+        if pages > MAX_PAGES {
+            return Err(format!(
+                "linear memory is limited to {MAX_PAGES} pages (4 GiB) by 32-bit WebAssembly, \
+                 but {pages} pages were requested"
+            ));
+        }
+        if stack_size == 0 {
+            return Err(
+                "the shadow stack must be at least one frame wide, but a size of 0 bytes was \
+                 requested"
+                    .to_string(),
+            );
+        }
+        if stack_size % FRAME_ALIGNMENT != 0 {
+            return Err(format!(
+                "the shadow stack size must be a multiple of the {FRAME_ALIGNMENT}-byte frame \
+                 alignment, because frame sizes are rounded to it and the stack top must land on \
+                 that grid, but {stack_size} bytes were requested"
+            ));
+        }
+        if u64::from(stack_size) > memory_bytes {
+            return Err(format!(
+                "the shadow stack ({stack_size} bytes) does not fit in the linear memory it \
+                 lives in ({pages} × 64 KiB = {memory_bytes} bytes)"
+            ));
+        }
+        if stack_size > i32::MAX.cast_unsigned() {
+            return Err(format!(
+                "the shadow stack size must not exceed {} bytes, the largest value the \
+                 `__stack_pointer` initializer can hold as a signed 32-bit constant, but \
+                 {stack_size} bytes were requested",
+                i32::MAX
+            ));
+        }
+        let span = memory_bytes + u64::from(stack_size);
+        if span > ADDRESS_SPACE {
+            return Err(format!(
+                "the linear memory ({pages} × 64 KiB = {memory_bytes} bytes) and the shadow \
+                 stack ({stack_size} bytes) together span {span} bytes, more than the \
+                 {ADDRESS_SPACE}-byte 32-bit address space; a stack overflow wraps to an \
+                 address at least {ADDRESS_SPACE} minus the stack size, which must stay past \
+                 the end of memory for the overflow to trap instead of writing into it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The initial `__stack_pointer` value: one past the last valid stack
+    /// address.
+    ///
+    /// This is a "past-the-end" value (like C++ `vector::end()`). Address
+    /// `stack_size` itself is never accessed — a frame prologue subtracts the
+    /// frame size before any memory operation, so the first actual access is at
+    /// `stack_size - frame_size`.
+    ///
+    /// The conversion is lossless for every layout [`Self::resolve`] accepts,
+    /// which is what bounds `stack_size` by [`i32::MAX`].
+    #[must_use]
+    pub fn stack_pointer_init(self) -> i32 {
+        self.stack_size.cast_signed()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,9 +590,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_two() {
+    fn abi_version_is_one_dot_three() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 2);
+        assert_eq!(COMPILER_ABI_MINOR, 3);
     }
 
     #[test]
@@ -620,5 +906,202 @@ mod tests {
                 feature.as_str()
             );
         }
+    }
+
+    /// Both dimensions given, for the cases where the point is the resulting
+    /// layout rather than which keys the request left unset.
+    fn layout(pages: u32, stack_size: u32) -> Result<MemoryLayout, MemoryLayoutError> {
+        MemoryLayout::resolve(Some(pages), Some(stack_size), MemoryLayoutSource::Flag)
+    }
+
+    #[test]
+    fn default_layout_is_one_page_of_stack() {
+        assert_eq!(MemoryLayout::default().pages(), 1);
+        assert_eq!(MemoryLayout::default().stack_size(), 65_536);
+    }
+
+    /// `Default` bypasses the checked constructor, so nothing but this says the
+    /// value it hands out is one the constructor would have accepted.
+    #[test]
+    fn the_default_is_a_layout_the_constructor_accepts() {
+        assert_eq!(
+            MemoryLayout::resolve(None, None, MemoryLayoutSource::Manifest),
+            Ok(MemoryLayout::default())
+        );
+    }
+
+    #[test]
+    fn default_stack_pointer_starts_past_the_last_stack_address() {
+        assert_eq!(MemoryLayout::default().stack_pointer_init(), 65_536);
+    }
+
+    /// An unset dimension takes the default and the set one is honored, in both
+    /// directions. Partial specification is the common case — a project that
+    /// wants a bigger memory has no reason to restate the stack size — so each
+    /// key has to be independently settable.
+    #[test]
+    fn an_unset_dimension_is_filled_from_the_default() {
+        let pages_only = MemoryLayout::resolve(Some(4), None, MemoryLayoutSource::Manifest)
+            .expect("four pages holds the default stack");
+        assert_eq!(pages_only.pages(), 4);
+        assert_eq!(pages_only.stack_size(), MemoryLayout::default().stack_size());
+
+        let stack_only = MemoryLayout::resolve(None, Some(32_768), MemoryLayoutSource::Manifest)
+            .expect("half a page of stack fits the default page");
+        assert_eq!(stack_only.pages(), MemoryLayout::default().pages());
+        assert_eq!(stack_only.stack_size(), 32_768);
+    }
+
+    /// Filling happens before checking, so a partial request is judged as the
+    /// whole layout it produces rather than on the one number it names.
+    ///
+    /// 128 KiB is a perfectly ordinary stack size — `pages = 4, stack-size =
+    /// 131072` is accepted below — and it is impossible here only because the
+    /// unstated page count defaulted to one. A constructor that validated the
+    /// stated key alone would accept this and emit a stack twice the size of the
+    /// memory holding it.
+    #[test]
+    fn a_partial_request_is_checked_against_the_layout_it_completes_to() {
+        let err = MemoryLayout::resolve(None, Some(131_072), MemoryLayoutSource::Manifest)
+            .expect_err("a 128 KiB stack cannot live in the default single page");
+        assert!(
+            err.reason.contains("does not fit in the linear memory"),
+            "{err}"
+        );
+        assert!(
+            MemoryLayout::resolve(Some(4), Some(131_072), MemoryLayoutSource::Manifest).is_ok(),
+            "the same stack size is fine once the memory is large enough"
+        );
+    }
+
+    /// Each invariant rejects on its own. The expectations pin both the invariant
+    /// that fired and the value it names, because several messages would
+    /// otherwise be satisfied by the same number: a layout that breaks one rule
+    /// must not be reported under another.
+    ///
+    /// These read as "this cannot be built" rather than "this can be built and
+    /// is invalid", which is the whole point of the private fields: outside this
+    /// crate the rejected values have no inhabited representation at all.
+    #[test]
+    fn the_constructor_rejects_each_broken_invariant() {
+        let cases = [
+            (0, 65_536, "at least one 64 KiB page", "0 pages"),
+            (65_537, 65_536, "limited to 65536 pages", "65537 pages"),
+            (1, 0, "at least one frame wide", "0 bytes"),
+            (
+                1,
+                1_000,
+                "multiple of the 16-byte frame alignment",
+                "1000 bytes",
+            ),
+            (
+                1,
+                131_072,
+                "does not fit in the linear memory",
+                "131072 bytes",
+            ),
+            (
+                65_536,
+                2_147_483_664,
+                "signed 32-bit constant",
+                "2147483664 bytes",
+            ),
+            // A memory filling the whole address space leaves a wrapped stack
+            // pointer nowhere out of bounds to land, so the overflow trap is
+            // gone. Every other rule here is satisfied.
+            (
+                65_536,
+                65_536,
+                "32-bit address space",
+                "4295032832 bytes",
+            ),
+        ];
+        for (pages, stack_size, invariant, value) in cases {
+            let err = layout(pages, stack_size)
+                .expect_err(&format!("{pages} pages / {stack_size} bytes must be rejected"));
+            assert!(
+                err.reason.contains(invariant),
+                "{pages} pages / {stack_size} bytes was rejected with `{err}`, which is not the \
+                 `{invariant}` rule"
+            );
+            assert!(
+                err.reason.contains(value),
+                "{pages} pages / {stack_size} bytes was rejected with `{err}`, which does not \
+                 name `{value}`"
+            );
+        }
+    }
+
+    /// The largest memory the overflow trap survives is accepted, and so is a
+    /// stack strictly smaller than the memory holding it — the shape that leaves
+    /// a data region above the stack.
+    ///
+    /// The first case is one page short of the 32-bit maximum, which is the real
+    /// ceiling: the headroom the wrapped stack pointer needs is what costs that
+    /// page, not the page count rule.
+    #[test]
+    fn the_constructor_accepts_the_extremes_of_the_admissible_range() {
+        assert!(layout(65_535, 16).is_ok());
+        assert!(layout(2, 16).is_ok());
+    }
+
+    /// The headroom rule is exactly `memory_bytes + stack_size <= 2^32`, so a
+    /// layout one byte-grid step either side of the boundary must land on
+    /// opposite verdicts. Without this pair the rule could be off by a whole
+    /// page and every other test would still pass.
+    #[test]
+    fn the_address_space_headroom_boundary_is_exact() {
+        let fits = layout(65_535, 65_536).expect("this layout sits exactly on the boundary");
+        assert_eq!(
+            u64::from(fits.pages()) * 65_536 + u64::from(fits.stack_size()),
+            1 << 32,
+            "this case is meant to sit exactly on the boundary"
+        );
+
+        assert!(
+            layout(fits.pages(), fits.stack_size() + 16).is_err(),
+            "one frame past the boundary must be rejected"
+        );
+    }
+
+    #[test]
+    fn memory_source_selects_the_spelling_the_message_names() {
+        assert_eq!(
+            MemoryLayoutSource::Manifest.label(),
+            "`[memory] pages` / `[memory] stack-size`"
+        );
+        assert_eq!(
+            MemoryLayoutSource::Flag.label(),
+            "`--memory-pages` / `--stack-size`"
+        );
+    }
+
+    /// The rendering is pinned character for character, for the same reason the
+    /// feature diagnostics are: the `#[error(...)]` attribute is the only copy of
+    /// this wording and both front ends show it verbatim.
+    ///
+    /// The two surfaces carry the same `reason` so the pair also pins that the
+    /// verdict is surface-independent — only the spelling changes.
+    #[test]
+    fn the_memory_error_renders_its_exact_wording() {
+        let manifest = MemoryLayout::resolve(Some(0), None, MemoryLayoutSource::Manifest)
+            .expect_err("a zero-page memory is rejected");
+        assert_eq!(
+            manifest.to_string(),
+            "Invalid `[memory] pages` / `[memory] stack-size`: linear memory must be at least \
+             one 64 KiB page, but 0 pages were requested"
+        );
+
+        let flag = MemoryLayout::resolve(Some(0), None, MemoryLayoutSource::Flag)
+            .expect_err("a zero-page memory is rejected");
+        assert_eq!(
+            flag.to_string(),
+            "Invalid `--memory-pages` / `--stack-size`: linear memory must be at least one \
+             64 KiB page, but 0 pages were requested"
+        );
+        assert_eq!(
+            manifest.reason, flag.reason,
+            "the same numbers must be refused for the same reason on either surface"
+        );
     }
 }

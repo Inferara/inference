@@ -5,17 +5,26 @@
 //!
 //! 1. **`process_directives`** — register raw imports from `use` statements
 //! 2. **`register_types`** — collect type/struct/enum/spec definitions
-//! 3. **`resolve_imports`** — bind import paths to the symbols they refer to
-//! 4. **`collect_function_and_constant_definitions`** — register function
+//! 3. **`collect_function_and_constant_definitions`** — register function
 //!    signatures and constant declarations
+//! 4. **`resolve_imports`** — bind import paths to the symbols they refer to
 //! 5. **`infer_variables`** — type-check function bodies and method bodies
 //!
-//! Phase ordering is load-bearing: type definitions (phase 2) must be in the
-//! symbol table before functions can mention them in signatures (phase 4),
-//! and imports (phase 3) must be resolved before name lookup runs during
-//! body inference (phase 5). This is what lets Inference support forward
-//! references — a function can refer to a type or another function defined
-//! later in the source file.
+//! Phase ordering is load-bearing: type definitions must be in the symbol table
+//! before functions can mention them in the signatures
+//! `collect_function_and_constant_definitions` registers, and imports must be
+//! resolved before name lookup runs during body inference. This is what lets
+//! Inference support forward references — a function can refer to a type or
+//! another function defined later in the source file. The constraints are stated
+//! against the passes rather than their positions, so a later reordering cannot
+//! leave this paragraph disagreeing with the list above it.
+//!
+//! The list is a summary, not the whole of `check_collecting`: signatures are
+//! also re-normalized and validated by later statements of that function, so
+//! "signatures" is not a concern that finishes when they are registered. Which
+//! statement performs a given check is worth confirming at the call site rather
+//! than inferring from this list — the checks are spread across the function,
+//! and not all of them run where a reading of the phase order would suggest.
 //!
 //! Errors are not fatal: the checker collects them in `self.errors` and
 //! keeps walking the AST so a single run reports as many issues as
@@ -24,9 +33,9 @@
 //! ## Generics
 //!
 //! Generic type parameters declared on a function (`fn foo<T>(...)`) are
-//! recorded on the signature in phase 4. At a call site in phase 5,
-//! `infer_type_params_from_args` derives concrete substitutions for each
-//! `T` from the call's argument types and reports
+//! recorded on the signature when it is registered. At a call site during body
+//! inference, `infer_type_params_from_args` derives concrete substitutions for
+//! each `T` from the call's argument types and reports
 //! `ConflictingTypeInference` / `CannotInferTypeParameter` when the
 //! substitution can't be determined unambiguously.
 
@@ -163,8 +172,9 @@ pub(crate) struct TypeChecker {
     ///
     /// Keyed by the *declaration*, not the bare name: a `use { f } from m;`
     /// directive is file-global, so it binds only the **top-level** `external fn
-    /// f` and never a same-named extern declared inside a `spec` or `module`.
-    /// Keying by [`DefId`] keeps those scopes' externs unbound (and so
+    /// f` and never a same-named extern declared inside a `spec` — the file's top
+    /// level and a `spec` within it being the only two places a declaration can
+    /// sit. Keying by [`DefId`] keeps that inner scope's externs unbound (and so
     /// A024-rejected) even when they share a name with a bound top-level extern.
     ///
     /// Holds only unambiguously-bound externs; an extern named by conflicting
@@ -266,8 +276,8 @@ impl TypeChecker {
     /// Phase ordering:
     /// 1. `process_directives()` - Register raw imports in scopes
     /// 2. `register_types()` - Collect type definitions into symbol table
-    /// 3. `resolve_imports()` - Bind import paths to symbols
-    /// 4. `collect_function_and_constant_definitions()` - Register functions
+    /// 3. `collect_function_and_constant_definitions()` - Register functions
+    /// 4. `resolve_imports()` - Bind import paths to symbols
     /// 5. Infer variable types in function bodies
     pub(crate) fn check_collecting(
         &mut self,

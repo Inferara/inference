@@ -65,6 +65,15 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// - `--wasm-features <list>`: Opt into post-MVP WebAssembly proposals by name.
 ///   The default output is pure WebAssembly 1.0.
 ///
+/// ## Memory Layout
+///
+/// - `--memory-pages <N>`: Linear memory size in 64 KiB pages (default 1).
+/// - `--stack-size <BYTES>`: Shadow stack size in bytes (default 65536).
+///
+/// Either may be given alone; the other keeps its default. The two are checked
+/// together, so a value that is legal on its own can still be refused by the
+/// layout it completes to.
+///
 /// Output flags only take effect when `--codegen` is active (explicitly or via default).
 ///
 /// ## Examples
@@ -249,6 +258,36 @@ pub(crate) struct Cli {
         action = clap::ArgAction::Append
     )]
     pub(crate) wasm_features: Vec<String>,
+
+    /// Linear memory size in 64 KiB pages.
+    ///
+    /// Emitted as both the minimum and the maximum of the memory section, so the
+    /// memory is fixed rather than growable. Omitting the flag keeps the single
+    /// page every build emitted before the layout was configurable.
+    ///
+    /// Independent of `--stack-size`: pages above the stack are ordinary
+    /// addressable data memory. The two are nonetheless validated jointly, since
+    /// a stack has to fit inside the memory holding it.
+    ///
+    /// `infs build` forwards the project's `[memory] pages`; direct `infc`
+    /// callers pass it by hand.
+    #[clap(long = "memory-pages", value_name = "N")]
+    pub(crate) memory_pages: Option<u32>,
+
+    /// Shadow stack size in bytes, occupying the bottom of linear memory.
+    ///
+    /// Sets the `__stack_pointer` initializer, and with it the budget A036
+    /// measures cumulative call-chain frame usage against — the two are the same
+    /// number by construction, so shrinking the stack tightens the diagnostic
+    /// rather than leaving it policing a stack the artifact does not have.
+    ///
+    /// Must be a multiple of the 16-byte frame alignment. Omitting the flag
+    /// keeps the 64 KiB default.
+    ///
+    /// `infs build` forwards the project's `[memory] stack-size`; direct `infc`
+    /// callers pass it by hand.
+    #[clap(long = "stack-size", value_name = "BYTES")]
+    pub(crate) stack_size: Option<u32>,
 
     /// Print the git commit hash embedded at build time and exit 0.
     ///

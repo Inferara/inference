@@ -25,23 +25,37 @@
 //!
 //! - **saturating float-to-int truncations** (8 opcodes:
 //!   `i32`/`i64`.`trunc_sat`_`f32`/`f64`_`s`/`u`),
-//! - **sign-extension** (5 opcodes: `i32.extend8_s`, `i32.extend16_s`,
-//!   `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s`),
 //! - **tail calls** (`return_call`, `return_call_indirect`),
 //! - **segment-indexed table initialization** (`table.init`, `elem.drop`,
 //!   `table.copy`),
-//! - **all floating-point** operators and value types (`f32`/`f64`),
-//! - **integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s`,
-//!   `i64.extend_i32_u`) — the last conversion family to be retracted. These
-//!   were kept because the translator did have an arm for them, but that arm
-//!   emitted `BI_cvtop`, a constructor the proof model never declares, so the
-//!   allow-list premise ("an allow-listed family has a translator lowering")
-//!   held only at the Rust level and failed at `coqc`. The translator now
-//!   rejects the whole conversion block, and
-//!   [`integer_width_conversions_are_rejected`] pins the retraction.
+//! - **all floating-point** operators and value types (`f32`/`f64`).
 //!
-//! Each of those is now rejected before reaching the merge, so it can never enter
-//! a linked output. The corpus below covers only what the linker still admits.
+//! Each of those is rejected before reaching the merge, so it can never enter a
+//! linked output. The corpus below covers only what the linker admits.
+//!
+//! ## The numeric envelope, restored in lockstep
+//!
+//! Two integer families were retracted alongside the list above and have since
+//! been restored, both phases together:
+//!
+//! - **sign-extension** (5 opcodes: `i32.extend8_s`, `i32.extend16_s`,
+//!   `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s`), which the proof model
+//!   spells as an ordinary unop, `BI_unop t (Unop_extend n)` — not as a
+//!   conversion. That misclassification is why they were grouped with the
+//!   conversion block and retracted with it.
+//! - **integer width conversions** (`i32.wrap_i64`, `i64.extend_i32_s`,
+//!   `i64.extend_i32_u`), which the proof model spells as `BI_cvtop` with the
+//!   `CVO_wrap`/`CVO_extend` constructors.
+//!
+//! The earlier retraction was correct at the time: the translator emitted
+//! `BI_cvtop` against a contract that declared no such constructor, so the
+//! allow-list premise ("an allow-listed family has a translator lowering") held
+//! at the Rust level and failed at `coqc`. What changed is the contract, not the
+//! premise — the `coqc` gate in `tests/src/rocq_typecheck.rs` now elaborates both
+//! families. [`integer_width_conversions_translate`] and
+//! [`sign_extension_operators_translate`] pin the restored lowerings here.
+//! The float-naming conversions stay rejected: the contract declares no float
+//! number type for them to mention.
 //!
 //! ## How the corpus drives operators into the output
 //!
@@ -506,25 +520,60 @@ fn i64_arithmetic_and_bitwise_translate() {
 }
 
 #[test]
-fn integer_width_conversions_are_rejected() {
-    // i32.wrap_i64 / i64.extend_i32_s / i64.extend_i32_u, the last of the
-    // conversion block to leave the allow-list. They were kept on the premise
-    // that the translator lowered them, but that lowering emitted `BI_cvtop`,
-    // which the proof model does not declare — the same divergence that
-    // retracted the saturating truncations and sign-extensions before them.
-    for op in ["i32.wrap_i64", "i64.extend_i32_s", "i64.extend_i32_u"] {
-        let operand = if op == "i32.wrap_i64" {
-            "local.get 2"
-        } else {
-            "local.get 0"
-        };
+fn integer_width_conversions_translate() {
+    // i32.wrap_i64 / i64.extend_i32_s / i64.extend_i32_u. Each is exercised in
+    // isolation rather than in one body, so a lowering that exists for only one
+    // of the three cannot be carried by its neighbours: the linked output for
+    // each fixture contains exactly one conversion.
+    for (op, operand) in [
+        ("i32.wrap_i64", "local.get 2"),
+        ("i64.extend_i32_s", "local.get 0"),
+        ("i64.extend_i32_u", "local.get 0"),
+    ] {
         let main = main_with_memory_body("(local i64)", &format!("{operand} {op} drop"));
-        assert_link_rejected_as_unmodeled(
-            op,
-            &main,
-            "integer width conversions (not supported by the Rocq translator)",
-        );
+        assert_output_translates(op, &main);
     }
+}
+
+#[test]
+fn sign_extension_operators_translate() {
+    // The five sign-extension opcodes, each in its own fixture for the same
+    // reason as the conversions above. They are unops in the proof model, so
+    // their lowering lives beside `clz`/`ctz`/`popcnt` rather than beside the
+    // conversions — a distinction the earlier grouping got wrong, and the reason
+    // this test is separate from [`integer_width_conversions_translate`] rather
+    // than folded into it.
+    for (op, operand) in [
+        ("i32.extend8_s", "local.get 0"),
+        ("i32.extend16_s", "local.get 0"),
+        ("i64.extend8_s", "local.get 2"),
+        ("i64.extend16_s", "local.get 2"),
+        ("i64.extend32_s", "local.get 2"),
+    ] {
+        let main = main_with_memory_body("(local i64)", &format!("{operand} {op} drop"));
+        assert_output_translates(op, &main);
+    }
+}
+
+#[test]
+fn tail_calls_are_rejected() {
+    // The retraction direction of the lockstep contract, kept live now that the
+    // numeric families have moved to the translating side. `return_call` has no
+    // translator lowering, so the linker must refuse it outright rather than
+    // produce an output the `-v` path cannot render.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            return_call 0)
+          (export "compute" (func 1)))
+        "#,
+    );
+    assert_link_rejected_as_unmodeled("return_call", &main, "tail calls (return_call)");
 }
 
 #[test]

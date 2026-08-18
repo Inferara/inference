@@ -26,9 +26,17 @@ pub(crate) fn print_assert(a: &HAssert, resolved: &FxHashMap<String, u32>) -> St
     assert_str(a, resolved)
 }
 
-/// Pushes every function symbol applied by a `T_app`/`HA_app_ok` anywhere in
-/// the tree onto `acc` (with duplicates; the caller sorts and de-duplicates).
-pub(crate) fn collect_symbols<'a>(a: &'a HAssert, acc: &mut Vec<&'a str>) {
+/// Pushes every application a `T_app`/`HA_app_ok` performs anywhere in the tree
+/// onto `acc` as a `(symbol, argument count)` pair (with duplicates; the caller
+/// sorts and de-duplicates).
+///
+/// The argument count travels with the symbol because nothing downstream can
+/// recover it: an application prints as `T_app <idx> (…)` whatever its arity,
+/// and Gallina accepts the result either way — `term`'s argument list is a
+/// `seq`, not a fixed-width tuple. An arity that disagrees with the function it
+/// resolves to therefore produces a well-formed but meaningless obligation, so
+/// the count is checked against the module before anything is printed.
+pub(crate) fn collect_symbols<'a>(a: &'a HAssert, acc: &mut Vec<(&'a str, usize)>) {
     match a {
         HAssert::True | HAssert::False => {}
         HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => collect_symbols(x, acc),
@@ -42,7 +50,7 @@ pub(crate) fn collect_symbols<'a>(a: &'a HAssert, acc: &mut Vec<&'a str>) {
         }
         HAssert::HasType(t, _) | HAssert::Defined(t) => collect_term_symbols(t, acc),
         HAssert::AppOk(f, args) => {
-            acc.push(f.0.as_str());
+            acc.push((f.0.as_str(), args.len()));
             for arg in args {
                 collect_term_symbols(arg, acc);
             }
@@ -50,11 +58,11 @@ pub(crate) fn collect_symbols<'a>(a: &'a HAssert, acc: &mut Vec<&'a str>) {
     }
 }
 
-fn collect_term_symbols<'a>(t: &'a HTerm, acc: &mut Vec<&'a str>) {
+fn collect_term_symbols<'a>(t: &'a HTerm, acc: &mut Vec<(&'a str, usize)>) {
     match t {
         HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => {}
         HTerm::App(f, args) => {
-            acc.push(f.0.as_str());
+            acc.push((f.0.as_str(), args.len()));
             for arg in args {
                 collect_term_symbols(arg, acc);
             }

@@ -93,8 +93,14 @@ them and the corpus can never exercise them:
   the `T_f32`/`T_f64` number types, float constants, and the float
   operator families (`relop_f`/`binop_f`/`unop_f`). Inference has no
   floating-point.
-- **Conversions** — the whole `cvtop` family and `BI_cvtop`. Inference
-  codegen emits no conversion instructions.
+- **The float-naming half of `cvtop`** — `CVO_trunc`, `CVO_trunc_sat`,
+  `CVO_convert`, `CVO_demote`, `CVO_promote` and `CVO_reinterpret`. Each
+  needs a float number type on one side or the other, and this stub
+  declares none. The two integer-to-integer constructors, `CVO_wrap` and
+  `CVO_extend`, *are* declared, alongside `BI_cvtop` and the
+  `Unop_extend` sign-extension operator: Inference codegen emits none of
+  those either, but a statically-linked external compiled by a real
+  toolchain does, and the translator lowers all eight.
 - **SIMD/vector** (`T_v128`), **GC/reference-typing instructions**, and
   **atomics**.
 

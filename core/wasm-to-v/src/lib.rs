@@ -165,18 +165,25 @@
 //! The translator emits only what the vendored proof stub in `rocq-stub/`
 //! declares. A construct outside that subset is refused with
 //! [`errors::WasmToVError::UnsupportedFeature`] naming it — never a `.v` that
-//! fails `coqc` downstream, and never a panic. Rejected: every floating-point,
-//! SIMD/vector, and conversion instruction (integer width conversions included —
-//! the model declares no conversion at all); `f32`/`f64`/`v128` in any type
-//! position; and the proposal families the model does not describe (GC,
-//! exception handling, stack switching, tail calls, wide arithmetic, typed
-//! references, `memory.discard`, segment-indexed table operations).
+//! fails `coqc` downstream, and never a panic. Rejected: every floating-point
+//! and SIMD/vector instruction; every conversion naming a float on either side
+//! (`trunc`, `trunc_sat`, `convert`, `demote`, `promote`, `reinterpret`), since
+//! the model declares no float number type for such a term to mention;
+//! `f32`/`f64`/`v128` in any type position; and the proposal families the model
+//! does not describe (GC, exception handling, stack switching, tail calls, wide
+//! arithmetic, typed references, `memory.discard`, segment-indexed table
+//! operations).
+//!
+//! Translated, not rejected: the three integer-to-integer width conversions
+//! (`BI_cvtop` with `CVO_wrap`/`CVO_extend`) and the five sign-extension
+//! operators, which the model spells as unops — `BI_unop t (Unop_extend n)`,
+//! with `n` the source width in **bits**.
 //!
 //! No Inference program can reach any of this — the language has no floats, no
-//! vectors, and emits no conversion — so these arms are reachable only through
-//! foreign bytes, via the external linking path or [`wasm_parser::translate_bytes`].
-//! `core/wasm-linker` refuses the same content in external modules, making this
-//! the second of two layers.
+//! vectors, and emits no conversion or sign-extension — so these arms are
+//! reachable only through foreign bytes, via the external linking path or
+//! [`wasm_parser::translate_bytes`]. `core/wasm-linker` refuses the same float
+//! content in external modules, making this the second of two layers.
 //!
 //! ## Performance Characteristics
 //!
@@ -1253,14 +1260,23 @@ mod link_robustness {
 
 /// Fail-closed rejection of every construct outside the wasm-verifier proof
 /// contract (mirrored in-repo by the vendored stub): floating-point, SIMD/vector,
-/// the conversion (`cvtop`) family, and the proposal families that previously hit
-/// `todo!()`.
+/// the float-naming half of the conversion (`cvtop`) family, and the proposal
+/// families that previously hit `todo!()`.
 ///
 /// The stub in `rocq-stub/` declares `number_type` with only `T_i32`/`T_i64`, no
-/// `T_v128`, and no `cvtop`/`BI_cvtop` (see its README "Scope"). Every fixture here
-/// therefore has no honest lowering: the translator must say so with a recoverable
+/// `T_v128`, and a `cvtop` carrying only the two integer-to-integer constructors
+/// (see its README "Scope"). Every fixture here therefore has no honest lowering:
+/// the translator must say so with a recoverable
 /// [`WasmToVError::UnsupportedFeature`] naming the construct, rather than emit a
 /// term the proof target cannot type, or abort the process.
+///
+/// The integer-to-integer conversions and the five sign-extension operators are
+/// the counterweight: they are *not* rejected, and
+/// [`integer_width_conversions_translate`] /
+/// [`sign_extension_operators_translate_with_bit_widths`] pin their emitted
+/// terms. Keeping both directions in one module is deliberate — the rejections
+/// above are about the float types the contract omits, not about conversion or
+/// width-change as a category.
 ///
 /// Two failure modes are pinned, because both existed before this change:
 ///
@@ -1269,7 +1285,7 @@ mod link_robustness {
 ///   `Relop_f` wants `ROF_*` and `ROI_ge` is an unapplied function awaiting an `sx`.
 ///   Nothing caught it: the `coqc` gate's corpus is Inference source, and no Inference
 ///   program lowers to float WASM.
-/// * **`todo!()` panic** — sign-extension, saturating truncation, most SIMD, and nine
+/// * **`todo!()` panic** — saturating truncation, most SIMD, and nine
 ///   proposal families aborted the process instead of returning. On the linking path
 ///   that is strictly worse than the bug being fixed.
 ///
@@ -1471,47 +1487,149 @@ mod unsupported_surface {
         );
     }
 
-    /// The integer-only width conversions: no float anywhere, so nothing can
-    /// steal the error. They make the scope explicit — the stub declares no
-    /// `BI_cvtop` at all, so even an integer-to-integer conversion has no lowering.
-    ///
-    /// The wasm-linker's allow-list mirrors this: it rejects these three at link
-    /// time for the same reason (an allow-listed operator must have a translator
-    /// lowering, and no `cvtop` lowering exists under the proof contract).
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn integer_width_conversions_are_rejected() {
-        assert_wat_rejected(
-            "i32.wrap_i64",
-            r#"(module (func (export "f") i64.const 1 i32.wrap_i64 drop))"#,
-            &["i32wrapi64", "conversion"],
-        );
-        assert_wat_rejected(
-            "i64.extend_i32_s",
-            r#"(module (func (export "f") i32.const 1 i64.extend_i32_s drop))"#,
-            &["i64extendi32s", "conversion"],
-        );
-        assert_wat_rejected(
-            "i64.extend_i32_u",
-            r#"(module (func (export "f") i32.const 1 i64.extend_i32_u drop))"#,
-            &["i64extendi32u", "conversion"],
+    /// Translates `wat` and asserts the emitted `.v` contains `needle`
+    /// **verbatim**. The counterpart to [`assert_wat_rejected`] for the operators
+    /// the contract does cover: a substring match on the exact printed term, so
+    /// an arity or spelling drift in the emitted constructor fails here rather
+    /// than surviving to `coqc`.
+    fn assert_wat_emits(label: &str, wat: &str, needle: &str) {
+        let bytes = wat::parse_str(wat).expect("fixture WAT assembles");
+        let v = translate(&bytes).unwrap_or_else(|e| panic!("{label}: must translate, got {e:?}"));
+        assert!(
+            v.contains(needle),
+            "{label}: the emitted `.v` must contain `{needle}`; got:\n{v}"
         );
     }
 
-    /// Sign extension, a `todo!()` panic before this change, folded into the
-    /// conversion class. Integer-only, so each pins its own operator.
+    /// The three integer-to-integer width conversions: no float anywhere, so the
+    /// proof contract's `cvtop` covers them. Each operand triple is pinned
+    /// because `cvtop_valid` admits exactly one per constructor — `CVO_wrap` at
+    /// `(i32, i64, None)` and `CVO_extend` at `(i64, i32, Some sx)` — so a
+    /// transposed number type or a dropped `sx` is a well-formed term the
+    /// backend still refuses.
+    ///
+    /// The wasm-linker's allow-list mirrors this: it admits these three because
+    /// a lowering exists, which is the standard it holds every allow-listed
+    /// operator to.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn sign_extension_operators_are_rejected_not_panic() {
-        assert_wat_rejected(
-            "i32.extend8_s",
-            r#"(module (func (export "f") i32.const 1 i32.extend8_s drop))"#,
-            &["i32extend8s", "conversion"],
+    fn integer_width_conversions_translate() {
+        assert_wat_emits(
+            "i32.wrap_i64",
+            r#"(module (func (export "f") i64.const 1 i32.wrap_i64 drop))"#,
+            "BI_cvtop T_i32 CVO_wrap T_i64 None",
         );
-        assert_wat_rejected(
-            "i64.extend32_s",
-            r#"(module (func (export "f") i64.const 1 i64.extend32_s drop))"#,
-            &["i64extend32s", "conversion"],
+        assert_wat_emits(
+            "i64.extend_i32_s",
+            r#"(module (func (export "f") i32.const 1 i64.extend_i32_s drop))"#,
+            "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)",
+        );
+        assert_wat_emits(
+            "i64.extend_i32_u",
+            r#"(module (func (export "f") i32.const 1 i64.extend_i32_u drop))"#,
+            "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)",
+        );
+    }
+
+    /// Sign extension, which the proof contract spells as a **unop** — `BI_unop t
+    /// (Unop_extend n)`, beside `clz`/`ctz`/`popcnt` — and not as a conversion.
+    ///
+    /// This test exists for `n`. The argument is the source width in **bits**;
+    /// the model's `app_unop` divides it by eight before extending. A byte count
+    /// (`Unop_extend 1`) is an equally well-typed term: the model's
+    /// `unop_type_agree` ignores the argument entirely, so the `.v` compiles,
+    /// every obligation over it is provable, and each of the five instructions
+    /// silently denotes a constant-zero extension of its input.
+    ///
+    /// **Do not delete this as redundant with the `coqc` gate.** That was
+    /// measured, not assumed: emitting `Unop_extend 1%N` produced a `.v` that
+    /// `coqc` **compiled clean**, and only a byte comparison caught it. The gate
+    /// proves a term elaborates, never that it means what the instruction means,
+    /// so it is structurally incapable of catching an argument-*value* error
+    /// here. This test and
+    /// `sign_extension_widths_are_bit_counts_not_byte_counts` in
+    /// `tests/src/rocq_typecheck.rs` are the entire guard, which is why the
+    /// convention is pinned by byte comparison against the one spelling that
+    /// denotes the instruction WebAssembly actually specifies.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sign_extension_operators_translate_with_bit_widths() {
+        for (label, wat, needle) in [
+            (
+                "i32.extend8_s",
+                r#"(module (func (export "f") i32.const 1 i32.extend8_s drop))"#,
+                "BI_unop T_i32 (Unop_extend 8%N)",
+            ),
+            (
+                "i32.extend16_s",
+                r#"(module (func (export "f") i32.const 1 i32.extend16_s drop))"#,
+                "BI_unop T_i32 (Unop_extend 16%N)",
+            ),
+            (
+                "i64.extend8_s",
+                r#"(module (func (export "f") i64.const 1 i64.extend8_s drop))"#,
+                "BI_unop T_i64 (Unop_extend 8%N)",
+            ),
+            (
+                "i64.extend16_s",
+                r#"(module (func (export "f") i64.const 1 i64.extend16_s drop))"#,
+                "BI_unop T_i64 (Unop_extend 16%N)",
+            ),
+            (
+                "i64.extend32_s",
+                r#"(module (func (export "f") i64.const 1 i64.extend32_s drop))"#,
+                "BI_unop T_i64 (Unop_extend 32%N)",
+            ),
+        ] {
+            assert_wat_emits(label, wat, needle);
+        }
+
+        // The byte counts the bit widths would collapse to. Each is a term the
+        // proof model accepts and gives the wrong meaning, so absence is the
+        // only thing that distinguishes a correct emission from a provable lie.
+        let v = translate(
+            &wat::parse_str(
+                r#"(module (func (export "f")
+                     i32.const 1 i32.extend8_s drop
+                     i32.const 1 i32.extend16_s drop
+                     i64.const 1 i64.extend8_s drop
+                     i64.const 1 i64.extend16_s drop
+                     i64.const 1 i64.extend32_s drop))"#,
+            )
+            .expect("fixture WAT assembles"),
+        )
+        .expect("the sign-extension surface must translate");
+        for byte_count in ["Unop_extend 1%N", "Unop_extend 2%N", "Unop_extend 4%N"] {
+            assert!(
+                !v.contains(byte_count),
+                "`{byte_count}` is a byte count where the proof model wants a bit \
+                 width; it type-checks and denotes a constant-zero extension:\n{v}"
+            );
+        }
+    }
+
+    /// The conversions that remain rejected: every one names a float on one side
+    /// or the other, and the proof contract declares no float number type. The
+    /// integer-only rows above are what makes this list meaningful — the
+    /// rejection is about floats, not about conversion as a category.
+    ///
+    /// Hand-encoded rather than assembled from WAT: a saturating truncation
+    /// consumes a float, its only source is an `f32.const`/`f64.const`, and that
+    /// const's own arm rejects first — so a WAT fixture would pin the const's
+    /// name and leave these arms untested. See "Why there are two tiers of
+    /// fixture" above.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn saturating_truncations_are_rejected() {
+        assert_raw_rejected(
+            "i32.trunc_sat_f32_s",
+            &[0xfc, 0x00],
+            &["i32truncsatf32s", "conversion"],
+        );
+        assert_raw_rejected(
+            "i64.trunc_sat_f64_u",
+            &[0xfc, 0x07],
+            &["i64truncsatf64u", "conversion"],
         );
     }
 
@@ -1803,7 +1921,6 @@ mod unsupported_surface {
         let v = translate(&bytes).expect("the integer-only surface must still translate");
 
         for absent in [
-            "BI_cvtop",
             "T_f32",
             "T_f64",
             "Relop_f",
@@ -2390,6 +2507,182 @@ mod reachability_emission {
         assert!(
             msg.contains("not an interpretable symbol") && msg.contains("ex_fn"),
             "the rejection must name the applied symbol and the rule; got: {msg}",
+        );
+    }
+
+    /// The two ways an obligation can name an *imported* function, and the two
+    /// different rejections they get.
+    ///
+    /// Both are live, and which one fires turns on the name section. Inference
+    /// code generation names only the functions it compiles, so a symbol
+    /// naming one of its imports matches nothing and takes the unresolved arm —
+    /// which recognizes the symbol as one of this module's function imports and
+    /// says the merge has not run. A module whose name section *does* name the
+    /// import (hand-assembled, or third-party) resolves the symbol to an
+    /// import index, and the arithmetic in `mod_funcs_index` rejects it there
+    /// instead. Deleting either arm leaves one of these applications printing a
+    /// `T_app` into an index space it does not belong to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_obligation_naming_an_import_is_rejected_on_both_paths() {
+        let applier = |symbol: &str| {
+            spec_maps(
+                "Applied",
+                vec![],
+                vec![HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::AppOk(HFnRef(symbol.to_string()), vec![]),
+                    SpecKind::Forall,
+                )],
+            )
+        };
+
+        // Unnamed import: no name-section entry to match, and the symbol is
+        // recognizably this module's own import.
+        let (spec_funcs, hspecs) = applier("mathlib.sum");
+        let err = translate(
+            r#"(module (import "mathlib" "sum" (func)) (func $applier))"#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("an obligation about an unmerged import must be rejected");
+        assert!(
+            err.to_string()
+                .contains("Link the module before translating it"),
+            "the rejection must name the missing merge; got: {err}",
+        );
+
+        // Named import: the symbol resolves, to an index below the defined
+        // functions, and the index arithmetic rejects it.
+        let (spec_funcs, hspecs) = applier("imported");
+        let err = translate(
+            r#"(module (import "mathlib" "sum" (func $imported)) (func $applier))"#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect_err("an obligation applying a named import must be rejected");
+        assert!(
+            err.to_string().contains("imports rather than defines"),
+            "the rejection must say the target is imported; got: {err}",
+        );
+    }
+
+    /// An application whose argument count is not its target's parameter count
+    /// is rejected before emission, in both the `T_app` and `HA_app_ok`
+    /// positions and in both directions (too few, too many).
+    ///
+    /// Nothing downstream can catch this. `T_app`'s arguments are a `seq term`,
+    /// so a wrong-width application is well-formed Gallina: it elaborates, the
+    /// `coqc` gate passes, and the obligation goes on to say something about a
+    /// function other than the one it names.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_wrong_arity_application_is_rejected() {
+        let module = r#"
+            (module
+              (func $pair (param i32) (param i32) (result i32)
+                local.get 0)
+              (func $applier))
+            "#;
+        for (label, payload, arity) in [
+            (
+                "T_app, one argument short",
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0)],
+                )),
+                1,
+            ),
+            (
+                "T_app, one argument too many",
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                )),
+                3,
+            ),
+            (
+                "HA_app_ok, no arguments at all",
+                HAssert::AppOk(HFnRef("pair".to_string()), vec![]),
+                0,
+            ),
+            (
+                "HA_app_ok, one argument too many",
+                HAssert::AppOk(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                ),
+                3,
+            ),
+        ] {
+            let (spec_funcs, hspecs) = spec_maps(
+                "Applied",
+                vec![],
+                vec![HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    payload,
+                    SpecKind::Forall,
+                )],
+            );
+            let msg = translate(module, &spec_funcs, &hspecs)
+                .err()
+                .unwrap_or_else(|| panic!("{label}: a wrong-arity application must be rejected"))
+                .to_string();
+            assert!(
+                msg.contains(&format!(
+                    "to {arity} argument(s), but the function it names takes 2"
+                )) && msg.contains("pair"),
+                "{label}: the rejection must name the symbol and both counts; got: {msg}",
+            );
+        }
+
+        // The control: the same symbol at its real arity translates.
+        let (spec_funcs, hspecs) = spec_maps(
+            "Applied",
+            vec![],
+            vec![HSpecEntry::new(
+                HFnRef("applier".to_string()),
+                HAssert::Defined(HTerm::App(
+                    HFnRef("pair".to_string()),
+                    vec![HTerm::Local(0), HTerm::Local(1)],
+                )),
+                SpecKind::Forall,
+            )],
+        );
+        translate(module, &spec_funcs, &hspecs)
+            .expect("an application at the function's own arity translates");
+
+        // One symbol applied at two arities: the collection de-duplicates whole
+        // applications, not symbols, so the wrong-arity one is still seen. Keyed
+        // on the symbol alone it would be absorbed by the correct application
+        // that sorts before it and reach emission unchecked.
+        let (spec_funcs, hspecs) = spec_maps(
+            "Applied",
+            vec![],
+            vec![
+                HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::Defined(HTerm::App(
+                        HFnRef("pair".to_string()),
+                        vec![HTerm::Local(0), HTerm::Local(1)],
+                    )),
+                    SpecKind::Forall,
+                ),
+                HSpecEntry::new(
+                    HFnRef("applier".to_string()),
+                    HAssert::Defined(HTerm::App(
+                        HFnRef("pair".to_string()),
+                        vec![HTerm::Local(0), HTerm::Local(1), HTerm::Local(2)],
+                    )),
+                    SpecKind::Forall,
+                ),
+            ],
+        );
+        let err = translate(module, &spec_funcs, &hspecs)
+            .expect_err("a wrong-arity application beside a correct one must still be rejected");
+        assert!(
+            err.to_string().contains("to 3 argument(s)"),
+            "the rejection must name the wrong-arity application; got: {err}",
         );
     }
 

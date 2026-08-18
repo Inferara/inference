@@ -34,6 +34,25 @@
 //! generation may use. It is an independent axis from the mode: the same features
 //! apply in `Compile` and `Proof` mode, so the `.v` always describes the same
 //! program as the shipped `.wasm`.
+//!
+//! # Memory Layout
+//!
+//! [`MemoryLayout`] describes the linear memory a module declares and how much of
+//! it the shadow stack occupies. It is the single source of truth for both
+//! numbers: the memory section, the `__stack_pointer` initializer, and the
+//! per-frame size assertion all read it, so no part of code generation can hold
+//! its own idea of where the stack ends. It is defined in
+//! `inference-compiler-interface` and re-exported here, because the surfaces
+//! that select a layout share it — emission reads exactly the type a manifest or
+//! a compiler flag fills in.
+
+/// The linear memory shape, re-exported so [`CodegenOptions`] and every caller
+/// naming the field keep one path to it.
+///
+/// [`MemoryLayout`]'s fields are private and [`MemoryLayout::resolve`] is the
+/// only way to name a non-default one, so the constructor's vocabulary comes
+/// along: a caller that can set the field must be able to build the value.
+pub use inference_compiler_interface::{MemoryLayout, MemoryLayoutError, MemoryLayoutSource};
 
 /// Compilation target for code generation.
 ///
@@ -180,10 +199,11 @@ impl OptLevel {
 
 /// The complete configuration [`crate::codegen`] compiles under: which platform
 /// the module targets, which compilation mode drives emission, how the output is
-/// optimized, and which post-MVP instruction families emission may use.
+/// optimized, which post-MVP instruction families emission may use, and how the
+/// module's linear memory is laid out.
 ///
 /// This is the input mirror of the configuration [`crate::CodegenOutput`]
-/// records on the artifact it describes. Bundling the four values keeps the
+/// records on the artifact it describes. Bundling the values keeps the
 /// `codegen` signature stable as configuration grows: a new knob is a new field
 /// here, not a new parameter at every call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +216,9 @@ pub struct CodegenOptions {
     pub opt_level: OptLevel,
     /// The post-MVP instruction families emission is permitted to use.
     pub features: EmitFeatures,
+    /// The linear memory the module declares and the share of it the shadow
+    /// stack occupies.
+    pub layout: MemoryLayout,
 }
 
 /// Implemented by hand rather than derived: the default optimization level is
@@ -210,6 +233,7 @@ impl Default for CodegenOptions {
             mode: CompilationMode::default(),
             opt_level: target.default_opt_level(),
             features: EmitFeatures::default(),
+            layout: MemoryLayout::default(),
         }
     }
 }

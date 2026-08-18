@@ -185,6 +185,7 @@ use inf_wasmparser::{
     FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
     RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
+use inference_fn_key::merged_name;
 use inference_hassert::{HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -309,14 +310,22 @@ impl FuncRemap {
     /// imported function; a retained function is accepted (the `reach_func`
     /// computation is the reason this method must not carry the reference
     /// guard).
+    ///
+    /// The imported case is reachable, and is not a compiler defect: an
+    /// unlinked module still carries its imports, and an obligation about a
+    /// linked `external fn` names a body only the static merge supplies. So the
+    /// error names the missing step rather than blaming the obligation.
     fn mod_funcs_index(&self, abs: u32) -> anyhow::Result<u32> {
         let instantiated = self.instantiated(abs)?;
         instantiated
             .checked_sub(self.func_import_count)
             .ok_or_else(|| {
                 anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
-                    "a `T_app` obligation references imported function {abs}, but only \
-                     module-defined functions can be applied"
+                    "an obligation applies function {abs}, which this module imports rather than \
+                     defines; only a function the module itself defines can be applied. An \
+                     obligation about an `external fn` resolves once the static-merge linker has \
+                     spliced its body in, so translate the linked module rather than the \
+                     compiler's direct output"
                 )))
             })
     }
@@ -411,9 +420,9 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) func_names_map: Option<HashMap<u32, String>>,
     /// The RAW, unsanitized name-section function names keyed by absolute WASM
     /// function index. Whereas `func_names_map` holds Rocq-sanitized names for
-    /// `Definition` emission, `inference.hspecs` obligations reference callees
-    /// by their exact `FnKey::Display` symbol, so `T_app` resolution keys on
-    /// these untouched strings.
+    /// `Definition` emission, an `inference.hspecs` obligation references a
+    /// callee by the exact string the emitted module carries for it, so `T_app`
+    /// resolution keys on these untouched strings.
     pub(crate) raw_func_names_map: Option<HashMap<u32, String>>,
     pub(crate) func_locals_name_map: Option<HashMap<u32, HashMap<u32, String>>>,
 
@@ -1045,31 +1054,38 @@ impl WasmParseData<'_> {
     }
 
     /// Resolves every function symbol any obligation applies to its `mod_funcs`
-    /// index, up front, so a missing / ambiguous / imported / spec-function
-    /// target fails before a line of output is built.
+    /// index, up front, so a missing / ambiguous / imported / spec-function /
+    /// wrong-arity target fails before a line of output is built.
     ///
     /// `by_name` is the shared raw name-section inversion built once in
     /// [`Self::translate`]. A `T_app` names exactly one defined function, so
     /// zero or several matches is a hard error.
+    ///
+    /// Arity is checked here and nowhere else. Downstream there is nothing left
+    /// to check it against: the printed `T_app` carries a `seq term`, so an
+    /// application of the wrong width is still well-typed Gallina and compiles
+    /// clean — it simply denotes a different (silent) thing than the function it
+    /// names. The obligation would then be discharged, or refuted, for reasons
+    /// unrelated to the program.
     fn resolve_app_symbols(
         &self,
         by_name: &HashMap<String, Vec<u32>>,
         remap: &FuncRemap,
     ) -> anyhow::Result<FxHashMap<String, u32>> {
-        let mut symbols: Vec<&str> = Vec::new();
+        let mut applications: Vec<(&str, usize)> = Vec::new();
         for entries in self.hspecs_by_spec.values() {
             for entry in entries {
-                hassert_print::collect_symbols(&entry.hassert, &mut symbols);
+                hassert_print::collect_symbols(&entry.hassert, &mut applications);
             }
         }
-        symbols.sort_unstable();
-        symbols.dedup();
-        if symbols.is_empty() {
+        applications.sort_unstable();
+        applications.dedup();
+        if applications.is_empty() {
             return Ok(FxHashMap::default());
         }
 
         let mut resolved = FxHashMap::default();
-        for sym in symbols {
+        for (sym, arity) in applications {
             let abs = match by_name.get(sym).map(Vec::as_slice) {
                 Some([one]) => *one,
                 Some(many) if many.len() > 1 => {
@@ -1080,10 +1096,9 @@ impl WasmParseData<'_> {
                     ))));
                 }
                 _ => {
-                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
-                        "obligation applies function symbol `{sym}`, which no defined function \
-                         in the module carries"
-                    ))));
+                    return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(
+                        self.unresolved_symbol_message(sym)
+                    )));
                 }
             };
             // A retained `exists`/`unique` spec function is the subject of its
@@ -1100,9 +1115,67 @@ impl WasmParseData<'_> {
             // Rejects an imported or omitted (spec) target: a `T_app` may only
             // name a module-defined, non-spec function.
             let idx = remap.mod_funcs_index(abs)?;
+            self.check_app_arity(sym, abs, arity)?;
             resolved.insert(sym.to_string(), idx);
         }
         Ok(resolved)
+    }
+
+    /// Why a symbol resolved to nothing.
+    ///
+    /// An obligation about a linked `external fn` names the body the merge
+    /// splices in, which a module that still *imports* that function does not
+    /// have — the commonest way to reach this, and one whose bare "no defined
+    /// function carries it" reads like a compiler defect. Recognizing the
+    /// symbol as one of this module's own function imports turns the dead end
+    /// into the missing step.
+    fn unresolved_symbol_message(&self, sym: &str) -> String {
+        let unmerged = self.imports.iter().any(|import| {
+            matches!(import.ty, TypeRef::Func(_))
+                && merged_name::root(import.module, import.name) == sym
+        });
+        if unmerged {
+            return format!(
+                "obligation applies function symbol `{sym}`, which this module imports rather \
+                 than defines; the static-merge linker has not run, so the external's body is \
+                 not here to be reasoned about. Link the module before translating it"
+            );
+        }
+        format!(
+            "obligation applies function symbol `{sym}`, which no defined function in the \
+             module carries"
+        )
+    }
+
+    /// Rejects an application whose argument count is not the resolved
+    /// function's parameter count.
+    ///
+    /// The wasm-verifier obligation applies the *compiled* function, so the
+    /// comparison is against its WASM signature rather than any source-level
+    /// arity: a mismatch means the obligation names a function it does not
+    /// describe.
+    ///
+    /// The Inference front end screens the source-level ways to reach this —
+    /// `A016` for a compound-returning callee, whose sret pointer would make
+    /// the compiled arity one more than the written one, and the external
+    /// signature validator for a declaration that disagrees with the `.wasm` it
+    /// binds. This is the check on the *artifact*: an embedder driving
+    /// `translate_bytes` directly, or any pipeline that skips analysis, reaches
+    /// emission with neither of those screens in front of it.
+    fn check_app_arity(&self, sym: &str, abs: u32, arity: usize) -> anyhow::Result<()> {
+        let Some(params) = self.defined_func_param_count(abs) else {
+            return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                "obligation applies function symbol `{sym}`, which resolves to function {abs}, \
+                 whose type cannot be read from the module"
+            ))));
+        };
+        if usize::try_from(params) != Ok(arity) {
+            return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
+                "obligation applies function symbol `{sym}` to {arity} argument(s), but the \
+                 function it names takes {params}"
+            ))));
+        }
+        Ok(())
     }
 
     /// Appends the per-spec obligation definitions to `out`, partitioned by
@@ -2262,6 +2335,17 @@ fn translate_basic_operator(
         Operator::I32Clz => "BI_unop T_i32 (Unop_i UOI_clz)".to_string(),
         Operator::I32Ctz => "BI_unop T_i32 (Unop_i UOI_ctz)".to_string(),
         Operator::I32Popcnt => "BI_unop T_i32 (Unop_i UOI_popcnt)".to_string(),
+        // Sign-extension is a *unop*, not a conversion: the proof model spells
+        // it `BI_unop t (Unop_extend n)`, alongside `clz`/`ctz`/`popcnt`, and
+        // covers it with the same `sem_unop` rule. Its argument is the source
+        // width in BITS — the model divides by eight before extending — so a
+        // byte count here would type-check, satisfy the model's typing side
+        // condition (which ignores the argument), and denote a constant-zero
+        // extension for every input.
+        // `sign_extension_operators_translate_with_bit_widths` in `lib.rs`
+        // byte-compares these strings for exactly that reason.
+        Operator::I32Extend8S => "BI_unop T_i32 (Unop_extend 8%N)".to_string(),
+        Operator::I32Extend16S => "BI_unop T_i32 (Unop_extend 16%N)".to_string(),
         Operator::I32Add => "BI_binop T_i32 (Binop_i BOI_add)".to_string(),
         Operator::I32Sub => "BI_binop T_i32 (Binop_i BOI_sub)".to_string(),
         Operator::I32Mul => "BI_binop T_i32 (Binop_i BOI_mul)".to_string(),
@@ -2280,6 +2364,9 @@ fn translate_basic_operator(
         Operator::I64Clz => "BI_unop T_i64 (Unop_i UOI_clz)".to_string(),
         Operator::I64Ctz => "BI_unop T_i64 (Unop_i UOI_ctz)".to_string(),
         Operator::I64Popcnt => "BI_unop T_i64 (Unop_i UOI_popcnt)".to_string(),
+        Operator::I64Extend8S => "BI_unop T_i64 (Unop_extend 8%N)".to_string(),
+        Operator::I64Extend16S => "BI_unop T_i64 (Unop_extend 16%N)".to_string(),
+        Operator::I64Extend32S => "BI_unop T_i64 (Unop_extend 32%N)".to_string(),
         Operator::I64Add => "BI_binop T_i64 (Binop_i BOI_add)".to_string(),
         Operator::I64Sub => "BI_binop T_i64 (Binop_i BOI_sub)".to_string(),
         Operator::I64Mul => "BI_binop T_i64 (Binop_i BOI_mul)".to_string(),
@@ -2355,18 +2442,31 @@ fn translate_basic_operator(
                 ),
             }));
         }
-        // The wasm-verifier proof contract covers no conversion surface
-        // (`cvtop`/`BI_cvtop`), so every conversion is untranslatable —
-        // including the three integer width conversions, which involve no float
-        // type at all. Inference codegen emits no conversion of any kind, so
-        // this arm is reachable only from foreign or hand-crafted `.wasm`.
-        Operator::I32WrapI64
-        | Operator::I32TruncF32S
+        // The three integer-to-integer width conversions. The proof contract's
+        // `cvtop_valid` admits `CVO_wrap` at exactly `(i32, i64, None)` and
+        // `CVO_extend` at exactly `(i64, i32, Some sx)`, which is why each
+        // operand triple below is written out rather than derived: these three
+        // are every well-typed instance the two constructors have. The first
+        // number type is the TARGET and the third is the SOURCE — the model's
+        // `bet_cvtop` types `BI_cvtop t2 op t1 sx` as `Tf [t1] [t2]` — so a
+        // transposition here is a well-formed term denoting the wrong
+        // conversion.
+        Operator::I32WrapI64 => "BI_cvtop T_i32 CVO_wrap T_i64 None".to_string(),
+        Operator::I64ExtendI32S => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)".to_string(),
+        Operator::I64ExtendI32U => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)".to_string(),
+        // The conversions that remain untranslatable. Each names a float on one
+        // side or the other — `trunc` and `trunc_sat` consume one, `convert`
+        // produces one, `demote`/`promote` are float-to-float, and `reinterpret`
+        // crosses the two representations — and the proof contract declares no
+        // float number type for them to mention, nor any rule that would give
+        // them meaning. Admitting them would put a term in the emitted `.v` that
+        // has no constructor, which is the divergence the allow-list on the
+        // linker side exists to prevent. Inference codegen emits none of them,
+        // so this arm is reachable only from foreign or hand-crafted `.wasm`.
+        Operator::I32TruncF32S
         | Operator::I32TruncF32U
         | Operator::I32TruncF64S
         | Operator::I32TruncF64U
-        | Operator::I64ExtendI32S
-        | Operator::I64ExtendI32U
         | Operator::I64TruncF32S
         | Operator::I64TruncF32U
         | Operator::I64TruncF64S
@@ -2385,11 +2485,6 @@ fn translate_basic_operator(
         | Operator::I64ReinterpretF64
         | Operator::F32ReinterpretI32
         | Operator::F64ReinterpretI64
-        | Operator::I32Extend8S
-        | Operator::I32Extend16S
-        | Operator::I64Extend8S
-        | Operator::I64Extend16S
-        | Operator::I64Extend32S
         | Operator::I32TruncSatF32S
         | Operator::I32TruncSatF32U
         | Operator::I32TruncSatF64S
@@ -2400,7 +2495,7 @@ fn translate_basic_operator(
         | Operator::I64TruncSatF64U => {
             return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
                 description: format!(
-                    "conversion instruction {operator:?} (the wasm-verifier proof contract covers no conversion instructions, integer width conversions included)"
+                    "conversion instruction {operator:?} (the wasm-verifier proof contract declares no floating-point number type, so a conversion naming one has no lowering; the integer-to-integer width conversions are supported)"
                 ),
             }));
         }

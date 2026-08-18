@@ -6,7 +6,10 @@
 //! function bodies, and the precise rejection for Tier-C inputs.
 
 use inf_wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
-use inference_wasm_linker::{link as raw_link, LinkError};
+use inference_wasm_linker::{
+    link as raw_link, link_with_warnings as raw_link_with_warnings, LinkError, LinkOutput,
+    LinkWarning,
+};
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
 fn wasm(wat: &str) -> Vec<u8> {
@@ -25,15 +28,28 @@ fn wasm(wat: &str) -> Vec<u8> {
 /// external (multi-module satisfaction, same-field disambiguation) call
 /// [`raw_link`] directly with explicit pairs.
 fn link(main: &[u8], libs: &[&[u8]]) -> Result<Vec<u8>, LinkError> {
+    let module = sole_import_module(main);
+    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
+    raw_link(main, &pairs)
+}
+
+/// [`link`] through the warning-carrying entry point, for tests whose subject is
+/// what the merge reports rather than what it emits.
+fn link_with_warnings(main: &[u8], libs: &[&[u8]]) -> Result<LinkOutput, LinkError> {
+    let module = sole_import_module(main);
+    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
+    raw_link_with_warnings(main, &pairs)
+}
+
+/// The single logical module `main` imports from, or the empty string when it
+/// imports nothing — a no-import main links any externals away to nothing, so
+/// the label is irrelevant there.
+fn sole_import_module(main: &[u8]) -> String {
     let modules: std::collections::BTreeSet<String> = function_imports(main)
         .into_iter()
         .map(|(module, _)| module)
         .collect();
-    // A no-import main links any externals away to nothing; the module label is
-    // irrelevant there. With imports, every fixture here uses a single module.
-    let module = modules.into_iter().next().unwrap_or_default();
-    let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
-    raw_link(main, &pairs)
+    modules.into_iter().next().unwrap_or_default()
 }
 
 /// Validates `bytes` as a complete WASM module.
@@ -506,6 +522,1216 @@ fn tier_b_merges_function_over_caller_memory() {
     );
 }
 
+// -- Declared but unused: lld boilerplate does not force Tier C --------------
+
+/// The first operator in body `func_idx` that names the global or table index
+/// space, rendered for the failure message, or `None` if the body names
+/// neither. `func_idx` of `None` scans every body.
+///
+/// Used on merges where no module contributes a global and the merge preserves
+/// no table section, to confirm that admitting an external which *declares*
+/// either leaves no operator behind that could resolve against the wrong module.
+/// Where an external legitimately contributes globals, [`body_global_indices`]
+/// is the sharper instrument: what matters there is not that the operator is
+/// absent but that its operand was remapped.
+fn body_naming_a_global_or_table(bytes: &[u8], func_idx: Option<usize>) -> Option<String> {
+    let mut idx = 0usize;
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            if func_idx.is_none_or(|wanted| wanted == idx) {
+                for op in body.get_operators_reader().unwrap() {
+                    let op = op.unwrap();
+                    if matches!(
+                        op,
+                        Operator::GlobalGet { .. }
+                            | Operator::GlobalSet { .. }
+                            | Operator::CallIndirect { .. }
+                            | Operator::TableGet { .. }
+                            | Operator::TableSet { .. }
+                            | Operator::TableGrow { .. }
+                            | Operator::TableSize { .. }
+                            | Operator::TableFill { .. }
+                            | Operator::RefFunc { .. }
+                    ) {
+                        return Some(format!("{op:?}"));
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+/// The `("get" | "set", global index)` of every global accessor in body
+/// `func_idx`, in operator order.
+///
+/// The operand is the whole point. A merged external's `global.get 0` copied
+/// verbatim still names *a* global, and where main declares one of the same type
+/// the merged module validates and runs — so a test that only asserted the
+/// operator survived, or only counted the module's globals, would pass on the
+/// exact miscompile the remap exists to prevent. Only the index distinguishes
+/// them.
+fn body_global_indices(bytes: &[u8], func_idx: usize) -> Vec<(&'static str, u32)> {
+    let mut idx = 0usize;
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+            if idx == func_idx {
+                return body
+                    .get_operators_reader()
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|op| match op.unwrap() {
+                        Operator::GlobalGet { global_index } => Some(("get", global_index)),
+                        Operator::GlobalSet { global_index } => Some(("set", global_index)),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            idx += 1;
+        }
+    }
+    panic!("no body at index {func_idx}");
+}
+
+#[test]
+fn external_with_an_unused_stack_pointer_global_links() {
+    // Every `cargo build --target wasm32-unknown-unknown` artifact carries an
+    // lld-synthesized `__stack_pointer` mutable global. A leaf integer function
+    // never reads it, so the declaration alone must not reject the link: Tier C
+    // is about what the closure *uses*, not what its module declares.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("an unread __stack_pointer must not block the link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+    assert_eq!(body_call_targets(&linked, 0), vec![1]);
+}
+
+#[test]
+fn external_with_an_unused_funcref_table_links() {
+    // An lld `std` build also emits `(table 1 1 funcref)` with no element
+    // segment. Nothing initializes or reads it, so it too is inert.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("an empty unused table must not block the link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+}
+
+#[test]
+fn external_with_unused_boilerplate_still_merges_over_caller_memory() {
+    // The realistic shape: lld's global and table alongside a function that
+    // stores through a caller-supplied pointer. The unread boilerplate must not
+    // demote the closure out of Tier B, so the merged body keeps its store and
+    // the output keeps the shared memory.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("lld boilerplate must not demote a Tier-B closure");
+    assert_valid(&linked);
+    assert_eq!(code_body_count(&linked), 2);
+    assert!(
+        body_has_i32_store(&linked, 1),
+        "the merged Tier-B body must retain its memory store"
+    );
+    assert!(
+        memory_limits(&linked).is_some(),
+        "the merged module must keep the shared memory"
+    );
+}
+
+#[test]
+fn an_externals_declared_globals_and_tables_are_absent_from_the_merged_output() {
+    // The soundness argument for the relaxed gate, asserted on the output rather
+    // than left implicit.
+    //
+    // `merge` emits the main module's globals only and writes no table section,
+    // and `rewrite`'s index map has no global or table remap arm. So a merged
+    // body carrying `global.get N` would silently rebind to *main's* N-th global
+    // and still pass post-merge validation (both are i32) — a wrong value with
+    // no diagnostic. What rules that out is that closure effects are computed
+    // over the closure's own bodies: a closure admitted with no global/table
+    // effect has no such operator to leave behind.
+    //
+    // Main declares two globals of its own; the external declares two more plus
+    // a table, and touches none of them.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (global (;1;) i64 (i64.const 64))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0
+            global.get 0
+            i32.add)
+          (export "compute" (func 1))
+          (export "state" (global 0)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (global (;1;) i64 (i64.const 999))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("declared-but-unused external state must merge");
+    assert_valid(&linked);
+
+    // Only main's globals survive, at their original indices — the external's
+    // two are dropped, not appended.
+    let globals = module_globals(&linked);
+    assert_eq!(
+        globals,
+        vec![
+            (true, "I32Const { value: 11 }".to_string()),
+            (false, "I64Const { value: 64 }".to_string()),
+        ],
+        "the external's globals must not reach the output, got {globals:?}"
+    );
+
+    // Main's own `global.get 0` still names main's first global.
+    assert_eq!(
+        body_call_targets(&linked, 0),
+        vec![1],
+        "main's call must retarget to the merged body"
+    );
+
+    // No table section is emitted, and no surviving body names a global or table
+    // the merge did not re-index.
+    let has_table_section = Parser::new(0)
+        .parse_all(&linked)
+        .any(|p| matches!(p.unwrap(), Payload::TableSection(_)));
+    assert!(!has_table_section, "no table section may reach the output");
+
+    // Main's body legitimately reads main's own global; the *merged* body (index
+    // 1) must name nothing.
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, Some(1)),
+        None,
+        "a merged external body must name no global or table"
+    );
+}
+
+#[test]
+fn a_global_read_outside_the_closure_does_not_block_the_link() {
+    // Directly exercises what makes the relaxed gate safe: effects are computed
+    // over the *closure*, not the module. The library's exported `sum` is pure,
+    // while a sibling `read_state` — which nothing in `sum`'s closure calls —
+    // reads the global. `sum` merges, `read_state` does not, and no `global.get`
+    // reaches the output. A module-scoped effect would have rejected this.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (type (;1;) (func (result i32)))
+          (global (;0;) (mut i32) (i32.const 7))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (func (;1;) (type 1) (result i32)
+            global.get 0)
+          (export "sum" (func 0))
+          (export "read_state" (func 1)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a global read outside the closure is irrelevant");
+    assert_valid(&linked);
+    assert_eq!(
+        code_body_count(&linked),
+        2,
+        "only main's `compute` and the merged `sum` may reach the output"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "the global-reading sibling must not be merged"
+    );
+    assert!(module_globals(&linked).is_empty());
+}
+
+#[test]
+fn a_global_read_through_a_transitive_call_is_remapped() {
+    // The converse of the test above, pinning that the effect scan follows
+    // calls: `sum` itself names no global, but the helper it calls does. The
+    // helper *is* in the closure and is merged, so the external's globals must be
+    // contributed on its account — the closure's `uses_globals` is what decides,
+    // and it is set transitively or not at all.
+    //
+    // Main declares one global of its own, so the external's single global lands
+    // at output index 1 and the helper's operand must move from 0 to 1. Were the
+    // effect scan not transitive, the external's globals would be dropped, the
+    // remap left empty, and the helper's `global.get 0` would fail the lookup —
+    // so this fixture pins the transitivity from the merge side too.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (type (;1;) (func (result i32)))
+          (global (;0;) (mut i32) (i32.const 7))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add
+            call 1
+            i32.add)
+          (func (;1;) (type 1) (result i32)
+            global.get 0)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a transitive global read must merge");
+    assert_valid(&linked);
+
+    // Bodies: main's `compute` (0), the merged `sum` (1), the merged helper (2).
+    assert_eq!(code_body_count(&linked), 3);
+    assert_eq!(
+        body_global_indices(&linked, 2),
+        vec![("get", 1)],
+        "the transitively merged helper must read the external's global at its \
+         remapped index, not main's global 0"
+    );
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 11 }".to_string()),
+            (true, "I32Const { value: 7 }".to_string()),
+        ],
+        "main's global keeps index 0 and the external's is appended after it"
+    );
+}
+
+/// An external shaped like real lld output: a multi-page linear memory, a
+/// `__stack_pointer` global pointing one page into it, an empty funcref table,
+/// and a leaf `i32.add` export that touches none of them.
+///
+/// The minimal fixtures above deliberately omit the memory so they isolate the
+/// global/table gate; this one is internally consistent (a stack pointer at
+/// 1048576 presupposes at least 17 pages) and is therefore the fixture that says
+/// what a stock artifact actually does at the link.
+fn lld_shaped_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) 17)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    )
+}
+
+/// The same lld shape, but with a body that stores through a caller-supplied
+/// pointer: a memory-*using* closure over a 17-page module. Its declared memory
+/// is a fact about the merged output, so reconciliation must judge it.
+fn lld_shaped_memory_using_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 17)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    )
+}
+
+/// A main module that imports `sum` and calls it from an exported `compute`,
+/// under the memory shape the Inference compiler emits: `(memory 1 1)`, one page
+/// with the maximum pinned equal to the minimum.
+fn infc_shaped_main_importing_sum() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "compute" (func 1)))
+        "#,
+    )
+}
+
+#[test]
+fn an_lld_shaped_external_links_onto_an_infc_shaped_main() {
+    // What the relaxed global/table gate buys, pinned against the main-module
+    // shape the Inference compiler actually emits: `(memory 1 1)`.
+    //
+    // The tier gate does not object: the closure reads no global and names no
+    // table. Neither does memory reconciliation. The external declares 17 pages,
+    // and the reconciler never relaxes the anchor module's pinned bound — but the
+    // closure is a leaf `i32.add` that never addresses memory, so the external's
+    // declaration is not folded in at all and main's single page is kept as-is.
+    //
+    // This test previously pinned the opposite outcome: an `IncompatibleMemory`
+    // rejection of 17 pages against main's pinned 1. That was recorded as
+    // behavior pinned rather than endorsed — the tier gate had been relaxed, and
+    // the reconciler was the next thing to reject a stock
+    // `wasm32-unknown-unknown` artifact, over pages nothing would have touched.
+    // Adoption is now guarded on the closure's `uses_memory` effect. A
+    // memory-*using* external still meets that rejection unchanged; see
+    // `a_memory_using_lld_shaped_external_still_fails_reconciliation`.
+    let main = infc_shaped_main_importing_sum();
+
+    let linked = link(&main, &[&lld_shaped_lib()])
+        .expect("a pure closure must not drag its module's 17 pages into the link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+
+    assert_eq!(
+        memory_limits(&linked),
+        Some((1, Some(1))),
+        "main's own memory must survive untouched: neither widened to the external's \
+         minimum nor relaxed to its unbounded maximum"
+    );
+
+    // The global/table gate still holds on the merged output.
+    assert!(
+        module_globals(&linked).is_empty(),
+        "the external's __stack_pointer must not reach the output"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "no body may name a global or table the output does not declare"
+    );
+}
+
+#[test]
+fn an_lld_shaped_external_links_onto_a_memoryless_main_without_adopting_its_memory() {
+    // The same external against a main that declares no memory of its own. The
+    // link succeeds and the merged output declares no memory at all: the merged
+    // closure is a pure `i32.add`, so the external's 17 pages are not adopted.
+    //
+    // This test previously pinned the opposite — an output memory of
+    // `(17, None)` — explicitly as imprecision pinned rather than endorsed. It
+    // reached further than the `.wasm`: `wasm-to-v` emits the reconciled limits
+    // into the paired `.v` as the module's `mod_mems`, so a pure function's
+    // incidental page count became an observable in the verification deliverable.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lld_shaped_lib()])
+        .expect("a memoryless main links a pure closure from a memory-declaring module");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+
+    assert_eq!(
+        memory_limits(&linked),
+        None,
+        "a closure that never addresses memory must not synthesize one in the output"
+    );
+
+    // The gate this change is about still holds on the merged output: neither the
+    // external's global nor its table survives, and no body names either.
+    assert!(
+        module_globals(&linked).is_empty(),
+        "the external's __stack_pointer must not reach the output"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "no body may name a global or table the output does not declare"
+    );
+}
+
+#[test]
+fn a_memory_using_lld_shaped_external_still_fails_reconciliation() {
+    // The counterpart that keeps the guard honest. The same 17-page lld shape,
+    // but the closure stores through a caller-supplied pointer, so its declared
+    // memory *is* folded in — and the reconciler still refuses to widen main's
+    // pinned single page to hold it.
+    //
+    // Guarding adoption narrows *which* externals contribute limits; it does not
+    // loosen the reconciliation applied to the ones that do. The page-count
+    // blocker for a stock memory-using artifact is untouched, and configurable
+    // linear memory remains a separate change.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+
+    let err = link(&main, &[&lld_shaped_memory_using_lib()])
+        .expect_err("17 pages cannot be reconciled onto a pinned single page");
+    match err {
+        LinkError::IncompatibleMemory { field, reason } => {
+            assert_eq!(field, "store_at");
+            assert!(
+                reason.contains("17 pages") && reason.contains("1 pages"),
+                "the diagnostic must name both bounds so the real blocker is legible: {reason}"
+            );
+        }
+        LinkError::RequiresRelocatableBuild { reasons, .. } => {
+            panic!("the tier gate must not be what rejects this artifact, got {reasons:?}")
+        }
+        other => panic!("expected IncompatibleMemory, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_memory_using_external_still_widens_the_reconciled_minimum() {
+    // The guard must not amount to switching adoption off. A memory-using closure
+    // over a 3-page external, folded onto a main that reserves one page under a
+    // five-page cap, must still widen the output minimum to 3 — a result
+    // distinguishable from dropping the external's declaration, which would have
+    // left `(1, Some(5))`.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 5)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 3)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a memory-using Tier-B closure must still merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((3, Some(5))),
+        "the memory-using external's minimum must still widen the output, under main's kept cap"
+    );
+    assert!(
+        body_has_i32_store(&linked, 1),
+        "the merged Tier-B body must retain its memory store"
+    );
+}
+
+#[test]
+fn a_memory_using_external_under_the_mains_bound_links_unchanged() {
+    // The everyday Tier-B shape, asserted on the limits rather than only on the
+    // memory export's survival: a one-page external whose closure stores through a
+    // caller pointer, merged into the `(memory 1 1)` main the compiler emits. It
+    // linked before the adoption guard and must link after it.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a one-page Tier-B external must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((1, Some(1))),
+        "main's pinned page must be kept, and the external's equal minimum changes nothing"
+    );
+    assert!(
+        body_has_i32_store(&linked, 1),
+        "the merged Tier-B body must retain its memory store"
+    );
+}
+
+#[test]
+fn memory_size_alone_counts_as_memory_use_and_adopts_the_memory() {
+    // `memory.size` reads no byte of linear memory — it returns a page count —
+    // so it is the operator most likely to be mistaken for memory-free. It is
+    // exactly what the adoption guard must treat as use: the value it returns
+    // *is* the reconciled minimum, so dropping the declaration that produced it
+    // would change the merged program's observable answer.
+    //
+    // Against a memoryless main the proof is unambiguous: the output memory can
+    // only have come from the external, so its presence shows the closure was
+    // classified as memory-using.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "memlib" "pages" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (result i32)
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (memory (;0;) 4)
+          (func (;0;) (type 0) (result i32)
+            memory.size)
+          (export "pages" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a memory.size closure must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        memory_limits(&linked),
+        Some((4, None)),
+        "memory.size must count as memory use, so the external's declaration is adopted"
+    );
+}
+
+#[test]
+fn only_the_memory_using_external_contributes_its_declaration() {
+    // The per-external form of the guard, against a memoryless main so every page
+    // in the output is traceable to the external that contributed it. One
+    // external is a pure `i32.add` over a 17-page lld-shaped module; the other
+    // stores through a caller pointer over a 2-page module. The output must
+    // reserve 2 pages — the memory-using external's — and not 17.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (type (;1;) (func (param i32 i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (import "mathlib" "store_at" (func (;1;) (type 1)))
+          (func (;2;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            local.get 0
+            local.get 1
+            call 1
+            call 0)
+          (export "run" (func 2)))
+        "#,
+    );
+    let store_lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 2)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lld_shaped_lib(), &store_lib])
+        .expect("both externals must merge");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(
+        memory_limits(&linked),
+        Some((2, None)),
+        "only the memory-using external may contribute limits; the pure external's 17 \
+         pages must not appear"
+    );
+    assert!(
+        module_globals(&linked).is_empty(),
+        "neither external's global may reach the output"
+    );
+}
+
+// -- The Tier-B reach warning ------------------------------------------------
+
+/// A main module importing `touch` from `memlib`, calling it, and owning a
+/// linear memory of `pages` pages pinned to that size — the shape the compiler
+/// emits once a project configures its memory.
+fn main_owning_pages(pages: u32) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "memlib" "touch" (func (;0;) (type 0)))
+          (memory (;0;) {pages} {pages})
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#
+    ))
+}
+
+/// An external exporting `touch : (i32, i32) -> i32` over a one-page memory that
+/// its body never addresses: it adds its two parameters. Tier A.
+///
+/// It nonetheless *declares* the memory, so the only difference between this
+/// fixture and a one-page [`tier_b_touch_lib`] is the operator in the body —
+/// which is what makes the pair a test of the tier rather than of two modules
+/// that happen to differ.
+fn tier_a_touch_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "touch" (func 0)))
+        "#,
+    )
+}
+
+/// The same external over `pages` pages, with a body that loads through its
+/// first parameter: a caller-supplied address, so Tier B.
+fn tier_b_touch_lib(pages: u32) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) {pages})
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            i32.load
+            local.get 1
+            i32.add)
+          (export "touch" (func 0)))
+        "#
+    ))
+}
+
+/// The single warning `out` carries, panicking when it carries any other count.
+fn sole_warning(out: &LinkOutput) -> &LinkWarning {
+    match out.warnings.as_slice() {
+        [only] => only,
+        other => panic!("expected exactly one warning, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_tier_b_external_in_a_multi_page_memory_warns() {
+    // What Tier B proves is that every address the external computes derives from
+    // a parameter of the call — not that it stays inside the buffer that
+    // parameter points into. A single page kept that gap mostly harmless by
+    // accident: the reach usually left the memory and trapped. Two pages do not,
+    // so the user is told.
+    let out = link_with_warnings(&main_owning_pages(2), &[&tier_b_touch_lib(1)])
+        .expect("a Tier-B external must still merge; this is a warning, not an error");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((2, Some(2))),
+        "the fixture must actually produce the multi-page memory the warning is about"
+    );
+
+    assert_eq!(
+        sole_warning(&out),
+        &LinkWarning::TierBInMultiPageMemory {
+            fields: vec!["touch".to_string()],
+            pages: 2,
+        }
+    );
+
+    // The rendered form is what a user reads, so the claim has to survive into it.
+    let rendered = sole_warning(&out).to_string();
+    assert!(
+        rendered.contains("`touch`"),
+        "the warning must name the external it is about: {rendered}"
+    );
+    assert!(
+        rendered.contains("derives") && rendered.contains("2 pages"),
+        "the warning must state the derivation claim and the page count: {rendered}"
+    );
+    assert!(
+        rendered.contains("#420"),
+        "the warning must point at the issue tracking containment analysis: {rendered}"
+    );
+}
+
+#[test]
+fn a_tier_a_external_in_a_multi_page_memory_does_not_warn() {
+    // The exposure belongs to memory-addressing closures. A pure function has no
+    // address to reach with, so the same two-page memory is not its problem —
+    // warning about it would train the user to ignore the warning.
+    //
+    // The fixture differs from the Tier-B one by its body's operator alone: same
+    // signature, same declared memory, same main module.
+    let out = link_with_warnings(&main_owning_pages(2), &[&tier_a_touch_lib()])
+        .expect("a Tier-A external must merge");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((2, Some(2))),
+        "the memory the warning would be keyed on must be present, so the silence is \
+         about the tier and not about the pages"
+    );
+    assert_eq!(
+        out.warnings,
+        Vec::new(),
+        "a closure that never addresses memory has no unbounded reach to warn about"
+    );
+}
+
+#[test]
+fn a_tier_b_external_in_a_single_page_memory_does_not_warn() {
+    // The other half of the condition. One page is the shape the accidental
+    // backstop still covers: an address past the caller's buffer is usually past
+    // the memory too, and traps.
+    let out = link_with_warnings(&main_owning_pages(1), &[&tier_b_touch_lib(1)])
+        .expect("a Tier-B external must merge");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        memory_limits(&out.wasm),
+        Some((1, Some(1))),
+        "the external's own single page must not widen the output past the condition"
+    );
+    assert_eq!(
+        out.warnings,
+        Vec::new(),
+        "one page is the memory the warning exists to distinguish from"
+    );
+}
+
+#[test]
+fn a_warning_does_not_change_what_link_returns() {
+    // A warning is never an error, and never a different artifact. `link` is the
+    // warning-discarding form of the same merge, so the bytes must be identical
+    // to the ones reported alongside the warning — the whole test suite links
+    // through it, and would not notice a divergence.
+    let main = main_owning_pages(2);
+    let lib = tier_b_touch_lib(1);
+
+    let out = link_with_warnings(&main, &[&lib]).expect("the merge succeeds");
+    assert!(
+        !out.warnings.is_empty(),
+        "this fixture must warn, or the test compares two silent links"
+    );
+
+    let bytes = link(&main, &[&lib]).expect("a warning must not fail the link");
+    assert_eq!(
+        bytes, out.wasm,
+        "the warning-discarding form must return the same module"
+    );
+}
+
+#[test]
+fn the_unreconcilable_minimum_names_the_knob_that_would_fix_it() {
+    // The rule is deliberate — an external never relaxes the main module's own
+    // memory bound — but the remedy lies on the other side of the link from the
+    // error, and an author reading two page counts has no reason to guess that
+    // the main module's page count is theirs to set.
+    let err = link(&main_owning_pages(1), &[&tier_b_touch_lib(17)])
+        .expect_err("17 pages cannot be reconciled onto a pinned single page");
+    let LinkError::IncompatibleMemory { reason, .. } = err else {
+        panic!("expected IncompatibleMemory, got {err:?}")
+    };
+    assert!(
+        reason.contains("`pages`")
+            && reason.contains("`[memory]`")
+            && reason.contains("Inference.toml"),
+        "the diagnostic must name the manifest key that raises the page count: {reason}"
+    );
+    assert!(
+        reason.contains("--memory-pages"),
+        "and the equivalent compiler flag, for a build with no manifest: {reason}"
+    );
+    assert!(
+        reason.contains("is not relaxed"),
+        "while still stating the rule it is applying: {reason}"
+    );
+}
+
+#[test]
+fn two_externals_each_carrying_unused_boilerplate_both_merge() {
+    // The relaxed gate must hold per external, not just for a single one. Two
+    // libraries, each with its own `__stack_pointer` and its own empty table —
+    // the realistic multi-dependency shape — and neither contributes a global or
+    // table to the shared output.
+    let main = main_with_sum_and_sub();
+    let add_lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+    let sub_lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (global $__stack_pointer (mut i32) (i32.const 2097152))
+          (table (;0;) 2 2 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.sub)
+          (export "sub" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&add_lib, &sub_lib]).expect("both externals must merge");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert!(
+        module_globals(&linked).is_empty(),
+        "neither external's global may reach the output"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "no merged body may name a global or table"
+    );
+}
+
+#[test]
+fn an_unused_global_does_not_mask_an_absolute_address_rejection() {
+    // Relaxing the global gate must not weaken the address-provenance proof that
+    // guards Tier B. This external carries the same inert `__stack_pointer` as
+    // the linking fixtures, but its body fabricates an absolute store address
+    // from a parameter-cancelling computation — which must still be Tier C.
+    //
+    // The risk being pinned is order-dependent: `tier_c_reasons` runs before the
+    // provenance analysis, so a module that used to be rejected on its global
+    // declaration now proceeds far enough to be judged on its addressing. The
+    // rejection must come from provenance, not vanish with the declaration.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 0 i32.const 1 i32.mul i32.const 4096 i32.sub
+            i32.sub
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib]).expect_err("a fabricated absolute address must still reject");
+    match err {
+        LinkError::RequiresRelocatableBuild { field, reasons } => {
+            assert_eq!(field, "store_at");
+            assert!(
+                !reasons.iter().any(|r| r.contains("global")),
+                "the rejection must come from address provenance, not the inert global: {reasons:?}"
+            );
+        }
+        other => panic!("expected RequiresRelocatableBuild from provenance, got {other:?}"),
+    }
+}
+
+#[test]
+fn reference_typed_table_operators_are_refused_by_the_feature_gate() {
+    // Which layer actually rejects the table accessors, pinned so a future
+    // reference-types enablement cannot silently widen the tier gate.
+    //
+    // `uses_tables` is set by `table.get`/`table.set`/`table.grow`/`table.size`/
+    // `table.fill` and `ref.func`, but every one of them is a reference-types
+    // instruction and `SUPPORTED_WASM_FEATURES` excludes that proposal — so an
+    // external carrying one is refused by the *feature gate*, before its closure
+    // is ever classified. The tier gate never sees them.
+    //
+    // That distinction matters now that the tier gate turns on use: if reference
+    // types were enabled without revisiting tier classification, these operators
+    // would start reaching `tier_c_reasons` and the flags in `safety.rs` would
+    // become load-bearing rather than defense in depth. This test fails at that
+    // moment — the error kind changes — rather than letting the widening pass
+    // unnoticed.
+    for (instruction, body) in [
+        ("table.get", "i32.const 0 table.get 0 drop"),
+        ("table.set", "i32.const 0 ref.null func table.set 0"),
+        ("table.size", "table.size 0 drop"),
+        ("table.grow", "ref.null func i32.const 1 table.grow 0 drop"),
+        (
+            "table.fill",
+            "i32.const 0 ref.null func i32.const 0 table.fill 0",
+        ),
+        ("ref.func", "ref.func 0 drop"),
+    ] {
+        let main = main_importing_sum();
+        let lib = wasm(&format!(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32) (result i32)))
+              (table (;0;) 1 1 funcref)
+              (func (;0;) (type 0) (param i32 i32) (result i32)
+                {body}
+                local.get 0
+                local.get 1
+                i32.add)
+              (export "sum" (func 0)))
+            "#
+        ));
+
+        let Err(err) = link(&main, &[&lib]) else {
+            panic!("`{instruction}` must be rejected, but the link succeeded");
+        };
+        match &err {
+            LinkError::UnsupportedWasmFeature { details, .. } => assert!(
+                details.contains("reference types"),
+                "`{instruction}` must be named as a reference-types refusal: {details}"
+            ),
+            LinkError::RequiresRelocatableBuild { reasons, .. } => panic!(
+                "`{instruction}` reached the tier gate, which means reference types \
+                 were enabled without revisiting tier classification: {reasons:?}"
+            ),
+            other => panic!("`{instruction}`: expected UnsupportedWasmFeature, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_bare_table_is_inert_on_an_external_and_fatal_on_main() {
+    // The asymmetry this change creates, asserted in one place so it is legible
+    // rather than inferred from two distant tests.
+    //
+    // The *same* declaration — `(table 1 1 funcref)` with no element segment and
+    // no instruction naming it — is now inert on an external (the closure never
+    // touches it, so the merge drops it) and still fatal on the main module. The
+    // main-side rejection is not about use at all: `emit` rebuilds main
+    // section-by-section and writes no `TableSection`, so a main table would be
+    // silently dropped along with anything that later referenced it. Rejecting
+    // the section is the only way to keep that from becoming a valid-but-wrong
+    // output, and it holds whether or not a body names the table.
+    //
+    // The existing `main_with_table_section_is_rejected` covers a main table that
+    // `call_indirect` uses; this one covers the bare declaration, which is
+    // exactly the shape that now links on the other side of the boundary.
+    let bare_table_main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "compute" (func 0)))
+        "#,
+    );
+    let err = link(&bare_table_main, &[]).expect_err("a bare main-side table must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("table")),
+        "a main table must be rejected on its declaration, with no body naming it: {err:?}"
+    );
+
+    // The identical declaration on an external links.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (table (;0;) 1 1 funcref)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+    let linked = link(&main, &[&lib]).expect("the same bare table is inert on an external");
+    assert_valid(&linked);
+    assert!(
+        !Parser::new(0)
+            .parse_all(&linked)
+            .any(|p| matches!(p.unwrap(), Payload::TableSection(_))),
+        "the external's table must not reach the output"
+    );
+}
+
+#[test]
+fn a_pure_external_declaring_only_an_unused_global_leaves_the_output_global_free() {
+    // Tier A with lld boilerplate: neither module owns a global that must
+    // survive, so the merged output has no global section at all.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("Tier A with lld boilerplate must link");
+    assert_valid(&linked);
+    assert!(
+        module_globals(&linked).is_empty(),
+        "no module contributes a surviving global"
+    );
+    assert_eq!(
+        body_naming_a_global_or_table(&linked, None),
+        None,
+        "no body may name a global or table the output does not declare"
+    );
+    assert!(
+        memory_limits(&linked).is_none(),
+        "a pure merge declares no memory"
+    );
+}
+
 // -- Tier C: rejected --------------------------------------------------------
 
 #[test]
@@ -554,9 +1780,199 @@ fn tier_c_data_segment_requires_relocatable_build() {
 }
 
 #[test]
-fn tier_c_global_requires_relocatable_build() {
-    // `counter` reads a module-defined global — per-module mutable state that
-    // cannot be merged into a shared module without relocation.
+fn a_merged_global_read_names_the_externals_own_global() {
+    // The central claim of the globals merge, and the one place a mistake is
+    // invisible without checking the operand.
+    //
+    // Main declares two globals of its own, so the external's single global lands
+    // at output index 2 and the merged `counter` must read `global.get 2`. If the
+    // re-encoder had no arm for `global.get`, the operator would be copied
+    // verbatim as `global.get 0` — main's first global, an `i32` like the
+    // external's, so the merged module validates, links, and runs, returning
+    // main's 11 where the library meant its own 7. Nothing but this index
+    // separates the two outcomes: the body still contains a `global.get`, the
+    // module still has a global section, and the counts are unchanged.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "statelib" "counter" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (global (;1;) (mut i32) (i32.const 22))
+          (func (;1;) (type 0) (result i32)
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (global (;0;) (mut i32) (i32.const 7))
+          (func (;0;) (type 0) (result i32)
+            global.get 0)
+          (export "counter" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a global-reading external must merge");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("get", 2)],
+        "the merged body must read the external's global at its remapped index"
+    );
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 11 }".to_string()),
+            (true, "I32Const { value: 22 }".to_string()),
+            (true, "I32Const { value: 7 }".to_string()),
+        ],
+        "main's globals keep indices 0 and 1; the external's is appended at 2"
+    );
+    assert_eq!(
+        body_global_indices(&linked, 0),
+        vec![],
+        "main's own body is untouched here, and its indices never shift regardless"
+    );
+}
+
+#[test]
+fn a_merged_global_write_names_the_externals_own_global() {
+    // The write side, which is the more dangerous half: a `global.set` copied
+    // verbatim would not merely read the wrong value but *corrupt* main's state,
+    // and it would do so on a module that validates. Main's global 0 is a
+    // mutable `i32` exactly like the external's, so type checking cannot tell the
+    // two apart.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (import "statelib" "set_counter" (func (;0;) (type 0)))
+          (global (;0;) (mut i32) (i32.const 11))
+          (func (;1;) (type 0) (param i32)
+            local.get 0
+            call 0)
+          (export "run" (func 1))
+          (export "state" (global 0)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (global (;0;) (mut i32) (i32.const 0))
+          (func (;0;) (type 0) (param i32)
+            local.get 0
+            global.set 0)
+          (export "set_counter" (func 0)))
+        "#,
+    );
+
+    let linked = link(&main, &[&lib]).expect("a global-writing external must merge");
+    assert_valid(&linked);
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("set", 1)],
+        "the merged body must write the external's own global, not main's state"
+    );
+
+    // Main's `state` export still names main's global 0. Appending the external's
+    // globals above main's is what keeps every main-side global reference — bodies
+    // and exports alike — correct without rewriting any of them.
+    let mut global_exports = Vec::new();
+    for payload in Parser::new(0).parse_all(&linked) {
+        if let Payload::ExportSection(reader) = payload.unwrap() {
+            for export in reader {
+                let export = export.unwrap();
+                if export.kind == ExternalKind::Global {
+                    global_exports.push((export.name.to_string(), export.index));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        global_exports,
+        vec![("state".to_string(), 0)],
+        "main's global export must still name main's own global"
+    );
+}
+
+#[test]
+fn two_externals_identical_globals_stay_distinct() {
+    // Signatures are deduplicated across externals; globals must not be. Two
+    // modules that each declare `(global (mut i32) (i32.const 0))` mean two
+    // counters, not one shared cell — a global is state, not a description — so
+    // the merged module must carry both, and each body must name its own.
+    //
+    // Collapsing them would produce a module that validates and runs, where one
+    // library's writes silently appear as the other's reads. The two libraries
+    // are deliberately byte-identical apart from their export names, so nothing
+    // but the merge's refusal to dedup keeps them apart.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (import "liba" "bump_a" (func (;0;) (type 0)))
+          (import "libb" "bump_b" (func (;1;) (type 0)))
+          (func (;2;) (type 0) (param i32)
+            local.get 0
+            call 0
+            local.get 0
+            call 1)
+          (export "run" (func 2)))
+        "#,
+    );
+    let counter_lib = |export: &str| {
+        wasm(&format!(
+            r#"
+            (module
+              (type (;0;) (func (param i32)))
+              (global (;0;) (mut i32) (i32.const 0))
+              (func (;0;) (type 0) (param i32)
+                local.get 0
+                global.set 0)
+              (export "{export}" (func 0)))
+            "#
+        ))
+    };
+    let lib_a = counter_lib("bump_a");
+    let lib_b = counter_lib("bump_b");
+
+    let linked = raw_link(&main, &[("liba", &lib_a), ("libb", &lib_b)])
+        .expect("two global-bearing externals must merge");
+    assert_valid(&linked);
+
+    assert_eq!(
+        module_globals(&linked),
+        vec![
+            (true, "I32Const { value: 0 }".to_string()),
+            (true, "I32Const { value: 0 }".to_string()),
+        ],
+        "structurally identical globals from two externals are distinct state and \
+         must both survive"
+    );
+
+    // Bodies: main's `run` (0), then the two merged bodies (1, 2) in the order
+    // their imports were satisfied. Each must name its own cell.
+    assert_eq!(body_global_indices(&linked, 1), vec![("set", 0)]);
+    assert_eq!(body_global_indices(&linked, 2), vec![("set", 1)]);
+}
+
+#[test]
+fn a_global_bearing_external_links_onto_a_globalless_main() {
+    // The main module the Inference compiler emits declares no globals at all,
+    // and until now the merge skipped the global section entirely whenever main
+    // had none. An external that brings one must still get a section, or its
+    // merged body would name a global the output does not declare — caught by
+    // post-merge validation, but only as a failure of the linker's own output.
+    //
+    // Main is memoryless too, so this fixture also pins that a globals-only
+    // merge needs no memory: the external's global is state, not an address, and
+    // nothing here is asked to reconcile a memory that no closure touches.
     let main = wasm(
         r#"
         (module
@@ -578,13 +1994,189 @@ fn tier_c_global_requires_relocatable_build() {
         "#,
     );
 
-    let err = link(&main, &[&lib]).expect_err("Tier C global must be rejected");
+    let linked = link(&main, &[&lib]).expect("a globalless main must accept an external's global");
+    assert_valid(&linked);
+    assert_eq!(
+        module_globals(&linked),
+        vec![(true, "I32Const { value: 7 }".to_string())],
+        "the external's global must be the sole entry of a section main did not open"
+    );
+    assert_eq!(
+        body_global_indices(&linked, 1),
+        vec![("get", 0)],
+        "with no main globals below it the external's global keeps index 0"
+    );
+    assert!(
+        memory_limits(&linked).is_none(),
+        "a globals-only merge must not invent a linear memory"
+    );
+}
+
+#[test]
+fn a_global_used_to_address_memory_is_still_rejected() {
+    // The soundness boundary, through the public API. A merged global's *value*
+    // is carried over with no relocation, and in real toolchain output that value
+    // is an address into the layout the external was compiled for —
+    // `__stack_pointer` here. Merged onto a memory laid out for the host program
+    // the index is right and the address means something else.
+    //
+    // What keeps that from linking is address provenance, which treats a value
+    // read from a global as not parameter-derived. It is a *conditional*
+    // protection: it runs only for a closure that touches memory. This test pins
+    // the case where it does.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (import "memlib" "push" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32)
+            local.get 0
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32)))
+          (memory (;0;) 17)
+          (global $__stack_pointer (mut i32) (i32.const 1048576))
+          (func (;0;) (type 0) (param i32)
+            global.get 0
+            local.get 0
+            i32.store)
+          (export "push" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib]).expect_err("a global-derived store address must be rejected");
     match err {
         LinkError::RequiresRelocatableBuild { field, reasons } => {
-            assert_eq!(field, "counter");
+            assert_eq!(field, "push");
+            // The rejection must come from provenance. A surviving globals reason
+            // would mean the gate was never relaxed, and every admission test
+            // above would be measuring something else.
             assert!(
-                reasons.iter().any(|r| r.contains("global")),
-                "reason should mention globals: {reasons:?}"
+                !reasons.iter().any(|r| r.contains("global")),
+                "the rejection must come from address provenance: {reasons:?}"
+            );
+        }
+        other => panic!("expected RequiresRelocatableBuild from provenance, got {other:?}"),
+    }
+}
+
+#[test]
+fn tier_c_element_segment_requires_relocatable_build() {
+    // A *bare* table is inert and links; an element segment does not, even
+    // though nothing in the closure reads the table. That rejection is
+    // conservatism, not a correctness requirement: the merged output declares no
+    // table, so a dropped element segment initializes nothing anyone could
+    // observe. It stays rejected because an element segment marks a module built
+    // around indirect dispatch, and admitting one would silently discard a
+    // construct the author wrote.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (table (;0;) 1 1 funcref)
+          (elem (;0;) (i32.const 0) func 0)
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib]).expect_err("an element segment must be rejected");
+    match err {
+        LinkError::RequiresRelocatableBuild { field, reasons } => {
+            assert_eq!(field, "sum");
+            assert_eq!(
+                reasons,
+                vec!["declares an element segment".to_string()],
+                "the reason must name the element segment, and must not claim \
+                 the closure touched the table space — this body never does"
+            );
+        }
+        other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
+    }
+}
+
+#[test]
+fn tier_c_unused_data_segment_requires_relocatable_build() {
+    // The deliberate asymmetry with globals and tables. This external's closure
+    // names no data segment at all — it is a pure integer add — yet the module's
+    // *declared* data segment still rejects the link, because an active data
+    // segment writes memory at instantiation whether or not any instruction
+    // refers to it. Dropping it would silently change what the merged program
+    // observes, so data stays declaration-gated where globals and tables no
+    // longer are.
+    let main = main_importing_sum();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (memory (;0;) 1)
+          (data (;0;) (i32.const 0) "\2a\00\00\00")
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib]).expect_err("a declared data segment must be rejected");
+    match err {
+        LinkError::RequiresRelocatableBuild { field, reasons } => {
+            assert_eq!(field, "sum");
+            assert!(
+                reasons.iter().any(|r| r.contains("data")),
+                "reason should mention static data: {reasons:?}"
+            );
+        }
+        other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
+    }
+}
+
+#[test]
+fn tier_c_data_drop_requires_relocatable_build() {
+    // The other segment-naming operator alongside `memory.init`: `data.drop`
+    // names a data segment the merge does not carry across.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func))
+          (import "droplib" "release" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0)
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func))
+          (memory (;0;) 1)
+          (data (;0;) "\2a")
+          (func (;0;) (type 0)
+            data.drop 0)
+          (export "release" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib]).expect_err("data.drop must be rejected");
+    match err {
+        LinkError::RequiresRelocatableBuild { field, reasons } => {
+            assert_eq!(field, "release");
+            assert!(
+                reasons.iter().any(|r| r.contains("data")),
+                "reason should mention static data: {reasons:?}"
             );
         }
         other => panic!("expected RequiresRelocatableBuild, got {other:?}"),
@@ -594,7 +2186,8 @@ fn tier_c_global_requires_relocatable_build() {
 #[test]
 fn tier_c_indirect_call_requires_relocatable_build() {
     // An external function that performs an indirect call needs the table /
-    // element space, which the static merge does not relocate.
+    // element space, which the static merge does not relocate. Here it is the
+    // `call_indirect` that rejects; the table declaration alone would not.
     let main = wasm(
         r#"
         (module
@@ -1159,10 +2752,10 @@ fn module_globals(bytes: &[u8]) -> Vec<(bool, String)> {
 
 #[test]
 fn main_globals_and_global_export_survive_the_merge() {
-    // The main module owns its own globals (an i32 and an i64) — Tier-C state on
-    // an *external* module, but perfectly fine on the main module, which keeps
-    // its memory and globals. The merge must re-emit the global section, both
-    // constant initializers, and a `Global`-kind export unchanged.
+    // The main module owns its own globals (an i32 and an i64) — state an
+    // external's closure may not touch, but perfectly fine on the main module,
+    // which keeps its memory and globals. The merge must re-emit the global
+    // section, both constant initializers, and a `Global`-kind export unchanged.
     let main = wasm(
         r#"
         (module
@@ -4527,12 +6120,12 @@ fn main_module_with_an_element_segment_is_rejected_cleanly() {
 
 // -- WASM 1.0 feature gate: supported post-MVP additions link ------------------
 //
-// `SUPPORTED_WASM_FEATURES` is the integer WASM 1.0 core plus exactly one scalar
-// post-MVP addition the merge models: bulk memory. An external using only this
-// must pass the link gate and merge normally — the gate rejects *every* other
-// post-1.0 proposal, including sign-extension and saturating float-to-int (the
-// Rocq translator models neither), and all floating point (the Inference language
-// has no `f32`/`f64` types).
+// `SUPPORTED_WASM_FEATURES` is the integer WASM 1.0 core plus the two scalar
+// post-MVP additions the merge models: bulk memory and sign-extension. An
+// external using only these must pass the link gate and merge normally — the
+// gate rejects *every* other post-1.0 proposal, including saturating
+// float-to-int (the Rocq translator has no lowering for it), and all floating
+// point (the Inference language has no `f32`/`f64` types).
 
 /// A main module importing a pure `f:(i32)->i32` from `lib` and calling it. The
 /// shared shape for the feature-gate fixtures, each of which supplies a `lib`
@@ -4552,13 +6145,15 @@ fn main_importing_f() -> Vec<u8> {
 }
 
 #[test]
-fn sign_extension_external_is_rejected_at_the_feature_gate() {
-    // The sign-extension proposal (`i32.extend8_s`) is outside the supported
-    // subset: the Rocq translator has no lowering for it, and Inference codegen
-    // narrows sub-i32 values with shifts/masks instead of emitting it. The gate's
-    // feature pass rejects such an external up front with the validator's
-    // sign-extension diagnostic — before the closure scanner's allow-list (the
-    // defense-in-depth backstop, tested directly in `safety.rs`) is reached.
+fn sign_extension_external_passes_the_gate_and_merges() {
+    // The sign-extension proposal is in the supported subset: the Rocq
+    // translator lowers all five opcodes to `BI_unop t (Unop_extend n)`.
+    // Inference codegen still emits none of them — it narrows sub-i32 values
+    // with shifts and masks — but a real toolchain emits them constantly, and
+    // this gate is what decides whether such an external gets as far as the
+    // allow-list at all. Without `WasmFeatures::SIGN_EXTENSION` the validator
+    // refuses the module before any body is scanned, so the allow-list entry
+    // alone would be unreachable.
     let main = main_importing_f();
     let lib = wasm(
         r#"
@@ -4566,15 +6161,54 @@ fn sign_extension_external_is_rejected_at_the_feature_gate() {
           (type (;0;) (func (param i32) (result i32)))
           (func (;0;) (type 0) (param i32) (result i32)
             local.get 0
-            i32.extend8_s)
+            i32.extend8_s
+            i32.extend16_s)
           (export "f" (func 0)))
         "#,
     );
-    let err = assert_clean_rejection(&main, &lib, "sign extension");
-    assert!(
-        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("sign extension")),
-        "expected an UnsupportedWasmFeature naming sign extension, got {err:?}"
+    let linked = link(&main, &[&lib]).expect("a sign-extension external must link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
+}
+
+#[test]
+fn integer_width_conversion_external_passes_the_gate_and_merges() {
+    // The three integer-to-integer width conversions are MVP instructions, so no
+    // feature flag ever gated them; the allow-list was the only thing that
+    // refused them, and it no longer does. Paired with the sign-extension case
+    // above because the two halves of the numeric envelope were refused in
+    // different places — one at the validator, one at the allow-list — and a
+    // change that lifted only one would leave this pair split.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i64) (result i32)))
+          (import "lib" "f" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i64) (result i32)
+            local.get 0
+            call 0)
+          (export "run" (func 1)))
+        "#,
     );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i64) (result i32)))
+          (func (;0;) (type 0) (param i64) (result i32)
+            local.get 0
+            i32.wrap_i64
+            i64.extend_i32_s
+            i32.wrap_i64
+            i64.extend_i32_u
+            i32.wrap_i64)
+          (export "f" (func 0)))
+        "#,
+    );
+    let linked = link(&main, &[&lib]).expect("an integer-width-conversion external must link");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+    assert_eq!(code_body_count(&linked), 2);
 }
 
 #[test]

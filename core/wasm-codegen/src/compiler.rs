@@ -59,7 +59,7 @@
 
 use crate::errors::CodegenError;
 use crate::hassert::reach::{ChoiceClass, ChoicePlan};
-use crate::target::EmitFeatures;
+use crate::target::{EmitFeatures, MemoryLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use inference_ast::arena::AstArena;
@@ -82,10 +82,10 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, CompoundFieldLayout, FrameLayout, RegionEmit, STACK_POINTER_INIT, STACK_SIZE,
-    StructSlot, align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy,
-    emit_memcpy_via_stack, emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue,
-    emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
+    self, ArraySlot, CompoundFieldLayout, FrameLayout, RegionEmit, StructSlot, align_to,
+    align_to_frame, compute_struct_field_layout, emit_array_param_copy, emit_memcpy_via_stack,
+    emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue, emit_stack_prologue,
+    emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 /// Origin of a function definition being lowered.
@@ -447,6 +447,12 @@ pub(crate) struct Compiler {
     /// each function's [`RegionEmit`]; `Compiler::new` call sites keep the
     /// WebAssembly 1.0 default.
     emit_features: EmitFeatures,
+    /// The linear memory the module declares and the share of it the shadow
+    /// stack occupies. Set once by [`crate::codegen`] for the whole module and
+    /// read by the memory section, the `__stack_pointer` initializer, and the
+    /// per-frame size assertion; `Compiler::new` call sites keep the default
+    /// one-page layout.
+    memory_layout: MemoryLayout,
     /// The region fill and copy state for the function being compiled: the
     /// permitted features plus the lazily allocated scratch locals, numbered from
     /// one past the last eagerly declared local. Rebuilt per function alongside
@@ -550,6 +556,7 @@ impl Compiler {
             compound_params: FxHashSet::default(),
             local_declarations: Vec::new(),
             emit_features: EmitFeatures::default(),
+            memory_layout: MemoryLayout::default(),
             region_emit: RegionEmit::new(0, EmitFeatures::default()),
         }
     }
@@ -561,6 +568,16 @@ impl Compiler {
     /// keep the default, so their emitted bytes stay within WebAssembly 1.0.
     pub(crate) fn set_emit_features(&mut self, features: EmitFeatures) {
         self.emit_features = features;
+    }
+
+    /// Lays out linear memory as `layout` describes for every function this
+    /// compiler emits.
+    ///
+    /// [`crate::codegen`] sets what the build requested, after validating it;
+    /// [`Self::new`] call sites keep the default, so their emitted bytes stay
+    /// those of a single all-stack page.
+    pub(crate) fn set_memory_layout(&mut self, layout: MemoryLayout) {
+        self.memory_layout = layout;
     }
 
     /// Enables or disables runtime array bounds-check emission.
@@ -1388,16 +1405,19 @@ impl Compiler {
             reach_plan,
         );
 
-        self.frame_layout = Self::compute_frame_layout(&FrameLayoutInput {
-            arena,
-            block_id: body_id,
-            ctx,
-            frame_ptr_local_idx: local_idx,
-            args: &args,
-            method_struct_name,
-            module_path,
-            extern_names: &self.extern_name_to_idx,
-        })?;
+        self.frame_layout = Self::compute_frame_layout(
+            &FrameLayoutInput {
+                arena,
+                block_id: body_id,
+                ctx,
+                frame_ptr_local_idx: local_idx,
+                args: &args,
+                method_struct_name,
+                module_path,
+                extern_names: &self.extern_name_to_idx,
+            },
+            self.memory_layout.stack_size(),
+        )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
         // structured `FnKey` itself, not its lossy `Display` rendering: two
@@ -2255,9 +2275,15 @@ impl Compiler {
     /// A function whose parameters and body bindings all turn out to need no
     /// memory gets `Ok(None)` and is frameless: no `__frame_ptr`, no prologue, no
     /// epilogue, and no `__stack_pointer` mutation.
+    ///
+    /// `stack_size` is the module-wide shadow-stack size the resulting frame must
+    /// fit in. It is a parameter rather than a [`FrameLayoutInput`] field because
+    /// it is a property of the module's memory, not of the function being laid
+    /// out, and no per-parameter decision consults it.
     #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
         input: &FrameLayoutInput<'_>,
+        stack_size: u32,
     ) -> Result<Option<FrameLayout>, CodegenError> {
         let FrameLayoutInput {
             arena,
@@ -2424,8 +2450,8 @@ impl Compiler {
 
         let total_size = align_to_frame(current_offset);
         assert!(
-            total_size <= STACK_SIZE,
-            "Frame size ({total_size} bytes) exceeds available stack memory ({STACK_SIZE} bytes)"
+            total_size <= stack_size,
+            "Frame size ({total_size} bytes) exceeds available stack memory ({stack_size} bytes)"
         );
 
         Ok(Some(FrameLayout {
@@ -6358,9 +6384,14 @@ impl Compiler {
         if self.has_memory {
             cov_mark::hit!(wasm_codegen_emit_memory_section);
             let mut memory_section = MemorySection::new();
+            // Minimum and maximum are deliberately the same value: the memory is
+            // fixed, not growable, so `memory.grow` can never move the boundary
+            // the shadow stack and its overflow trap are reasoned about against.
+            // A separate maximum, which is what makes a memory growable, is
+            // issue #170 and is not part of the single size issue #210 asks for.
             memory_section.memory(MemoryType {
-                minimum: 1,
-                maximum: Some(1),
+                minimum: u64::from(self.memory_layout.pages()),
+                maximum: Some(u64::from(self.memory_layout.pages())),
                 memory64: false,
                 shared: false,
                 page_size_log2: None,
@@ -6376,7 +6407,7 @@ impl Compiler {
                     mutable: true,
                     shared: false,
                 },
-                &ConstExpr::i32_const(STACK_POINTER_INIT),
+                &ConstExpr::i32_const(self.memory_layout.stack_pointer_init()),
             );
             module.section(&global_section);
         }
@@ -6614,9 +6645,42 @@ mod tests {
         let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let expected = crate::MemoryLayout::default().stack_pointer_init();
         assert!(
-            wat.contains("i32.const 65536"),
-            "Stack pointer must be initialized to 65536 (one page):\n{wat}"
+            wat.contains(&format!("i32.const {expected}")),
+            "Stack pointer must be initialized to the top of the default layout's stack \
+             ({expected}):\n{wat}"
+        );
+    }
+
+    /// A configured layout must reach both places that read it, and the two must
+    /// be read independently: the memory section takes the page count and the
+    /// stack-pointer global takes the stack size. A layout whose stack is
+    /// smaller than its memory is the case that separates them — with the
+    /// default they are numerically equal, so an emitter that confused one for
+    /// the other would still look right.
+    #[test]
+    fn a_configured_layout_sizes_the_memory_and_the_stack_pointer_separately() {
+        let mut compiler = Compiler::new("test");
+        compiler.set_memory_layout(
+            MemoryLayout::resolve(Some(2), Some(32_768), crate::MemoryLayoutSource::Flag)
+                .expect("a half-page stack in two pages is admissible"),
+        );
+        compiler.enable_memory();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take(&HSpecMap::default());
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("(memory (;0;) 2 2)"),
+            "the memory section must declare 2 fixed pages:\n{wat}"
+        );
+        assert!(
+            wat.contains("i32.const 32768"),
+            "the stack pointer must start at the configured stack size:\n{wat}"
+        );
+        assert!(
+            !wat.contains("i32.const 65536"),
+            "the stack pointer must not fall back to the page count:\n{wat}"
         );
     }
 

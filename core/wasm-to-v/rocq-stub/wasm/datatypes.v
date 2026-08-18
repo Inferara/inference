@@ -59,11 +59,10 @@ Inductive block_type : Type :=
 (* Operator families                                                  *)
 (*                                                                    *)
 (* Integer families only. The float families (`relop_f`/`binop_f`/    *)
-(* `unop_f`) and the conversion family (`cvtop`) are deliberately     *)
-(* absent: Inference has no floating-point and its codegen emits no   *)
-(* conversion instructions, so no reachable emitter output uses them. *)
-(* The single-constructor wrappers (`Relop_i` etc.) stay because the  *)
-(* emitter writes the wrapped form. See README.md "Scope".            *)
+(* `unop_f`) are deliberately absent: Inference has no floating-point *)
+(* and no reachable emitter output uses them. The single-constructor  *)
+(* wrappers (`Relop_i` etc.) stay because the emitter writes the      *)
+(* wrapped form. See README.md "Scope".                               *)
 (* ------------------------------------------------------------------ *)
 
 Inductive testop : Type :=
@@ -102,8 +101,34 @@ Inductive unop_i : Type :=
 | UOI_ctz : unop_i
 | UOI_popcnt : unop_i.
 
+(* `Unop_extend`'s argument is the SOURCE width in BITS (8, 16 or 32)
+   -- the width being sign-extended FROM -- and not a byte count: the
+   real library's `app_unop` divides it by 8 before sign-extending, so
+   `Unop_extend 8` on an i32 is `i32.extend8_s`. Both spellings
+   type-check here and both satisfy
+   `unop_type_agree`, which ignores the argument entirely -- so a byte
+   count would denote a constant-zero extension that `coqc` cannot
+   object to. The convention is therefore pinned on the emitter side, by
+   byte-comparison, in `core/wasm-to-v/src/lib.rs` and
+   `tests/src/rocq_typecheck.rs`. *)
 Inductive unop : Type :=
-| Unop_i : unop_i -> unop.
+| Unop_i : unop_i -> unop
+| Unop_extend : N -> unop.
+
+(* Only the two conversions with an integer source AND an integer
+   target: `CVO_wrap` (i64 -> i32) and `CVO_extend` (i32 -> i64). The
+   real library's six remaining constructors -- `CVO_trunc`,
+   `CVO_trunc_sat`, `CVO_convert`, `CVO_demote`, `CVO_promote`,
+   `CVO_reinterpret` -- each require a float on one side or the other,
+   and this stub declares no float number type for them to name. Their
+   absence keeps the gate strict in the same way the missing float
+   families do: an emitter that started writing one would produce an
+   unbound constructor here rather than a silently type-checking term.
+   Extend this inductive together with the emitter arm and a producer in
+   the `coqc` corpus, never ahead of them. *)
+Inductive cvtop : Type :=
+| CVO_wrap : cvtop
+| CVO_extend : cvtop.
 
 (* ------------------------------------------------------------------ *)
 (* Memory argument                                                    *)
@@ -172,7 +197,8 @@ Inductive basic_instruction : Type :=
 | BI_testop : number_type -> testop -> basic_instruction
 | BI_relop : number_type -> relop -> basic_instruction
 | BI_binop : number_type -> binop -> basic_instruction
-| BI_unop : number_type -> unop -> basic_instruction.
+| BI_unop : number_type -> unop -> basic_instruction
+| BI_cvtop : number_type -> cvtop -> number_type -> option sx -> basic_instruction.
 Set Elimination Schemes.
 
 (* ------------------------------------------------------------------ *)

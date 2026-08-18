@@ -25,11 +25,16 @@
 //! ## Function references are symbolic
 //!
 //! [`HFnRef`] stores a WASM name-section function symbol as an opaque
-//! non-empty string (producers write `FnKey::Display`). The static linker
-//! deletes imports and shifts every function index, so an index-based reference
-//! would need remapping at link time; a symbolic reference is carried through
-//! the merge untouched and resolved to a `mod_funcs` index only by `wasm-to-v`,
-//! which alone knows the emitted module's final function layout.
+//! non-empty string. The static linker deletes imports and shifts every
+//! function index, so an index-based reference would need remapping at link
+//! time; a symbolic reference is carried through the merge untouched and
+//! resolved to a `mod_funcs` index only by `wasm-to-v`, which alone knows the
+//! emitted module's final function layout.
+//!
+//! That indirection is also what lets an obligation name a *linked external*:
+//! the external has no defined body when the obligation is built, and acquires
+//! one — under the name `inference_fn_key::merged_name::root` gives it — only
+//! at the merge.
 //!
 //! ## Deliberate deviations from wasm-verifier's inductive
 //!

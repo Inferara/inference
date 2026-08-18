@@ -10,7 +10,7 @@
 //! Typed AST (TypedContext)
 //!         |
 //!         v
-//!   codegen(tc, module_name, CodegenOptions { target, mode, opt_level, features })
+//!   codegen(tc, module_name, CodegenOptions { target, mode, opt_level, features, layout })
 //!         |
 //!         v
 //!   CodegenOutput { wasm, target, mode, opt_level, module_name, has_main }
@@ -42,7 +42,7 @@
 //! - [`compiler`] - WASM binary generation via wasm-encoder (private)
 //! - [`memory`] - Linear memory infrastructure for stack-allocated compound types (private)
 //! - [`output`] - `CodegenOutput` struct definition
-//! - [`target`] - `Target`, `CompilationMode`, and `OptLevel` enums
+//! - [`target`] - `Target`, `CompilationMode`, `OptLevel`, and `MemoryLayout`
 
 #![warn(clippy::pedantic)]
 
@@ -67,7 +67,10 @@ mod spec_section;
 pub mod target;
 
 pub use output::CodegenOutput;
-pub use target::{CodegenOptions, CompilationMode, EmitFeatures, OptLevel, Target};
+pub use target::{
+    CodegenOptions, CompilationMode, EmitFeatures, MemoryLayout, MemoryLayoutError,
+    MemoryLayoutSource, OptLevel, Target,
+};
 
 /// Re-exports of the `hassert` obligation IR, so a consumer of
 /// [`CodegenOutput::hspecs`] can name the assertion tree it returns without a
@@ -101,7 +104,14 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 /// for the field-by-field contract. Its `features` apply identically in both
 /// compilation modes, so the `.v` always describes the same program as the
 /// `.wasm`; [`CodegenOptions::default()`] compiles an executable Wasm32 module
-/// inside WebAssembly 1.0 at the target's default optimization level.
+/// inside WebAssembly 1.0 at the target's default optimization level, into a
+/// single all-stack page of linear memory.
+///
+/// The memory layout needs no check here: [`MemoryLayout`]'s fields are private
+/// and [`MemoryLayout::resolve`] refuses anything the emitter could not lower, so
+/// a layout that reaches this function is one code generation can honor. That is
+/// a stronger guarantee than a refusal at this boundary was — it holds for every
+/// caller, including one that never passes through here.
 ///
 /// # Errors
 ///
@@ -119,6 +129,7 @@ pub fn codegen(
         mode,
         opt_level,
         features,
+        layout,
     } = options;
 
     // Refuse a feature the target's runtime does not accept before a single byte
@@ -164,6 +175,7 @@ pub fn codegen(
 
     let mut compiler = Compiler::new(module_name);
     compiler.set_emit_features(features);
+    compiler.set_memory_layout(layout);
 
     // Runtime array bounds checks are emitted for every Compile-mode build
     // (Debug and Release, Wasm32 and Soroban): the executed/deployed artifact is
@@ -850,6 +862,40 @@ fn collect_emittable_functions(
 }
 
 #[cfg(test)]
+mod memory_layout_tests {
+    use super::{CodegenOptions, MemoryLayout, MemoryLayoutSource, codegen};
+    use inference_type_checker::typed_context::TypedContext;
+
+    /// Every layout `codegen` can be handed compiles, which is what replaced the
+    /// refusal this module used to test.
+    ///
+    /// The unbuildable cases are gone rather than moved: outside
+    /// `inference-compiler-interface` a rejected layout has no representation, so
+    /// there is nothing left here to hand `codegen`. The rejection itself is
+    /// tested where it now lives, against the constructor.
+    #[test]
+    fn a_constructible_layout_compiles() {
+        for (pages, stack_size) in [(1, 65_536), (2, 32_768), (4, 131_072)] {
+            let layout =
+                MemoryLayout::resolve(Some(pages), Some(stack_size), MemoryLayoutSource::Flag)
+                    .expect("these layouts are admissible");
+            assert!(
+                codegen(
+                    &TypedContext::default(),
+                    "output",
+                    CodegenOptions {
+                        layout,
+                        ..CodegenOptions::default()
+                    },
+                )
+                .is_ok(),
+                "{pages} pages / {stack_size} bytes must compile"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod feature_validation_tests {
     use super::{CodegenOptions, CompilationMode, EmitFeatures, Target, codegen};
     use inference_type_checker::typed_context::TypedContext;
@@ -870,6 +916,7 @@ mod feature_validation_tests {
                 mode,
                 opt_level: target.default_opt_level(),
                 features,
+                layout: crate::MemoryLayout::default(),
             },
         )
     }

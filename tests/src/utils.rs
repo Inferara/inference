@@ -112,23 +112,52 @@ pub(crate) fn codegen_impl_with_features(
     analysis: AnalysisMode,
     features: inference_wasm_codegen::EmitFeatures,
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
-    let arena = build_ast(source_code.to_string());
-    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
-        .unwrap()
-        .typed_context();
-    if let AnalysisMode::Run = analysis {
-        let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
-    }
-    inference_wasm_codegen::codegen(
-        &typed_context,
-        "output",
+    codegen_impl_with_options(
+        source_code,
+        analysis,
         inference_wasm_codegen::CodegenOptions {
             target,
             mode,
             opt_level,
             features,
+            ..Default::default()
         },
     )
+}
+
+/// The one implementation of the single-file source route: parse, type-check,
+/// optionally analyze, then generate WASM under `options`.
+///
+/// Every other single-file helper is a narrower view of this one, fixing the
+/// knobs it does not expose. A single pipeline is what makes a knob's effect
+/// attributable: a helper that assembled its own parse and codegen calls could
+/// differ from the rest of the corpus in ways the knob under test had nothing to
+/// do with.
+///
+/// Analysis measures the program against the artifact `options` describes, not
+/// against a default one, because that is the pairing a real build must make:
+/// A036's budget is the shadow stack code generation is about to emit. Fixing it
+/// here rather than at each call site means a fixture cannot be analyzed against
+/// a stack its own module does not have.
+fn codegen_impl_with_options(
+    source_code: &str,
+    analysis: AnalysisMode,
+    options: inference_wasm_codegen::CodegenOptions,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    if let AnalysisMode::Run = analysis {
+        let _analysis_result = inference_analysis::analyze_with_options(
+            &typed_context,
+            inference_analysis::AnalysisOptions {
+                stack_budget_bytes: options.layout.stack_size(),
+            },
+        )
+        .unwrap();
+    }
+    inference_wasm_codegen::codegen(&typed_context, "output", options)
 }
 
 /// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).
@@ -315,6 +344,29 @@ pub(crate) fn wasm_codegen_with_features(
         target.default_opt_level(),
         AnalysisMode::Run,
         features,
+    )
+    .unwrap()
+    .wasm()
+    .to_vec()
+}
+
+/// Generates WebAssembly bytes from source code under an explicit memory layout,
+/// using the default target (`Wasm32`) and mode (`Compile`).
+///
+/// The analogue of [`wasm_codegen_with_features`] for the memory knob: passing
+/// `MemoryLayout::default()` here must reproduce [`wasm_codegen`] exactly, which
+/// is what makes a difference in the emitted bytes attributable to the layout.
+pub(crate) fn wasm_codegen_with_layout(
+    source_code: &str,
+    layout: inference_wasm_codegen::MemoryLayout,
+) -> Vec<u8> {
+    codegen_impl_with_options(
+        source_code,
+        AnalysisMode::Run,
+        inference_wasm_codegen::CodegenOptions {
+            layout,
+            ..Default::default()
+        },
     )
     .unwrap()
     .wasm()

@@ -135,9 +135,21 @@ Not all external functions can be merged. The linker classifies each closure:
 
 | Tier | What the function touches | Merged? |
 |------|--------------------------|---------|
-| A | No memory, globals, data, or tables — pure arithmetic | Yes |
+| A | No memory, no global or table access, no data — pure arithmetic | Yes |
 | B | Memory only through caller-supplied pointers (e.g., `sort(ptr, len)`) | Yes |
-| C | Own static data, globals, or indirect-call tables | No — requires a relocatable build |
+| C | Own static data, global access, or indirect-call tables | No — requires a relocatable build |
+
+Tiers A and B turn on what the closure *uses*. A global the function never reads
+or writes, and a table with no element segment that nothing names, do not force
+Tier C — so the `__stack_pointer` global lld puts in every
+`wasm32-unknown-unknown` artifact no longer rejects it on sight.
+
+That is a necessary step toward linking stock toolchain output, not a sufficient
+one. Such an artifact also declares a multi-page linear memory, and the merge
+never relaxes the anchor module's declared bound, so against an Inference main —
+which emits a fixed one-page `(memory 1 1)` — it now clears the tier gate and
+fails at memory reconciliation instead. Configurable linear memory is a separate
+change.
 
 A Tier-C function produces a clear error at link time:
 

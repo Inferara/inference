@@ -61,10 +61,12 @@ crate::rule! {
 /// Walks the definition tree, maintaining a stack of extern declarations in
 /// scope, and flags every call that resolves to an *unbound* extern.
 ///
-/// Each `Spec`/`Module` pushes its own extern declarations as a new scope
-/// layer before its function bodies are checked, so a spec-inner `external fn`
-/// shadows a same-named top-level one for calls inside that spec. The layer is
-/// popped on exit, keeping sibling specs isolated from one another.
+/// A file's top level and a `spec` inside it are the only two places an
+/// `external fn` can be declared, and each pushes the declarations it introduces
+/// as a new scope layer before the bodies at that level are checked, so a
+/// spec-inner `external fn` shadows a same-named top-level one for calls inside
+/// that spec. The layer is popped on exit, keeping sibling specs isolated from
+/// one another. Specs do not nest, so the stack is at most two deep.
 fn check_defs<'a>(
     arena: &'a AstArena,
     ctx: &TypedContext,

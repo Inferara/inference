@@ -26,6 +26,7 @@ mod expr_deep_nesting;
 mod extern_import;
 mod extern_link;
 mod extern_link_exec;
+mod extern_link_toolchain;
 mod inference_wrapper;
 mod literal_ctx_array_elements;
 mod literal_ctx_i64;

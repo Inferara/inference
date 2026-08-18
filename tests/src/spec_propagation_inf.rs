@@ -44,6 +44,7 @@ mod helpers {
                 mode,
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
+                layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         )
         .unwrap_or_else(|e| panic!("codegen failed for {file}: {e}"))
@@ -628,6 +629,7 @@ mod fixture_assume_body_modifier_rejected {
                 mode: CompilationMode::Proof,
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
+                layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         )
         .expect_err("an assume body-modifier spec states no property");
@@ -813,6 +815,7 @@ mod over_long_spec_function_name_rejected {
                 mode: CompilationMode::Proof,
                 opt_level: OptLevel::O3,
                 features: inference_wasm_codegen::EmitFeatures::default(),
+                layout: inference_wasm_codegen::MemoryLayout::default(),
             },
         )
         .expect_err("a spec function name past MAX_NAME_LEN overflows the inference.hspecs cap");
