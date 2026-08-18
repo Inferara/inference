@@ -2059,36 +2059,38 @@ spec Outer { fn f() forall { let a: i32 = @; assert(probe(a) == a); } }
     );
 }
 
-/// An `external fn` is visible only in the file that declares it. A sibling
-/// file's spec that calls a same-named *local* function resolves to its own
-/// function, not to the other file's extern.
+/// An `external fn` is visible only in the file that declares it, so a bare
+/// name written in two files means two declarations and each file's obligation
+/// names its own.
 ///
 /// The scope key is `(defining file, enclosing spec)`, and this pins the file
-/// half of it: drop that component and the extern in `side` captures `main`'s
-/// call, emitting an obligation about a body the call never reaches — which
-/// resolves post-link and elaborates under `coqc`, so nothing downstream would
-/// notice.
+/// half of it: without that component the index holds one `scale` for the whole
+/// program, and one of the two specs states an obligation about the *other*
+/// library — a body its call never reaches, which still resolves post-link and
+/// elaborates under `coqc`, so nothing downstream would notice.
 ///
-/// Code generation is *not* this precise on the very program below. Its
-/// call-site extern table (`Compiler::extern_name_to_idx`) is keyed by bare
-/// name across the whole program, so `side`'s bound `scale` claims the name and
-/// the entry file's own `scale(a)` lowers to `call $libA.scale`. The obligation
-/// this test pins is the correct reading; the emitted call is not, and the two
-/// describe different functions. That is pre-existing and tracked by
-/// [#423](https://github.com/Inferara/inference/issues/423) — recorded here so
-/// the assertion below is not mistaken for agreement between the two passes.
+/// The two declarations are bound to different libraries because that is what
+/// makes the mix-up visible at all: bound to the same one, the wrong answer and
+/// the right answer are the same string. A local function of the same name
+/// cannot serve as the witness — a top-level function sharing a bare name with a
+/// top-level `external fn` anywhere in the program is rejected outright.
+///
+/// Code generation resolves this very program through this very index, so the
+/// obligation and the emitted call name one function. That agreement is what
+/// makes the assertions below worth having: were the two keyed differently, this
+/// test would pin the correct reading of a call compiled as something else.
 #[test]
 fn an_extern_in_one_file_does_not_capture_a_sibling_files_call() {
     let ctx = type_check_multi(&[
         (
             vec![],
-            "use side;\nfn scale(x: i32) -> i32 { return x * 10; }\nspec MainSpec { fn f() forall \
-             { let a: i32 = @; assert(scale(a) == a * 10); } }\n",
+            "use side;\nexternal fn scale(x: i32) -> i32;\nuse { scale } from libA;\nspec \
+             MainSpec { fn f() forall { let a: i32 = @; assert(scale(a) == a); } }\n",
         ),
         (
             vec!["side"],
-            "external fn scale(x: i32) -> i32;\nuse { scale } from libA;\npub fn use_side(x: i32) \
-             -> i32 { return scale(x); }\n",
+            "external fn scale(x: i32) -> i32;\nuse { scale } from libB;\nspec SideSpec { fn f() \
+             forall { let a: i32 = @; assert(scale(a) == a); } }\n",
         ),
     ]);
     let (map, diagnostics) = translate(&ctx);
@@ -2098,8 +2100,13 @@ fn an_extern_in_one_file_does_not_capture_a_sibling_files_call() {
     );
     assert_eq!(
         applied_symbols(&sole_obligation(&map, "MainSpec")),
-        vec!["scale".to_string()],
-        "the entry file's own `scale` — `libA.scale` would be the sibling file's extern"
+        vec!["libA.scale".to_string()],
+        "the entry file's spec names the declaration its own file bound"
+    );
+    assert_eq!(
+        applied_symbols(&sole_obligation(&map, "side_SideSpec")),
+        vec!["libB.scale".to_string()],
+        "the sibling's spec names the declaration its own file bound"
     );
 }
 
@@ -2136,16 +2143,19 @@ fn a_spec_inner_function_cannot_shadow_a_top_level_name() {
     }
 }
 
-/// The second invariant the extern symbol rests on: one `external fn` name may
-/// not be bound to two modules.
+/// The second invariant the extern symbol rests on: an `external fn`
+/// *declaration* is bound to at most one module.
 ///
-/// Code generation keys its import table on the bare extern *name*, program
-/// wide, while an obligation names the module its declaration was bound to. Two
-/// bindings for one name would leave every call site invoking a single import
-/// while the obligations named two different merged bodies — the executable and
-/// the claim would then describe different functions.
+/// An obligation names the module its declaration was bound to, and a call is
+/// emitted against the import that same declaration registered. Both are
+/// answers about a declaration, so both stay well defined exactly as long as a
+/// *declaration* has one module — not as long as a *name* does. Two files may
+/// each declare `scale` and bind it to a different library; the declarations
+/// are distinct, so the program is legal and each obligation names its own
+/// module. The rule is per file: one file naming one field from two modules is
+/// still the conflict, and is covered by the binding pass's own tests.
 #[test]
-fn one_extern_name_cannot_be_bound_to_two_modules() {
+fn one_extern_declaration_is_bound_to_one_module() {
     let mut arena = AstArena::default();
     for (module_path, source) in [
         (
@@ -2167,12 +2177,27 @@ fn one_extern_name_cannot_be_bound_to_two_modules() {
         );
         arena = parsed.arena;
     }
-    let error = TypeCheckerBuilder::build_typed_context(arena)
-        .err()
-        .expect("one extern name bound to two modules must be rejected");
-    assert!(
-        error.to_string().contains("bound to multiple modules"),
-        "the rejection must be the multiple-binding rule, got: {error}"
+    let ctx = TypeCheckerBuilder::build_typed_context(arena)
+        .expect("two files may each bind their own declaration to their own module")
+        .typed_context();
+    let index = ctx.extern_index();
+    let in_a = index
+        .lookup_top_level(&["a".to_string()], "scale")
+        .expect("file `a` declares `scale`");
+    let in_b = index
+        .lookup_top_level(&["b".to_string()], "scale")
+        .expect("file `b` declares `scale`");
+    assert_ne!(
+        in_a, in_b,
+        "the fixture must declare two distinct `scale`s, or this test proves nothing"
+    );
+    assert_eq!(
+        ctx.extern_origin_by_decl(in_a).map(|o| o.logical_module),
+        Some("libA".to_string())
+    );
+    assert_eq!(
+        ctx.extern_origin_by_decl(in_b).map(|o| o.logical_module),
+        Some("libB".to_string())
     );
 }
 

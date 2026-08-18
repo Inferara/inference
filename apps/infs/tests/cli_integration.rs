@@ -2384,15 +2384,23 @@ fn logged_probes(log: &std::path::Path) -> Vec<String> {
 /// what these tests link must be what `infc` emits today, or a change to the
 /// module shape would leave them linking a stale fixture.
 fn build_arith_library(infc_path: &std::path::Path) -> Vec<u8> {
+    build_library(infc_path, "arith", ARITH_LIB_SRC)
+}
+
+/// Compiles `source` on its own with the real `infc` and returns the `.wasm`
+/// bytes, for vendoring into a dependent project as a `[wasm-dependencies]`
+/// entry.
+fn build_library(infc_path: &std::path::Path, name: &str, source: &str) -> Vec<u8> {
     let lib = assert_fs::TempDir::new().unwrap();
-    lib.child("arith.inf").write_str(ARITH_LIB_SRC).unwrap();
+    let entry = format!("{name}.inf");
+    lib.child(&entry).write_str(source).unwrap();
 
     let mut cmd = Command::new(infc_path);
-    cmd.current_dir(lib.path()).arg("arith.inf");
+    cmd.current_dir(lib.path()).arg(&entry);
     cmd.assert().success();
 
-    std::fs::read(lib.child("out").child("arith.wasm").path())
-        .expect("infc must produce out/arith.wasm for the library")
+    std::fs::read(lib.child("out").child(format!("{name}.wasm")).path())
+        .unwrap_or_else(|e| panic!("infc must produce out/{name}.wasm for the library: {e}"))
 }
 
 /// Scaffolds a project that binds the `arith` external: the manifest declares the
@@ -2797,6 +2805,76 @@ fn project_run_executes_a_linked_manifest_dependency() {
     assert!(
         stdout.contains("42"),
         "wasmtime must print the linked call's result (40 + 2), got:\n{stdout}"
+    );
+}
+
+/// Two files of one project each declare `external fn scale` and bind it to a
+/// *different* library. Executed end to end through the project front end.
+///
+/// The project route is the one seam where the merged arena is built from a real
+/// source tree rather than assembled in a test, and the whole program is one
+/// `infc` invocation — so both files' `scale` calls pass through a single
+/// compilation with a single import table. Nothing before execution distinguishes
+/// a per-file resolution from a program-wide one: the declarations agree on name
+/// and signature, so either wiring type-checks, links and validates. Only the
+/// value says which library ran. `libA` multiplies by 999 and `libB` by 7, and
+/// `main` reports both at once as `1998 * 100 + 14`.
+#[test]
+fn project_run_resolves_a_same_named_extern_per_file() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let lib_a = build_library(
+        &infc_path,
+        "libA",
+        "pub fn scale(a: i32) -> i32 {\n    return a * 999;\n}\n",
+    );
+    let lib_b = build_library(
+        &infc_path,
+        "libB",
+        "pub fn scale(a: i32) -> i32 {\n    return a * 7;\n}\n",
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        "use sib;\n\n\
+         external fn scale(a: i32) -> i32;\n\
+         use { scale } from libA;\n\n\
+         pub fn main() -> i32 {\n    return scale(2) * 100 + sib::via_b(2);\n}\n",
+        "[wasm-dependencies]\n\
+         libA = { path = \"libs/libA.wasm\" }\n\
+         libB = { path = \"libs/libB.wasm\" }\n",
+    );
+    temp.child("src")
+        .child("sib.inf")
+        .write_str(
+            "external fn scale(a: i32) -> i32;\n\
+             use { scale } from libB;\n\n\
+             pub fn via_b(x: i32) -> i32 {\n    return scale(x);\n}\n",
+        )
+        .unwrap();
+    temp.child("libs")
+        .child("libA.wasm")
+        .write_binary(&lib_a)
+        .unwrap();
+    temp.child("libs")
+        .child("libB.wasm")
+        .write_binary(&lib_b)
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env_remove("INFERENCE_WASM_LIB_PATH")
+        .current_dir(temp.path())
+        .arg("run");
+    let stdout = stdout_of(&cmd.assert().success());
+    assert!(
+        stdout.contains("199814"),
+        "each file's `scale` must reach its own library (1998 via libA, 14 via libB); \
+         201798 would mean both calls funnelled into libA, got:\n{stdout}"
     );
 }
 

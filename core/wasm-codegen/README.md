@@ -27,8 +27,11 @@ Typed AST (TypedContext)
 2. **Import reservation + function index pre-scan** - Build the complete WASM function
    index space before any body is compiled, in two stages that each run across all files:
    (a) `register_imports` assigns indices `0..N` to every `external fn` declaration bound
-   via `use … from <module>`, populating `extern_name_to_idx` and recording the
-   `(logical_module, export_field, type_idx)` tuple needed for the import section;
+   via `use … from <module>`, populating `extern_import_idx` — keyed by the declaring
+   `DefId` rather than by the extern's name, since two files may declare the same name and
+   bind it to different modules — and recording the `(logical_module, export_field,
+   type_idx)` tuple needed for the import section. Declarations that bind the same
+   `(module, field)` at the same signature share one import;
    (b) a two-pass local scan first registers all top-level functions from every source file
    under their mangled `FnKey` names, then registers all struct methods under their mangled
    names (`"{StructName}.{method_name}"`). Functions from the entry file use unqualified

@@ -202,13 +202,14 @@ use inference_ast::nodes::{
 };
 use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
+use inference_type_checker::ExternIndex;
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
+use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
 use super::reach::ChoicePlan;
-use super::{CalleeIndex, ExternIndex};
 
 /// Polarity of the surrounding quantification.
 ///
@@ -2062,7 +2063,10 @@ impl<'a> SpecFnTranslator<'a> {
                 // rule is ever relaxed, this must become a real innermost-first
                 // walk over both kinds: a file-scope extern would otherwise
                 // hide a spec-sibling function that shadows it.
-                if let Some(decl) = self.externs.lookup(self.module_path, self.spec_name, &name) {
+                if let Some(decl) =
+                    self.externs
+                        .lookup(self.module_path, Some(self.spec_name), &name)
+                {
                     return self.resolve_external(decl);
                 }
                 // A cross-file item import (`use lib::arith::{add}; add()`)
@@ -3946,8 +3950,8 @@ mod tests {
 
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
-        let externs = ExternIndex::build(ctx.arena());
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, &externs);
+        let externs = ctx.extern_index();
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, externs);
         let unwound = catch_unwind(AssertUnwindSafe(|| translator.number_literal(orphan, "7")));
         let payload = unwound.expect_err("an untyped literal must abort translation");
         let text = panic_text(payload.as_ref());
@@ -3968,8 +3972,8 @@ mod tests {
 
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
-        let externs = ExternIndex::build(ctx.arena());
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, &externs);
+        let externs = ctx.extern_index();
+        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, externs);
         assert_eq!(
             translator.number_literal(orphan, "7"),
             zero_sentinel(),

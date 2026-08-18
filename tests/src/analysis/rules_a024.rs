@@ -218,7 +218,7 @@ mod analysis_rules_tests {
 
     #[test]
     fn a024_top_level_use_does_not_bind_spec_inner_extern() {
-        // H8: a top-level `use { sort } from sorting;` is file-global but binds
+        // H8: a top-level `use { sort } from sorting;` is file-wide but binds
         // only top-level externs. With no top-level `sort` declared, the `use`
         // names an undeclared top-level extern, so the type checker reports
         // ExternImportNotDeclared rather than silently binding the spec-inner

@@ -52,7 +52,24 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<AstArena> {
 pub(crate) fn try_type_check_multi_file(
     files: &[(Vec<&str>, &str)],
 ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
-    let mut arena = inference_ast::arena::AstArena::default();
+    Ok(
+        inference_type_checker::TypeCheckerBuilder::build_typed_context(build_multi_file_ast(
+            files,
+        ))?
+        .typed_context(),
+    )
+}
+
+/// Folds `(module_path, source)` pairs into one arena, the shape a multi-file
+/// program reaches the type checker in. The multi-file analogue of
+/// [`build_ast`], for tests that need the structured diagnostics
+/// [`inference_type_checker::check_with_diagnostics`] returns rather than the
+/// aggregated message [`try_type_check_multi_file`] renders.
+///
+/// # Panics
+/// Panics if any file has a syntax error (tests should pass valid sources).
+pub(crate) fn build_multi_file_ast(files: &[(Vec<&str>, &str)]) -> AstArena {
+    let mut arena = AstArena::default();
     for (module_path, source) in files {
         let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
         let parsed = inference_parser::parse_into(arena, source, module_path);
@@ -63,10 +80,7 @@ pub(crate) fn try_type_check_multi_file(
         );
         arena = parsed.arena;
     }
-    Ok(
-        inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?
-            .typed_context(),
-    )
+    arena
 }
 
 /// Controls whether the analysis pass runs during codegen.
@@ -535,6 +549,34 @@ pub(crate) fn proof_wasm_codegen_project(module_path: &str, test_name: &str) -> 
         },
     )
     .unwrap_or_else(|e| panic!("multi-file proof codegen failed for {test_name}: {e}"))
+    .wasm()
+    .to_vec()
+}
+
+/// Type-checks, analyzes and generates a multi-file program from in-memory
+/// sources in Proof mode, returning the merged WASM bytes.
+///
+/// The proof-mode analogue of [`wasm_codegen_multi_file`], for the constructs
+/// that exist only inside a `spec` — compile mode emits no specification
+/// function at all, so a seam reached only from a spec body is unreachable
+/// through the compile-mode helper.
+///
+/// # Panics
+/// Panics if any file has a syntax error, or if type checking, analysis or
+/// code generation fails.
+pub(crate) fn proof_wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
+    let typed_context = try_type_check_multi_file(files)
+        .expect("multi-file proof-mode test source should type-check");
+    inference_analysis::analyze(&typed_context).expect("multi-file proof analysis should succeed");
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        "output",
+        inference_wasm_codegen::CodegenOptions {
+            mode: inference_wasm_codegen::CompilationMode::Proof,
+            ..Default::default()
+        },
+    )
+    .expect("multi-file proof codegen should succeed")
     .wasm()
     .to_vec()
 }

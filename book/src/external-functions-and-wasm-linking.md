@@ -99,8 +99,12 @@ example above produces:
 
 Imported functions occupy the lowest WASM function indices. The local `add_three`
 is shifted to index 1 (after the one import at index 0). The call target `call 0`
-is the import index, resolved statically from the `extern_name_to_idx` table built
-during the pre-scan phase.
+is the import index, resolved statically during the pre-scan phase: the compiler
+resolves the callee name to the `external fn` declaration in scope where the call
+is written — its file, and the `spec` block enclosing it — and takes the import
+that declaration reserved. Identity is the declaration, not the name, so two files
+may each declare `scale` and bind it to a different module, and each file's calls
+reach its own.
 
 ## The Link Step
 

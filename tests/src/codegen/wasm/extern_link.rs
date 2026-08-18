@@ -91,6 +91,21 @@ mod extern_link_tests {
         imports
     }
 
+    /// The number of functions **defined** in `wasm`, excluding imports.
+    ///
+    /// After a merge every function is defined, so this counts the program's own
+    /// functions plus one body per merged external — the number that tells two
+    /// declarations sharing one import apart from two separate imports.
+    fn defined_function_count(wasm: &[u8]) -> usize {
+        let mut count = 0;
+        for payload in Parser::new(0).parse_all(wasm) {
+            if let Payload::FunctionSection(reader) = payload.expect("valid payload") {
+                count += reader.count() as usize;
+            }
+        }
+        count
+    }
+
     /// Runs the pipeline an `infc -L <lib_dir> main.inf -v` invocation runs and
     /// returns the unified `.wasm` together with its Rocq translation.
     fn compile_and_link(main_source: &str, lib_dir: &Path, module_name: &str) -> (Vec<u8>, String) {
@@ -1039,6 +1054,219 @@ pub fn probe_named_array() -> i32 {
         assert!(
             rocq.contains("T_binop T_i32 (Binop_i BOI_add) (T_local 0%N) (T_local 0%N)"),
             "the claim the extern is measured against must survive; .v was:\n{rocq}"
+        );
+    }
+
+    /// Compiles a multi-file program and links its externals, the pipeline an
+    /// `infs build` of a project runs.
+    ///
+    /// `files` is `(module_path, source)` pairs with the entry file first, folded
+    /// into one arena exactly as the project front end folds a source tree.
+    fn compile_and_link_multi_file(
+        files: &[(Vec<&str>, &str)],
+        lib_dir: &Path,
+        module_name: &str,
+    ) -> Vec<u8> {
+        let mut arena = inference_ast::arena::AstArena::default();
+        for (module_path, source) in files {
+            let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+            let parsed = inference_parser::parse_into(arena, source, module_path);
+            assert!(
+                parsed.errors.is_empty(),
+                "multi-file source has syntax errors: {:?}",
+                parsed.errors
+            );
+            arena = parsed.arena;
+        }
+        let typed = type_check(arena).expect("multi-file source type-checks");
+        inference_analysis::analyze(&typed).expect("multi-file analysis succeeds");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.to_path_buf());
+        let externals = resolve_external_modules(&typed, &search_path, None)
+            .expect("external modules resolve and validate");
+        let external_bytes: Vec<(&str, &[u8])> = externals
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+
+        let codegen_output = codegen(&typed, module_name).expect("multi-file codegen succeeds");
+        link(codegen_output.wasm(), &external_bytes).expect("link succeeds")
+    }
+
+    /// Instantiates a self-contained merged module and calls `name` with one
+    /// `i32` argument.
+    fn call_i32(unified: &[u8], name: &str, argument: i32) -> i32 {
+        inf_wasmparser::validate(unified).expect("unified module is valid wasm");
+        assert!(
+            function_imports(unified).is_empty(),
+            "a merged module must be self-contained, found {:?}",
+            function_imports(unified)
+        );
+        let engine = Engine::default();
+        let module =
+            Module::new(&engine, unified).unwrap_or_else(|e| panic!("merged module rejected: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("merged module failed to instantiate: {e}"));
+        let func: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, name)
+            .unwrap_or_else(|e| panic!("merged module must export `{name}`: {e}"));
+        func.call(&mut store, argument)
+            .unwrap_or_else(|e| panic!("`{name}({argument})` failed: {e}"))
+    }
+
+    /// Two files each declare `external fn scale`, bind it to a **different**
+    /// library, and call it. Executed end to end: each file's call must reach
+    /// its own library.
+    ///
+    /// Nothing before execution can tell the two apart. The declarations agree
+    /// on name and signature, so the module type-checks, links and validates
+    /// whichever import each call is wired to; only the returned value says
+    /// which library ran. `libA` multiplies by 999 and `libB` by 7, values
+    /// nothing else in the program can produce.
+    #[test]
+    fn two_files_binding_one_name_to_two_libraries_each_call_their_own() {
+        let lib_a = compile_wasm("pub fn scale(a: i32) -> i32 { return a * 999; }", "libA");
+        let lib_b = compile_wasm("pub fn scale(a: i32) -> i32 { return a * 7; }", "libB");
+        let lib_dir = TempLibDir::new("two-modules");
+        lib_dir.write_module(Path::new("libA.wasm"), &lib_a);
+        lib_dir.write_module(Path::new("libB.wasm"), &lib_b);
+
+        let unified = compile_and_link_multi_file(
+            &[
+                (
+                    vec![],
+                    "use sib;\n\
+                     external fn scale(a: i32) -> i32;\n\
+                     use { scale } from libA;\n\
+                     pub fn from_a(x: i32) -> i32 { return scale(x); }\n\
+                     pub fn from_b(x: i32) -> i32 { return sib::via_b(x); }\n",
+                ),
+                (
+                    vec!["sib"],
+                    "external fn scale(a: i32) -> i32;\n\
+                     use { scale } from libB;\n\
+                     pub fn via_b(x: i32) -> i32 { return scale(x); }\n",
+                ),
+            ],
+            lib_dir.path(),
+            "two_modules",
+        );
+
+        assert_eq!(
+            call_i32(&unified, "from_a", 2),
+            1998,
+            "the entry file's `scale` is bound to `libA`, so `from_a(2)` is 2 * 999"
+        );
+        assert_eq!(
+            call_i32(&unified, "from_b", 2),
+            14,
+            "the sibling's `scale` is bound to `libB`, so `from_b(2)` is 2 * 7; \
+             1998 would mean both files' calls funnelled into one import"
+        );
+    }
+
+    /// Two files declaring and binding the same `(module, field)` share one
+    /// import, and both calls reach it.
+    ///
+    /// The two declarations are distinct, but the import they need is the same
+    /// one; the merge folds a single `libA.scale` body in, and neither call is
+    /// left pointing at a second copy or at nothing.
+    #[test]
+    fn two_files_binding_one_library_share_a_single_merged_body() {
+        let lib_a = compile_wasm("pub fn scale(a: i32) -> i32 { return a * 999; }", "libA");
+        let lib_dir = TempLibDir::new("one-module");
+        lib_dir.write_module(Path::new("libA.wasm"), &lib_a);
+
+        let unified = compile_and_link_multi_file(
+            &[
+                (
+                    vec![],
+                    "use sib;\n\
+                     external fn scale(a: i32) -> i32;\n\
+                     use { scale } from libA;\n\
+                     pub fn direct(x: i32) -> i32 { return scale(x); }\n\
+                     pub fn through_sibling(x: i32) -> i32 { return sib::via(x); }\n",
+                ),
+                (
+                    vec!["sib"],
+                    "external fn scale(a: i32) -> i32;\n\
+                     use { scale } from libA;\n\
+                     pub fn via(x: i32) -> i32 { return scale(x); }\n",
+                ),
+            ],
+            lib_dir.path(),
+            "one_module",
+        );
+
+        assert_eq!(call_i32(&unified, "direct", 2), 1998);
+        assert_eq!(call_i32(&unified, "through_sibling", 2), 1998);
+        assert_eq!(
+            defined_function_count(&unified),
+            4,
+            "`direct`, `through_sibling`, `via` and one merged `libA.scale`: the \
+             two declarations must share a single import, not merge two copies"
+        );
+    }
+
+    /// Two files bind the same `(module, field)` and **disagree** on its arity.
+    /// The program must be rejected.
+    ///
+    /// The linker satisfies an import on `(module, field)` alone and compares no
+    /// signatures, so a declaration whose signature never reaches validation is
+    /// linked to the library regardless. Arity is the shape that makes the
+    /// consequence an artifact rather than a late error: re-validating the
+    /// merged module catches a disagreement in value *types*, but a surplus
+    /// operand pushed into a narrower callee leaves the module well typed,
+    /// because `return` is stack-polymorphic. The merged program then runs, and
+    /// the extra argument is silently discarded.
+    ///
+    /// So validation has to reach *every* bound declaration, not one per
+    /// `(module, field)`.
+    #[test]
+    fn two_files_disagreeing_on_one_externs_signature_are_rejected() {
+        let lib_a = compile_wasm("pub fn scale(a: i32) -> i32 { return a * 999; }", "libA");
+        let lib_dir = TempLibDir::new("signature-clash");
+        lib_dir.write_module(Path::new("libA.wasm"), &lib_a);
+
+        let mut arena = inference_ast::arena::AstArena::default();
+        for (module_path, source) in [
+            (
+                Vec::new(),
+                "use sib;\n\
+                 external fn scale(a: i32) -> i32;\n\
+                 use { scale } from libA;\n\
+                 pub fn direct(x: i32) -> i32 { return scale(x); }\n\
+                 pub fn through_sibling(a: i32, b: i32) -> i32 { return sib::via(a, b); }\n",
+            ),
+            (
+                vec!["sib".to_string()],
+                "external fn scale(a: i32, b: i32) -> i32;\n\
+                 use { scale } from libA;\n\
+                 pub fn via(a: i32, b: i32) -> i32 { return scale(a, b); }\n",
+            ),
+        ] {
+            let parsed = inference_parser::parse_into(arena, source, module_path);
+            assert!(
+                parsed.errors.is_empty(),
+                "multi-file source has syntax errors: {:?}",
+                parsed.errors
+            );
+            arena = parsed.arena;
+        }
+        let typed = type_check(arena).expect("both declarations are well formed on their own");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let error = resolve_external_modules(&typed, &search_path, None)
+            .expect_err("a declaration the library does not match must be rejected");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("signature mismatch for external function `scale`")
+                && rendered.contains("declared (i32, i32) -> (i32)"),
+            "the rejection must name the mismatching extern and the signature that \
+             disagrees; got: {rendered}"
         );
     }
 }

@@ -16,13 +16,19 @@
 //! declaration is unbound. A purely name-keyed check would let an unbound
 //! same-named declaration poison every call to a bound extern (round-2 H-1).
 //!
+//! Resolution itself is not implemented here. The walk below tracks only
+//! *where* each body sits — the file it belongs to and the `spec` enclosing it,
+//! if any — and hands that scope to
+//! [`ExternIndex`](inference_type_checker::ExternIndex), the whole-program
+//! index type checking already built. Sharing that index is what keeps this
+//! rule and the specification translator from disagreeing about which
+//! declaration a call names.
+//!
 //! NOTE: This rule only matches direct calls by name (`foo()`). External
 //! functions cannot currently be struct members or passed as values, so
 //! name-based matching within a scope is sufficient. If the language later
 //! allows extern functions in structs or as first-class values, this rule
 //! will need to be extended.
-
-use std::collections::HashMap;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
@@ -43,14 +49,13 @@ crate::rule! {
     fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let arena = ctx.arena();
         let mut errors = Vec::new();
-        let mut scopes: Vec<HashMap<&str, DefId>> = Vec::new();
         for source_file in ctx.source_files() {
             check_defs(
                 arena,
                 ctx,
                 &source_file.module_path,
+                None,
                 &source_file.defs,
-                &mut scopes,
                 &mut errors,
             );
         }
@@ -58,72 +63,55 @@ crate::rule! {
     }
 }
 
-/// Walks the definition tree, maintaining a stack of extern declarations in
-/// scope, and flags every call that resolves to an *unbound* extern.
+/// Walks the definitions of one scope, flagging every call in their bodies that
+/// resolves to an *unbound* extern.
 ///
 /// A file's top level and a `spec` inside it are the only two places an
-/// `external fn` can be declared, and each pushes the declarations it introduces
-/// as a new scope layer before the bodies at that level are checked, so a
-/// spec-inner `external fn` shadows a same-named top-level one for calls inside
-/// that spec. The layer is popped on exit, keeping sibling specs isolated from
-/// one another. Specs do not nest, so the stack is at most two deep.
-fn check_defs<'a>(
-    arena: &'a AstArena,
+/// `external fn` can be declared, so a body's scope is fully described by the
+/// file's `module_path` plus `spec` — `None` at the top level, the spec's name
+/// inside one. Specs do not nest, so the recursion descends at most one level
+/// and sibling specs stay isolated by construction.
+fn check_defs(
+    arena: &AstArena,
     ctx: &TypedContext,
     module_path: &[String],
+    spec: Option<&str>,
     defs: &[DefId],
-    scopes: &mut Vec<HashMap<&'a str, DefId>>,
     errors: &mut Vec<LabeledDiagnostic>,
 ) {
-    scopes.push(collect_extern_decls(arena, defs));
     for &def_id in defs {
         match &arena[def_id].kind {
             Def::Function { body, .. } => {
-                check_function_body(arena, ctx, module_path, *body, scopes, errors);
+                check_function_body(arena, ctx, module_path, spec, *body, errors);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
                     if let Def::Function { body, .. } = &arena[method_id].kind {
-                        check_function_body(arena, ctx, module_path, *body, scopes, errors);
+                        check_function_body(arena, ctx, module_path, spec, *body, errors);
                     }
                 }
             }
-            Def::Spec { defs, .. } => {
-                check_defs(arena, ctx, module_path, defs, scopes, errors);
+            Def::Spec { name, defs, .. } => {
+                check_defs(
+                    arena,
+                    ctx,
+                    module_path,
+                    Some(arena[*name].name.as_str()),
+                    defs,
+                    errors,
+                );
             }
             _ => {}
         }
     }
-    scopes.pop();
-}
-
-/// Records the `external fn` declarations introduced directly by `defs`,
-/// mapping each extern name to its declaring [`DefId`]. Keeps the first
-/// declaration for a name; a same-name redeclaration in one scope is a type
-/// error caught earlier, so the choice is immaterial to a valid program.
-fn collect_extern_decls<'a>(arena: &'a AstArena, defs: &[DefId]) -> HashMap<&'a str, DefId> {
-    let mut decls = HashMap::default();
-    for &def_id in defs {
-        if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
-            decls.entry(arena[*name].name.as_str()).or_insert(def_id);
-        }
-    }
-    decls
-}
-
-/// Resolves a callee name against the scope stack, innermost first, returning
-/// the declaring [`DefId`] of the nearest `external fn` of that name, or `None`
-/// if the name does not resolve to any extern in scope (a regular function).
-fn resolve_extern_decl(scopes: &[HashMap<&str, DefId>], name: &str) -> Option<DefId> {
-    scopes.iter().rev().find_map(|scope| scope.get(name).copied())
 }
 
 fn check_function_body(
     arena: &AstArena,
     ctx: &TypedContext,
     module_path: &[String],
+    spec: Option<&str>,
     body: inference_ast::ids::BlockId,
-    scopes: &[HashMap<&str, DefId>],
     errors: &mut Vec<LabeledDiagnostic>,
 ) {
     walker::walk_block_stmts(arena, body, &mut |stmt_id| {
@@ -133,7 +121,7 @@ fn check_function_body(
                     && let Expr::Identifier(ident_id) = &arena[*function].kind
                 {
                     let callee_name = &arena[*ident_id].name;
-                    if let Some(decl) = resolve_extern_decl(scopes, callee_name)
+                    if let Some(decl) = ctx.extern_index().lookup(module_path, spec, callee_name)
                         && ctx.extern_origin_by_decl(decl).is_none()
                     {
                         errors.push(LabeledDiagnostic::new(

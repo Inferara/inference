@@ -33,7 +33,7 @@
 //! Functions without an explicit return type default to the unit type,
 //! represented as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::bail;
@@ -1917,15 +1917,28 @@ impl SymbolTable {
     }
 
     /// Collects the provenance of every **bound** `external fn` across all
-    /// scopes, deduplicated by `(logical_module, export_field)`.
+    /// scopes, deduplicated by `(logical_module, export_field, decl)`.
     ///
     /// The driver consumes this to resolve and validate each external `.wasm`
     /// before linking. Unbound bare externs (declared without a binding `use`)
     /// carry no origin and are skipped — they never reach the linker.
+    ///
+    /// The declaration is part of the key because the driver validates the
+    /// external library against the *declared* signature it recovers from
+    /// `decl`. Two files may each declare and bind the same `(module, field)`,
+    /// and the linker satisfies an import on `(module, field)` alone with no
+    /// signature comparison of its own — so dropping either declaration here
+    /// would leave its signature unchecked and let a disagreement ship as a
+    /// silently mis-linked artifact instead of a rejection. Only a genuinely
+    /// repeated registration of one declaration (the same extern reachable from
+    /// more than one scope) collapses.
+    ///
+    /// The order is deterministic: a scope's symbols are stored by name in a
+    /// hash map, so the traversal alone would leave the order — and hence which
+    /// of several failing externs is reported first — unstable across runs.
     #[must_use = "this enumeration has no side effects"]
     pub(crate) fn extern_origins(&self) -> Vec<ExternOrigin> {
-        let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut origins = Vec::new();
+        let mut origins: BTreeMap<(String, String, DefId), ExternOrigin> = BTreeMap::new();
         for scope in &self.scopes {
             for symbol in scope.symbols.values() {
                 let Some(info) = symbol.as_function() else {
@@ -1934,13 +1947,15 @@ impl SymbolTable {
                 let Some(origin) = info.extern_origin() else {
                     continue;
                 };
-                let key = (origin.logical_module.clone(), origin.export_field.clone());
-                if seen.insert(key) {
-                    origins.push(origin.clone());
-                }
+                let key = (
+                    origin.logical_module.clone(),
+                    origin.export_field.clone(),
+                    origin.decl,
+                );
+                origins.entry(key).or_insert_with(|| origin.clone());
             }
         }
-        origins
+        origins.into_values().collect()
     }
 
     /// Returns the provenance of the **bound** `external fn` declared by
@@ -1964,21 +1979,6 @@ impl SymbolTable {
                 {
                     return Some(origin.clone());
                 }
-            }
-        }
-        None
-    }
-
-    /// Looks up a function by name across **all** registered scopes, ignoring
-    /// file boundaries; the returned [`FuncInfo`] carries the extern provenance,
-    /// so post-type-check phases can read it scope-agnostically.
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_function_anywhere(&self, name: &str) -> Option<FuncInfo> {
-        for scope in &self.scopes {
-            if let Some(symbol) = scope.lookup_symbol_local(name)
-                && let Some(info) = symbol.as_function()
-            {
-                return Some(info.clone());
             }
         }
         None
@@ -4191,6 +4191,13 @@ mod tests {
             }
         }
 
+        fn i64_type() -> TypeInfo {
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            }
+        }
+
         fn origin(module: &str, field: &str) -> ExternOrigin {
             ExternOrigin {
                 logical_module: module.to_string(),
@@ -4214,7 +4221,7 @@ mod tests {
                 .expect("registering a bound extern should succeed");
 
             let info = table
-                .lookup_function_anywhere("sort")
+                .lookup_function("sort")
                 .expect("sort should be registered");
             assert!(info.is_extern(), "a registered extern must be discriminated");
             let found = info.extern_origin().expect("bound extern carries origin");
@@ -4230,7 +4237,7 @@ mod tests {
                 .expect("registering an unbound extern should succeed");
 
             let info = table
-                .lookup_function_anywhere("add")
+                .lookup_function("add")
                 .expect("add should be registered");
             assert!(
                 info.is_extern(),
@@ -4250,7 +4257,7 @@ mod tests {
                 .expect("registering a local function should succeed");
 
             let info = table
-                .lookup_function_anywhere("helper")
+                .lookup_function("helper")
                 .expect("helper should be registered");
             assert!(!info.is_extern());
             assert!(info.extern_origin().is_none());
@@ -4286,9 +4293,9 @@ mod tests {
         }
 
         #[test]
-        fn extern_origins_dedups_repeated_module_field_pairs() {
-            // Two distinct externs that name the same module+field collapse to a
-            // single resolution unit; the driver should resolve that `.wasm` once.
+        fn extern_origins_dedups_one_declaration_reached_from_two_scopes() {
+            // One declaration registered in two scopes is one binding; the driver
+            // should resolve and validate that `.wasm` once.
             let mut table = SymbolTable::default();
             table
                 .register_extern_function(
@@ -4314,7 +4321,56 @@ mod tests {
             assert_eq!(
                 origins.len(),
                 1,
-                "identical (module, field) pairs dedup to one origin, got {origins:?}"
+                "one declaration reached twice is one origin, got {origins:?}"
+            );
+        }
+
+        #[test]
+        fn extern_origins_keeps_two_declarations_of_one_module_field() {
+            // Two files may each declare and bind `collections::sort`. The driver
+            // validates the resolved library against the signature *each*
+            // declaration states, and the linker satisfies the import on
+            // `(module, field)` alone with no signature comparison of its own —
+            // so a dropped declaration is a signature that is never checked and a
+            // mismatch that ships as a mis-linked artifact.
+            let mut table = SymbolTable::default();
+            let mut first = origin("collections", "sort");
+            first.decl = inference_ast::ids::idx_from_u32(1);
+            let mut second = origin("collections", "sort");
+            second.decl = inference_ast::ids::idx_from_u32(2);
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i32_type()],
+                    vec![None],
+                    i32_type(),
+                    Some(first),
+                )
+                .unwrap();
+            let _ = table.push_scope_with_name("other_file", Visibility::Public);
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i64_type()],
+                    vec![None],
+                    i64_type(),
+                    Some(second),
+                )
+                .unwrap();
+
+            let origins = table.extern_origins();
+            assert_eq!(
+                origins.len(),
+                2,
+                "both declarations must reach validation, got {origins:?}"
+            );
+            assert_eq!(
+                origins.iter().map(|o| o.decl).collect::<Vec<_>>(),
+                vec![
+                    inference_ast::ids::idx_from_u32(1),
+                    inference_ast::ids::idx_from_u32(2)
+                ],
+                "the enumeration order is deterministic, got {origins:?}"
             );
         }
     }
