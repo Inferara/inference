@@ -5,6 +5,7 @@
 
 use crate::{
     errors::TypeMismatchContext,
+    extern_index::ExternIndex,
     symbol_table::{EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
@@ -125,6 +126,10 @@ pub struct TypedContext {
     /// truth for what a literal denotes, and nothing about how a program
     /// compiles depends on which position supplied that type.
     literal_type_sources: FxHashMap<ExprId, TypeMismatchContext>,
+    /// Every `external fn` declaration in the program, keyed by the scope that
+    /// introduces it. A pure function of the arena, so it is built at
+    /// construction and is already answering queries while type checking runs.
+    extern_index: ExternIndex,
 }
 
 // Compile-time assertion: TypedContext is Send + Sync. Its symbol table is an
@@ -143,6 +148,7 @@ impl TypedContext {
         Self {
             symbol_table: SymbolTable::default(),
             node_types: FxHashMap::default(),
+            extern_index: ExternIndex::build(&arena),
             arena,
             structs_by_key: FxHashMap::default(),
             enums_by_key: FxHashMap::default(),
@@ -593,17 +599,16 @@ impl TypedContext {
             })
     }
 
-    /// Returns the provenance of an `external fn`, or `None` for a local
-    /// function or an unbound extern (one declared without a binding `use`).
+    /// The program's `external fn` declarations, indexed by the scope that
+    /// declares them.
     ///
-    /// The returned [`ExternOrigin`] gives the logical source module and export
-    /// field for the named extern. WASM code generation consumes this per call
-    /// site to emit an import and lower the call to its import index.
+    /// Resolves the bare callee name at a call site to the declaration that
+    /// site actually names, which is what an `external fn`'s identity is: two
+    /// declarations may share a name and differ in everything else. See
+    /// [`ExternIndex`] for why every consumer must share one index.
     #[must_use = "this is a pure lookup with no side effects"]
-    pub fn extern_origin(&self, name: &str) -> Option<ExternOrigin> {
-        self.symbol_table
-            .lookup_function_anywhere(name)
-            .and_then(|info| info.extern_origin().cloned())
+    pub fn extern_index(&self) -> &ExternIndex {
+        &self.extern_index
     }
 
     /// Returns the provenance of the **bound** `external fn` declared by
@@ -612,26 +617,25 @@ impl TypedContext {
     /// Analysis uses this to decide whether a specific call resolves to a bound
     /// or unbound extern when two same-named externs exist (e.g. a top-level
     /// and a spec-inner `f`): a name keyed query cannot tell them apart, but the
-    /// declaring [`DefId`] can.
+    /// declaring [`DefId`] can. Code generation reserves one import per bound
+    /// declaration through it, and the specification translator names the body
+    /// a spec's obligation refers to.
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn extern_origin_by_decl(&self, decl: DefId) -> Option<ExternOrigin> {
         self.symbol_table.extern_origin_by_decl(decl)
     }
 
-    /// Returns true if the named function is an `external fn` (bound or unbound).
-    #[must_use = "this is a pure check with no side effects"]
-    pub fn is_extern_function(&self, name: &str) -> bool {
-        self.symbol_table
-            .lookup_function_anywhere(name)
-            .is_some_and(|info| info.is_extern())
-    }
-
     /// Returns the provenance of every **bound** `external fn` in the program,
-    /// deduplicated by `(logical_module, export_field)`.
+    /// deduplicated by `(logical_module, export_field, decl)`.
     ///
     /// The build driver consumes this to resolve and validate each external
-    /// `.wasm` once before linking. Unbound bare externs carry no origin and do
-    /// not appear here.
+    /// `.wasm` before linking. Unbound bare externs carry no origin and do not
+    /// appear here.
+    ///
+    /// Every bound *declaration* appears, including two that name the same
+    /// module and field: the driver validates the library against the signature
+    /// each declaration states, and only one entry per `(module, field)` would
+    /// leave the other's signature unchecked.
     #[must_use = "this enumeration has no side effects"]
     pub fn extern_origins(&self) -> Vec<ExternOrigin> {
         self.symbol_table.extern_origins()

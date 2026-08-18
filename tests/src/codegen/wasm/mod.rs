@@ -33,6 +33,7 @@ mod literal_ctx_i64;
 mod literal_ctx_nested_array;
 mod loops;
 mod multi_file;
+mod multi_file_extern;
 mod multi_file_golden;
 mod negative;
 mod param_by_ref;

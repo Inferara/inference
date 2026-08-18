@@ -171,7 +171,7 @@ pub(crate) struct TypeChecker {
     /// directives before externs are registered.
     ///
     /// Keyed by the *declaration*, not the bare name: a `use { f } from m;`
-    /// directive is file-global, so it binds only the **top-level** `external fn
+    /// directive is file-wide, so it binds only the **top-level** `external fn
     /// f` and never a same-named extern declared inside a `spec` — the file's top
     /// level and a `spec` within it being the only two places a declaration can
     /// sit. Keying by [`DefId`] keeps that inner scope's externs unbound (and so
@@ -199,6 +199,17 @@ pub(crate) struct TypeChecker {
     /// callee's parameter names. Guards the same repeated visit as
     /// [`Self::mixed_argument_calls_reported`].
     labelled_argument_calls_checked: FxHashSet<ExprId>,
+    /// Top-level `external fn` declarations whose name is also a top-level
+    /// function **in the same file**, reported by
+    /// [`Self::check_extern_function_name_collisions`].
+    ///
+    /// Registration consults this to leave the extern out of the file's symbol
+    /// table: the two declarations claim one symbol, and inserting the second
+    /// raises a generic registration failure that names neither site. Skipping
+    /// the extern leaves the purpose-built collision diagnostic as the only
+    /// message — and leaves an unrelated duplicate of either name still able to
+    /// report its own.
+    same_file_extern_collisions: FxHashSet<DefId>,
 }
 
 /// RAII guard that enters a spec scope on construction and pops it on drop.
@@ -285,6 +296,10 @@ impl TypeChecker {
     ) -> (SymbolTable, Vec<(Option<String>, TypeCheckError)>) {
         self.process_directives(ctx);
         self.collect_extern_bindings(ctx);
+        // Runs before any registration so a same-file collision is reported by
+        // the purpose-built diagnostic rather than by the symbol table refusing
+        // the second insert.
+        self.check_extern_function_name_collisions(ctx);
         self.register_types(ctx);
         self.collect_function_and_constant_definitions(ctx);
         // Top-level consts become importable / qualified-resolvable symbols after
@@ -1376,6 +1391,13 @@ impl TypeChecker {
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id(ctx.arena(), r))
                     .unwrap_or_default();
+                // A declaration that collides with a same-file function is left
+                // out of the symbol table: the function already holds the
+                // symbol, and inserting over it would raise a second, generic
+                // diagnostic for a collision already reported precisely.
+                if self.same_file_extern_collisions.contains(&def_id) {
+                    return;
+                }
                 let origin = self.extern_module_bindings.get(&def_id).cloned();
                 if let Err(err) = self.symbol_table.register_extern_function(
                     &func_name,
@@ -4093,11 +4115,13 @@ impl TypeChecker {
             // import (`use lib::arith::{add};`); `definition_scope_id` is the
             // callee's defining file either way, so codegen file-qualifies the
             // WASM name correctly even when it differs from the calling file.
-            // Externs carry no local body, so an extern call resolves by bare
-            // name against codegen's import map. That bare-identifier shape is
-            // also what `Compiler::param_escapes_to_extern` keys on when it
-            // decides whether a compound parameter must keep its private entry
-            // copy because the callee may write through the pointer. Leaving
+            // Externs carry no local body, so an extern call is resolved at
+            // code generation time by looking its bare name up in the scope the
+            // call is written in — the declaring file, and the `spec` block
+            // within it. That bare-identifier shape is also what
+            // `Compiler::param_escapes_to_extern` keys on when it decides
+            // whether a compound parameter must keep its private entry copy
+            // because the callee may write through the pointer. Leaving
             // externs unrecorded keeps "an extern call carries no target" a
             // contract codegen can rely on, rather than a value it would have
             // to know to ignore.
@@ -4303,34 +4327,43 @@ impl TypeChecker {
     /// Binds each `external fn` to the source module named by a `use … from`
     /// clause, populating [`Self::extern_module_bindings`].
     ///
+    /// A `use … from` clause is file-scoped: it names fields of a logical module
+    /// and binds the *declaring file's own* top-level `external fn`s of those
+    /// names. Accumulation and resolution are therefore both per file — a
+    /// directive in one file can neither bind nor conflict with a declaration in
+    /// another, and the diagnostics below all describe one file's own text.
+    ///
     /// For every `use { fields } from module;` directive, each field is paired
     /// with `module`. The resulting bindings are validated:
     ///
-    /// - A field imported from two or more distinct modules is reported as
-    ///   [`TypeCheckError::AmbiguousExternModule`] and left unbound.
-    /// - A field imported from a module but never declared as an `external fn`
-    ///   is reported as [`TypeCheckError::ExternImportNotDeclared`].
+    /// - A field imported from two or more distinct modules *by the same file*
+    ///   is reported as [`TypeCheckError::AmbiguousExternModule`] and left
+    ///   unbound. Two files may bind the same name to different modules; the
+    ///   declarations are distinct and each keeps its own origin.
+    /// - A field imported from a module but not declared as an `external fn` at
+    ///   the importing file's top level is reported as
+    ///   [`TypeCheckError::ExternImportNotDeclared`].
     /// - A field imported from exactly one module and declared as an extern is
     ///   recorded as a bound [`ExternOrigin`].
     ///
     /// An `external fn` with no binding `use` is left unbound (no error): a bare
     /// extern declaration is valid; analysis rule A024 governs whether *calling*
     /// an unlinked extern is allowed.
+    ///
+    /// Diagnostics are emitted in source order. The per-file map is drained in
+    /// hash order, so each file's errors are sorted by source position before
+    /// they are pushed, and the files themselves are visited in arena order —
+    /// making the reported order the order the user reads.
     fn collect_extern_bindings(&mut self, ctx: &TypedContext) {
         let arena = ctx.arena();
+        let index = ctx.extern_index();
 
-        let extern_decls = Self::collect_top_level_extern_decls(arena);
-
-        // field name → (distinct modules in first-seen order, first import
-        // location, label of the file that owns that first `use … from`). The
-        // owning-file label rides alongside the location because this scan runs
-        // at the root cursor over every file's directives: a dangling or
-        // ambiguous import in an imported file must be stamped with that file,
-        // not the entry, or the location (per-file-local) is misattributed.
-        let mut imports: FxHashMap<String, (Vec<String>, Location, Option<String>)> =
-            FxHashMap::default();
         for sf in arena.source_files() {
             let owner_label = inference_ast::nodes::file_label(&sf.module_path);
+
+            // field name → (distinct modules in first-seen order, first import
+            // location), over this file's directives alone.
+            let mut imports: FxHashMap<String, (Vec<String>, Location)> = FxHashMap::default();
             for directive in &sf.directives {
                 let Directive::Use(use_dir) = directive;
                 let Some(module_ref) = &use_dir.from else {
@@ -4346,74 +4379,134 @@ impl TypeChecker {
                     let field = arena[field_id].name.clone();
                     let entry = imports
                         .entry(field)
-                        .or_insert_with(|| (Vec::new(), use_dir.location, owner_label.clone()));
+                        .or_insert_with(|| (Vec::new(), use_dir.location));
                     if !entry.0.contains(&module) {
                         entry.0.push(module.clone());
                     }
                 }
             }
-        }
 
-        for (field, (modules, location, owner_label)) in imports {
-            let Some(&decl) = extern_decls.get(&field) else {
-                self.push_error_with_label(
-                    owner_label,
-                    TypeCheckError::ExternImportNotDeclared {
-                        name: field,
-                        module: modules.join(", "),
+            let mut errors: Vec<(Location, TypeCheckError)> = Vec::new();
+            for (field, (modules, location)) in imports {
+                let Some(decl) = index.lookup_top_level(&sf.module_path, &field) else {
+                    errors.push((
                         location,
-                    },
-                );
-                continue;
-            };
-            if modules.len() > 1 {
-                let module_list = modules
-                    .iter()
-                    .map(|m| format!("`{m}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.push_error_with_label(
-                    owner_label,
-                    TypeCheckError::AmbiguousExternModule {
-                        name: field,
-                        modules: module_list,
+                        TypeCheckError::ExternImportNotDeclared {
+                            name: field,
+                            module: modules.join(", "),
+                            location,
+                        },
+                    ));
+                    continue;
+                };
+                if modules.len() > 1 {
+                    let module_list = modules
+                        .iter()
+                        .map(|m| format!("`{m}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    errors.push((
                         location,
-                    },
-                );
-                continue;
-            }
-            let logical_module = modules.into_iter().next().expect("one module");
-            self.extern_module_bindings.insert(
-                decl,
-                ExternOrigin {
-                    logical_module,
-                    export_field: field,
+                        TypeCheckError::AmbiguousExternModule {
+                            name: field,
+                            modules: module_list,
+                            location,
+                        },
+                    ));
+                    continue;
+                }
+                let logical_module = modules.into_iter().next().expect("one module");
+                self.extern_module_bindings.insert(
                     decl,
-                    resolved_path: None,
-                },
-            );
+                    ExternOrigin {
+                        logical_module,
+                        export_field: field,
+                        decl,
+                        resolved_path: None,
+                    },
+                );
+            }
+
+            errors.sort_by_key(|(location, _)| (location.offset_start, location.offset_end));
+            for (_, error) in errors {
+                self.push_error_with_label(owner_label.clone(), error);
+            }
         }
     }
 
-    /// Collects every **top-level** `external fn` declaration, mapping its name
-    /// to its declaring [`DefId`].
+    /// Rejects every top-level `external fn` whose name is also a top-level
+    /// function's, anywhere in the program.
     ///
-    /// A `use … from` clause is file-global and binds only top-level externs,
-    /// so this deliberately does **not** descend into `spec` or `module` bodies:
-    /// a same-named extern declared in a spec or module is left out, stays
-    /// unbound, and remains A024-rejected when called. Descending here (the prior
-    /// behavior) let a top-level `use` silently bind a spec-inner extern,
-    /// suppressing A024 and miscompiling proof-mode codegen.
-    fn collect_top_level_extern_decls(arena: &AstArena) -> FxHashMap<String, DefId> {
-        let mut decls = FxHashMap::default();
+    /// The two resolve perfectly well: an `external fn` is identified by its
+    /// declaration and a bare call resolves in the scope it is written in, so
+    /// such a program has one callee per call site and would run correctly. The
+    /// pair is rejected as a rule about the name — a local function shadowing a
+    /// foreign-boundary declaration is hard to read, because a call site does
+    /// not say whether the callee is compiled here or linked in. That is a
+    /// property of the spelling, so the rule spans the whole program rather than
+    /// one file; the same-file half additionally replaces the symbol table's
+    /// refusal of the second insert, which named neither declaration.
+    ///
+    /// Only the two top-level kinds take part. A method is namespaced under its
+    /// receiver type and a `spec`-inner declaration under its `spec`, so neither
+    /// is written as the bare name the rule is about.
+    ///
+    /// One diagnostic per colliding `external fn`, naming the first colliding
+    /// function in arena order; files are walked in that same order and each
+    /// file's declarations in source order, so a program with several collisions
+    /// reports them the way the user reads them.
+    fn check_extern_function_name_collisions(&mut self, ctx: &TypedContext) {
+        let arena = ctx.arena();
+        let mut functions: FxHashMap<&str, (Location, Option<String>)> = FxHashMap::default();
         for sf in arena.source_files() {
+            let label = inference_ast::nodes::file_label(&sf.module_path);
             for &def_id in &sf.defs {
-                if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
-                    decls.insert(arena[*name].name.clone(), def_id);
+                if let Def::Function { name, .. } = &arena[def_id].kind {
+                    functions
+                        .entry(&arena[*name].name)
+                        .or_insert_with(|| (arena[def_id].location, label.clone()));
                 }
             }
         }
-        decls
+        if functions.is_empty() {
+            return;
+        }
+
+        for sf in arena.source_files() {
+            let label = inference_ast::nodes::file_label(&sf.module_path);
+            // The registration skip is a same-file question, so it is decided by
+            // this file's own function names rather than by the program-wide map
+            // above, whose entry for a name may belong to another file entirely.
+            let own: FxHashSet<&str> = sf
+                .defs
+                .iter()
+                .filter_map(|&def_id| match &arena[def_id].kind {
+                    Def::Function { name, .. } => Some(arena[*name].name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for &def_id in &sf.defs {
+                let Def::ExternFunction { name, .. } = &arena[def_id].kind else {
+                    continue;
+                };
+                let name = &arena[*name].name;
+                let Some((function_location, function_file)) = functions.get(name.as_str()) else {
+                    continue;
+                };
+                if own.contains(name.as_str()) {
+                    self.same_file_extern_collisions.insert(def_id);
+                }
+                self.push_error_with_label(
+                    label.clone(),
+                    TypeCheckError::ExternFunctionNameCollision {
+                        name: name.clone(),
+                        location: arena[def_id].location,
+                        function_location: *function_location,
+                        function_file: function_file.clone(),
+                    },
+                );
+            }
+        }
     }
 
     /// Process a use statement (Phase A: registration only).

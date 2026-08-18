@@ -40,12 +40,19 @@ index counter past the imports.
 
 ```text
 register_imports(arena, extern_def_ids, ctx)
-    extern_name_to_idx["sum"] = 0   (import at index 0)
-    extern_name_to_idx["neg"] = 1   (import at index 1)
+    extern_import_idx[def_id(sum)] = 0   (import at index 0)
+    extern_import_idx[def_id(neg)] = 1   (import at index 1)
     returns N = 2  (import count)
 
-set_local_func_base(2)              (locals now start at 2)
+set_local_func_base(2)                   (locals now start at 2)
 ```
+
+The map is keyed by the declaring `DefId`, not by the extern's name: whether a
+declaration is bound, and to which module, is a property of that declaration
+rather than of the name it happens to use, and two files may declare the same
+name and bind it to different modules. `register_imports` reads the binding
+through `ctx.extern_origin_by_decl`, which answers `None` for a declaration no
+`use … from` clause binds; such a declaration is skipped and reserves no import.
 
 ### Stage 1 — Top-level function registration (`build_func_name_to_idx`)
 
@@ -80,7 +87,7 @@ is an import or a local.
 register_function_indices
         |
         +---> register_imports(extern_def_ids)         // Stage 0
-        |         extern_name_to_idx["sum"] = 0, ...
+        |         extern_import_idx[def_id(sum)] = 0, ...
         |         returns N = import_count
         |
         +---> set_local_func_base(N)                   // seeds func_idx = N
@@ -247,10 +254,14 @@ local body to compile, but it does have a WASM function index (assigned by Stage
 0) and a WASM type signature derived from the declared Inference parameter and
 return types.
 
-When `lower_function_call` resolves the callee and finds it in
-`extern_name_to_idx`, it emits `call <import_idx>` via the same
-`Instruction::Call` path used for local functions. The only difference is which
-index table the lookup hits.
+Resolving the callee is not a probe of a flat, program-wide name table. It goes
+through `ExternCallScope::import_target`, which resolves the bare callee name to
+a declaration via `TypedContext::extern_index()` — scoped to the file the call is
+written in and the `spec` block enclosing it — and then probes
+`extern_import_idx` by that declaration's `DefId`. On a hit `lower_function_call`
+emits `call <import_idx>` via the same `Instruction::Call` path used for local
+functions; on a miss the name is not a bound extern *at this point in the
+program*, and resolution falls through to the local-function path.
 
 ### Example
 
@@ -384,6 +395,7 @@ resolved until multi-file compilation is implemented (currently `todo!()` in `co
 | `wasm_codegen_param_by_reference` | varies | A compound parameter or receiver is neither assigned through nor forwarded to an `external fn`, so it gets no frame slot and no entry copy |
 | `wasm_codegen_emit_import_section` | 1+ | Import section emitted (fires whenever at least one `external fn` is present) |
 | `wasm_codegen_emit_extern_call` | 1+ | Extern call lowered to `call <import_idx>` (fires in `single_import_test`) |
+| `wasm_codegen_extern_out_of_scope` | varies | A callee name that is a bound `external fn` elsewhere in the program is not one in the calling scope, so the call resolves as a local function instead |
 
 The `fn_params_test` verifies `wasm_codegen_emit_function_params` fires exactly 7 times
 (matching `fn_params.inf`: 1+1+1+2+2 params). The `fn_calls_test` verifies

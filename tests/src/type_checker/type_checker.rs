@@ -3315,19 +3315,37 @@ mod external_function_tests {
 /// Phase 1 of issue #9: extern provenance binding.
 ///
 /// An `external fn` is bound to the source module named by a `use … from`
-/// clause. The binding is exposed on [`TypedContext`] via `extern_origin` and
-/// `is_extern_function`. A name imported from two distinct modules is an
-/// ambiguity error; a `use … from` naming an undeclared extern is a dangling
-/// import error; a bare extern (no binding `use`) stays valid but unbound.
+/// clause. The binding is read back by *declaration*: `ExternIndex` resolves a
+/// name to the declaration it denotes in a given scope, and
+/// `TypedContext::extern_origin_by_decl` gives that declaration's provenance. A
+/// name imported from two distinct modules is an ambiguity error; a `use … from`
+/// naming an undeclared extern is a dangling import error; a bare extern (no
+/// binding `use`) stays valid but unbound.
 #[cfg(test)]
 mod extern_provenance_tests {
     use super::*;
+    use inference_ast::ids::DefId;
+    use inference_type_checker::ExternOrigin;
+    use inference_type_checker::typed_context::TypedContext;
 
     fn err_string(source: &str) -> String {
         match try_type_check(source) {
             Ok(_) => panic!("type checking should fail"),
             Err(e) => e.to_string(),
         }
+    }
+
+    /// The top-level `external fn name` this fixture declares, or `None` when it
+    /// declares none. Every fixture here is a single file, whose module path is
+    /// empty.
+    fn declaration(ctx: &TypedContext, name: &str) -> Option<DefId> {
+        ctx.extern_index().lookup_top_level(&[], name)
+    }
+
+    /// The provenance of the top-level `external fn name`, or `None` when the
+    /// fixture declares no such extern or declares one no `use … from` binds.
+    fn origin_of(ctx: &TypedContext, name: &str) -> Option<ExternOrigin> {
+        declaration(ctx, name).and_then(|decl| ctx.extern_origin_by_decl(decl))
     }
 
     // Binding succeeds ---
@@ -3340,16 +3358,14 @@ mod extern_provenance_tests {
             fn main() -> i32 { return 0; }
         "#;
         let ctx = try_type_check(source).expect("binding a single module should type-check");
-        let origin = ctx
-            .extern_origin("sort")
-            .expect("sort should carry a bound origin");
+        let origin = origin_of(&ctx, "sort").expect("sort should carry a bound origin");
         assert_eq!(origin.logical_module, "collections");
         assert_eq!(origin.export_field, "sort");
         assert!(
             origin.resolved_path.is_none(),
             "Phase 1 leaves resolved_path unset; the driver fills it"
         );
-        assert!(ctx.is_extern_function("sort"));
+        assert!(declaration(&ctx, "sort").is_some());
     }
 
     #[test]
@@ -3360,7 +3376,7 @@ mod extern_provenance_tests {
             fn main() -> i32 { return 0; }
         "#;
         let ctx = try_type_check(source).expect("nested module path should type-check");
-        let origin = ctx.extern_origin("hash").expect("hash should be bound");
+        let origin = origin_of(&ctx, "hash").expect("hash should be bound");
         assert_eq!(
             origin.logical_module, "crypto::sha256",
             "nested path joins with `::`, never an OS separator"
@@ -3377,11 +3393,11 @@ mod extern_provenance_tests {
         "#;
         let ctx = try_type_check(source).expect("multi-field use should type-check");
         assert_eq!(
-            ctx.extern_origin("sort").expect("sort bound").logical_module,
+            origin_of(&ctx, "sort").expect("sort bound").logical_module,
             "collections"
         );
         assert_eq!(
-            ctx.extern_origin("search")
+            origin_of(&ctx, "search")
                 .expect("search bound")
                 .logical_module,
             "collections"
@@ -3400,7 +3416,7 @@ mod extern_provenance_tests {
         "#;
         let ctx = try_type_check(source).expect("repeated identical import should bind");
         assert_eq!(
-            ctx.extern_origin("sort").expect("sort bound").logical_module,
+            origin_of(&ctx, "sort").expect("sort bound").logical_module,
             "collections"
         );
     }
@@ -3415,11 +3431,11 @@ mod extern_provenance_tests {
         "#;
         let ctx = try_type_check(source).expect("a bare extern declaration is valid");
         assert!(
-            ctx.extern_origin("add").is_none(),
+            origin_of(&ctx, "add").is_none(),
             "an extern with no binding `use` has no provenance"
         );
         assert!(
-            ctx.is_extern_function("add"),
+            declaration(&ctx, "add").is_some(),
             "an unbound extern is still discriminated as extern, not local"
         );
     }
@@ -3428,8 +3444,8 @@ mod extern_provenance_tests {
     fn local_function_is_not_extern() {
         let source = r#"fn helper() -> i32 { return 1; } fn main() -> i32 { return helper(); }"#;
         let ctx = try_type_check(source).expect("local functions type-check");
-        assert!(!ctx.is_extern_function("helper"));
-        assert!(ctx.extern_origin("helper").is_none());
+        assert!(declaration(&ctx, "helper").is_none());
+        assert!(origin_of(&ctx, "helper").is_none());
     }
 
     // Ambiguity errors ---
@@ -3505,7 +3521,7 @@ mod extern_provenance_tests {
 
     #[test]
     fn top_level_use_does_not_bind_a_spec_inner_extern() {
-        // H8: a `use … from` clause is file-global but binds only TOP-LEVEL
+        // H8: a `use … from` clause is file-wide but binds only TOP-LEVEL
         // externs. A spec-inner `external fn mix` is a different scope; naming it
         // from a top-level `use` with no matching top-level extern is a dangling
         // import (`ExternImportNotDeclared`), not a silent bind. The prior
@@ -3541,8 +3557,18 @@ mod extern_provenance_tests {
         "#;
         let ctx = try_type_check(source).expect("top-level mix binds; spec mix stays unbound");
         assert_eq!(
-            ctx.extern_origin("mix").expect("top-level mix is bound").logical_module,
+            origin_of(&ctx, "mix")
+                .expect("top-level mix is bound")
+                .logical_module,
             "crypto"
+        );
+        let spec_mix = ctx
+            .extern_index()
+            .lookup(&[], Some("s"), "mix")
+            .expect("the spec declares its own `mix`");
+        assert!(
+            ctx.extern_origin_by_decl(spec_mix).is_none(),
+            "the spec-inner declaration is a different extern and stays unbound"
         );
     }
 

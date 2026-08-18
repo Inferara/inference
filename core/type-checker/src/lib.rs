@@ -105,11 +105,13 @@ use crate::{errors::TypeCheckError, type_checker::TypeChecker, typed_context::Ty
 
 mod definition_graph;
 pub mod errors;
+mod extern_index;
 mod symbol_table;
 mod type_checker;
 pub mod type_info;
 pub mod typed_context;
 
+pub use extern_index::ExternIndex;
 pub use symbol_table::{EnumInfo, ExternOrigin, StructFieldInfo, StructInfo};
 pub use typed_context::MethodMetadata;
 

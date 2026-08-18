@@ -331,7 +331,8 @@ fn compute_frame_layout(input: &FrameLayoutInput<'_>) -> Result<Option<FrameLayo
 
 `FrameLayoutInput` carries the arena, the body block, the `TypedContext`, the module path, the
 `__frame_ptr` local index, the argument list, the enclosing struct name when compiling a method
-body, and the extern-name map the escape gate consults.
+body, and the `ExternCallScope` (`extern_scope`) the escape gate consults to decide which
+`external fn` a bare callee name denotes here.
 
 Returns `None` when nothing needs memory — no frame, and therefore no `__frame_ptr`, no
 prologue, no epilogue and no `__stack_pointer` mutation. That now includes a function whose only

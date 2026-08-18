@@ -12,7 +12,8 @@
 //!
 //! For each import the main module declares, the linker:
 //!
-//! 1. finds the external module that exports a function of that name,
+//! 1. finds the external module that exports a function of that name under the
+//!    matching logical module,
 //! 2. computes the **transitive closure** of that export inside its module (the
 //!    functions it calls, the types they reference),
 //! 3. classifies the closure into a **feasibility tier** (see [`tier`]),

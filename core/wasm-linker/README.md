@@ -22,7 +22,8 @@ C-library half of issue #9.
 For each import in the main module the linker performs these steps:
 
 ```text
-1. Find which external module exports a function of that name
+1. Find which external module exports a function of that name under the
+         matching logical module
 2. Compute the transitive closure of that export inside its source module
          (the functions it calls, recursively, plus any helpers)
 3. Classify the closure's feasibility tier (A, B, or C — see below)

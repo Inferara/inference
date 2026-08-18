@@ -923,6 +923,33 @@ pub enum TypeCheckError {
         module: String,
         location: Location,
     },
+
+    /// A top-level `external fn` and a top-level function share one bare name.
+    ///
+    /// Not a resolution failure. An `external fn` is identified by its
+    /// declaration and a bare call resolves in the scope it is written in, so
+    /// every call in such a program reaches exactly one callee and the program
+    /// would compile and run correctly. It is rejected as a rule about the name:
+    /// a local function that shadows a foreign-boundary declaration is hard to
+    /// read, because nothing at a call site distinguishes a call this program
+    /// compiles from a call that leaves it. The rule is program-wide for the
+    /// same reason — the two spellings are indistinguishable to a reader
+    /// wherever the declarations sit.
+    ///
+    /// Reported against the `external fn`, with the colliding function named as
+    /// a note: `function_file` is the [`inference_ast::nodes::file_label`] of the
+    /// file defining it, `None` for the entry file. Both sites appear because
+    /// neither is at fault on its own — renaming either one resolves it.
+    #[error(
+        "{location}: `external fn {name}` and the function `{name}` share one name; a name is either a local function or an `external fn`, never both in one program, so rename one\nnote: the function `{name}` is defined at {function_location} in {}",
+        function_file.as_ref().map_or_else(|| "the entry file".to_string(), |file| format!("file `{file}`"))
+    )]
+    ExternFunctionNameCollision {
+        name: String,
+        location: Location,
+        function_location: Location,
+        function_file: Option<String>,
+    },
 }
 
 impl TypeCheckError {
@@ -994,6 +1021,7 @@ impl TypeCheckError {
             | TypeCheckError::DuplicateEnumVariant { location, .. }
             | TypeCheckError::AmbiguousExternModule { location, .. }
             | TypeCheckError::ExternImportNotDeclared { location, .. }
+            | TypeCheckError::ExternFunctionNameCollision { location, .. }
             | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
         }
     }
@@ -2013,6 +2041,39 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: `use` imports `hash` from module `crypto`, but no `external fn hash` is declared"
+        );
+    }
+
+    /// A second location renders as a `line:col` alone, so the file it belongs
+    /// to has to be spelled out or a cross-file note reads as a same-file one.
+    #[test]
+    fn display_extern_function_name_collision_in_a_named_file() {
+        let err = TypeCheckError::ExternFunctionNameCollision {
+            name: "scale".to_string(),
+            location: test_location(),
+            function_location: Location::new(40, 45, 7, 1, 7, 6),
+            function_file: Some("lib::math".to_string()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `external fn scale` and the function `scale` share one name; a name is either a local function or an `external fn`, never both in one program, so rename one\nnote: the function `scale` is defined at 7:1 in file `lib::math`"
+        );
+    }
+
+    /// The entry file has no label, so it is named in words rather than left
+    /// unqualified — an unqualified note beside a file-prefixed error would read
+    /// as pointing into that same file.
+    #[test]
+    fn display_extern_function_name_collision_in_the_entry_file() {
+        let err = TypeCheckError::ExternFunctionNameCollision {
+            name: "scale".to_string(),
+            location: test_location(),
+            function_location: Location::new(40, 45, 7, 1, 7, 6),
+            function_file: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `external fn scale` and the function `scale` share one name; a name is either a local function or an `external fn`, never both in one program, so rename one\nnote: the function `scale` is defined at 7:1 in the entry file"
         );
     }
 

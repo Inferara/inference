@@ -162,6 +162,12 @@ impl std::error::Error for ExternalResolutionError {}
 /// A program with no externs yields an empty vector, and the build proceeds
 /// without invoking the linker.
 ///
+/// Every bound *declaration* is signature-validated, including two declarations
+/// in different files that name the same module and field. The linker satisfies
+/// an import on `(module, field)` alone and compares no signatures, so a
+/// declaration whose signature never reached validation here would be linked
+/// against a library it does not match.
+///
 /// # Errors
 ///
 /// Returns an [`ExternalResolutionError`] if any extern fails to resolve,

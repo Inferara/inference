@@ -279,10 +279,11 @@ impl Plan {
         }
 
         // 2. Resolve each satisfied import to an external export and close over
-        //    it. An import is satisfiable when some external module exports a
-        //    function of the import's field name; the module name is the
-        //    logical module the front-end bound, but the merge keys on the
-        //    field, matching the codegen import contract.
+        //    it. An import is satisfiable when the external bound under its
+        //    logical module exports a function of its field name: the merge
+        //    keys on the full `(module, field)` pair codegen records for every
+        //    import, so two libraries exporting the same field under different
+        //    logical modules are never conflated.
         let main_import_count = main.imported_funcs.len() as u32;
         let mut import_target = BTreeMap::new();
         let mut merged: Vec<MergedFunc> = Vec::new();

@@ -71,7 +71,7 @@ use inference_ast::nodes::{
 };
 use inference_hassert::HSpecMap;
 use inference_type_checker::{
-    EnumInfo,
+    EnumInfo, ExternIndex,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -214,7 +214,7 @@ struct LoopContext {
 /// indexes the shared [`Compiler::types`] table; identical signatures dedup onto
 /// the same entry. Imports occupy WASM function indices `0..N`, ahead of every
 /// locally defined function (see [`Compiler::register_imports`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportEntry {
     module: String,
     field: String,
@@ -332,10 +332,21 @@ pub(crate) struct Compiler {
     /// registration order. Each occupies WASM function index `i` for its
     /// position `i` in this vector (imports come before all local functions).
     imports: Vec<ImportEntry>,
-    /// Maps an `external fn` name to its WASM import function index (`0..N`).
-    /// Calls to an extern lower to `call <this index>` rather than a local
-    /// function index. Populated alongside [`Self::imports`] during Stage 1.
-    extern_name_to_idx: FxHashMap<String, u32>,
+    /// Maps an `external fn` *declaration* to its WASM import function index
+    /// (`0..N`). Calls to a bound extern lower to `call <this index>` rather
+    /// than a local function index. Populated alongside [`Self::imports`]
+    /// during Stage 1.
+    ///
+    /// Keyed by the declaring [`DefId`], never by the extern's name, because a
+    /// name is not an identity: two files may each declare an `external fn` of
+    /// that name bound to different modules, and a name-keyed map holds exactly
+    /// one of them program-wide. It would then route the other file's calls —
+    /// and any same-named *local* call anywhere in the program — into an import
+    /// the calling file cannot see. A call site resolves its bare name to a
+    /// declaration through [`TypedContext::extern_index`] first, so what it
+    /// looks up here is already a declaration that call can name. Declarations
+    /// binding the same `(module, field)` share one import index.
+    extern_import_idx: FxHashMap<DefId, u32>,
     /// Sticky flag: set to `true` when any function requires linear memory.
     has_memory: bool,
     /// Maps function keys to their array return type metadata.
@@ -514,9 +525,51 @@ struct FrameLayoutInput<'a> {
     /// Module path of the file the function is defined in, used to resolve type
     /// names against their defining file.
     module_path: &'a [String],
-    /// Registered import names, as `register_imports` left them. Only the keys
-    /// are read.
-    extern_names: &'a FxHashMap<String, u32>,
+    /// Which `external fn` a bare callee name in this body denotes, and whether
+    /// that declaration registered an import.
+    extern_scope: ExternCallScope<'a>,
+}
+
+/// The point in the program a bare callee name is being resolved from, paired
+/// with the import registration [`Compiler::register_imports`] produced.
+///
+/// An `external fn`'s identity is its declaration, and the only thing that
+/// picks a declaration out of a bare name is where the name is written: the
+/// declaring file, and the `spec` block within it. Two passes ask the same
+/// question of that scope — [`Compiler::lower_function_call`], which emits the
+/// call, and [`Compiler::param_escapes_to_extern`], which decides whether a
+/// compound parameter may be passed by reference. They must answer identically:
+/// a gate narrower than emission drops an entry copy and lets a foreign store
+/// land in the caller's memory. Routing both through one scope and one
+/// [`ExternCallScope::import_target`] makes that agreement structural rather
+/// than a coincidence between two separate walks.
+#[derive(Clone, Copy)]
+struct ExternCallScope<'a> {
+    index: &'a ExternIndex,
+    /// Module path of the file the point of use sits in.
+    module_path: &'a [String],
+    /// The `spec` block the point of use sits in, `None` at a file's top level.
+    spec: Option<&'a str>,
+    imports: &'a FxHashMap<DefId, u32>,
+}
+
+impl ExternCallScope<'_> {
+    /// The WASM import index a call to `callee_name` lowers to here, or `None`
+    /// when the name is not a bound `external fn` at this point — either
+    /// because no declaration of that name is in scope, or because the one that
+    /// is has no binding `use … from` clause and so registered no import.
+    fn import_target(&self, callee_name: &str) -> Option<u32> {
+        self.index
+            .lookup(self.module_path, self.spec, callee_name)
+            .and_then(|decl| self.imports.get(&decl).copied())
+    }
+
+    /// Whether the program registered any import at all. A program with none
+    /// has nothing for a call to reach, so scans that only look for extern
+    /// calls can skip their body walk outright.
+    fn has_imports(&self) -> bool {
+        !self.imports.is_empty()
+    }
 }
 
 impl Compiler {
@@ -534,7 +587,7 @@ impl Compiler {
             module_name: module_name.to_string(),
             func_name_to_idx: FxHashMap::default(),
             imports: Vec::new(),
-            extern_name_to_idx: FxHashMap::default(),
+            extern_import_idx: FxHashMap::default(),
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
@@ -753,10 +806,12 @@ impl Compiler {
     /// For each extern this:
     /// 1. lowers its declared signature to a WASM `(params, results)` type and
     ///    dedups it into [`Self::types`] (identical signatures share one entry);
-    /// 2. records an [`ImportEntry`] carrying the logical module / export field
-    ///    from the Phase 1 provenance ([`TypedContext::extern_origin`]);
-    /// 3. maps the extern's name to its import function index so call lowering can
-    ///    emit `call <import_idx>`.
+    /// 2. interns an [`ImportEntry`] carrying the logical module / export field
+    ///    from the declaration's provenance
+    ///    ([`TypedContext::extern_origin_by_decl`]), sharing one import with any
+    ///    declaration that already named the same foreign function;
+    /// 3. maps the *declaration* to its import function index, so call lowering
+    ///    can emit `call <import_idx>` for the calls that can name it.
     ///
     /// Externs without provenance (a bare `external fn` with no binding `use`) are
     /// skipped: they cannot be emitted as a well-formed two-level import, and
@@ -773,16 +828,9 @@ impl Compiler {
         ctx: &TypedContext,
     ) -> Result<u32, CodegenError> {
         for &def_id in extern_def_ids {
-            let Def::ExternFunction {
-                name,
-                args,
-                returns,
-                ..
-            } = &arena[def_id].kind
-            else {
+            let Def::ExternFunction { args, returns, .. } = &arena[def_id].kind else {
                 continue;
             };
-            let extern_name = arena[*name].name.clone();
             // Resolve provenance by the declaring `DefId`, not by name. Two
             // same-named externs can coexist (a bound top-level `f` and an
             // unbound spec-inner `f`); a name-keyed lookup cannot tell them apart
@@ -802,16 +850,32 @@ impl Compiler {
             };
             let type_idx = self.intern_type(params, results);
 
-            let import_idx = self.imports.len() as u32;
-            self.imports.push(ImportEntry {
+            let import_idx = self.intern_import(ImportEntry {
                 module: origin.logical_module,
                 field: origin.export_field,
                 type_idx,
             });
-            self.extern_name_to_idx.insert(extern_name, import_idx);
+            self.extern_import_idx.insert(def_id, import_idx);
         }
 
         Ok(self.imports.len() as u32)
+    }
+
+    /// Interns `entry` into [`Self::imports`], returning the WASM function index
+    /// it occupies.
+    ///
+    /// Declarations that bind the same `(module, field)` at the same signature
+    /// name one foreign function, so they share one import. Emitting a second
+    /// import of an identical pair would give that one function two function
+    /// indices, obliging a host or a linker to satisfy it twice.
+    #[allow(clippy::cast_possible_truncation)]
+    fn intern_import(&mut self, entry: ImportEntry) -> u32 {
+        if let Some(existing) = self.imports.iter().position(|e| *e == entry) {
+            return existing as u32;
+        }
+        let idx = self.imports.len() as u32;
+        self.imports.push(entry);
+        idx
     }
 
     /// Lowers an extern's declared parameter types to WASM value types. An
@@ -1405,7 +1469,10 @@ impl Compiler {
             reach_plan,
         );
 
-        self.frame_layout = Self::compute_frame_layout(
+        // The layout gate must read the very scope call lowering will read, so
+        // the input borrows `self`; the result lands in `self.frame_layout`
+        // only once that borrow has ended.
+        let frame_layout = Self::compute_frame_layout(
             &FrameLayoutInput {
                 arena,
                 block_id: body_id,
@@ -1414,10 +1481,11 @@ impl Compiler {
                 args: &args,
                 method_struct_name,
                 module_path,
-                extern_names: &self.extern_name_to_idx,
+                extern_scope: self.extern_call_scope(ctx),
             },
             self.memory_layout.stack_size(),
         )?;
+        self.frame_layout = frame_layout;
 
         // Record the real frame size (0 for frameless functions) keyed by the
         // structured `FnKey` itself, not its lossy `Display` rendering: two
@@ -2035,25 +2103,26 @@ impl Compiler {
     /// fails in the unsafe direction — a missing copy. A false positive only
     /// costs one extra copy.
     ///
-    /// Callee resolution mirrors emission: `extern_name_to_idx` is read only by
-    /// [`Self::lower_function_call`], which is reachable only for a bare
-    /// `Expr::Identifier` callee, and `register_imports` fills the map before any
-    /// body is compiled, so it is complete at layout time. Complete in both
-    /// senses: the map is whole-program, built from every file's externs at once,
-    /// so an extern declared *and* called inside a non-entry file disqualifies
-    /// there too.
+    /// Callee resolution mirrors emission because it *is* emission's: this scan
+    /// and [`Self::lower_function_call`] ask [`ExternCallScope::import_target`]
+    /// about the same name in the same scope, so neither can recognize a call
+    /// the other does not. `register_imports` fills that scope's import map
+    /// before any body is compiled, so the answer is already final when a frame
+    /// is laid out.
     ///
     /// That a bare identifier is the only callee shape worth checking is not an
-    /// approximation but a consequence of the grammar: an `external fn` cannot be
-    /// `pub`, so no extern is ever nameable from another file, and the qualified
-    /// and cross-file callee shapes that preempt the bare-identifier arm can
-    /// therefore never resolve to one. Should externs ever become exportable,
-    /// this gate silently starts missing them and must be widened with the arm
-    /// that lowers them.
+    /// approximation but a consequence of the grammar and of how an extern call
+    /// is lowered. An `external fn` may not be `pub` — the parser reports that
+    /// as an error — and the type checker deliberately records no call target
+    /// for a call to one, so the qualified and item-imported callee arms that
+    /// preempt the bare-identifier arm in [`Self::lower_function_call`] can
+    /// never resolve to an extern. Should externs ever become exportable, this
+    /// gate silently starts missing them and must be widened with the arm that
+    /// lowers them.
     fn param_escapes_to_extern(
         arena: &AstArena,
         block_id: BlockId,
-        extern_names: &FxHashMap<String, u32>,
+        extern_scope: ExternCallScope<'_>,
         param_name: &str,
     ) -> bool {
         Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
@@ -2062,7 +2131,8 @@ impl Compiler {
             };
             let callee_is_extern = matches!(
                 &arena[*function].kind,
-                Expr::Identifier(ident_id) if extern_names.contains_key(&arena[*ident_id].name)
+                Expr::Identifier(ident_id)
+                    if extern_scope.import_target(&arena[*ident_id].name).is_some()
             );
             callee_is_extern
                 && args
@@ -2239,11 +2309,11 @@ impl Compiler {
         // The gate costs a full body walk, so a program that registered no
         // imports skips it outright: there is nothing for the parameter to escape
         // to, and the common case pays nothing.
-        if !input.extern_names.is_empty()
+        if input.extern_scope.has_imports()
             && Self::param_escapes_to_extern(
                 input.arena,
                 input.block_id,
-                input.extern_names,
+                input.extern_scope,
                 param_name,
             )
         {
@@ -3558,10 +3628,16 @@ impl Compiler {
         // An `external fn` call targets its import index (0..N) rather than a
         // local function index. Imports never participate in spec-mangled
         // lookup, so this probe precedes the free-callee resolution.
-        if let Some(&import_idx) = self.extern_name_to_idx.get(callee_name) {
-            cov_mark::hit!(wasm_codegen_emit_extern_call);
-            self.func().instruction(&Instruction::Call(import_idx));
-            return Ok(());
+        match self.extern_call_scope(ctx).import_target(callee_name) {
+            Some(import_idx) => {
+                cov_mark::hit!(wasm_codegen_emit_extern_call);
+                self.func().instruction(&Instruction::Call(import_idx));
+                return Ok(());
+            }
+            None if self.names_a_registered_import(callee_name) => {
+                cov_mark::hit!(wasm_codegen_extern_out_of_scope);
+            }
+            None => {}
         }
 
         let func_idx = self
@@ -3601,6 +3677,33 @@ impl Compiler {
 
         self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// The scope a bare callee name in the function currently being compiled
+    /// resolves against, together with the imports `register_imports` left.
+    fn extern_call_scope<'a>(&'a self, ctx: &'a TypedContext) -> ExternCallScope<'a> {
+        ExternCallScope {
+            index: ctx.extern_index(),
+            module_path: &self.current_module_path,
+            spec: self.current_spec.as_deref(),
+            imports: &self.extern_import_idx,
+        }
+    }
+
+    /// Whether a probe by bare name over the registered imports would have
+    /// matched `callee_name`.
+    ///
+    /// An import's field is the name of the `external fn` that bound it — a
+    /// `use { f } from m;` clause matches declarations by that very name — so
+    /// this is exactly the answer a whole-program name map would give. It is
+    /// asked only once [`ExternCallScope::import_target`] has already decided,
+    /// to record that the two disagreed: the name is a bound extern somewhere
+    /// in the program, and is not one here. Nothing depends on the answer;
+    /// without the mark this case is indistinguishable at compile time from an
+    /// ordinary local call, and a regression that widened the scope back out
+    /// would surface only as a wrong value at run time.
+    fn names_a_registered_import(&self, callee_name: &str) -> bool {
+        self.imports.iter().any(|entry| entry.field == callee_name)
     }
 
     /// Resolves a free-function bare name to its WASM function index,
@@ -6531,6 +6634,60 @@ fn try_const_index_byte_offset(
 mod tests {
     use super::*;
 
+    /// An `external fn` registration as [`Compiler::register_imports`] leaves
+    /// it: the program's own declaration index, plus an import index for each
+    /// declaration a `use … from` clause bound.
+    ///
+    /// The scans driven from here resolve a callee name to a *declaration* and
+    /// only then to an import index, so a list of names no longer describes a
+    /// registration — the declarations have to be the subject program's.
+    struct RegisteredExterns {
+        index: ExternIndex,
+        imports: FxHashMap<DefId, u32>,
+    }
+
+    impl RegisteredExterns {
+        /// The registration `register_imports` leaves for a program whose
+        /// `external fn`s are all bound: every top-level declaration, in
+        /// declaration order, at import indices `0..N`.
+        fn all(arena: &AstArena) -> Self {
+            let mut imports = FxHashMap::default();
+            for file in arena.source_files() {
+                for &def_id in &file.defs {
+                    if matches!(arena[def_id].kind, Def::ExternFunction { .. }) {
+                        let idx =
+                            u32::try_from(imports.len()).expect("test import index fits in u32");
+                        imports.insert(def_id, idx);
+                    }
+                }
+            }
+            Self {
+                index: ExternIndex::build(arena),
+                imports,
+            }
+        }
+
+        /// The same program with nothing registered, as an unbound declaration
+        /// leaves it: there is no import for a call to reach.
+        fn none(arena: &AstArena) -> Self {
+            Self {
+                index: ExternIndex::build(arena),
+                imports: FxHashMap::default(),
+            }
+        }
+
+        /// The entry file's top level, which is where every subject program
+        /// below writes its calls.
+        fn scope(&self) -> ExternCallScope<'_> {
+            ExternCallScope {
+                index: &self.index,
+                module_path: &[],
+                spec: None,
+                imports: &self.imports,
+            }
+        }
+    }
+
     /// Prepares `compiler` to emit a function body whose eager declarations are
     /// `declarations`, mirroring what `visit_function_definition` sets up before
     /// lowering, and returns the compiler ready for `take_completed_function`.
@@ -7014,12 +7171,213 @@ mod tests {
         }
     }
 
+    /// Tests for [`ExternCallScope`], the one resolution that both extern-call
+    /// emission and the frame-layout escape gate go through.
+    ///
+    /// These pin **resolution only**: which declaration a bare name denotes at a
+    /// given point, and which import index that declaration holds. They say
+    /// nothing about the bytes that come out. That an emitted `call` carries the
+    /// resolved index is asserted by the executed coverage in
+    /// `tests/src/codegen/wasm/multi_file_extern.rs`, which runs the module.
+    ///
+    /// They build their arenas with the parser alone. The scope an `external fn`
+    /// is resolved in is a property of where declarations and calls are
+    /// *written*, which the parser already establishes, so driving the
+    /// resolution directly keeps these cases reachable regardless of which
+    /// programs the binding pass accepts.
+    mod extern_call_scope {
+        use super::*;
+
+        /// Folds `(module_path, source)` pairs into one arena, the shape a
+        /// multi-file program reaches code generation in.
+        fn multi_file_arena(files: &[(&[&str], &str)]) -> AstArena {
+            let mut arena = AstArena::default();
+            for (module_path, source) in files {
+                let module_path = module_path.iter().map(|s| (*s).to_string()).collect();
+                let parsed = inference_parser::parse_into(arena, source, module_path);
+                assert!(
+                    parsed.errors.is_empty(),
+                    "parse errors: {:?}\nsource:\n{source}",
+                    parsed.errors
+                );
+                arena = parsed.arena;
+            }
+            arena
+        }
+
+        fn path(segments: &[&str]) -> Vec<String> {
+            segments.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        /// Two files each declaring `external fn f`, each binding it to a
+        /// different foreign module, resolve to their own declaration and so to
+        /// their own import.
+        ///
+        /// This is the shape a name-keyed table cannot express: it holds one
+        /// `f` for the whole program, so one of the two files calls an import
+        /// satisfied by the other file's library. Each file's call must reach
+        /// the import its own declaration registered.
+        #[test]
+        fn same_named_externs_in_two_files_resolve_per_file() {
+            let arena = multi_file_arena(&[
+                (
+                    &["a"],
+                    "external fn f(x: i32) -> i32;\nuse { f } from libA;\npub fn ua(x: i32) -> \
+                     i32 { return f(x); }\n",
+                ),
+                (
+                    &["b"],
+                    "external fn f(x: i32) -> i32;\nuse { f } from libB;\npub fn ub(x: i32) -> \
+                     i32 { return f(x); }\n",
+                ),
+            ]);
+            let index = ExternIndex::build(&arena);
+            let (path_a, path_b) = (path(&["a"]), path(&["b"]));
+            let decl_a = index
+                .lookup_top_level(&path_a, "f")
+                .expect("file `a` declares `f`");
+            let decl_b = index
+                .lookup_top_level(&path_b, "f")
+                .expect("file `b` declares `f`");
+            assert_ne!(
+                decl_a, decl_b,
+                "the two files declare two different `f`s, which a key that dropped the \
+                 file would collapse into one"
+            );
+
+            let mut imports = FxHashMap::default();
+            imports.insert(decl_a, 0);
+            imports.insert(decl_b, 1);
+            let scope_a = ExternCallScope {
+                index: &index,
+                module_path: &path_a,
+                spec: None,
+                imports: &imports,
+            };
+            let scope_b = ExternCallScope {
+                module_path: &path_b,
+                ..scope_a
+            };
+
+            assert_eq!(
+                scope_a.import_target("f"),
+                Some(0),
+                "file `a`'s call must reach the import its own declaration registered"
+            );
+            assert_eq!(
+                scope_b.import_target("f"),
+                Some(1),
+                "file `b`'s call must reach the import its own declaration registered"
+            );
+        }
+
+        /// A file that declares no `external fn f` sees none, even though
+        /// another file in the program declares and binds one.
+        ///
+        /// This is the miscompile the scope key closes: with a whole-program
+        /// name table the entry file's call to its *own* `f` matched the
+        /// sibling's import and was emitted as a call into the foreign module,
+        /// leaving the entry's own function compiled and unreachable.
+        #[test]
+        fn a_siblings_extern_is_not_visible_to_the_entry_file() {
+            let arena = multi_file_arena(&[
+                (
+                    &[],
+                    "use side;\nfn f(x: i32) -> i32 { return x * 10; }\npub fn run(x: i32) -> \
+                     i32 { return f(x); }\n",
+                ),
+                (
+                    &["side"],
+                    "external fn f(x: i32) -> i32;\nuse { f } from libA;\npub fn boost(x: i32) \
+                     -> i32 { return f(x); }\n",
+                ),
+            ]);
+            let index = ExternIndex::build(&arena);
+            let side = path(&["side"]);
+            let decl = index
+                .lookup_top_level(&side, "f")
+                .expect("file `side` declares `f`");
+            let mut imports = FxHashMap::default();
+            imports.insert(decl, 0);
+
+            let entry_scope = ExternCallScope {
+                index: &index,
+                module_path: &[],
+                spec: None,
+                imports: &imports,
+            };
+            assert_eq!(
+                entry_scope.import_target("f"),
+                None,
+                "the entry file names its own `f`, not the sibling's external one"
+            );
+
+            let side_scope = ExternCallScope {
+                index: &index,
+                module_path: &side,
+                spec: None,
+                imports: &imports,
+            };
+            assert_eq!(
+                side_scope.import_target("f"),
+                Some(0),
+                "the declaring file still reaches its own import"
+            );
+        }
+
+        /// Within a `spec` block, a spec-inner declaration shadows a top-level
+        /// one of the same name, and an unbound declaration registers no import
+        /// — so a call there reaches no import at all.
+        ///
+        /// A key without the spec component would hand the spec's call the
+        /// top-level declaration's import, emitting a call to a foreign body
+        /// the program never bound it to.
+        #[test]
+        fn a_spec_inner_declaration_shadows_the_top_level_one() {
+            let arena = multi_file_arena(&[(
+                &[],
+                "external fn probe(x: i32) -> i32;\nuse { probe } from sensors;\nspec S {\n  \
+                 external fn probe(x: i32) -> i32;\n}\n",
+            )]);
+            let index = ExternIndex::build(&arena);
+            let top_level = index
+                .lookup_top_level(&[], "probe")
+                .expect("the file declares a top-level `probe`");
+            let mut imports = FxHashMap::default();
+            imports.insert(top_level, 0);
+
+            let file_scope = ExternCallScope {
+                index: &index,
+                module_path: &[],
+                spec: None,
+                imports: &imports,
+            };
+            assert_eq!(
+                file_scope.import_target("probe"),
+                Some(0),
+                "at the file's top level `probe` is the bound declaration"
+            );
+
+            let spec_scope = ExternCallScope {
+                index: &index,
+                module_path: &[],
+                spec: Some("S"),
+                imports: &imports,
+            };
+            assert_eq!(
+                spec_scope.import_target("probe"),
+                None,
+                "inside `spec S` the name is the spec's own unbound declaration"
+            );
+        }
+    }
+
     /// Tests for [`Compiler::param_escapes_to_extern`], the gate that decides
     /// whether a compound parameter — here the `self` receiver — needs its own
     /// frame slot.
     ///
-    /// The scan reads only the AST and the registered import names, so these
-    /// drive it directly on parsed source rather than through code generation:
+    /// The scan reads only the AST and the extern scope the body sits in, so
+    /// these drive it directly on parsed source rather than through codegen:
     /// the emitted bytes are pinned by the codegen fixtures, while these pin the
     /// *shapes* the gate must recognize. A missed shape is a silently missing
     /// copy, so the negative cases are as load-bearing as the positive ones.
@@ -7070,22 +7428,10 @@ struct Pair {{
             (arena, block_id)
         }
 
-        /// The import map as `register_imports` leaves it: import names to
-        /// indices. Only the keys matter to the scan.
-        fn imports() -> FxHashMap<String, u32> {
-            let mut map = FxHashMap::default();
-            for (idx, name) in ["sort_pair", "probe"].iter().enumerate() {
-                map.insert(
-                    (*name).to_string(),
-                    u32::try_from(idx).expect("test import index fits in u32"),
-                );
-            }
-            map
-        }
-
         fn escapes(body: &str) -> bool {
             let (arena, block_id) = touch_body(body);
-            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), "self")
+            let registered = RegisteredExterns::all(&arena);
+            Compiler::param_escapes_to_extern(&arena, block_id, registered.scope(), "self")
         }
 
         /// Every argument shape whose root peels to `self` hands the external an
@@ -7223,18 +7569,6 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             (arena, block_id)
         }
 
-        /// The import map as `register_imports` leaves it. Only the keys matter.
-        fn imports() -> FxHashMap<String, u32> {
-            let mut map = FxHashMap::default();
-            for (idx, name) in ["scramble", "probe"].iter().enumerate() {
-                map.insert(
-                    (*name).to_string(),
-                    u32::try_from(idx).expect("test import index fits in u32"),
-                );
-            }
-            map
-        }
-
         fn written(body: &str, param: &str) -> bool {
             let (arena, block_id) = subject_body(body);
             Compiler::param_is_written(&arena, block_id, param)
@@ -7242,7 +7576,8 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
 
         fn escapes(body: &str, param: &str) -> bool {
             let (arena, block_id) = subject_body(body);
-            Compiler::param_escapes_to_extern(&arena, block_id, &imports(), param)
+            let registered = RegisteredExterns::all(&arena);
+            Compiler::param_escapes_to_extern(&arena, block_id, registered.scope(), param)
         }
 
         /// The `left` expression of the first assignment in the subject body.
@@ -7486,10 +7821,10 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
         /// Whether the subject program's `external fn` declarations are handed to
         /// the decision as registered imports.
         ///
-        /// The escape gate is keyed on the import map, so the same source answers
-        /// differently under the two, and which one a case means is the whole
-        /// point of that case — a bare `true`/`false` at the call site would hide
-        /// it.
+        /// The escape gate fires only on a declaration that registered an
+        /// import, so the same source answers differently under the two, and
+        /// which one a case means is the whole point of that case — a bare
+        /// `true`/`false` at the call site would hide it.
         #[derive(Clone, Copy)]
         enum Imports {
             Registered,
@@ -7532,9 +7867,9 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("function `{fn_name}` must be present"));
-            let extern_names = match imports_state {
-                Imports::Registered => imports(),
-                Imports::Unregistered => FxHashMap::default(),
+            let registered = match imports_state {
+                Imports::Registered => RegisteredExterns::all(arena),
+                Imports::Unregistered => RegisteredExterns::none(arena),
             };
             let input = FrameLayoutInput {
                 arena,
@@ -7544,7 +7879,7 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
                 args: &args,
                 method_struct_name: None,
                 module_path: &[],
-                extern_names: &extern_names,
+                extern_scope: registered.scope(),
             };
             Compiler::compound_param_is_by_reference(&input, &args[param_index])
                 .expect("the subject programs lay out")
@@ -7663,10 +7998,10 @@ fn writes_in_a_nondet_block(mut p: Pair) -> i32 {{
         /// A parameter forwarded to a registered import keeps its slot; the same
         /// program with no imports registered does not.
         ///
-        /// The second half is what makes the first non-vacuous: the gate is
-        /// keyed on the import map, so a fixture whose `external fn` was never
-        /// bound would exercise the *ungated* path while looking like it
-        /// exercised the gate.
+        /// The second half is what makes the first non-vacuous: the gate fires
+        /// only on a declaration that registered an import, so a fixture
+        /// whose `external fn` was never bound would exercise the *ungated*
+        /// path while looking like it exercised the gate.
         #[test]
         fn parameters_forwarded_to_an_extern_are_not_by_reference() {
             let source = "\
