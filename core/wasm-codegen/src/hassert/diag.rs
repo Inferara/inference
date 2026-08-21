@@ -112,8 +112,12 @@ pub(crate) enum PCode {
     /// An aggregate introduction (a compound `@`, a compound parameter, or an
     /// array/struct literal) whose scalar leaves would push the specification
     /// function past its cumulative quantified-leaf budget
-    /// (`SPEC_FN_MAX_QUANTIFIED_LEAVES`). A quantified leaf brings a binder and
-    /// a typing guard, each one assertion-tree level; a literal's leaves are
+    /// (`SPEC_FN_MAX_QUANTIFIED_LEAVES`). A quantified leaf brings a hypothesis
+    /// or a binder, and what that costs depends on where it sits: one
+    /// assertion-tree level as a universal slot's hypothesis, where a narrow
+    /// leaf's declared value domain is grouped into that one level rather than
+    /// added beside it, and one as an existential binder — two where a narrow
+    /// leaf's bound rides in a conjunct inside it. A literal's leaves are
     /// constants and still nest one level apiece through a leafwise
     /// comparison. Either way the levels accumulate across every introduction
     /// in the function, so the budget is a per-function total, not a
@@ -127,6 +131,23 @@ pub(crate) enum PCode {
     /// translator even with analysis on, and the no-analysis codegen paths make
     /// this the only guard for any of the spellings.
     P014,
+    /// A quantified introduction — a parameter, a `let … = @`, an anonymous
+    /// call-argument `@`, or a leaf of an aggregate one — at an `enum` declared
+    /// with no variants. The declared type admits no value, so there is nothing
+    /// for the claim to range over: an obligation over it either says nothing
+    /// or is unprovable for a reason that has nothing to do with the program.
+    ///
+    /// Analysis rule `A009` already warns about the *declaration*, but only
+    /// warns, so such an enum compiles and a `@` over it really does reach this
+    /// pass. Executable code generation then treats it three mutually
+    /// inconsistent ways: a draw is left unconstrained (`rem_u 0` would trap, so
+    /// no normalization is emitted at all), an exported function's entry tag
+    /// guard traps on every call (`tag >= 0` is uniformly true), and a memory
+    /// round-trip constrains nothing either. There is no consistent behaviour to
+    /// mirror in an antecedent, and picking one of the three would put a claim
+    /// about an uninhabited type on a footing none of them supports — so the
+    /// specification path refuses the introduction instead.
+    P015,
 }
 
 impl fmt::Display for PCode {
@@ -146,6 +167,7 @@ impl fmt::Display for PCode {
             PCode::P012 => "P012",
             PCode::P013 => "P013",
             PCode::P014 => "P014",
+            PCode::P015 => "P015",
         };
         f.write_str(code)
     }

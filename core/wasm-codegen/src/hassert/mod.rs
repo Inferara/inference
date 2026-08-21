@@ -56,11 +56,39 @@
 //! ## Obligation depth and the encoding cap
 //!
 //! The `inference.hspecs` codec caps assertion-tree depth at
-//! [`inference_hassert::MAX_TREE_DEPTH`] (256). The right-folded statement
-//! translator spends one `And`/`Imp` level per structural statement, and a
-//! statement whose slots drain a typing guard spends two — `Imp(guard, And(…))`
-//! — so the practical statement budget for a guard-heavy body is roughly half
-//! the cap.
+//! [`inference_hassert::MAX_TREE_DEPTH`] (256), and refuses a tree *deeper*
+//! than that, so all 256 levels are usable. The depth counts **assertion nodes
+//! only**: the codec's walk hands a term to a separate check on a fresh
+//! counter, so however deeply a term nests it never extends the assertion
+//! depth. Printed-paren nesting in the emitted `.v` is a different number and
+//! must not be read as this one.
+//!
+//! The right-folded statement translator spends one `And`/`Imp` level per
+//! structural statement, and a statement whose introductions drain their
+//! hypotheses spends two — `Imp(hypotheses, And(…))` — so the practical
+//! statement budget for a guard-heavy body is roughly half the cap. The figures
+//! below are all measured on one shape — a body that drains every introduction
+//! at a single `assert` — because `N` introductions drained at one statement and
+//! `N` introductions each with their own statement are different trees.
+//!
+//! *Universally*, each introduction contributes exactly one level to the `And`
+//! spine of that antecedent, whatever its declared type. A narrow one carries
+//! its declared value domain grouped into that single spine entry
+//! (`And(guard, bound)`) rather than as a spine entry of its own, which is what
+//! keeps the count per introduction the same as a full-width one's: a bound
+//! stated as a second entry would halve how many narrow introductions fit. What
+//! a narrow entry does add is depth *inside* itself, on a branch the fold does
+//! not continue along — one `And`, then one `HA_not` over a `term_eq` for an
+//! unsigned bound or an `And` of two of those for a signed one.
+//!
+//! *Existentially* that equality does not hold, and this is where the real
+//! ceiling is. A read narrow binder is emitted as `Ex(And(bound, body))` while
+//! a full-width one's `⊤` definition is absorbed and leaves a bare `Ex`, so a
+//! narrow binder costs **two** accumulating levels against one. Signedness does
+//! not change it: a signed pair's `And` of two bounds sits inside that one
+//! conjunct node. At the 64-leaf budget the deepest aggregate is therefore
+//! existential and narrow, at 192 of the 256 levels, against 128 for the
+//! full-width existential and 66–68 for any universal one.
 //!
 //! A short-circuit `&&`/`||` costs two more levels for its pinned witness
 //! (`Ex` over `And`), plus the depth of the constraint itself. Where the
@@ -70,12 +98,12 @@
 //! every statement that follows and a chain of such bindings adds up.
 //!
 //! An aggregate is the largest single consumer, and what a leaf costs depends
-//! on where it comes from: a universal `@` or parameter leaf costs a typing-
-//! guard level; a leaf bound under a nested `forall` costs a guard level *and*
-//! an `All` level; an existential leaf costs one `Ex` level and no guard (a
-//! prover-chosen value states no typing); and a literal's leaves bind nothing
-//! and guard nothing, nesting only one conjunct apiece through a leafwise
-//! comparison. All of them accumulate across every aggregate introduction in
+//! on where it comes from: a universal `@` or parameter leaf costs one
+//! hypothesis level; a leaf bound under a nested `forall` costs a hypothesis
+//! level *and* an `All` level; an existential leaf costs one `Ex` level, plus a
+//! second for the `And` a narrow one's bound rides in; and a literal's leaves
+//! bind nothing and guard nothing, nesting only one conjunct apiece through a
+//! leafwise comparison. All of them accumulate across every aggregate introduction in
 //! the function, which is why the leaf budget
 //! (`SPEC_FN_MAX_QUANTIFIED_LEAVES`, `P013`) is a per-function running total
 //! rather than a per-introduction cap — a cap that let each of four parameters

@@ -686,8 +686,9 @@ spec Alt {
 
 /// The alternation fixture the `coqc` corpus compiles also translates through
 /// real code generation, and every one of its obligations carries a universal
-/// binder — the fixture is the gate's only producer of one, so a body that
-/// stopped emitting it would leave that stub declaration unelaborated.
+/// binder — it is the fixture that exercises the shape at every nesting the
+/// language admits, so a body that stopped emitting one would leave that stub
+/// declaration resting on whatever else happens to nest a `forall`.
 #[test]
 fn quantifier_alternation_fixture_emits_a_universal_binder_in_every_obligation() {
     let map = proof_hspecs(&read_inf("spec_quantifier_alternation.inf"));
@@ -720,4 +721,319 @@ fn binds_a_universal(a: &HAssert) -> bool {
         | HAssert::Defined(_)
         | HAssert::AppOk(_, _) => false,
     }
+}
+
+// narrow-domain expected-tree builders
+
+/// `x <u hi_excl`, non-zero: the bound a zero-extending width, a `bool` or an
+/// enum tag is quantified under. The comparison is unsigned because the
+/// normalization these widths receive zero-extends.
+fn below_u(x: HTerm, hi_excl: i32) -> HAssert {
+    nz(rel(HRelop::LtU, x, i32c(hi_excl)))
+}
+
+/// `lo_incl <=s x /\ x <s hi_excl`, both halves non-zero and in the order the
+/// pass conjoins them: a sign-extending width has a lower bound as well as an
+/// upper one, and one half alone characterizes nothing.
+fn between_s(x: HTerm, lo_incl: i32, hi_excl: i32) -> HAssert {
+    and(
+        nz(rel(HRelop::LeS, i32c(lo_incl), x.clone())),
+        nz(rel(HRelop::LtS, x, i32c(hi_excl))),
+    )
+}
+
+/// A universal introduction's guard: the class its values ride in and the set
+/// its declaration admits, grouped into one conjunct — the shape both the guard
+/// channel and a universal binder build.
+fn guarded(x: HTerm, ty: HNumType, domain: HAssert) -> HAssert {
+    and(hastype(x, ty), domain)
+}
+
+/// A narrow `@` states the values its declaration admits beside the class they
+/// ride in, through the whole front end. Both signednesses appear in one body,
+/// in the order their introductions drained: an unsigned bound for the
+/// zero-extending width, a two-sided signed pair for the sign-extending one.
+#[test]
+fn a_narrow_uzumaki_states_its_declared_domain_end_to_end() {
+    let source = "\
+spec Narrow {
+  fn draws() forall {
+    let a: u8 = @;
+    let b: i8 = @;
+    assert(a <= 255);
+    assert(b >= -128);
+  }
+}
+";
+    let expected = imp(
+        and(
+            guarded(local(0), HNumType::I32, below_u(local(0), 256)),
+            guarded(local(1), HNumType::I32, between_s(local(1), -128, 128)),
+        ),
+        and(
+            nz(rel(HRelop::LeU, local(0), i32c(255))),
+            nz(rel(HRelop::GeS, local(1), i32c(-128))),
+        ),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// A narrow *parameter* states the same set a narrow draw does. A `spec`
+/// function is compiled in proof mode but never exported, so its parameters
+/// receive neither the entry ABI's normalization nor an enum tag guard: the
+/// antecedent is the only place the declaration's meaning is written down.
+#[test]
+fn a_narrow_spec_parameter_states_its_declared_domain_end_to_end() {
+    let source = "\
+spec Narrow {
+  fn param(p: u16) forall {
+    assert(p <= 65535);
+  }
+}
+";
+    let expected = imp(
+        guarded(local(0), HNumType::I32, below_u(local(0), 65536)),
+        nz(rel(HRelop::LeU, local(0), i32c(65535))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// An aggregate leaf is bounded at its declared *element* type, one bound per
+/// leaf. The element's narrowing happens at the load that reads it back, so a
+/// leaf admits exactly the set its scalar counterpart does.
+#[test]
+fn narrow_array_leaves_state_their_element_domain_end_to_end() {
+    let source = "\
+spec Narrow {
+  fn leaves() forall {
+    let a: [i16; 2] = @;
+    assert(a[0] <= a[1]);
+  }
+}
+";
+    let expected = imp(
+        and(
+            guarded(local(0), HNumType::I32, between_s(local(0), -32768, 32768)),
+            guarded(local(1), HNumType::I32, between_s(local(1), -32768, 32768)),
+        ),
+        nz(rel(HRelop::LeS, local(0), local(1))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// A struct field's leaf is bounded by the field's own declared type, and a
+/// full-width field beside it keeps the bare typing guard it always had — the ⊤
+/// a full-width domain builds is absorbed rather than emitted.
+#[test]
+fn a_narrow_struct_field_leaf_states_its_domain_end_to_end() {
+    let source = "\
+struct Pixel {
+  level: u8;
+  wide: i32;
+}
+
+spec Narrow {
+  fn field(p: Pixel) forall {
+    assert(p.level <= 255);
+  }
+}
+";
+    let expected = imp(
+        and(
+            guarded(local(0), HNumType::I32, below_u(local(0), 256)),
+            hastype(local(1), HNumType::I32),
+        ),
+        nz(rel(HRelop::LeU, local(0), i32c(255))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// Existentially the bound is a *conjunct inside the binder*, never an
+/// antecedent, and the binder carries no typing guard at all: the value is the
+/// prover's to choose, so there is no unconstrained valuation to type — only a
+/// set to keep the choice inside.
+///
+/// The polarity is the whole point. An implication under `HA_ex` would let a
+/// proof pick an out-of-domain witness, refute the guard, and discharge the
+/// obligation with nothing said about the claim.
+#[test]
+fn an_existential_narrow_uzumaki_bounds_its_witness_end_to_end() {
+    let source = "\
+spec Narrow {
+  fn witness() forall {
+    exists {
+      let m: u8 = @;
+      assert(m == 200);
+    }
+  }
+}
+";
+    let expected = ex(and(below_u(lvar(0), 256), teq(lvar(0), i32c(200))));
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// An enum is bounded by its variant count rather than by a width, and the
+/// bound is unsigned like the zero-extending widths — the tag normalization it
+/// mirrors is an `i32.rem_u`.
+#[test]
+fn an_enum_uzumaki_states_its_variant_count_end_to_end() {
+    let source = "\
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+fn id_color(v: Color) -> Color {
+  return v;
+}
+
+spec Narrow {
+  fn tag() forall {
+    let c: Color = @;
+    assert(id_color(c) == c);
+  }
+}
+";
+    let expected = imp(
+        guarded(local(0), HNumType::I32, below_u(local(0), 3)),
+        nz(rel(HRelop::Eq, app("id_color", vec![local(0)]), local(0))),
+    );
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Narrow"), expected);
+}
+
+/// `nz(l op r)` at `i32`, matching only the operands supplied: `None` accepts
+/// whatever term an introduction assigned to the variable being bounded, which
+/// is what lets a bound be recognized without knowing which slot or binder
+/// level it landed on.
+fn is_nz_relop(a: &HAssert, op: HRelop, lhs: Option<&HTerm>, rhs: Option<&HTerm>) -> bool {
+    let HAssert::Not(equality) = a else {
+        return false;
+    };
+    let HAssert::TermEq(HTerm::Relop(HNumType::I32, found, l, r), zero) = &**equality else {
+        return false;
+    };
+    *found == op
+        && *zero == i32c(0)
+        && lhs.is_none_or(|want| **l == *want)
+        && rhs.is_none_or(|want| **r == *want)
+}
+
+/// Whether `a` is an unsigned upper bound at `hi_excl`, over any term.
+fn is_below_u(a: &HAssert, hi_excl: i32) -> bool {
+    is_nz_relop(a, HRelop::LtU, None, Some(&i32c(hi_excl)))
+}
+
+/// Whether `a` is a signed two-sided bound at `lo_incl ..< hi_excl`, over any
+/// term. Both halves are required: a signed width that stated only its upper
+/// bound would still be quantified over every negative value.
+fn is_between_s(a: &HAssert, lo_incl: i32, hi_excl: i32) -> bool {
+    let HAssert::And(lo, hi) = a else {
+        return false;
+    };
+    is_nz_relop(lo, HRelop::LeS, Some(&i32c(lo_incl)), None)
+        && is_nz_relop(hi, HRelop::LtS, None, Some(&i32c(hi_excl)))
+}
+
+/// Whether any obligation of `spec` contains an assertion `pred` accepts.
+fn some_obligation_states(map: &HSpecMap, spec: &str, pred: &dyn Fn(&HAssert) -> bool) -> bool {
+    let entries = map.get(spec).unwrap_or_else(|| {
+        panic!(
+            "no spec `{spec}`; have {:?}",
+            map.keys().collect::<Vec<_>>()
+        )
+    });
+    entries
+        .iter()
+        .any(|entry| holds_anywhere(&entry.hassert, pred))
+}
+
+/// Whether `pred` accepts `a` or any assertion inside it.
+fn holds_anywhere(a: &HAssert, pred: &dyn Fn(&HAssert) -> bool) -> bool {
+    if pred(a) {
+        return true;
+    }
+    match a {
+        HAssert::Not(x) | HAssert::Ex(x) | HAssert::All(x) => holds_anywhere(x, pred),
+        HAssert::And(l, r) | HAssert::Imp(l, r) | HAssert::Or(l, r) => {
+            holds_anywhere(l, pred) || holds_anywhere(r, pred)
+        }
+        HAssert::True
+        | HAssert::False
+        | HAssert::TermEq(_, _)
+        | HAssert::HasType(_, _)
+        | HAssert::Defined(_)
+        | HAssert::AppOk(_, _) => false,
+    }
+}
+
+/// A narrow choice in a reachability body carries no bound, and that absence is
+/// the correct emission rather than a gap.
+///
+/// An `exists`-quantified function states a reachability claim: its choices are
+/// parameters of the runs the judgment quantifies, not variables an assertion
+/// binds, so there is no valuation for a bound to narrow. What makes reading the
+/// parameter raw sound is elsewhere — code generation writes a *named* choice's
+/// narrowed value back into the parameter itself, so the payload and the
+/// compiled body read one value.
+#[test]
+fn a_narrow_reachability_choice_carries_no_bound_end_to_end() {
+    let source = "\
+fn id_u8(v: u8) -> u8 {
+  return v;
+}
+
+spec Reach {
+  fn choose() exists {
+    let c: u8 = @;
+    assert(id_u8(c) == c);
+  }
+}
+";
+    // `==` in a reachability payload is the strict `term_eq` the judgment
+    // compares exit states through, not a relop the body computes.
+    let expected = teq(app("id_u8", vec![local(0)]), local(0));
+    assert_eq!(sole_obligation(&proof_hspecs(source), "Reach"), expected);
+}
+
+/// The two narrow fixtures the `coqc` corpus compiles carry every row of the
+/// domain table between them, through real code generation.
+///
+/// The gate over the corpus matches the *printed* `.v`; this matches the tree,
+/// so a printer change cannot stand in for an emission one. The bounds are
+/// recognized without naming the slot or binder level they landed on, so
+/// reordering a fixture's own introductions cannot break the claim — what it
+/// pins is that each row still has a producer.
+#[test]
+fn the_narrow_fixtures_carry_every_row_of_the_domain_table() {
+    let uzumaki = proof_hspecs(&read_inf("spec_narrow_uzumaki.inf"));
+    let abi = proof_hspecs(&read_inf("spec_narrow_abi.inf"));
+    let unsigned: [(i32, &str); 4] = [
+        (256, "`u8`"),
+        (65536, "`u16`"),
+        (2, "`bool`"),
+        (3, "the three-variant enum `Color`"),
+    ];
+    for (hi_excl, what) in unsigned {
+        assert!(
+            some_obligation_states(&uzumaki, "NarrowUzu", &|a| is_below_u(a, hi_excl)),
+            "spec_narrow_uzumaki.inf no longer bounds {what} above by {hi_excl}"
+        );
+    }
+    for (lo_incl, hi_excl, what) in [(-128, 128, "`i8`"), (-32768, 32768, "`i16`")] {
+        assert!(
+            some_obligation_states(&uzumaki, "NarrowUzu", &|a| is_between_s(
+                a, lo_incl, hi_excl
+            )),
+            "spec_narrow_uzumaki.inf no longer bounds {what} to {lo_incl}..{hi_excl}"
+        );
+    }
+    assert!(
+        some_obligation_states(&abi, "NarrowAbi", &|a| is_below_u(a, 256)),
+        "spec_narrow_abi.inf no longer bounds a `u8` at the declaration boundary"
+    );
+    assert!(
+        some_obligation_states(&abi, "NarrowAbi", &|a| is_between_s(a, -128, 128)),
+        "spec_narrow_abi.inf no longer bounds an `i8` at the declaration boundary"
+    );
 }

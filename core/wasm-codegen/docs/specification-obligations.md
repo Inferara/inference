@@ -35,6 +35,68 @@ That difference decides almost everything below, and one sentence carries it:
 > memory and each choice arrives as one scalar parameter — so there, aggregates must still
 > be taken apart by hand.
 
+## What a Quantified Variable States
+
+A `ValidSpec` payload is evaluated over valuations the judgment constrains in no way, so
+every universally quantified variable states its own hypothesis and the claim sits under it
+as an antecedent. That hypothesis has two halves.
+
+The **class** the readouts ride in — `HA_has_type (T_local i) T_i32` or `T_i64`. Only `i64`
+and `u64` ride 64 bits; `bool`, every enum, and every sub-word integer ride `i32`.
+
+The **value domain** the declaration admits, where that says more than the class does. A
+declared `u8` is not every `i32`: it is `0..255`, and left unsaid, a property true of every
+`u8` is unprovable at `256`, while its existential mirror — a witness the program can never
+draw — discharges while saying nothing about the program. The domain is exactly the set code
+generation's normalization of a draw produces, so the obligation and the compiled body range
+over the same values.
+
+| declared type | normalization in compiled code | value set | bound emitted over `x` |
+| --- | --- | --- | --- |
+| `u8` | `and 0xFF` | `0..255` | `x <u 256` |
+| `u16` | `and 0xFFFF` | `0..65535` | `x <u 65536` |
+| `i8` | `shl 24; shr_s 24` | `-128..127` | `-128 <=s x` **and** `x <s 128` |
+| `i16` | `shl 16; shr_s 16` | `-32768..32767` | `-32768 <=s x` **and** `x <s 32768` |
+| `bool` | `and 1` (a draw), `!= 0` (an entry parameter) | `{0, 1}` | `x <u 2` |
+| `enum` with N ≥ 1 variants | `rem_u N` | `0..N-1` | `x <u N` |
+| `enum` with no variants | — | ∅ | **P015** |
+| `i32`, `u32`, `i64`, `u64` | none | the whole class | *none* |
+
+Three properties of that table are load-bearing rather than cosmetic, and each is dictated by
+what the downstream narrow-idiom lemmas take as their hypothesis:
+
+- **Signedness follows the normalization, not the source spelling.** The widths whose
+  normalization zero-extends — `u8`, `u16`, `bool`, an enum tag — are bounded *unsigned*; the
+  widths whose normalization sign-extends, `i8` and `i16`, take a *signed* pair. A signed
+  guard against an unsigned bound, or the reverse, is an obligation no lemma consumes.
+- **The upper bound is strict, at the domain's exclusive top** — `<u 256`, `<s 128` — which
+  is also the existing convention for a symbolic index's `i <u N`.
+- **A signed width states both bounds.** There is no range predicate in the assertion
+  language, so a one-sided signed bound characterizes nothing: every value below the lower
+  end would still satisfy it.
+
+The two halves ride as **one** hypothesis per introduction — `HA_and (HA_has_type x T_i32)
+<bound>` — rather than as two adjacent conjuncts. That keeps an introduction's cost at one
+level of the antecedent's conjunction spine whatever its declared type, and it is the shape
+the hand-written downstream examples are written against.
+
+Polarity belongs to the quantifier, not to the bound:
+
+- **universally**, the hypothesis is an `Himpl` antecedent — it narrows what the claim has to
+  cover;
+- **existentially**, the bound is an `HA_and` conjunct *inside* the binder — it constrains the
+  witness. An `Himpl` under an `HA_ex` would let a proof pick an out-of-domain witness, refute
+  the antecedent, and discharge the obligation without ever meeting the payload.
+
+A bound over a variable the claim never reads is **dropped**, like every other binder
+definition nothing reads. A `let a: u8 = @;` inside an `exists` with nothing asserting
+anything about `a` must stay the vacuous `HA_true` that **P010** refuses; conjoining a range
+unconditionally would turn it into a trivially true claim that no longer looks vacuous.
+
+A specification function is compiled in proof mode but never exported, so its narrow
+parameters receive neither ABI normalization nor an entry tag guard. Their hypothesis is the
+only place the declaration's meaning is written down, and it states the same set.
+
 ## Aggregates Are Their Scalar Leaves
 
 There is no aggregate *term*. An aggregate — a compound `@`, a compound parameter, an array
@@ -89,13 +151,18 @@ compound `@` each consume exactly one slot, and an aggregate refused for overrun
 budget consumes its whole leaf count — in every case the counter advances without anything
 being emitted, so every later slot number keeps the position the source gives it.
 
-In a universal payload a typing guard is emitted for **every** leaf, including leaves the
-claim never reads. Guards are antecedents, so the extra ones only weaken the obligation;
+In a universal payload a hypothesis is emitted for **every** leaf, including leaves the
+claim never reads. They are antecedents, so the extra ones only weaken the obligation;
 uniformity is preferred to a use analysis that would make slot numbering depend on what the
-body happens to mention. The cost is worth knowing: an N-leaf aggregate puts N guards in
-front of every obligation of its function. An *existential* leaf carries no guard — the
-prover chooses the value, so there is no unconstrained valuation to constrain — and a
-literal's leaves are constants that neither bind a variable nor guard one.
+body happens to mention. The cost is worth knowing: an N-leaf aggregate puts N hypotheses in
+front of every obligation of its function. A literal's leaves are constants that neither bind
+a variable nor guard one.
+
+A leaf states what its own declared *element* or *field* type says, by the table above — so a
+`[u8; 2]` bounds both of its leaves at `0..255`, a struct bounds each field at its own type,
+and a leaf of an uninhabited enum is **P015**. An *existential* leaf carries no typing guard —
+the prover chooses the value, so there is no unconstrained valuation to make denote — and
+keeps its declared bound, as a conjunct inside its own binder, wherever the claim reads it.
 
 ### One Obligation, Fully Expanded
 
@@ -203,7 +270,8 @@ forall {
 
 Both bounds are *necessary*, not sufficient: they make the element denote, and nothing more.
 A claim about the element's value needs hypotheses about the element's value as well, because
-a compound `@` states only the typing of its leaves — every leaf ranges over the whole width.
+a compound `@` states of each leaf only what that leaf's declared element type says — over
+`[i32; 3]` that is the typing alone, and the leaf ranges over the whole class.
 So `assert(a[i] >= 0)` does not follow from the bounds alone; it follows from the bounds *and*
 an assumption covering every element, which is what the corpus fixture states:
 
@@ -237,10 +305,13 @@ forall {
 
 Each operator follows its own operand's type rather than a per-function mode, so an unsigned
 index may compare unsigned while a claim about `i32` elements stays signed. Note also that
-the typing guard records only a **width**: over `[i32; 3]` the index takes slot 3 (slots 0-2
-are the array's leaves) and is guarded `HA_has_type (T_local 3%N) T_i32` whether it is
-declared `i32` or `u32`, so the index's signedness is carried entirely by the relop
-spellings, and no downstream proof can catch a wrong operator choice for you.
+`i32` and `u32` are indistinguishable in the hypothesis a slot carries: both admit every
+value of their class, so over `[i32; 3]` the index takes slot 3 (slots 0-2 are the array's
+leaves) and is guarded by exactly `HA_has_type (T_local 3%N) T_i32` either way. The index's
+signedness is therefore carried entirely by the relop spellings, and no downstream proof can
+catch a wrong operator choice for you. A *narrow* index would differ — it states the values
+its declaration admits alongside the width — but a narrow index needs no source guard at all
+where its whole domain is already in bounds.
 
 ## Alternating Quantifiers
 
@@ -258,18 +329,43 @@ function.
 
 - **64 scalar leaves per spec function**, cumulative across every aggregate introduction
   (**P013**). The resource being protected is assertion-tree depth, and what a leaf costs
-  depends on where it comes from: a leaf of a universal `@` or parameter costs a typing-guard
-  level; a leaf of a `@` inside a nested `forall` costs a guard level *and* a `Hall` level; a
-  leaf of an existential `@` costs one `HA_ex` level and no guard at all (a prover-chosen
-  value needs no stated typing); and a literal's leaves are constants that bind nothing and
-  guard nothing, nesting only one conjunct apiece through a leafwise comparison. All of those
-  accumulate across every introduction in the function until a structural statement drains
-  the guards, so a per-introduction cap would not bound the resource it names. The executable
-  unrolling's own cap is far larger; the two measure different things (instruction count
-  versus obligation nesting depth).
+  depends on where it comes from: a leaf of a universal `@` or parameter costs one hypothesis
+  level; a leaf of a `@` inside a nested `forall` costs a hypothesis level *and* a `Hall`
+  level; a leaf of an existential `@` costs one `HA_ex` level — two where a narrow one's bound
+  rides inside it — and no typing guard at all (a prover-chosen value needs no stated
+  typing); and a literal's leaves are constants that bind
+  nothing and guard nothing, nesting only one conjunct apiece through a leafwise comparison.
+  All of those accumulate across every introduction in the function until a structural
+  statement drains the guards, so a per-introduction cap would not bound the resource it
+  names.
+
+  *Universally* a narrow leaf costs the same **one** level as a full-width one — its bound is
+  grouped into that level, not added beside it — and only deepens that level's own subtree,
+  on a branch the fold does not continue along. *Existentially* it costs **two**: a read
+  narrow binder is `HA_ex (HA_and bound body)` where a full-width one's ⊤ is absorbed and
+  leaves a bare `HA_ex`. Signedness makes no difference, because a signed pair's `HA_and` of
+  two bounds sits inside that one conjunct node. Measured at the budget's exact ceiling with
+  every leaf read:
+
+  | shape | assertion depth |
+  | --- | --- |
+  | `[i32; 64]`, universal | 66 |
+  | `[u8; 64]` / `[u16; 64]` / `[bool; 64]`, universal | 67 |
+  | `[i8; 64]` / `[i16; 64]`, universal | 68 |
+  | `[i32; 64]`, existential | 128 |
+  | any narrow width at 64 leaves, existential | 192 |
+
+  So the worst case is existential and narrow, at 192 of 256, leaving 64 levels for the
+  claim. The executable unrolling's own cap is far larger; the two measure different things
+  (instruction count versus obligation nesting depth).
 - **One non-constant index per access chain** (**P002**).
-- **`MAX_TREE_DEPTH` = 256 assertion-tree levels** overall — 255 usable in practice — enforced
-  by a fail-closed pre-encode gate that names the offending spec and function
+- **`MAX_TREE_DEPTH` = 256 assertion-tree levels** overall, all of them usable — the gate
+  refuses a tree *deeper* than the maximum, so one exactly at it passes. The depth counts
+  assertion nodes only: a term is checked on a counter of its own, so it never extends the
+  assertion depth, and printed-paren nesting in the emitted `.v` is a different number. Any
+  scalar figure quoted against this cap has to name the shape it was measured on, since `N`
+  draws drained at one `assert` and `N` draws each with their own `assert` are different
+  trees. Enforced by a fail-closed pre-encode gate that names the offending spec and function
   (`CodegenError::HspecTreeTooDeep`).
 
 ## What Stays Rejected, and Why
@@ -288,6 +384,7 @@ function.
 | P007 | `forall` inside an `exists`/`unique` body | see *Alternating Quantifiers* |
 | P008 | an out-of-surface compound `@` in **any** body; any compound `@` in an `exists`/`unique` body | out of surface, there is no leaf tree to build; in a reachability body a choice arrives as one scalar parameter of the run |
 | P014 | a constant-folded out-of-bounds index | the same fact analysis rule A037 states, at the spelling A037 cannot see |
+| P015 | a parameter, a `@`, or an aggregate leaf at an `enum` declared with no variants | an uninhabited type has no value for the claim to range over, so the obligation would either say nothing or be unprovable for a reason unrelated to the program; A009 only *warns* about the declaration, so such an enum really does reach here |
 
 Memory-content assertions — addresses, points-to, iterated heaps — are out of scope entirely.
 The surface language cannot express them, and the properties this encoding *can* state are
@@ -297,7 +394,7 @@ scalar leaves express exactly.
 ## Related Documents
 
 - [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../wasm-to-v/ROCQ_CONTRACT.md) — the emitted `.v`
-  contract, including the full `P001`–`P014` registry
+  contract, including the full `P001`–`P015` registry
 - [`docs/arrays-and-memory.md`](arrays-and-memory.md) — the executable lowering of the same
   aggregates, including `compute_struct_field_layout`, whose order the leaf enumeration
   shares

@@ -1,0 +1,32 @@
+// The narrow-domain antecedent's acceptance, stated so the antecedent is the
+// only thing that makes it provable.
+//
+// Each claim below holds for every value its slot's declared type admits and
+// fails one step outside it: `v <= 255` is true of every `u8` and false at 256,
+// and the `i8` conjunction is true of every `i8` and false at -200 and at 200.
+// A slot quantified at its width alone ranges over every `i32`, so without the
+// declared domain in the antecedent each obligation is not merely unprovable
+// but *false*; with it, each is dischargeable by splitting on the bound.
+//
+// The two rows are the two antecedent shapes. A zero-extending width states one
+// unsigned upper bound, because a negative `i32` is already a huge unsigned
+// value and no lower bound is missing. A sign-extending width states a signed
+// pair, and the conjunction here reads both halves — a claim that used only one
+// would leave the other half unexercised and would still discharge, which is
+// how a half-stated domain would go unnoticed.
+//
+// Kept free of calls on purpose: a `T_app` payload would carry the obligation
+// through an interpretation, and what is under test is the antecedent itself.
+// The call-bearing narrow shapes live in `spec_narrow_abi.inf`, and the full
+// per-position table in `spec_narrow_uzumaki.inf`.
+spec NarrowDischarge {
+    fn u8_domain() forall {
+        let v: u8 = @;
+        assert(v <= 255);
+    }
+
+    fn i8_domain() forall {
+        let v: i8 = @;
+        assert(v >= -128 && v <= 127);
+    }
+}

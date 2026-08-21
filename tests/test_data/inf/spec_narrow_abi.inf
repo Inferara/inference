@@ -1,3 +1,33 @@
+// Narrow types at the declaration boundary: a specification function's own
+// parameters, and an anonymous `@` whose only type is the one the callee declares
+// for the argument slot it lands in.
+//
+// A `spec` function is compiled in proof mode but never exported, so its narrow
+// parameters receive neither the entry ABI's normalization nor an enum tag guard.
+// The obligation's antecedent is therefore the only place a narrow parameter's
+// declared meaning is written down at all, which is what makes this the position
+// the issue's title names first: `fn f(p: u8)` quantified over every `i32` states
+// a claim about values `p` can never hold.
+//
+// An anonymous `@` has no annotation of its own — it is not bound to a name and
+// carries no declared type — so its domain comes from the type recorded for the
+// argument, which is the callee's declared parameter type. That resolution is a
+// second path through the pass (a recorded, already-resolved type rather than a
+// written annotation), and it runs in three modes with three different binder
+// mechanisms: an anonymous slot under plain `forall`, a universal binder wrapped
+// around the enclosing statement under a nested `forall`, and an existential
+// witness under `exists`. Named draws, aggregate leaves and the full domain table
+// live in `spec_narrow_uzumaki.inf`.
+//
+// The helpers are file-scope so each claim carries a real `T_app` over the value
+// whose domain is at issue, and every claim is true: `fits_u8` and `fits_i8` hold
+// for exactly the values their parameter's declaration admits, so they discharge
+// from the bound and are unprovable without it.
+enum Gate {
+    Off,
+    On,
+}
+
 pub fn low_bits_u8(v: u8) -> u8 { return v; }
 
 pub fn shr_u16(x: u16, k: u16) -> u16 { return x >> k; }
@@ -6,13 +36,70 @@ pub fn truthy(b: bool) -> bool { return b; }
 
 pub fn div_i8_abi(a: i8, b: i8) -> i8 { return a / b; }
 
-enum Gate { Off, On }
-
 pub fn gate_tag(g: Gate) -> bool { return g == Gate::On; }
+
+pub fn fits_u8(v: u8) -> bool { return v <= 255; }
+
+pub fn fits_i8(v: i8) -> bool { return v >= -128; }
 
 spec NarrowAbi {
     fn round_trip() forall {
         let v: u8 = @;
         assert(low_bits_u8(v) == v);
+    }
+
+    fn u8_parameter(p: u8) forall {
+        assert(low_bits_u8(p) == p);
+    }
+
+    fn u16_parameters(x: u16, k: u16) forall {
+        assume {
+            assert(k == 0);
+        }
+        assert(shr_u16(x, k) == x);
+    }
+
+    fn bool_parameter(b: bool) forall {
+        assert(truthy(b) == b);
+    }
+
+    fn i8_parameter(a: i8) forall {
+        assert(div_i8_abi(a, 1) == a);
+    }
+
+    fn enum_parameter(g: Gate) forall {
+        assume {
+            assert(g == Gate::On);
+        }
+        assert(gate_tag(g));
+    }
+
+    // The anonymous draw takes the `u8` its callee declares, and the claim is the
+    // acceptance shape of the whole feature: `v <= 255` is true of every `u8` and
+    // of no wider quantification.
+    fn anonymous_universal() forall {
+        assert(fits_u8(@));
+    }
+
+    fn anonymous_nested_universal() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                assert(fits_u8(@));
+            }
+        }
+    }
+
+    fn anonymous_existential() forall {
+        let n: i32 = @;
+        assume {
+            assert(n == 0);
+        }
+        exists {
+            assert(fits_i8(@));
+        }
     }
 }
