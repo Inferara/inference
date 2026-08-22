@@ -15,15 +15,20 @@
 //! [`TypedContext`], so this stays a pure post-type-check step with no extra
 //! plumbing through the front end.
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
+use inference_ast::arena::AstArena;
+use inference_ast::ids::{DefId, NodeId};
 use inference_ast::nodes::Def;
+use inference_type_checker::ExternOrigin;
 use inference_type_checker::typed_context::TypedContext;
+use inference_wasm_linker::ImportWriteSet;
 
 use super::resolve::{resolve_wasm_module, ManifestDeps, ModulePath, SearchPath};
-use super::validate::{lower_extern_signature, validate_extern};
+use super::validate::{lower_extern_signature, validate_extern, LoweredExtern};
 
 /// Maximum size, in bytes, of a resolved external `.wasm` module.
 ///
@@ -43,6 +48,35 @@ pub struct ResolvedExternalModule {
     pub path: PathBuf,
     /// The module's bytes, ready for the linker.
     pub bytes: Vec<u8>,
+}
+
+/// Everything a program's `external fn` declarations resolve to: the modules to
+/// merge, and the write-set contracts the merge is checked against.
+///
+/// The two travel together because they are two halves of one answer. The bytes
+/// alone let a caller link without a check; the contracts alone describe imports
+/// nothing satisfies. Handing them over as one value keeps a caller from
+/// reaching the linker with the first and not the second.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedExternals {
+    /// One entry per distinct logical module the program binds, sorted by name.
+    pub modules: Vec<ResolvedExternalModule>,
+    /// One entry per distinct `(module, field)` the program binds, sorted by
+    /// that pair. Every satisfied import of the codegen output has an entry, so
+    /// the checked link mode holds all of them to a declaration.
+    pub contracts: Vec<ImportWriteSet>,
+}
+
+impl ResolvedExternals {
+    /// The `(logical_module, bytes)` pairs the linker takes, borrowed from
+    /// [`ResolvedExternals::modules`].
+    #[must_use]
+    pub fn module_bytes(&self) -> Vec<(&str, &[u8])> {
+        self.modules
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect()
+    }
 }
 
 /// Why the driver could not assemble the external-module set.
@@ -99,6 +133,20 @@ pub enum ExternalResolutionError {
     /// A bound extern named a function the AST has no `external fn` declaration
     /// for — an internal inconsistency between provenance and the parsed tree.
     MissingDeclaration { export_field: String },
+    /// Two bound declarations of one `(module, field)` declare different write
+    /// sets: one marks a parameter `mut` and the other does not.
+    ///
+    /// Both declarations are real and both are linked against the same merged
+    /// body, which is checked once. Accepting either reading would compile one
+    /// of the two files against a contract it never made, so the program is
+    /// rejected until the declarations agree.
+    ConflictingWriteSet {
+        logical_module: String,
+        export_field: String,
+        /// The two files, already rendered for the message.
+        first_file: String,
+        second_file: String,
+    },
 }
 
 impl std::fmt::Display for ExternalResolutionError {
@@ -144,6 +192,20 @@ impl std::fmt::Display for ExternalResolutionError {
                 f,
                 "internal error: extern `{export_field}` is bound but has no declaration"
             ),
+            ExternalResolutionError::ConflictingWriteSet {
+                logical_module,
+                export_field,
+                first_file,
+                second_file,
+            } => write!(
+                f,
+                "conflicting write sets for external function `{export_field}` of module \
+                 `{logical_module}`: {first_file} and {second_file} declare it with different \
+                 `mut` parameters. Both declarations bind the same imported function, which the \
+                 linker checks once against the merged body, so the two must agree on which \
+                 parameters that body may write through; mark the same parameters `mut` in both \
+                 declarations"
+            ),
         }
     }
 }
@@ -152,7 +214,10 @@ impl std::error::Error for ExternalResolutionError {}
 
 /// Resolves, validates, and reads every external `.wasm` module a program binds.
 ///
-/// Returns one resolved module per distinct **logical module** the program
+/// Returns the resolved modules together with the write-set contracts their
+/// declarations state, as one [`ResolvedExternals`].
+///
+/// One resolved module per distinct **logical module** the program
 /// binds. Two externs from the same logical module yield a single entry, and a
 /// physical `.wasm` file is read and validated once even if two logical modules
 /// resolve to it — but each logical module still gets its own entry, because the
@@ -168,18 +233,24 @@ impl std::error::Error for ExternalResolutionError {}
 /// declaration whose signature never reached validation here would be linked
 /// against a library it does not match.
 ///
+/// Every bound declaration also contributes its **write set** — the parameters
+/// it marks `mut` — keyed on the `(module, field)` pair the linker satisfies an
+/// import on. Two declarations of one pair that disagree on that set are
+/// rejected rather than reconciled; see [`record_write_set`].
+///
 /// # Errors
 ///
 /// Returns an [`ExternalResolutionError`] if any extern fails to resolve,
-/// validate, lower its signature, or read its bytes.
+/// validate, lower its signature, or read its bytes, or if two declarations of
+/// one `(module, field)` declare different write sets.
 pub fn resolve_external_modules(
     typed_context: &TypedContext,
     search_path: &SearchPath,
     manifest_deps: Option<&ManifestDeps>,
-) -> Result<Vec<ResolvedExternalModule>, ExternalResolutionError> {
+) -> Result<ResolvedExternals, ExternalResolutionError> {
     let origins = typed_context.extern_origins();
     if origins.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ResolvedExternals::default());
     }
 
     let arena = typed_context.arena();
@@ -192,6 +263,10 @@ pub fn resolve_external_modules(
     // needs its own entry even if it shares bytes with another. `BTreeMap` keeps
     // the output deterministic.
     let mut by_module: BTreeMap<String, ResolvedExternalModule> = BTreeMap::new();
+    // The write-set contracts, keyed on the `(module, field)` pair an import is
+    // satisfied on — not on the logical module the modules above are keyed on,
+    // because one library may back several imports with different write sets.
+    let mut contracts: BTreeMap<(String, String), DeclaredWriteSet> = BTreeMap::new();
 
     for origin in &origins {
         let module_path = parse_module_path(&origin.logical_module)?;
@@ -221,19 +296,21 @@ pub fn resolve_external_modules(
                 export_field: origin.export_field.clone(),
             }
         })?;
-        let declared_sig = lower_extern_signature(arena, &args, returns).map_err(|error| {
+        let lowered = lower_extern_signature(arena, &args, returns).map_err(|error| {
             ExternalResolutionError::Signature {
                 export_field: origin.export_field.clone(),
                 error,
             }
         })?;
 
-        validate_extern(&bytes, &origin.export_field, &declared_sig).map_err(|error| {
+        validate_extern(&bytes, &origin.export_field, &lowered.signature).map_err(|error| {
             ExternalResolutionError::Validate {
                 logical_module: origin.logical_module.clone(),
                 error: Box::new(error),
             }
         })?;
+
+        record_write_set(arena, origin, &lowered, &mut contracts)?;
 
         by_module
             .entry(origin.logical_module.clone())
@@ -244,7 +321,83 @@ pub fn resolve_external_modules(
             });
     }
 
-    Ok(by_module.into_values().collect())
+    Ok(ResolvedExternals {
+        modules: by_module.into_values().collect(),
+        contracts: contracts.into_values().map(|d| d.write_set).collect(),
+    })
+}
+
+/// Folds one declaration's write set into the per-`(module, field)` contract
+/// map, rejecting a disagreement between two declarations of the same import.
+///
+/// Two files may each declare and bind the same `(module, field)`: both
+/// declarations survive resolution, while codegen folds them onto a **single**
+/// WASM import. The linker then performs one write-set check, and codegen
+/// consults each declaration separately — so if one file says `mut p` and the
+/// other does not, the non-`mut` file's calls are compiled against a contract
+/// only the `mut` file satisfied.
+///
+/// Neither reconciliation is available. A union licenses the non-`mut` file's
+/// calls to a body that writes; an intersection refuses the `mut` file's
+/// legitimate link; taking the first match is the miscompile itself. So the
+/// disagreement is a hard error naming both files, and the fix is for the two
+/// declarations to agree.
+///
+/// `mut` has no counterpart in a found WASM signature, so this cannot ride along
+/// on the existing signature comparison: two declarations differing only in
+/// `mut` lower to the identical [`DeclaredSignature`] and both validate.
+fn record_write_set(
+    arena: &AstArena,
+    origin: &ExternOrigin,
+    lowered: &LoweredExtern,
+    contracts: &mut BTreeMap<(String, String), DeclaredWriteSet>,
+) -> Result<(), ExternalResolutionError> {
+    let key = (origin.logical_module.clone(), origin.export_field.clone());
+    match contracts.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(DeclaredWriteSet {
+                decl: origin.decl,
+                write_set: ImportWriteSet {
+                    module: origin.logical_module.clone(),
+                    field: origin.export_field.clone(),
+                    mut_params: lowered.mut_params.clone(),
+                    param_names: lowered.param_names.clone(),
+                },
+            });
+            Ok(())
+        }
+        Entry::Occupied(slot) if slot.get().write_set.mut_params == lowered.mut_params => Ok(()),
+        Entry::Occupied(slot) => Err(ExternalResolutionError::ConflictingWriteSet {
+            logical_module: origin.logical_module.clone(),
+            export_field: origin.export_field.clone(),
+            first_file: declaring_file(arena, slot.get().decl),
+            second_file: declaring_file(arena, origin.decl),
+        }),
+    }
+}
+
+/// One `(module, field)`'s declared write set, tagged with the declaration it
+/// came from so a later disagreement can name both files.
+struct DeclaredWriteSet {
+    decl: DefId,
+    write_set: ImportWriteSet,
+}
+
+/// How a diagnostic names the file a declaration lives in.
+///
+/// The entry file has no module path, so it is named in words rather than
+/// rendered as an empty label — a message quoting nothing at all would leave the
+/// reader with one of the two files unidentified, which is the whole point of
+/// the diagnostic. A declaration whose file cannot be recovered falls back to
+/// the same wording, which is honest: nothing better is known about it.
+fn declaring_file(arena: &AstArena, decl: DefId) -> String {
+    match arena
+        .node_module_path(NodeId::Def(decl))
+        .and_then(inference_ast::nodes::file_label)
+    {
+        Some(label) => format!("`{label}`"),
+        None => "the entry file".to_string(),
+    }
 }
 
 /// Reads a resolved external `.wasm` module's bytes, enforcing

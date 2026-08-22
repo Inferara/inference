@@ -1,6 +1,7 @@
 // The gate. A compound `external fn` parameter is lowered to a raw pointer and
 // a linked external shares this program's single linear memory, so a foreign
-// body can store through the address it is handed. A parameter that reaches one
+// body can store through the address it is handed. `mut` on the declared
+// parameter is what states that it may; a parameter reaching such a declaration
 // therefore keeps its own copy no matter how little the body itself does with
 // it.
 //
@@ -13,9 +14,14 @@
 // gate consults empty — a fixture missing the `use` would golden the ungated
 // bytes and pass. The module imports, so it is compared as bytes rather than
 // executed.
+//
+// The forwarding parameters are `mut` because the declarations they reach are:
+// handing a binding the source did not declare mutable to a parameter the
+// foreign body may write through is an A047 error. `extern_forward_read_only`
+// is the other side of that decision.
 
-external fn sort_pair(p: Pair);
-external fn sort_arr(a: [i32; 2]);
+external fn sort_pair(mut p: Pair);
+external fn sort_arr(mut a: [i32; 2]);
 use { sort_pair, sort_arr } from sortlib;
 
 struct Pair {
@@ -23,12 +29,12 @@ struct Pair {
     b: i32;
 }
 
-pub fn forward_struct(p: Pair) -> i32 {
+pub fn forward_struct(mut p: Pair) -> i32 {
     sort_pair(p);
     return p.a * 10 + p.b;
 }
 
-pub fn forward_array(a: [i32; 2]) -> i32 {
+pub fn forward_array(mut a: [i32; 2]) -> i32 {
     sort_arr(a);
     return a[0] * 10 + a[1];
 }

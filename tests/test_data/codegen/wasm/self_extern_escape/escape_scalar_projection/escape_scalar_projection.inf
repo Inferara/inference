@@ -7,8 +7,14 @@
 // the unsafe direction: a missing copy is the bug, an extra copy is only slower.
 // This fixture is what stops a later "optimization" from narrowing the scan back
 // into that shape without noticing it reopened the hole.
+//
+// `mut` on a scalar parameter is the book's raw-pointer idiom — the foreign body
+// may store through the integer's value read as an address — and A047 does not
+// fire on it, because a scalar argument carries no region of the caller's the
+// rule could check. So this stays the one fixture in the family whose receiver
+// is immutable, and the only producer of the immutable-receiver mark.
 
-external fn probe_i32(v: i32) -> i32;
+external fn probe_i32(mut v: i32) -> i32;
 use { probe_i32 } from sortlib;
 
 struct Pair {

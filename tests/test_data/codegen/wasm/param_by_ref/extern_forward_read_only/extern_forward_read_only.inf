@@ -1,0 +1,53 @@
+// The other side of the extern gate: reaching an external is not by itself a
+// reason to copy.
+//
+// `mut` on an `external fn` parameter declares that the foreign body may store
+// through the address that parameter denotes, and the linker holds the merged
+// body to that declaration. A declaration that marks nothing `mut` declares the
+// empty write set, and the link then requires the merged bytes to record no
+// store at all — so a body bound to it can disturb nothing, and a caller that
+// hands over its own storage has nothing to observe. That is what lets a
+// read-only external stop costing its callers a copy.
+//
+// Both externs are declared and bound in one module, which is what makes the
+// decision legible as a per-declaration one. `has_imports` is module-wide: a
+// gate keyed on it, or on the mere presence of an extern call, would copy
+// `read_struct`'s and `read_array`'s parameters too.
+//
+// `sort_pair` is the writing control. Its caller keeps its copy in the same
+// module, under the same import section, so the two outcomes differ in the
+// declaration and in nothing else.
+
+external fn read_pair(p: Pair) -> i32;
+external fn read_arr(a: [i32; 2]) -> i32;
+external fn sort_pair(mut p: Pair);
+use { read_pair, read_arr, sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+pub fn read_struct(p: Pair) -> i32 {
+    return read_pair(p) + p.a * 10 + p.b;
+}
+
+pub fn read_array(a: [i32; 2]) -> i32 {
+    return read_arr(a) + a[0] * 10 + a[1];
+}
+
+// The writing control. The declaration is the only difference from
+// `read_struct`, and it is enough to put the parameter back in a frame slot.
+pub fn write_struct(mut p: Pair) -> i32 {
+    sort_pair(p);
+    return p.a * 10 + p.b;
+}
+
+// A parameter handed to a read-only external *and* written by the body keeps
+// its copy: the two conditions are disjunctive, and the write is the one that
+// decides here.
+pub fn read_then_write(mut p: Pair) -> i32 {
+    let seen: i32 = read_pair(p);
+    p.a = seen;
+    return p.a * 10 + p.b;
+}

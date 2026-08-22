@@ -60,8 +60,16 @@ use inference_wasm_linker::{link, LinkError};
 let unified: Vec<u8> = link(
     main_wasm,
     &[("arith", arith_wasm), ("sortlib", sortlib_wasm)],
+    None,
 )?;
 ```
+
+The third argument, `contracts: Option<&[ImportWriteSet]>`, is the mode that
+decides whether [The Declared Write-Set Check](#the-declared-write-set-check)
+runs at all: `None` skips it (the mode for hand-written `.wasm` fixtures with
+no Inference declaration behind them, such as the linker's own tests), while
+`Some(list)` — the mode `infc`/`infs` uses — holds every satisfied import to a
+declared write set built from the program's `external fn` declarations.
 
 Each external is tagged with the logical module name codegen recorded for it. The
 merge resolves each import by matching both the logical module name **and** the
@@ -130,11 +138,11 @@ external fn sum(a: i32, b: i32) -> i32;
 external fn neg(a: i32) -> i32;
 use { sum, neg } from arith;
 
-external fn store_at(ptr: i32, val: i32);
+external fn store_at(mut ptr: i32, val: i32);
 external fn load_at(ptr: i32) -> i32;
 use { store_at, load_at } from memlib;
 
-external fn sort_pair(ptr: i32);
+external fn sort_pair(mut ptr: i32);
 use { sort_pair } from sortlib;
 ```
 
@@ -152,7 +160,7 @@ classifies each closure:
 | Tier | What the closure may touch | Merged? | Admission condition |
 |------|---------------------------|---------|---------------------|
 | A | No memory, no global or table access, no data segments — pure arithmetic | Yes | None beyond the operator allow-list |
-| B | Linear memory **only through caller-supplied pointers**; no own data segments, no global or table access | Yes | Provenance proof: every memory address is parameter-derived (see below) |
+| B | Linear memory **only through caller-supplied pointers**; no own data segments, no global or table access | Yes | Provenance proof: every memory address is parameter-derived (see below); the closure's may-write set is covered by the `external fn` declaration's `mut` parameters (see [The Declared Write-Set Check](#the-declared-write-set-check)) |
 | C | Own static data segments, global access, or table/element use | No | Rejected with `LinkError::RequiresRelocatableBuild` |
 
 ### What Each Tier May Touch
@@ -319,6 +327,90 @@ inner2(addr, count):
   count is i32.const 0x8000 → Const, mask = {} → mask ⊄ trusted → Tier C ✗
 ```
 
+### The Declared Write-Set Check
+
+Tier-B admission proves that every memory address a closure computes *derives
+from* a caller-supplied parameter. It does not say *which* parameter licenses
+a given store, and it does not have to — until the closure is also held to a
+declared write set.
+
+`mut` on an `external fn` parameter is the Inference-side declaration of that
+licence: it states that the foreign body may store through the address that
+parameter denotes. The linker checks the claim, keyed on `(module, field)` —
+the same pair an import is satisfied on — against the merged bytes, in one of
+two ways depending on what the declaration says:
+
+- **No parameter marked `mut`** (an empty declared set) is checked
+  *structurally*: the merged closure must record no `Store` access anywhere,
+  not merely an attributed write set that happens to come out empty. A caller
+  relying on "this closure writes nothing, anywhere" then inherits none of the
+  attribution pass's own assumptions.
+- **Some parameter marked `mut`** is checked against a second, forward
+  least-fixpoint attribution pass — distinct from the greatest-fixpoint
+  `trusted[g]` computation above — that computes, for every function `g` in
+  the closure, the set of the *root export's* parameters each of `g`'s own
+  parameters may derive from, seeded at the root and propagated through every
+  call site's argument dependencies. Every `Store` access's address is then
+  attributed to the union of root parameters its dependencies may derive from.
+  The attributed set must be a subset of the declared one, or the link fails
+  with `LinkError::UndeclaredExternWrite`, naming the offending parameter by
+  index and, where the declaration gave it a name, by name.
+
+An import the checked mode's declaration list does not mention is treated as
+declaring **no** `mut` parameter, never skipped — see
+[Where the Linker Fits in the Pipeline](#where-the-linker-fits-in-the-pipeline)
+for the two `contracts` modes that decide whether the check runs at all, and
+for which callers use each one.
+
+**This check licenses derivation-to-a-parameter, not containment within it** —
+the same limit [Tier-B Provenance Analysis](#tier-b-provenance-analysis)
+describes. `W ⊆ D` bounds which parameter a store's *address* derives from; it
+says nothing about which *bytes* the store touches, or whether they stay
+inside the region the caller meant that parameter to grant. A declaration
+`external fn writer(mut a: [i32; 2], b: [i32; 2]);` whose body stores at `a +
+8` — past `a`'s own two elements — links cleanly, because the address still
+derives from parameter 0. Closing that gap needs the numeric/interval domain
+issue #420 tracks; the write-set check narrows *which* parameter a store may
+be attributed to, not *where* within it the store lands.
+
+That narrower guarantee is nonetheless enough to license one thing safely:
+`core/wasm-codegen`'s by-reference optimization elides a compound parameter's
+entry copy only when **every** external it reaches declares no `mut`
+parameter at all. An empty declared set forces the structural "no `Store`
+access anywhere" fact above, and a closure that never stores cannot disturb a
+caller's elided copy — no containment property is needed for that narrower
+claim. A *mixed* declaration (`writer(mut a, b)`) still costs every parameter
+it reaches a copy, including `b`'s: per-position elision is deliberately not
+implemented, because it would need the containment property this check does
+not have. See `core/wasm-codegen/docs/arrays-and-memory.md` for the codegen
+side of this decision.
+
+The attributed set can also be broader than "this parameter is itself a
+written-through address" suggests, for a reason distinct from the
+containment gap above: the attribution is affine, and it counts every
+parameter that may *contribute* to a store's address, not only the one
+playing the role of base pointer. The ordinary scaled-index write `mem[ptr +
+(idx << 2)] = val` attributes to both `ptr` and `idx` — `idx` never denotes
+an address on its own, but it scales one, and the affine form the
+attribution tracks does not distinguish that role from a base pointer's. A
+declaration `external fn set_elem(ptr: i32, idx: i32, val: i32);` bound to a
+body that writes this way must therefore mark `idx`, not only `ptr`, `mut` —
+`set_elem(mut ptr: i32, mut idx: i32, val: i32);` — or the link fails naming
+parameter 1, even though nothing about `idx`'s own value is a location the
+body writes *to*. This runs in the same conservative direction as the
+containment gap: attributing too broadly can force a wider declaration than
+the informal reading of `mut` suggests, never let an actual write through
+undeclared.
+
+The read/write split above is what keeps this from over-reaching further.
+`memory.copy(dest, src, size)`'s `src` operand is recorded as a `Load`, never
+a `Store`, so it never contributes to any `Store` access's dependency and is
+never pulled into the attributed write set — even though the same
+instruction also writes `dest`. A pure source pointer stays correctly
+unforced; it is specifically a *store's own* address computation whose
+affine contributors all get pulled in, `idx`-style scaling parameters
+included.
+
 ## Proof-Only Stripping
 
 Inference non-deterministic blocks (`forall`, `exists`, `assume`, `unique`) and
@@ -404,6 +496,7 @@ the module prefix removes the common case rather than every possible one.
 | `LinkError::AmbiguousImport { module, field }` | More than one supplied external exports a function of the same field name the import requests under the same logical module; the body to merge is ambiguous |
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |
 | `LinkError::InvalidMergedModule(msg)` | The post-merge structural validator rejected the merged output; this is a guard against allow-list gaps — it converts a potential silent miscompile into a clean diagnostic |
+| `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | A Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters (checked mode only — see [The Declared Write-Set Check](#the-declared-write-set-check)); the message names the offending parameter and, when the declaration uses an unnamed form, says to name it before it can be marked `mut` |
 
 ## Supported WASM Subset
 

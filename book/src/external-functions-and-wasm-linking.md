@@ -15,16 +15,84 @@ module. The declaration looks like an ordinary function signature without a body
 external fn sum(a: i32, b: i32) -> i32;
 ```
 
-Parameter names are optional in the declaration. The following is equivalent:
+A named parameter may be declared `mut`:
+
+```inference
+external fn store_at(mut ptr: i32, val: i32);
+```
+
+`mut` on an `external fn` parameter declares that the foreign body may
+**store** through the address that parameter denotes — for a compound
+parameter that is the pointer the caller hands over, for a scalar it is the
+integer's own value. This is a claim about the linked library, not a request:
+the linker derives, from the merged `.wasm` bytes, which parameters the body
+actually stores through, and rejects the link when that set is not covered by
+the declaration. An external whose body stores through an *undeclared*
+parameter fails to link with `UndeclaredExternWrite`; a parameter declared
+`mut` that the body never writes through links anyway, since `mut` here is a
+permission the body is not obliged to exercise. The linker's side of this
+check — including exactly what it does and does not prove about *where* a
+declared store lands — is the subject of
+[The WASM Linker](the-wasm-linker.md).
+
+The set this check requires you to declare is looser than "the parameter
+itself denotes the address" suggests. Attribution is affine: a store's
+address is attributed to *every* parameter that may contribute a term to it,
+not only the one playing the role of base pointer. The ordinary scaled-index
+write `mem[ptr + (idx << 2)] = val` attributes to both `ptr` and `idx`, so
+`external fn set_elem(ptr: i32, idx: i32, val: i32);` bound to a body that
+writes this way must declare `set_elem(mut ptr: i32, mut idx: i32, val:
+i32);` — `idx` included, even though `idx` never itself denotes a location
+the body writes to; it only scales `ptr`'s. Narrowing the attribution to the
+one operand that "looks like" a base pointer would need the linker to tell a
+base from an offset, which an affine form alone does not carry; the safe
+direction to err in is attributing too broadly, since that can only demand a
+wider declaration than the informal reading of `mut` suggests, never let an
+undeclared write through. This over-attribution is specific to a *store's*
+own address computation: a *read*-only pointer, such as the source of a
+`memory.copy(dest, src, size)`, contributes to no store's dependency and so
+is never forced `mut` merely for being touched by the same instruction that
+writes `dest`.
+
+`mut` is required on every parameter a linked external's body stores through,
+compound or scalar alike — there is no exemption for a pointer-shaped `i32`.
+Passing a *compound* argument (a struct or an array) to a `mut` position
+additionally requires the argument to be rooted at a `mut` binding, enforced
+at the call site by analysis rule A047 (see
+[Static Analysis](static-analysis.md)): exactly the same requirement an
+ordinary assignment through that binding would carry, since a foreign store
+through a `mut` parameter is otherwise the one write in the language invisible
+at the call site. A *scalar* argument is not checked by A047 — it passes a
+value, not a region, so there is no binding at the call site for the rule to
+root — which keeps the check honest rather than complete: a foreign store
+through an undeclared caller-supplied integer is still possible and is closed
+only by a future containment analysis (issue #420).
+
+Parameter names are optional in the declaration, for a parameter no merged
+body writes through:
 
 ```inference
 external fn sum(i32, i32) -> i32;
 ```
 
+The unnamed form and the named form are equivalent **only when nothing is
+written through the parameter**. Neither `ArgKind::Ignored` (`_: i32`) nor
+`ArgKind::TypeOnly` (a bare type) carries a mutability field, and the grammar
+gives neither a slot for `mut`, so a parameter a linked body stores through
+cannot be declared in the unnamed form at all: `external fn sort_pair([i32;
+2]);` bound to a library that writes through it has an empty declared write
+set by construction and fails to link with `UndeclaredExternWrite`, whose
+message says to name the parameter first. Give every parameter of a writing
+external a name.
+
 The type signature must match the exported function in the external module exactly.
 If the types disagree, the validation step (`validate_extern`, run by the link
 driver when it resolves each binding against the real `.wasm` bytes) reports a
-`SignatureMismatch` error and no linked module is produced.
+`SignatureMismatch` error and no linked module is produced. A related
+resolution-time check: two files that each declare and bind the same
+`(module, field)` must agree on which parameters are `mut` — a disagreement is
+rejected as `ConflictingWriteSet`, naming both files, since the linker checks
+the merged body once and cannot honor two different declarations of it.
 
 ## Binding an External Function to a Module
 
@@ -176,11 +244,23 @@ Tier-C support in a future release.
   import for it and so cannot compile the call.
 - Only one version of each logical module is resolved per build. Multi-version
   dependency resolution is deferred to a future manifest update.
+- A `mut` scalar parameter's argument is not checked by analysis rule A047: a
+  scalar carries no region for the rule to root a binding in, so a call
+  passing a plain `i32` has nothing at the call site to reject. This is an
+  accepted, documented gap, not an absence of risk — the shadow stack occupies
+  `[0, stack_size)` of the same linear memory a scalar `i32` addresses, and
+  under the default layout (one page, entirely stack) a caller's own frame
+  sits just below address 65536, so `store_at(65528, 7)` overwrites that
+  caller's own locals through a plain `i32.store`, admitted by the linker
+  because Tier-B admission proves only that the address *derives from* a
+  parameter, not where it lands — see
+  [The WASM Linker](the-wasm-linker.md) for what that proof does and does not
+  bound. Closing it is tracked in issue #420.
 
 ## Example: Two Libraries, One Module
 
 ```inference
-external fn sort(ptr: i32, len: i32);
+external fn sort(mut ptr: i32, len: i32);
 external fn checksum(ptr: i32, len: i32) -> i32;
 use { sort } from collections;
 use { checksum } from crypto;

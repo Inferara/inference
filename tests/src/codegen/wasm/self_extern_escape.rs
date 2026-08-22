@@ -1,25 +1,38 @@
-//! Golden coverage for the receiver copy an immutable `self` gets when it
-//! escapes to an `external fn` (issue #329).
+//! Golden coverage for the receiver copy a `self` receiver gets when it reaches
+//! an `external fn` the declaration says may write through it.
 //!
-//! A `mut self` receiver has always been copied into the method's own frame on
-//! entry; an immutable one was passed straight through as a pointer into the
-//! caller's memory. That is invisible while nothing can write through the
-//! pointer — and an `external fn` with a compound parameter is exactly something
+//! A written receiver has always been copied into the method's own frame on
+//! entry; one the body never assigns was passed straight through as a pointer
+//! into the caller's memory. That is invisible while nothing can write through
+//! the pointer — and an `external fn` with a compound parameter is something
 //! that can, because a compound extern argument lowers to a raw address and a
 //! linked module shares the caller's linear memory. A method forwarding `self`
 //! to such an external let the foreign body mutate the *caller's* struct.
 //!
-//! The fixtures here pin both directions of the gate that closed it. Five drive
-//! the escape through a different syntactic position — whole receiver,
-//! sub-object, nested block, nested expression, scalar projection. A sixth puts
-//! an escaping receiver in the same frame as a named compound parameter, the one
-//! arrangement where an offset collision between the new receiver slot and the
-//! parameter slots could hide. One holds the `mut self` control, which must come
-//! out unchanged: the two conditions that earn a slot are disjunctive over a
-//! single slot, so a receiver that is both mutable and escaping is copied once,
-//! not twice. One holds the negative: an immutable receiver in a module that does
-//! register an import, but never hands `self` to it, still gets no slot and no
-//! copy.
+//! What separates the two outcomes is the declaration. `mut` on an `external fn`
+//! parameter states that the foreign body may store through the address it
+//! denotes, and the linker holds the merged body to that statement; a
+//! declaration marking nothing `mut` links only against a body that records no
+//! store at all, so a receiver handed to one is read where it lies.
+//!
+//! The fixtures pin both directions. Five drive the escape through a different
+//! syntactic position — whole receiver, sub-object, nested block, nested
+//! expression, scalar projection. A sixth puts an escaping receiver in the same
+//! frame as a named compound parameter, the one arrangement where an offset
+//! collision between the receiver slot and the parameter slots could hide. One
+//! holds the written-receiver control, which must come out unchanged: the
+//! conditions that earn a slot are disjunctive over a single slot, so a receiver
+//! that is both written and escaping is copied once, not twice. Two hold
+//! negatives — a receiver in a module that registers a *writing* import but
+//! never hands `self` to it, and a receiver handed to a wholly read-only
+//! declaration — and neither gets a slot or a copy.
+//!
+//! A receiver forwarded to a `mut` parameter must itself be `mut`, or A047
+//! rejects the program; the copy is still earned by the escape and not by the
+//! marker, which is what `param_by_ref`'s `mut_never_written` states directly.
+//! `escape_scalar_projection` is the one fixture whose receiver stays immutable,
+//! because A047 does not reach a scalar parameter — and so it is the only
+//! producer of the immutable-receiver mark.
 //!
 //! Two properties make the assertions sharp rather than tautological:
 //!
@@ -116,8 +129,8 @@ mod self_extern_escape_tests {
         let body = function_wat(wasm, name);
         assert!(
             !body.contains("__frame_ptr"),
-            "an immutable receiver nothing can write through is read in place, so \
-             {name} must allocate no frame:\n{body}"
+            "a receiver nothing can write through is read in place, so {name} \
+             must allocate no frame:\n{body}"
         );
         assert!(
             !body.contains("local.set $self"),
@@ -128,9 +141,15 @@ mod self_extern_escape_tests {
     /// `sort_pair(self)` — the shape from the issue. The whole receiver travels
     /// to the external as a pointer, so it must be a pointer to the method's own
     /// copy.
+    ///
+    /// The receiver is `mut` only because A047 requires it at a `mut` parameter;
+    /// the copy is the escape's doing, which the write count states by staying
+    /// at zero.
     #[test]
     fn escape_whole_self_test() {
-        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
+        cov_mark::check_count!(wasm_codegen_param_reaches_read_only_extern, 0);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_whole_self");
         assert_receiver_copied(&wasm, "Pair.touch");
@@ -140,7 +159,8 @@ mod self_extern_escape_tests {
     /// receiver, so the member access peels to `self` and the copy still lands.
     #[test]
     fn escape_sub_object_test() {
-        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_sub_object");
         assert_receiver_copied(&wasm, "Outer.touch");
@@ -151,7 +171,8 @@ mod self_extern_escape_tests {
     /// pre-fix bytes.
     #[test]
     fn escape_nested_block_test() {
-        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_nested_block");
         assert_receiver_copied(&wasm, "Pair.touch");
@@ -162,7 +183,8 @@ mod self_extern_escape_tests {
     /// expression descent reaches every position an extern call can occupy.
     #[test]
     fn escape_nested_expr_test() {
-        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_nested_expr");
         assert_receiver_copied(&wasm, "Pair.touch");
@@ -172,13 +194,21 @@ mod self_extern_escape_tests {
     /// alias anything. The copy is emitted anyway.
     ///
     /// This is the one fixture whose expected behaviour is *deliberate waste*.
-    /// The scan is type-blind because refining it would need a second predicate
-    /// agreeing with argument lowering, and a disagreement drops the copy — the
-    /// failure direction that is the bug. Assert the over-copy so narrowing the
-    /// scan has to change a test that says why it is there.
+    /// The scan is type-blind about the argument because refining it would need a
+    /// second predicate agreeing with argument lowering, and a disagreement drops
+    /// the copy — the failure direction that is the bug. Assert the over-copy so
+    /// narrowing the scan has to change a test that says why it is there.
+    ///
+    /// It is also the family's only *immutable* receiver, and so the only
+    /// producer of `wasm_codegen_self_escapes_to_extern`. A047 obliges every
+    /// other escaping receiver here to be `mut`, but it does not reach a scalar
+    /// parameter — a scalar argument carries no region of the caller's for the
+    /// rule to check — so `mut v: i32` costs this receiver its copy without
+    /// costing it its immutability.
     #[test]
     fn escape_scalar_projection_test() {
         cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_scalar_projection");
         assert_receiver_copied(&wasm, "Pair.touch");
@@ -230,7 +260,8 @@ mod self_extern_escape_tests {
     /// 32-byte frame).
     #[test]
     fn escape_with_param_test() {
-        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 1);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("escape_with_param");
         assert_receiver_copied(&wasm, "Pair.touch");
@@ -254,27 +285,55 @@ mod self_extern_escape_tests {
         );
     }
 
-    /// A `mut self` receiver that also escapes gets **one** copy, not two, and
-    /// does not fire the escape mark: the mutable case was already covered and
-    /// the two conditions share a single slot.
+    /// A receiver the body assigns *and* forwards to a writing external gets
+    /// **one** copy, not two, and reports the write: the write scan runs first
+    /// and the two conditions share a single slot.
     #[test]
     fn mut_self_extern_test() {
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 0);
         cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 0);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
         let wasm = assert_golden("mut_self_extern");
         assert_receiver_copied(&wasm, "Pair.touch");
     }
 
-    /// The negative: an import is registered and called, but never with an
-    /// argument rooted at `self`, so the receiver keeps the by-reference
-    /// treatment. Both marks stay silent — the decision is "no escape", not
-    /// "no externs to check against".
+    /// The negative: a *writing* import is registered and called, but never with
+    /// an argument rooted at `self`, so the receiver keeps the by-reference
+    /// treatment. The escape marks stay silent and so does the read-only one —
+    /// the decision is "no reach", not "no externs to check against" and not
+    /// "the external cannot write".
     #[test]
     fn no_escape_self_test() {
         cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 0);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 0);
+        cov_mark::check_count!(wasm_codegen_param_reaches_read_only_extern, 0);
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
         cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 0);
         let wasm = assert_golden("no_escape_self");
         assert_receiver_not_copied(&wasm, "Pair.sum");
+    }
+
+    /// The other negative, and the one the refined gate turns on: the receiver
+    /// *does* reach an external, and is still not copied, because that
+    /// declaration marks no parameter `mut`.
+    ///
+    /// A declaration with an empty write set links only against a merged body
+    /// that records no store at all, so nothing the receiver's address is handed
+    /// to can disturb it. `Writable.touch` sits in the same module handing its
+    /// own receiver to a `mut`-declaring external and keeps its copy, which is
+    /// what makes this a per-declaration decision rather than a property of the
+    /// module: a gate keyed on the module having imports would copy both.
+    #[test]
+    fn read_only_extern_self_test() {
+        cov_mark::check_count!(wasm_codegen_param_reaches_read_only_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_self_escapes_to_extern, 0);
+        cov_mark::check_count!(wasm_codegen_emit_self_copy_on_entry, 1);
+        let wasm = assert_golden("read_only_extern_self");
+        assert_receiver_not_copied(&wasm, "Pair.touch");
+        assert_receiver_copied(&wasm, "Writable.touch");
     }
 }
 
@@ -360,5 +419,11 @@ mod regenerate {
     #[ignore]
     fn regenerate_no_escape_self_wasm() {
         regenerate("no_escape_self");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_read_only_extern_self_wasm() {
+        regenerate("read_only_extern_self");
     }
 }

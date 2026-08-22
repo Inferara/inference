@@ -79,6 +79,20 @@
 //!   `-(128)`, and binary subtraction are out of scope. See
 //!   [`rules::spaced_negative_literal`].
 //!
+//! ### External Function Contracts (A024, A047)
+//!
+//! - A024: Call to an *unbound* external function (listed above with the codegen
+//!   restrictions, since an unbound extern has no body to merge)
+//! - A047: A compound argument at a `mut` `external fn` parameter must be rooted
+//!   at a `mut` binding. A linked external shares the caller's linear memory, so
+//!   a struct or array argument reaches it as a raw pointer with no copy in
+//!   between; `mut` on the declaration states that the foreign body may store
+//!   through that pointer, and the linker checks the claim against the merged
+//!   body. This is the one place a write to a binding is invisible in Inference
+//!   source — the store lives in a `.wasm` the type checker never reads — so the
+//!   call site must carry the statement instead. Scalars and enums are out of
+//!   scope: neither passes a region. See [`rules::extern_mut_argument`].
+//!
 //! ### Recursion (A035)
 //!
 //! - A035: Direct or indirect (mutual) recursion is forbidden (Power of 10, Rule 1)
@@ -312,6 +326,7 @@ mod tests {
             AnalysisDiagnostic::ShiftCountOutOfRange { value: "32".to_string(), type_name: "i32".to_string(), max: 31, location: dummy_location() },
             AnalysisDiagnostic::FieldLessStructValue { name: "E".to_string(), position: "a struct literal", location: dummy_location() },
             AnalysisDiagnostic::SpacedNegativeLiteral { value: "128".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::ExternWriteThroughImmutableArgument { arg: "arr".to_string(), param: "a".to_string(), callee: "sort_pair".to_string(), ty: "[i32; 2]".to_string(), root: errors::ImmutableArgumentRoot::Binding, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

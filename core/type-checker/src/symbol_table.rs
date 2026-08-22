@@ -17,7 +17,7 @@
 //!
 //! ## Scope Tree Traversal
 //!
-//! `lookup_variable`, `lookup_variable_is_mut`, and `lookup_method` first check
+//! `lookup_variable`, `lookup_binding_mutability`, and `lookup_method` first check
 //! the current scope locally; on a miss they follow the parent [`ScopeId`] and
 //! recurse, terminating when either a match is found or the root scope (which has
 //! no parent) is reached. Symbol resolution adds a file boundary on top of this
@@ -574,6 +574,51 @@ impl Symbol {
     }
 }
 
+/// How a binding's declaration constrains a write to it.
+///
+/// Three states rather than a `bool`, because two of them are immutable for
+/// *different* reasons and a diagnostic that asks the author to relax one must
+/// name a spelling the grammar accepts. `let p` and `const P` both refuse an
+/// assignment, but only the first has a `mut` slot to fill: `const mut P` is a
+/// parse error, so advice built from `is_mut == false` alone would send the
+/// author of a `const` to a declaration form that does not exist.
+///
+/// Recorded where the declaration is read, alongside the type, because the
+/// answer comes from the scope entry and no later phase can reconstruct it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingMutability {
+    /// Declared `mut`: the source already states the value may change.
+    Mutable,
+    /// A `let` binding, a parameter, or a `self` receiver left without `mut`.
+    /// The declaration has a `mut` slot, so asking for it is a spellable fix.
+    Immutable,
+    /// A `const`. Immutable, and immutable in a form no `mut` can relax — the
+    /// grammar has no `const mut`, so the only repair is a separate `mut`
+    /// binding initialized from it.
+    Constant,
+}
+
+impl BindingMutability {
+    /// Classifies a binding whose declaration carries a `mut` flag: a `let`, a
+    /// parameter, or a receiver. A `const` never comes through here — it has no
+    /// such flag, which is the whole distinction this type records.
+    #[must_use = "this classifies a declaration without modifying it"]
+    pub(crate) fn from_mut_flag(is_mut: bool) -> Self {
+        if is_mut {
+            BindingMutability::Mutable
+        } else {
+            BindingMutability::Immutable
+        }
+    }
+
+    /// Whether the declaration permits a write. False for both immutable forms,
+    /// which is what an assignment check asks.
+    #[must_use = "this is a pure predicate over the declaration"]
+    pub(crate) fn permits_write(self) -> bool {
+        matches!(self, BindingMutability::Mutable)
+    }
+}
+
 /// A scope in the symbol table tree.
 #[derive(Debug, Clone)]
 pub(crate) struct Scope {
@@ -586,7 +631,7 @@ pub(crate) struct Scope {
     pub(crate) parent: Option<ScopeId>,
     pub(crate) children: Vec<ScopeId>,
     pub(crate) symbols: FxHashMap<String, Symbol>,
-    pub(crate) variables: FxHashMap<String, (u32, TypeInfo, bool)>,
+    pub(crate) variables: FxHashMap<String, (u32, TypeInfo, BindingMutability)>,
     pub(crate) methods: FxHashMap<String, Vec<MethodInfo>>,
     /// Unresolved imports registered in this scope
     pub(crate) imports: Vec<Import>,
@@ -640,18 +685,18 @@ impl Scope {
         name: &str,
         node_id: u32,
         ty: TypeInfo,
-        is_mut: bool,
+        mutability: BindingMutability,
     ) -> anyhow::Result<()> {
         if self.variables.contains_key(name) {
             bail!("Variable `{name}` already declared in this scope");
         }
         self.variables
-            .insert(name.to_string(), (node_id, ty, is_mut));
+            .insert(name.to_string(), (node_id, ty, mutability));
         Ok(())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    fn lookup_variable_local(&self, name: &str) -> Option<(u32, TypeInfo, bool)> {
+    fn lookup_variable_local(&self, name: &str) -> Option<(u32, TypeInfo, BindingMutability)> {
         self.variables.get(name).cloned()
     }
 
@@ -665,8 +710,10 @@ impl Scope {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    fn lookup_variable_is_mut_local(&self, name: &str) -> Option<bool> {
-        self.variables.get(name).map(|(_, _, is_mut)| *is_mut)
+    fn lookup_binding_mutability_local(&self, name: &str) -> Option<BindingMutability> {
+        self.variables
+            .get(name)
+            .map(|(_, _, mutability)| *mutability)
     }
 
     pub(crate) fn insert_method(&mut self, type_name: &str, method_info: MethodInfo) {
@@ -1158,10 +1205,10 @@ impl SymbolTable {
         &mut self,
         name: &str,
         var_type: TypeInfo,
-        is_mut: bool,
+        mutability: BindingMutability,
     ) -> anyhow::Result<()> {
         if let Some(current) = self.current_scope {
-            self.scopes[current.index()].insert_variable(name, 0, var_type, is_mut)
+            self.scopes[current.index()].insert_variable(name, 0, var_type, mutability)
         } else {
             bail!("No active scope to push variable")
         }
@@ -1339,12 +1386,12 @@ impl SymbolTable {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_variable_is_mut(&self, name: &str) -> Option<bool> {
+    pub(crate) fn lookup_binding_mutability(&self, name: &str) -> Option<BindingMutability> {
         let mut cursor = self.current_scope;
         while let Some(id) = cursor {
             let s = self.scope(id)?;
-            if let Some(is_mut) = s.lookup_variable_is_mut_local(name) {
-                return Some(is_mut);
+            if let Some(mutability) = s.lookup_binding_mutability_local(name) {
+                return Some(mutability);
             }
             cursor = s.parent;
         }

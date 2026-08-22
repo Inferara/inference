@@ -788,6 +788,19 @@ existed every module elaborating one was hand-assembled. An obligation applying 
 merged function's own index — is what makes the claim about it a claim
 about the bytes that will run.
 
+A declared **write set** — `mut` on an `external fn` parameter, checked by
+`core/wasm-linker` against the merged bytes before the merge is allowed to
+happen — is a link-time gate with no representation anywhere in this
+translator's output, and that is correct rather than an omission. It decides
+*whether* a body may be merged at all; once merged, the body is bytes like any
+other, translated by exactly the paths above. The module the translator reads
+has no imports left for a record to describe — the linker either satisfied
+every one or refused to produce the module — so there is nothing for a write
+set to be attached to by the time this translator runs, and no obligation
+quantifies over "what an import was permitted to write" in the first place. A
+merged function's stores are already present in the translated body, not
+promised by a signature a proof would need to consult.
+
 The module record changes shape too, in one place. Code generation emits
 its linear memory with the minimum and the maximum equal, so a module it
 produced alone always reads `Mm {|lim_min := N%N; lim_max := Some(N%N)|}`.

@@ -1771,8 +1771,8 @@ mod tests {
     use inference_ast::arena::AstArena;
     use inference_ast::ids::{BlockId, DefId, ExprId, TypeId};
     use inference_ast::nodes::{
-        ArgKind, BlockKind, Def, Directive, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
-        UnaryOperatorKind, Visibility,
+        ArgData, ArgKind, BlockKind, Def, Directive, Expr, OperatorKind, SimpleTypeKind, Stmt,
+        TypeNode, UnaryOperatorKind, Visibility,
     };
 
     /// Parses `src`, asserts the parse produced no errors, and returns the arena.
@@ -1830,6 +1830,26 @@ mod tests {
     /// Reads a `TypeNode` by ID (keeps the match arms below readable).
     fn type_kind(arena: &AstArena, ty: TypeId) -> &TypeNode {
         &arena[ty].kind
+    }
+
+    /// The arguments of the single top-level `external fn` definition.
+    fn extern_args(arena: &AstArena) -> &[ArgData] {
+        match single_def(arena) {
+            Def::ExternFunction { args, .. } => args,
+            other => panic!("expected extern function, got {other:?}"),
+        }
+    }
+
+    /// The `(is_mut, ty)` pair of each argument, in declaration order. Panics on
+    /// any argument that is not `ArgKind::Named`, so a mutability assertion
+    /// cannot silently pass on an argument that never carried the flag.
+    fn named_args(args: &[ArgData]) -> Vec<(bool, TypeId)> {
+        args.iter()
+            .map(|arg| match &arg.kind {
+                ArgKind::Named { is_mut, ty, .. } => (*is_mut, *ty),
+                other => panic!("expected a named argument, got {other:?}"),
+            })
+            .collect()
     }
 
     /// The single nested statement inside an else-arm block. Used by the else-if
@@ -1988,6 +2008,98 @@ mod tests {
                 assert!(returns.is_some());
             }
             other => panic!("expected extern function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_mut_external_function_args() {
+        // `mut` on an external parameter reaches `Def::ExternFunction`, for a
+        // compound parameter and a scalar one alike. The type assertions pin
+        // that the keyword does not displace the type: lowering anchors the
+        // type on the `:`, and a `mut` before the name is exactly what could
+        // break that anchoring.
+        let arena = lower("external fn sort_pair(mut a: [i32; 2], mut n: i32);");
+        let named = named_args(extern_args(&arena));
+        assert_eq!(
+            named.iter().map(|&(m, _)| m).collect::<Vec<_>>(),
+            [true, true]
+        );
+        assert!(matches!(
+            type_kind(&arena, named[0].1),
+            TypeNode::Array { .. }
+        ));
+        assert!(matches!(
+            type_kind(&arena, named[1].1),
+            TypeNode::Simple(SimpleTypeKind::I32)
+        ));
+    }
+
+    #[test]
+    fn lowers_external_function_args_without_mut() {
+        // Teeth for `lowers_mut_external_function_args`: the same declaration
+        // without the keyword lowers to `is_mut: false`, so a lowering that
+        // hardcoded the flag cannot pass both tests.
+        let arena = lower("external fn sort_pair(a: [i32; 2], n: i32);");
+        let named = named_args(extern_args(&arena));
+        assert_eq!(
+            named.iter().map(|&(m, _)| m).collect::<Vec<_>>(),
+            [false, false]
+        );
+    }
+
+    #[test]
+    fn lowers_mut_external_function_args_in_spec() {
+        // `spec` blocks accept `external fn`, so the flag must survive the extra
+        // nesting. The mixed declaration also pins that mutability is recorded
+        // per argument rather than per declaration.
+        let arena = lower("spec S { external fn sort_pair(mut a: [i32; 2], n: i32); }");
+        let Def::Spec { defs, .. } = single_def(&arena) else {
+            panic!("expected a spec definition");
+        };
+        assert_eq!(defs.len(), 1);
+        let Def::ExternFunction { args, .. } = &arena[defs[0]].kind else {
+            panic!("expected an extern function inside the spec");
+        };
+        let named = named_args(args);
+        assert_eq!(
+            named.iter().map(|&(m, _)| m).collect::<Vec<_>>(),
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn a_rejected_mut_never_lowers_a_mutable_argument() {
+        // The property later phases rely on: a `mut` the parser rejected must
+        // not reach the AST as a mutability flag. Each source here is an
+        // erroring program containing a `mut` in a position that qualifies no
+        // binding; scanning every def in the arena — not just the top-level
+        // ones — catches the spec-nested and method cases too.
+        for src in [
+            "external fn g(mut [i32; 2]);",
+            "external fn e(mut i32);",
+            "external fn f(mut _: i32);",
+            "external fn n(mut Point);",
+            "external fn j(mut a);",
+            "fn h(mut [i32; 2]) { }",
+            "fn i(mut _: i32) { }",
+            "fn j(mut a) { }",
+            "spec S { external fn m(mut _: i32); }",
+            "struct S { fn m(mut [i32; 2]) { } }",
+        ] {
+            let result = parse(src);
+            assert!(!result.errors.is_empty(), "{src:?} must still be rejected");
+
+            for (_, def) in result.arena.defs.iter() {
+                let args = match &def.kind {
+                    Def::Function { args, .. } | Def::ExternFunction { args, .. } => args,
+                    _ => continue,
+                };
+                for arg in args {
+                    if let ArgKind::Named { is_mut: true, .. } = arg.kind {
+                        panic!("{src:?} lowered a mutable argument from an erroring program");
+                    }
+                }
+            }
         }
     }
 

@@ -10,8 +10,10 @@
 //!
 //! These tests close that hole by **executing** the merged module. Each fixture is
 //! assembled from inline WAT (mirroring the linker's own integration tests), driven
-//! through the real `inference::link`, instantiated in `wasmtime`, and asserted on
-//! the *computed result* — a value chosen to distinguish correct wiring from the
+//! through the real `inference::link` in its **unchecked** write-set mode — these
+//! mains are hand-written WAT with no Inference source, so no `external fn`
+//! declaration exists whose `mut` annotations a contract could state — then
+//! instantiated in `wasmtime` and asserted on the *computed result* — a value chosen to distinguish correct wiring from the
 //! plausible swap. The merged module exports its shared memory and its entry
 //! function, so a Tier-B round-trip can be observed directly through that memory.
 
@@ -81,7 +83,7 @@ mod extern_link_exec_tests {
             "#,
         );
 
-        let linked = link(&main, &[("arith", &lib)]).expect("Tier-A merge succeeds");
+        let linked = link(&main, &[("arith", &lib)], None).expect("Tier-A merge succeeds");
         inf_wasmparser::validate(&linked).expect("merged module is valid wasm");
 
         let (mut store, instance) = instantiate(&linked);
@@ -160,7 +162,7 @@ mod extern_link_exec_tests {
             "#,
         );
 
-        let linked = link(&main, &[("memlib", &lib)]).expect("Tier-B merge succeeds");
+        let linked = link(&main, &[("memlib", &lib)], None).expect("Tier-B merge succeeds");
         inf_wasmparser::validate(&linked).expect("merged module is valid wasm");
 
         let (mut store, instance) = instantiate(&linked);
@@ -290,7 +292,7 @@ mod extern_link_exec_tests {
             "#,
         );
 
-        let linked = link(&main, &[("sortlib", &lib)]).expect("interprocedural Tier-B merge succeeds");
+        let linked = link(&main, &[("sortlib", &lib)], None).expect("interprocedural Tier-B merge succeeds");
         inf_wasmparser::validate(&linked).expect("merged module is valid wasm");
 
         let (mut store, instance) = instantiate(&linked);

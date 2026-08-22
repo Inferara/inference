@@ -86,7 +86,9 @@ fn resolves_validates_and_reads_a_bound_extern() {
     search.push_lib_dir(tree.root().to_path_buf());
 
     let modules =
-        resolve_external_modules(&typed, &search, None).expect("resolution succeeds");
+        resolve_external_modules(&typed, &search, None)
+            .expect("resolution succeeds")
+            .modules;
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].logical_module, "arith");
     assert_eq!(modules[0].bytes, lib);
@@ -111,7 +113,8 @@ fn resolves_a_bound_extern_through_a_manifest_entry() {
     manifest.insert("arith", on_disk);
 
     let modules = resolve_external_modules(&typed, &SearchPath::new(), Some(&manifest))
-        .expect("manifest resolution succeeds");
+        .expect("manifest resolution succeeds")
+        .modules;
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].logical_module, "arith");
     assert_eq!(modules[0].bytes, lib);
@@ -141,7 +144,8 @@ fn manifest_entry_overrides_a_search_path_directory() {
     manifest.insert("arith", manifest_target);
 
     let modules = resolve_external_modules(&typed, &search, Some(&manifest))
-        .expect("manifest must override the wrong search-path module");
+        .expect("manifest must override the wrong search-path module")
+        .modules;
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].bytes, right);
 }
@@ -149,8 +153,9 @@ fn manifest_entry_overrides_a_search_path_directory() {
 #[test]
 fn a_program_without_externs_resolves_to_an_empty_set() {
     let typed = typed_of("pub fn double(x: i32) -> i32 { return x + x; }");
-    let modules = resolve_external_modules(&typed, &SearchPath::new(), None).unwrap();
-    assert!(modules.is_empty());
+    let externals = resolve_external_modules(&typed, &SearchPath::new(), None).unwrap();
+    assert!(externals.modules.is_empty());
+    assert!(externals.contracts.is_empty());
 }
 
 #[test]
@@ -223,7 +228,8 @@ fn bound_top_level_extern_validates_against_its_own_declaration_not_a_spec_sibli
     search.push_lib_dir(tree.root().to_path_buf());
 
     let modules = resolve_external_modules(&typed, &search, None)
-        .expect("the bound top-level `sort(i32)` must validate against the library");
+        .expect("the bound top-level `sort(i32)` must validate against the library")
+        .modules;
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].logical_module, "sorting");
 }
@@ -274,7 +280,9 @@ fn two_externs_from_one_module_dedup_to_a_single_entry() {
     let mut search = SearchPath::new();
     search.push_lib_dir(tree.root().to_path_buf());
 
-    let modules = resolve_external_modules(&typed, &search, None).expect("resolution succeeds");
+    let modules = resolve_external_modules(&typed, &search, None)
+        .expect("resolution succeeds")
+        .modules;
     assert_eq!(
         modules.len(),
         1,
@@ -307,7 +315,9 @@ fn two_distinct_modules_yield_one_entry_each_keyed_by_logical_module() {
     let mut search = SearchPath::new();
     search.push_lib_dir(tree.root().to_path_buf());
 
-    let modules = resolve_external_modules(&typed, &search, None).expect("resolution succeeds");
+    let modules = resolve_external_modules(&typed, &search, None)
+        .expect("resolution succeeds")
+        .modules;
     let logical: Vec<&str> = modules.iter().map(|m| m.logical_module.as_str()).collect();
     assert_eq!(
         logical,
@@ -604,7 +614,9 @@ fn nested_logical_module_resolves_under_subdirectory() {
     let mut search = SearchPath::new();
     search.push_lib_dir(tree.root().to_path_buf());
 
-    let modules = resolve_external_modules(&typed, &search, None).unwrap();
+    let modules = resolve_external_modules(&typed, &search, None)
+        .unwrap()
+        .modules;
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].logical_module, "crypto::sha256");
 }

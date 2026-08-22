@@ -79,7 +79,7 @@ Glob imports (`use lib::arith::*;`) are not supported and produce a diagnostic.
 The from form binds an `external fn` declaration to a pre-compiled `.wasm` library:
 
 ```inference
-external fn sort(ptr: i32, len: i32);
+external fn sort(mut ptr: i32, len: i32);
 use { sort } from collections;
 ```
 

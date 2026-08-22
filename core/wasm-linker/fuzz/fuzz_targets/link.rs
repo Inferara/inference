@@ -91,7 +91,10 @@ fuzz_target!(|data: &[u8]| {
         .map(|(i, bytes)| (module_names[i % module_names.len()], bytes.as_slice()))
         .collect();
 
-    match inference_wasm_linker::link(&main, &pairs) {
+    // The unchecked write-set mode: the fuzzer's inputs are raw byte strings with
+    // no `external fn` declaration behind them, so there is no contract to hold
+    // them to. The target's subject is the merge's own robustness.
+    match inference_wasm_linker::link(&main, &pairs, None) {
         // A returned error is the contractually-correct outcome for malformed or
         // unsupported input. Nothing more to check.
         Err(_) => {}

@@ -46,7 +46,8 @@ Typed AST (TypedContext)
    value and allocates a synthetic `__frame_ptr` WASM local. Struct fields are laid out with C-compatible
    natural alignment (`compute_struct_field_layout`). A compound parameter earns a slot only when the
    body can write through it — see `compound_param_is_by_reference`; a parameter that is neither
-   assigned through nor forwarded to an `external fn` is read straight from the caller's pointer. A
+   assigned through nor forwarded to an `external fn` **whose declaration marks a parameter `mut`** is
+   read straight from the caller's pointer. A
    function whose parameters and bindings all turn out to need no memory gets no frame at all: no
    `__frame_ptr`, no prologue, no epilogue, and no `__stack_pointer` mutation.
    See [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
@@ -91,7 +92,8 @@ Typed AST (TypedContext)
    struct member access. Function calls push arguments in positional order and emit a
    `call <func_idx>` instruction. A struct-typed parameter is copied into the callee's
    frame on entry when the body assigns through it or forwards it to an `external fn`
-   (value semantics); otherwise it is read through the caller's pointer.
+   that declares a `mut` parameter (value semantics); otherwise it is read through the
+   caller's pointer.
    Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
    evaluating the right-hand side expression and emitting `local.set` to store the result.
    Array index assignment (`arr[i] = value;`) computes the element address and emits a store
@@ -109,10 +111,13 @@ Typed AST (TypedContext)
    (an `i32` pointer). A receiver is a parameter and obeys the same rule as any other: it
    is copied into the callee's frame on entry (value semantics — mutations do not reach
    the caller) when the body assigns through it, or when the body forwards `self` or a
-   projection of it to an `external fn` — a linked external shares the program's linear
-   memory and can store through the pointer it is handed, which would reach the caller's
-   own memory. A receiver that does neither is read directly through the pointer,
-   whether it is written `self` or `mut self`. Methods are never exported as WASM
+   projection of it to an `external fn` whose declaration marks a parameter `mut` — a
+   linked external shares the program's linear memory and, having declared that it may
+   store through the address it is handed, would reach the caller's own memory. A
+   declaration marking nothing `mut` links only against a merged body that records no
+   store at all, so a receiver reaching only such declarations is read in place. A
+   receiver that does neither is read directly through the pointer, whether it is written
+   `self` or `mut self`. Methods are never exported as WASM
    exports regardless of Inference visibility.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
    Non-void functions emit an `unreachable` instruction before the function `end` to
@@ -617,8 +622,8 @@ Test data includes:
 - By-reference parameter fixtures in `tests/test_data/codegen/wasm/param_by_ref/`
   (tests in `tests/src/codegen/wasm/param_by_ref.rs`). Each fixture pins the *decision*
   with `check_count!` on `wasm_codegen_param_by_reference` /
-  `wasm_codegen_param_written_in_body` / `wasm_codegen_param_escapes_to_extern`, not only
-  the emitted bytes:
+  `wasm_codegen_param_written_in_body` / `wasm_codegen_param_escapes_to_extern` /
+  `wasm_codegen_param_reaches_read_only_extern`, not only the emitted bytes:
   - `read_only_params` - The headline shape: struct and array parameters that are read and
     never written, in functions needing no frame for anything else, so each compiles
     frameless
@@ -626,9 +631,12 @@ Test data includes:
     parameter rebind
   - `mut_never_written` - `mut` parameters that are never assigned; the half of the domain
     where the body scan decides something the `mut` marker cannot
-  - `extern_forward` - The escape gate: parameters forwarded to an `external fn` keep their
-    copies while a sibling that is not forwarded does not; covers the struct and array
-    lowerings separately
+  - `extern_forward` - The escape gate: parameters forwarded to an `external fn` that
+    declares a `mut` parameter keep their copies while a sibling that is not forwarded does
+    not; covers the struct and array lowerings separately
+  - `extern_forward_read_only` - The other side of the same gate, in one module: parameters
+    forwarded to declarations marking nothing `mut` are elided, a sibling forwarded to a
+    `mut`-declaring external keeps its copy, and a body write still decides regardless
   - `alias_same_argument` - The same caller variable passed to two parameters, one written
     and copied, the other by reference
   - `alias_whole_and_part` - One parameter's region strictly contains the other's
@@ -637,11 +645,13 @@ Test data includes:
   - `alias_sret` - A compound return writes the caller's destination while a by-reference
     parameter is read, including a destination pointer forwarded down a call chain
 - Receiver escape fixtures in `tests/test_data/codegen/wasm/self_extern_escape/`: a method
-  that hands `self`, a projection of it, or a scalar drawn from it to an `external fn` —
-  from a nested block, a nested expression, or a sub-object position — allocates the
-  receiver a frame slot and copies on entry; `no_escape_self` is the control that stays
-  frameless, `mut_self_extern` covers the mutable receiver, and `escape_with_param` pins
-  the receiver slot's frame offset against a co-resident written-parameter slot
+  that hands `self`, a projection of it, or a scalar drawn from it to an `external fn`
+  declaring a `mut` parameter — from a nested block, a nested expression, or a sub-object
+  position — allocates the receiver a frame slot and copies on entry; `no_escape_self` and
+  `read_only_extern_self` are the two controls that stay frameless (the receiver reaches no
+  external, and the receiver reaches one that declares nothing `mut`), `mut_self_extern`
+  covers the written receiver, and `escape_with_param` pins the receiver slot's frame offset
+  against a co-resident written-parameter slot
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

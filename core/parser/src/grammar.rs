@@ -119,6 +119,18 @@ mod tests {
         "glob imports are not supported; import the file (use a::b;) or list items \
          explicitly (use a::b::{x, y};)";
 
+    /// The verbatim stray-`mut` diagnostic, kept in sync with
+    /// `params::MUT_WITHOUT_BINDING_MESSAGE`. Duplicated for the same reason as
+    /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
+    const MUT_MESSAGE: &str = "`mut` applies to a named parameter or to `self`; write \
+                               `mut name: type`, or drop the `mut`";
+
+    /// The verbatim missing-type `mut` diagnostic, kept in sync with
+    /// `params::MUT_PARAMETER_MISSING_TYPE_MESSAGE`.
+    const MUT_MISSING_TYPE_MESSAGE: &str = "a `mut` parameter needs a type; write \
+                                            `mut name: type`, or drop the `mut` if this is a \
+                                            bare type";
+
     /// The verbatim non-decimal-tail diagnostic for `tail`, kept in sync with
     /// `expr::non_decimal_message`. Duplicated for the same reason as
     /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
@@ -267,6 +279,31 @@ mod tests {
         let args = e.child(SyntaxKind::ArgumentList).unwrap();
         // Two bare-type arguments: each is a TypeI32 directly in the list.
         assert_eq!(count_kind(args, SyntaxKind::TypeI32), 2);
+    }
+
+    #[test]
+    fn external_function_mut_argument_shape() {
+        // `mut` on an external parameter parses today and is inert downstream;
+        // this pins the CST shape it produces before anything depends on it.
+        let src = "external fn sort_pair(mut a: [i32; 2]);";
+        assert_clean(src);
+        let e = first(src, SyntaxKind::ExternalFunctionDefinition);
+        let args = e.child(SyntaxKind::ArgumentList).unwrap();
+        let decl = args.child(SyntaxKind::ArgumentDeclaration).unwrap();
+        assert!(decl.child(SyntaxKind::MutKeyword).is_some());
+        assert_eq!(
+            decl.child(SyntaxKind::Identifier).map(|n| n.text(src)),
+            Some("a")
+        );
+        assert!(decl.child(SyntaxKind::TypeArray).is_some());
+
+        // Teeth: the same declaration without `mut` carries no `MutKeyword`, so
+        // the assertion above cannot pass on a node the parser always emits.
+        let plain = first(
+            "external fn sort_pair(a: [i32; 2]);",
+            SyntaxKind::ArgumentDeclaration,
+        );
+        assert!(plain.child(SyntaxKind::MutKeyword).is_none());
     }
 
     #[test]
@@ -1584,6 +1621,134 @@ mod tests {
         assert_clean(src);
         let sr = first(src, SyntaxKind::SelfReference);
         assert!(sr.child(SyntaxKind::MutKeyword).is_some());
+    }
+
+    #[test]
+    fn mut_before_bare_type_argument_is_rejected() {
+        // `mut` has no binding to qualify before a bare type. Exactly one
+        // diagnostic, and the type still parses as the bare-type argument the
+        // source wrote — not as a declaration with an error name.
+        let src = "external fn g(mut [i32; 2]);";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        let args = find(&root, SyntaxKind::ArgumentList).expect("argument list");
+        assert_eq!(count_kind(args, SyntaxKind::ArgumentDeclaration), 0);
+        assert!(
+            find(args, SyntaxKind::TypeArray).is_some(),
+            "the bare type must survive the dropped `mut`:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn mut_before_ignored_argument_is_rejected() {
+        // The ignored form names no binding either. Before this diagnostic the
+        // `mut` derailed the whole argument list, cascading into phantom
+        // top-level `Error` definitions.
+        let src = "external fn f(mut _: i32);";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        let args = find(&root, SyntaxKind::ArgumentList).expect("argument list");
+        assert_eq!(count_kind(args, SyntaxKind::IgnoreArgument), 1);
+        assert_eq!(count_kind(args, SyntaxKind::ArgumentDeclaration), 0);
+    }
+
+    #[test]
+    fn mut_before_bare_type_in_plain_function_is_rejected() {
+        // The `mut` arm is shared with ordinary `fn` parameters, so the same
+        // rejection applies there.
+        let src = "fn h(mut [i32; 2]) -> i32 { return 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        let f = find(&root, SyntaxKind::FunctionDefinition).expect("function");
+        assert!(
+            f.child(SyntaxKind::Block).is_some(),
+            "the body must still parse:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn mut_before_ignored_argument_in_plain_function_is_rejected() {
+        let src = "fn i(mut _: i32) -> i32 { return 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        let args = find(&root, SyntaxKind::ArgumentList).expect("argument list");
+        assert_eq!(count_kind(args, SyntaxKind::IgnoreArgument), 1);
+    }
+
+    #[test]
+    fn mut_without_binding_does_not_corrupt_following_items() {
+        // Recovery quality: the definition after the rejected `mut` must parse
+        // intact, and no `Error` definition may be manufactured from the tokens
+        // of the erroring one.
+        let src = "external fn g(mut [i32; 2]); fn later() -> i32 { return 7; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        assert_eq!(count_kind(&root, SyntaxKind::Error), 0);
+        let f = find(&root, SyntaxKind::FunctionDefinition).expect("the trailing fn must parse");
+        assert_eq!(
+            f.child(SyntaxKind::Identifier).map(|n| n.text(src)),
+            Some("later")
+        );
+    }
+
+    #[test]
+    fn mut_before_ignored_argument_does_not_corrupt_following_items() {
+        // The ignored form is the shape that used to swallow the rest of the
+        // file; pin the trailing definition separately from the bare-type case.
+        let src = "fn i(mut _: i32) -> i32 { return 1; } fn later() -> i32 { return 7; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string()]);
+        assert_eq!(count_kind(&root, SyntaxKind::Error), 0);
+        assert_eq!(count_kind(&root, SyntaxKind::FunctionDefinition), 2);
+    }
+
+    #[test]
+    fn repeated_stray_mut_reports_once_per_keyword() {
+        // The drain loop reports each keyword it drops, and the declaration the
+        // last `mut` does qualify still parses with its mutability intact.
+        let src = "fn l(mut mut mut a: i32) -> i32 { return 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MESSAGE.to_string(), MUT_MESSAGE.to_string()]);
+        let decl = find(&root, SyntaxKind::ArgumentDeclaration).expect("declaration");
+        assert!(decl.child(SyntaxKind::MutKeyword).is_some());
+        assert_eq!(
+            decl.child(SyntaxKind::Identifier).map(|n| n.text(src)),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn mut_parameter_without_a_type_names_the_missing_type() {
+        // `mut a` *is* a named parameter, so the general stray-`mut` message
+        // would deny what the source says; this shape earns its own diagnostic
+        // naming the missing type. It stays on the drop path all the same, so no
+        // declaration — and so no fabricated mutability flag — is manufactured
+        // from the erroring program.
+        for src in ["fn j(mut a) -> i32 { return 1; }", "external fn j(mut a);"] {
+            let (root, msgs) = parse_messages(src);
+            assert_eq!(
+                msgs,
+                vec![MUT_MISSING_TYPE_MESSAGE.to_string()],
+                "for {src:?}"
+            );
+            assert_eq!(
+                count_kind(&root, SyntaxKind::ArgumentDeclaration),
+                0,
+                "for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mut_before_a_bare_custom_type_gets_the_missing_type_message() {
+        // `mut Point` is a bare custom type, indistinguishable at this point
+        // from a named parameter missing its type — which is why the message
+        // offers both fixes rather than demanding a `:` the source may not want.
+        let src = "external fn n(mut Point);";
+        let (_root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![MUT_MISSING_TYPE_MESSAGE.to_string()]);
     }
 
     #[test]

@@ -52,8 +52,9 @@ use crate::{
     definition_graph::{self, DefNode, GraphOutcome},
     errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{
-        ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind, ResolvedImport,
-        ResolvedImportTarget, ResolvedNominalType, SymbolTable, UnimportedNamespace,
+        BindingMutability, ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind,
+        ResolvedImport, ResolvedImportTarget, ResolvedNominalType, SymbolTable,
+        UnimportedNamespace,
     },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::{CallTarget, TypedContext},
@@ -1231,10 +1232,11 @@ impl TypeChecker {
                 // `check_const_initializers` after imports resolve, so a `const`
                 // may reference a cross-file `const` brought in by `use a::b::{C};`
                 // or named by a qualified path.
-                if let Err(err) =
-                    self.symbol_table
-                        .push_variable_to_scope(&const_name, const_type, false)
-                {
+                if let Err(err) = self.symbol_table.push_variable_to_scope(
+                    &const_name,
+                    const_type,
+                    BindingMutability::Constant,
+                ) {
                     self.push_error(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Variable,
                         name: const_name,
@@ -1681,10 +1683,11 @@ impl TypeChecker {
                     if !bound.insert(name_str.clone()) {
                         continue;
                     }
-                    if let Err(err) = self
-                        .symbol_table
-                        .push_variable_to_scope(&name_str, arg_type, *is_mut)
-                    {
+                    if let Err(err) = self.symbol_table.push_variable_to_scope(
+                        &name_str,
+                        arg_type,
+                        BindingMutability::from_mut_flag(*is_mut),
+                    ) {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
                             name: name_str,
@@ -1759,10 +1762,11 @@ impl TypeChecker {
                     if !bound.insert(name_str.clone()) {
                         continue;
                     }
-                    if let Err(err) = self
-                        .symbol_table
-                        .push_variable_to_scope(&name_str, arg_type, *is_mut)
-                    {
+                    if let Err(err) = self.symbol_table.push_variable_to_scope(
+                        &name_str,
+                        arg_type,
+                        BindingMutability::from_mut_flag(*is_mut),
+                    ) {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
                             name: name_str,
@@ -1775,10 +1779,11 @@ impl TypeChecker {
                     if !bound.insert("self".to_string()) {
                         continue;
                     }
-                    if let Err(err) =
-                        self.symbol_table
-                            .push_variable_to_scope("self", self_type.clone(), *is_mut)
-                    {
+                    if let Err(err) = self.symbol_table.push_variable_to_scope(
+                        "self",
+                        self_type.clone(),
+                        BindingMutability::from_mut_flag(*is_mut),
+                    ) {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
                             name: "self".to_string(),
@@ -1851,7 +1856,9 @@ impl TypeChecker {
         match kind {
             Stmt::Assign { left, right } => {
                 if let Some(name) = self.extract_root_variable_name(ctx.arena(), left) {
-                    if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
+                    if let Some(mutability) = self.symbol_table.lookup_binding_mutability(&name)
+                        && !mutability.permits_write()
+                    {
                         self.push_error(TypeCheckError::AssignToImmutable { name, location });
                     }
                 } else {
@@ -2049,10 +2056,11 @@ impl TypeChecker {
                         location,
                     });
                 }
-                if let Err(err) =
-                    self.symbol_table
-                        .push_variable_to_scope(&var_name, target_type.clone(), is_mut)
-                {
+                if let Err(err) = self.symbol_table.push_variable_to_scope(
+                    &var_name,
+                    target_type.clone(),
+                    BindingMutability::from_mut_flag(is_mut),
+                ) {
                     self.push_error(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Variable,
                         name: var_name,
@@ -2104,7 +2112,7 @@ impl TypeChecker {
                     if let Err(err) = self.symbol_table.push_variable_to_scope(
                         &const_name,
                         constant_type.clone(),
-                        false,
+                        BindingMutability::Constant,
                     ) {
                         self.push_error(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
@@ -2939,10 +2947,17 @@ impl TypeChecker {
             }
             Expr::Identifier(ident_id) => {
                 let name = ctx.arena()[ident_id].name.clone();
-                if let Some(var_ty) = self
-                    .symbol_table
-                    .lookup_variable(&name)
-                    .or_else(|| self.symbol_table.lookup_constant(&name))
+                let as_variable = self.symbol_table.lookup_variable(&name);
+                // Mutability is recorded only for a name that resolves to a
+                // variable, and only here: the answer comes from the scope the
+                // cursor currently sits in, which no later phase can reconstruct.
+                if as_variable.is_some()
+                    && let Some(mutability) = self.symbol_table.lookup_binding_mutability(&name)
+                {
+                    ctx.set_binding_mutability(expr_id, mutability);
+                }
+                if let Some(var_ty) =
+                    as_variable.or_else(|| self.symbol_table.lookup_constant(&name))
                 {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), var_ty.clone());
                     Some(var_ty)
@@ -4119,7 +4134,7 @@ impl TypeChecker {
             // code generation time by looking its bare name up in the scope the
             // call is written in — the declaring file, and the `spec` block
             // within it. That bare-identifier shape is also what
-            // `Compiler::param_escapes_to_extern` keys on when it decides
+            // `Compiler::param_extern_reach` keys on when it decides
             // whether a compound parameter must keep its private entry copy
             // because the callee may write through the pointer. Leaving
             // externs unrecorded keeps "an extern call carries no target" a

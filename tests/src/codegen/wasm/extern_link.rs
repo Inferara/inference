@@ -108,18 +108,22 @@ mod extern_link_tests {
 
     /// Runs the pipeline an `infc -L <lib_dir> main.inf -v` invocation runs and
     /// returns the unified `.wasm` together with its Rocq translation.
+    ///
+    /// Analysis is part of that pipeline and is run here for the same reason
+    /// `infc` runs it: a fixture that skipped it could compile, link and assert
+    /// green while being a program `infc` refuses. That matters most for the
+    /// rules about what may cross an extern call boundary — A024 and A047 —
+    /// whose whole subject is the shape these fixtures are built out of.
     fn compile_and_link(main_source: &str, lib_dir: &Path, module_name: &str) -> (Vec<u8>, String) {
         let arena = parse(main_source).expect("main source parses");
         let typed = type_check(arena).expect("main source type-checks");
+        inference_analysis::analyze(&typed).expect("main source passes analysis");
 
         let mut search_path = SearchPath::new();
         search_path.push_lib_dir(lib_dir.to_path_buf());
         let externals = resolve_external_modules(&typed, &search_path, None)
             .expect("external modules resolve and validate");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = codegen(&typed, module_name).expect("main codegen succeeds");
 
@@ -139,7 +143,12 @@ mod extern_link_tests {
             "the unlinked module must still carry an import record; .v was:\n{pre_link_rocq}"
         );
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         let rocq = wasm_to_v(
             module_name,
             &unified,
@@ -267,10 +276,18 @@ mod extern_link_tests {
 
         let externals =
             resolve_external_modules(&typed, &SearchPath::new(), None).expect("no externs");
-        assert!(externals.is_empty(), "program binds no external modules");
+        assert!(
+            externals.modules.is_empty(),
+            "program binds no external modules"
+        );
+        assert!(
+            externals.contracts.is_empty(),
+            "a program that declares no extern declares no write set either"
+        );
 
         let codegen_output = codegen(&typed, "plain").expect("codegen succeeds");
-        let unified = link(codegen_output.wasm(), &[]).expect("link is a no-op");
+        let unified = link(codegen_output.wasm(), &[], Some(&externals.contracts))
+            .expect("link is a no-op");
         assert_eq!(
             unified,
             codegen_output.wasm(),
@@ -294,13 +311,13 @@ mod extern_link_tests {
         )
         .expect("fixture assembles");
         assert!(
-            link(&import_bearing, &[]).is_err(),
+            link(&import_bearing, &[], None).is_err(),
             "a module with an unsatisfied import must not pass through as Ok"
         );
 
         // And malformed bytes must surface a parse error, not Ok(garbage).
         assert!(
-            link(&[0x00, 0x61, 0x73, 0x6d, 0xff], &[]).is_err(),
+            link(&[0x00, 0x61, 0x73, 0x6d, 0xff], &[], None).is_err(),
             "malformed main bytes must be a link error, not a silent pass-through"
         );
     }
@@ -352,16 +369,16 @@ mod extern_link_tests {
           (export "sort_pair" (func 1)))
         "#;
 
-    /// Issue #329: an immutable `self` forwarded to a writing external must not
-    /// let that external reach the caller's struct.
+    /// Issue #329: a `self` receiver forwarded to a writing external must not let
+    /// that external reach the caller's struct.
     ///
-    /// The first three probes differ only in how the receiver arrives — an
-    /// immutable `self`, a `mut self`, and an ordinary by-value parameter — and
-    /// each packs what the callee saw together with what the caller has
-    /// afterwards, so a single number pins the whole outcome. The bug returned
-    /// `20050205` for the first probe: the caller's `Pair { a: 5, b: 2 }` came
-    /// back sorted, because `touch` was frameless and handed `probe_self`'s own
-    /// frame pointer to the foreign body.
+    /// The first two probes differ only in how the receiver arrives — a `mut
+    /// self` and an ordinary by-value parameter — and each packs what the callee
+    /// saw together with what the caller has afterwards, so a single number pins
+    /// the whole outcome. The bug returned `20050205` for the first probe: the
+    /// caller's `Pair { a: 5, b: 2 }` came back sorted, because `touch` was
+    /// frameless and handed `probe_mut_self`'s own frame pointer to the foreign
+    /// body.
     ///
     /// Both halves of each value are load-bearing. Checking only that the caller
     /// survived would accept a fix that stages a copy at the *call site* instead
@@ -371,12 +388,17 @@ mod extern_link_tests {
     ///
     /// What this pins is caller-side value semantics only. Inside the method the
     /// external still writes through the callee's own copy, so `touch` observes
-    /// its immutable receiver sorted — the `2005` half of the expected value.
-    /// The named-parameter probe has behaved that way all along (its `25` half),
-    /// which is why it is here: the fix makes the receiver match the parameter,
-    /// not the other way round.
+    /// its own receiver sorted — the `2005` half of the expected value. The
+    /// named-parameter probe has behaved that way all along (its `25` half).
     ///
-    /// The fourth probe runs the opposite decision in the same merged module. A
+    /// The receiver is `mut self` because `sort_pair` now declares `mut p`:
+    /// forwarding an *immutable* receiver to a parameter the foreign body may
+    /// write through is an A047 error, which
+    /// [`immutable_bindings_forwarded_to_a_writing_extern_are_rejected`] pins.
+    /// The receiver's mutability is what changed; the values did not, because
+    /// `mut` on the external's parameter keeps every entry copy in place.
+    ///
+    /// The third probe runs the opposite decision in the same merged module. A
     /// compound parameter that never reaches the external is passed by reference
     /// — no frame slot, no entry copy — so what the callee dereferences is a raw
     /// address in the caller's frame rather than a region of its own. Linking is
@@ -390,11 +412,12 @@ mod extern_link_tests {
     /// the callee's copy (`2005`), and the address was still good afterwards
     /// (`52`).
     #[test]
-    fn immutable_self_forwarded_to_writing_extern_leaves_the_caller_intact() {
-        // Of the four compound parameters in this program only `peek`'s is passed
-        // by reference; the other three reach the external and keep their copies.
-        // Without this the fourth probe would be equally satisfied by a copy, and
-        // the merged module's handling of a raw caller address would go unrun.
+    fn mut_self_forwarded_to_writing_extern_leaves_the_caller_intact() {
+        // Of the three compound parameters in this program only `peek`'s is
+        // passed by reference; the other two reach the external and keep their
+        // copies. Without this the third probe would be equally satisfied by a
+        // copy, and the merged module's handling of a raw caller address would go
+        // unrun.
         cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
         let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
         let lib_dir = TempLibDir::new("self_extern");
@@ -403,25 +426,20 @@ mod extern_link_tests {
         lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
 
         let main_source = "\
-external fn sort_pair(p: Pair);
+external fn sort_pair(mut p: Pair);
 use { sort_pair } from sortlib;
 
 struct Pair {
     a: i32;
     b: i32;
 
-    fn touch(self) -> i32 {
-        sort_pair(self);
-        return self.a * 1000 + self.b;
-    }
-
-    fn touch_mut(mut self) -> i32 {
+    fn touch(mut self) -> i32 {
         sort_pair(self);
         return self.a * 1000 + self.b;
     }
 }
 
-fn touch_param(p: Pair) -> i32 {
+fn touch_param(mut p: Pair) -> i32 {
     sort_pair(p);
     return p.a * 10 + p.b;
 }
@@ -430,15 +448,9 @@ fn peek(p: Pair) -> i32 {
     return p.a * 10 + p.b;
 }
 
-pub fn probe_self() -> i32 {
-    let p: Pair = Pair { a: 5, b: 2 };
-    let inner: i32 = p.touch();
-    return inner * 10000 + p.a * 100 + p.b;
-}
-
 pub fn probe_mut_self() -> i32 {
     let p: Pair = Pair { a: 5, b: 2 };
-    let inner: i32 = p.touch_mut();
+    let inner: i32 = p.touch();
     return inner * 10000 + p.a * 100 + p.b;
 }
 
@@ -479,20 +491,15 @@ pub fn probe_by_reference() -> i32 {
         let initial_sp = stack_pointer(&mut store, &instance);
 
         assert_eq!(
-            call(&mut store, "probe_self"),
+            call(&mut store, "probe_mut_self"),
             20_050_502,
-            "an immutable `self` must be copied into the method's own frame before \
+            "a `self` receiver must be copied into the method's own frame before \
              it reaches a writing external: the callee sees the sorted pair (2005) \
              and the caller still holds Pair {{ a: 5, b: 2 }} (502). 20050205 is the \
              #329 bug (caller mutated); 50020502 would mean the copy was staged at \
-             the call site instead of on entry"
-        );
-        assert_eq!(
-            call(&mut store, "probe_mut_self"),
-            20_050_502,
-            "the `mut self` control is unchanged — it has had a frame slot and an \
-             entry copy all along, and the fix must give the immutable receiver the \
-             same treatment rather than alter this one"
+             the call site instead of on entry. `mut self` says the method's own \
+             copy may change, which is exactly what the sort does to it — it says \
+             nothing about the caller's"
         );
         assert_eq!(
             call(&mut store, "probe_named_param"),
@@ -517,7 +524,7 @@ pub fn probe_by_reference() -> i32 {
         assert_eq!(
             stack_pointer(&mut store, &instance),
             initial_sp,
-            "four probes have entered and left frames — two of them holding an \
+            "three probes have entered and left frames — two of them holding an \
              entry copy of a receiver — so the shadow stack must be exactly where \
              it started; a drift here means some prologue in the merged module \
              was never matched by its epilogue"
@@ -545,6 +552,11 @@ pub fn probe_by_reference() -> i32 {
     /// test: `25` says the callee did see the sorted pair, so the copy is made
     /// on entry and not staged at the call site, and `52` says the caller's own
     /// array never changed.
+    ///
+    /// `touch_array` takes `mut a` because `sort_pair` declares `mut p`: an
+    /// immutable array forwarded to a parameter the foreign body may write
+    /// through is an A047 error. The asserted value is unchanged by that — `mut`
+    /// on the external's parameter is what keeps the entry copy in place.
     #[test]
     fn named_array_param_forwarded_to_writing_extern_leaves_the_caller_intact() {
         let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
@@ -552,10 +564,10 @@ pub fn probe_by_reference() -> i32 {
         lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
 
         let main_source = "\
-external fn sort_pair(p: [i32; 2]);
+external fn sort_pair(mut p: [i32; 2]);
 use { sort_pair } from sortlib;
 
-fn touch_array(a: [i32; 2]) -> i32 {
+fn touch_array(mut a: [i32; 2]) -> i32 {
     sort_pair(a);
     return a[0] * 10 + a[1];
 }
@@ -601,6 +613,395 @@ pub fn probe_named_array() -> i32 {
         );
     }
 
+    /// A read/write asymmetric external, hand-written in WAT: `copy_first(dst,
+    /// src)` copies the `i32` at `[src]` to `[dst]`.
+    ///
+    /// Its write set is `{0}` and never `{0, 1}`, which is the point: an
+    /// analysis that simply returned "every parameter" would satisfy every
+    /// acceptance test in this file, and only a rejection that names `dst` while
+    /// `src` is declared shows the set was actually derived.
+    const COPYLIB_WAT: &str = r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            i32.load
+            i32.store)
+          (export "copy_first" (func 0)))
+        "#;
+
+    /// Runs [`compile_and_link`]'s pipeline but hands back the link failure
+    /// instead of panicking on it, for the tests whose subject is the rejection.
+    ///
+    /// Analysis runs here too, and its own rejection is reported distinctly: a
+    /// program A047 refuses never reaches the linker, so a test asserting a link
+    /// error against such a program would otherwise pass on the wrong diagnostic.
+    fn try_compile_and_link(
+        main_source: &str,
+        lib_dir: &Path,
+        module_name: &str,
+    ) -> Result<Vec<u8>, String> {
+        let arena = parse(main_source).expect("main source parses");
+        let typed = type_check(arena).expect("main source type-checks");
+        inference_analysis::analyze(&typed).map_err(|e| format!("analysis rejected: {e}"))?;
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.to_path_buf());
+        let externals = resolve_external_modules(&typed, &search_path, None)
+            .map_err(|e| format!("resolution rejected: {e}"))?;
+        let external_bytes = externals.module_bytes();
+        let codegen_output = codegen(&typed, module_name).expect("main codegen succeeds");
+        link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// The rendered analysis rejection of `main_source`, which must be rejected.
+    fn analysis_rejection(main_source: &str) -> String {
+        let arena = parse(main_source).expect("main source parses");
+        let typed = type_check(arena).expect("main source type-checks");
+        inference_analysis::analyze(&typed)
+            .expect_err("the program must be rejected by analysis")
+            .to_string()
+    }
+
+    /// Instantiates a merged module and calls a nullary `i32`-returning export.
+    fn call_probe(unified: &[u8], name: &str) -> i32 {
+        inf_wasmparser::validate(unified).expect("unified module is valid wasm");
+        let engine = Engine::default();
+        let module =
+            Module::new(&engine, unified).unwrap_or_else(|e| panic!("merged module rejected: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("merged module failed to instantiate: {e}"));
+        let probe: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, name)
+            .unwrap_or_else(|e| panic!("merged module must export `{name}`: {e}"));
+        probe
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("`{name}` failed: {e}"))
+    }
+
+    /// **The acceptance criterion for issue #333.** A merged body that stores
+    /// through a parameter its declaration did not mark `mut` is rejected, and
+    /// the *only* difference between the rejected program and the accepted one is
+    /// that keyword.
+    ///
+    /// The control is what makes this a statement about the contract rather than
+    /// about `sortlib` being unmergeable: both programs resolve the same library,
+    /// compute the same closure and reach the same Tier-B verdict, so the sole
+    /// remaining variable is what the declaration claimed. Without it a rejection
+    /// for any unrelated reason — a resolution failure, a Tier-C reason, a
+    /// provenance refusal — would read as success.
+    #[test]
+    fn a_store_through_an_undeclared_parameter_is_rejected_at_link() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("undeclared_write");
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        // One template; `{declaration}` is the entire difference between the two
+        // programs. The local is `mut` in both, so A047 fires in neither and the
+        // linker is the component under test.
+        let program = |declaration: &str| {
+            format!(
+                "\
+{declaration}
+use {{ sort_pair }} from sortlib;
+
+pub fn probe() -> i32 {{
+    let mut arr: [i32; 2] = [5, 2];
+    sort_pair(arr);
+    return arr[0] * 10 + arr[1];
+}}
+"
+            )
+        };
+
+        let rejection = try_compile_and_link(
+            &program("external fn sort_pair(p: [i32; 2]);"),
+            lib_dir.path(),
+            "undeclared_write",
+        )
+        .expect_err("a body that stores through an undeclared parameter must not link");
+        assert!(
+            rejection.contains("sortlib::sort_pair")
+                && rejection.contains("parameter 0 (`p`)")
+                && rejection.contains("does not declare `mut`"),
+            "the rejection must name the external, the offending parameter and the \
+             missing declaration; got: {rejection}"
+        );
+        assert!(
+            rejection.contains("mut p"),
+            "the rejection must spell the fix out for a named parameter; got: {rejection}"
+        );
+
+        let accepted = try_compile_and_link(
+            &program("external fn sort_pair(mut p: [i32; 2]);"),
+            lib_dir.path(),
+            "declared_write",
+        )
+        .expect("the same program with `mut p` declared must link");
+        assert!(
+            function_imports(&accepted).is_empty(),
+            "the accepted control must still be a self-contained merge, found {:?}",
+            function_imports(&accepted)
+        );
+    }
+
+    /// A parameter the external provably never writes through stays outside the
+    /// required declaration, and one it does write through cannot be swapped for
+    /// it.
+    ///
+    /// This is what separates a derived write set from `0..arity`. `copy_first`
+    /// writes through `dst` and only reads through `src`, so declaring `mut dst`
+    /// alone links — a write set equal to the full arity would have demanded
+    /// `mut src` too — while declaring `mut src` alone is rejected *naming
+    /// `dst`*, which a set that under-reported to `{}` could not do either.
+    #[test]
+    fn the_write_set_names_the_written_parameter_and_not_the_read_one() {
+        let lib_wasm = wat::parse_str(COPYLIB_WAT).expect("copylib WAT assembles");
+        let lib_dir = TempLibDir::new("asymmetric_write");
+        lib_dir.write_module(Path::new("copylib.wasm"), &lib_wasm);
+
+        let program = |declaration: &str| {
+            format!(
+                "\
+{declaration}
+use {{ copy_first }} from copylib;
+
+pub fn probe() -> i32 {{
+    let mut dst: [i32; 1] = [7];
+    let mut src: [i32; 1] = [9];
+    copy_first(dst, src);
+    return dst[0] * 10 + src[0];
+}}
+"
+            )
+        };
+
+        let unified = try_compile_and_link(
+            &program("external fn copy_first(mut dst: [i32; 1], src: [i32; 1]);"),
+            lib_dir.path(),
+            "write_dst_only",
+        )
+        .expect("declaring only the parameter the body writes through must be enough");
+        assert_eq!(
+            call_probe(&unified, "probe"),
+            99,
+            "`copy_first` copies [src] over [dst], so both hold 9; the value states \
+             that the merged body ran and wrote where the declaration said it would"
+        );
+
+        let rejection = try_compile_and_link(
+            &program("external fn copy_first(dst: [i32; 1], mut src: [i32; 1]);"),
+            lib_dir.path(),
+            "write_src_only",
+        )
+        .expect_err("declaring the parameter the body only reads must not cover the write");
+        assert!(
+            rejection.contains("parameter 0 (`dst`)"),
+            "the rejection must name the parameter actually written, not merely \
+             report that some declaration was missing; got: {rejection}"
+        );
+    }
+
+    /// Issue #429: a compound `let` local handed straight to a writing external.
+    ///
+    /// Unlike a parameter, a local has no entry copy to contain the foreign
+    /// store, so the callee writes the caller's own bytes — which is correct only
+    /// if the source said the local may change. Three rows cover the whole
+    /// decision, and the first two are the ones #429 is about: before this
+    /// contract existed the program below built silently and mutated an
+    /// immutable `let`.
+    #[test]
+    fn a_compound_local_passed_to_a_writing_extern_must_be_declared_and_mut() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("local_extern");
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        let program = |declaration: &str, binding: &str| {
+            format!(
+                "\
+{declaration}
+use {{ sort_pair }} from sortlib;
+
+pub fn probe_direct() -> i32 {{
+    let {binding} arr: [i32; 2] = [5, 2];
+    sort_pair(arr);
+    return arr[0] * 10 + arr[1];
+}}
+"
+            )
+        };
+
+        // (a) The declaration claims nothing, so the store has no cover and the
+        //     program cannot be built at all. This is the row that closes #429:
+        //     the same source used to link and return 25.
+        let rejection = try_compile_and_link(
+            &program("external fn sort_pair(p: [i32; 2]);", ""),
+            lib_dir.path(),
+            "local_undeclared",
+        )
+        .expect_err("an undeclared write into a caller's local must not link");
+        assert!(
+            rejection.contains("may store through the address parameter 0 (`p`)"),
+            "the rejection must come from the write-set check; got: {rejection}"
+        );
+
+        // (b) The declaration is honest, so the linker is satisfied — and the
+        //     rejection moves to the call site, where an immutable local is
+        //     handed to a parameter the body may write through.
+        let rejection = analysis_rejection(&program("external fn sort_pair(mut p: [i32; 2]);", ""));
+        assert!(
+            rejection.contains("[A047]") && rejection.contains("`arr`"),
+            "an immutable local at a `mut` extern parameter must be an A047 error \
+             naming the binding; got: {rejection}"
+        );
+
+        // (c) Both halves stated: the program builds, runs, and the mutation the
+        //     source authorised is observed in the caller's own local.
+        let unified = try_compile_and_link(
+            &program("external fn sort_pair(mut p: [i32; 2]);", "mut"),
+            lib_dir.path(),
+            "local_declared_mut",
+        )
+        .expect("a `mut` local at a declared `mut` parameter must link");
+        assert_eq!(
+            call_probe(&unified, "probe_direct"),
+            25,
+            "a `mut` local is passed as a raw pointer into the caller's frame, so \
+             the foreign sort reaches it and `arr` is [2, 5] afterwards. 52 would \
+             mean the write was contained in a copy the source never asked for"
+        );
+    }
+
+    /// An unnamed parameter cannot carry a write set, and the rejection has to
+    /// say so — because unlike every other rejection in this file, "declare it
+    /// `mut`" is not a fix the author can apply.
+    ///
+    /// The two unnamed forms occupy a real ABI slot but carry no mutability
+    /// field, and the grammar has no slot for one. So an external that writes
+    /// through such a parameter is unlinkable until the declaration names it, and
+    /// a message that only said "declare it `mut`" would send the author looking
+    /// for a spelling that does not exist.
+    #[test]
+    fn an_unnamed_parameter_cannot_declare_a_write_set() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("unnamed_param");
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        for declaration in [
+            "external fn sort_pair([i32; 2]);",
+            "external fn sort_pair(_: [i32; 2]);",
+        ] {
+            let source = format!(
+                "\
+{declaration}
+use {{ sort_pair }} from sortlib;
+
+pub fn probe() -> i32 {{
+    let mut arr: [i32; 2] = [5, 2];
+    sort_pair(arr);
+    return arr[0] * 10 + arr[1];
+}}
+"
+            );
+            let rejection = try_compile_and_link(&source, lib_dir.path(), "unnamed_param")
+                .expect_err("an unnamed parameter declares no write set, so the store is uncovered");
+            assert!(
+                rejection.contains("unnamed form") && rejection.contains("give it a name first"),
+                "`{declaration}` must be rejected with the name-it-first fix, since \
+                 `mut` has nowhere to go; got: {rejection}"
+            );
+            assert!(
+                !rejection.contains("(`"),
+                "the rejection must not quote a parameter name the declaration does \
+                 not have; got: {rejection}"
+            );
+        }
+    }
+
+    /// The capability AD-3 removes: an immutable compound binding may no longer
+    /// be forwarded to a parameter a merged body may write through.
+    ///
+    /// These are the three shapes the #220/#329 acceptance fixtures used to
+    /// assert as *working* — an immutable `self` receiver, an immutable by-value
+    /// struct parameter, and an immutable array parameter, each handed straight
+    /// to `sort_pair`. They were correct while `sort_pair` claimed nothing; once
+    /// it declares `mut p`, each one is a value that changes across a call the
+    /// source never said could change it, which is exactly A047's subject. The
+    /// removal is pinned here so it reads as a decision rather than as coverage
+    /// that quietly disappeared.
+    #[test]
+    fn immutable_bindings_forwarded_to_a_writing_extern_are_rejected() {
+        for (shape, forwarder) in [
+            (
+                "an immutable `self` receiver",
+                "\
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        sort_pair(self);
+        return self.a;
+    }
+}
+",
+            ),
+            (
+                "an immutable by-value struct parameter",
+                "\
+struct Pair {
+    a: i32;
+    b: i32;
+}
+
+fn touch_param(p: Pair) -> i32 {
+    sort_pair(p);
+    return p.a;
+}
+",
+            ),
+        ] {
+            let source = format!(
+                "\
+external fn sort_pair(mut p: Pair);
+use {{ sort_pair }} from sortlib;
+
+{forwarder}"
+            );
+            let rejection = analysis_rejection(&source);
+            assert!(
+                rejection.contains("[A047]"),
+                "forwarding {shape} to a `mut` extern parameter must be an A047 \
+                 error; got: {rejection}"
+            );
+        }
+
+        let rejection = analysis_rejection(
+            "\
+external fn sort_pair(mut p: [i32; 2]);
+use { sort_pair } from sortlib;
+
+fn touch_array(a: [i32; 2]) -> i32 {
+    sort_pair(a);
+    return a[0];
+}
+",
+        );
+        assert!(
+            rejection.contains("[A047]") && rejection.contains("`a`"),
+            "forwarding an immutable array parameter must be an A047 error naming \
+             the binding; got: {rejection}"
+        );
+    }
+
     #[test]
     fn proof_mode_spec_omission_renumbers_the_call_to_the_merged_extern() {
         // C1: a proof-mode program that binds an extern AND declares a spec.
@@ -642,10 +1043,7 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
         let externals =
             resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
@@ -657,7 +1055,12 @@ pub fn probe_named_array() -> i32 {
         )
         .expect("proof-mode codegen succeeds");
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
 
         // Empty explicit maps: the post-link embedded sections are the source of
@@ -733,10 +1136,7 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
         let externals =
             resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
@@ -748,7 +1148,12 @@ pub fn probe_named_array() -> i32 {
         )
         .expect("proof-mode codegen succeeds");
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
 
         // Empty explicit maps: the post-link embedded sections are the source of
@@ -828,10 +1233,7 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
         let externals =
             resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
@@ -843,7 +1245,12 @@ pub fn probe_named_array() -> i32 {
         )
         .expect("proof-mode codegen succeeds");
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
 
         // Empty explicit maps: the post-link embedded sections are the source
@@ -914,10 +1321,7 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
         let externals =
             resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
@@ -929,7 +1333,12 @@ pub fn probe_named_array() -> i32 {
         )
         .expect("proof-mode codegen succeeds");
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
@@ -997,10 +1406,7 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.path().to_path_buf());
         let externals =
             resolve_external_modules(&typed, &search_path, None).expect("external modules resolve");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = inference_wasm_codegen::codegen(
             &typed,
@@ -1030,7 +1436,12 @@ pub fn probe_named_array() -> i32 {
             "the pre-link rejection must name the missing step; got: {pre_link}"
         );
 
-        let unified = link(codegen_output.wasm(), &external_bytes).expect("link succeeds");
+        let unified = link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds");
         inf_wasmparser::validate(&unified).expect("unified module is valid wasm");
         let rocq = wasm_to_v(
             "linked_double",
@@ -1085,13 +1496,15 @@ pub fn probe_named_array() -> i32 {
         search_path.push_lib_dir(lib_dir.to_path_buf());
         let externals = resolve_external_modules(&typed, &search_path, None)
             .expect("external modules resolve and validate");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let codegen_output = codegen(&typed, module_name).expect("multi-file codegen succeeds");
-        link(codegen_output.wasm(), &external_bytes).expect("link succeeds")
+        link(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        )
+        .expect("link succeeds")
     }
 
     /// Instantiates a self-contained merged module and calls `name` with one
@@ -1267,6 +1680,82 @@ pub fn probe_named_array() -> i32 {
                 && rendered.contains("declared (i32, i32) -> (i32)"),
             "the rejection must name the mismatching extern and the signature that \
              disagrees; got: {rendered}"
+        );
+    }
+
+    /// Two files bind the same `(module, field)` and **disagree** on its write
+    /// set. The program must be rejected, naming both files.
+    ///
+    /// This is the one shape where the contract could otherwise be applied to a
+    /// program it does not describe. Both declarations survive resolution — they
+    /// are distinct `external fn`s — while codegen folds them onto a *single*
+    /// WASM import, pinned by
+    /// [`two_files_binding_one_library_share_a_single_merged_body`]. The linker
+    /// then runs one write-set check, and codegen consults each declaration
+    /// separately, so accepting the `mut` file's claim would compile the
+    /// non-`mut` file's calls against a contract that file never made.
+    ///
+    /// The existing cross-declaration gate cannot catch it: `mut` has no
+    /// counterpart in a WASM signature, so both declarations lower identically
+    /// and both validate against the library. Hence a check of its own, and a
+    /// hard error rather than a reconciliation — a union licenses the non-`mut`
+    /// file, an intersection refuses the `mut` file's legitimate link, and taking
+    /// the first match is the miscompile itself.
+    #[test]
+    fn two_files_disagreeing_on_one_externs_write_set_are_rejected() {
+        let lib_wasm = wat::parse_str(SORTLIB_WAT).expect("sortlib WAT assembles");
+        let lib_dir = TempLibDir::new("write-set-clash");
+        lib_dir.write_module(Path::new("sortlib.wasm"), &lib_wasm);
+
+        let mut arena = inference_ast::arena::AstArena::default();
+        for (module_path, source) in [
+            (
+                Vec::new(),
+                "use sib;\n\
+                 external fn sort_pair(mut p: [i32; 2]);\n\
+                 use { sort_pair } from sortlib;\n\
+                 pub fn direct() -> i32 {\n\
+                     let mut arr: [i32; 2] = [5, 2];\n\
+                     sort_pair(arr);\n\
+                     return arr[0];\n\
+                 }\n\
+                 pub fn through_sibling() -> i32 { return sib::via(); }\n",
+            ),
+            (
+                vec!["sib".to_string()],
+                "external fn sort_pair(p: [i32; 2]);\n\
+                 use { sort_pair } from sortlib;\n\
+                 pub fn via() -> i32 {\n\
+                     let arr: [i32; 2] = [5, 2];\n\
+                     sort_pair(arr);\n\
+                     return arr[0];\n\
+                 }\n",
+            ),
+        ] {
+            let parsed = inference_parser::parse_into(arena, source, module_path);
+            assert!(
+                parsed.errors.is_empty(),
+                "multi-file source has syntax errors: {:?}",
+                parsed.errors
+            );
+            arena = parsed.arena;
+        }
+        let typed = type_check(arena).expect("both declarations are well formed on their own");
+
+        let mut search_path = SearchPath::new();
+        search_path.push_lib_dir(lib_dir.path().to_path_buf());
+        let error = resolve_external_modules(&typed, &search_path, None)
+            .expect_err("two declarations disagreeing on the write set must be rejected");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("conflicting write sets for external function `sort_pair`")
+                && rendered.contains("module `sortlib`"),
+            "the rejection must name the extern and the module it is bound to; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("the entry file") && rendered.contains("`sib`"),
+            "the rejection must name BOTH declaring files, since the fix is to make \
+             them agree and neither is wrong on its own; got: {rendered}"
         );
     }
 }

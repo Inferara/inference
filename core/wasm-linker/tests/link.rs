@@ -27,10 +27,17 @@ fn wasm(wat: &str) -> Vec<u8> {
 /// `link(&main, &[&lib])`. Tests that need *distinct* logical modules per
 /// external (multi-module satisfaction, same-field disambiguation) call
 /// [`raw_link`] directly with explicit pairs.
+///
+/// Every call in this file takes the **unchecked** write-set mode, and it is the
+/// only coherent one: these fixtures are hand-written WAT with no Inference
+/// source behind them, so there is no `external fn` declaration whose `mut`
+/// annotations a contract could be derived from. The checked mode has its own
+/// tests below, which supply contracts by hand, and is exercised end to end
+/// through the `infc` pipeline in `inference-tests`.
 fn link(main: &[u8], libs: &[&[u8]]) -> Result<Vec<u8>, LinkError> {
     let module = sole_import_module(main);
     let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
-    raw_link(main, &pairs)
+    raw_link(main, &pairs, None)
 }
 
 /// [`link`] through the warning-carrying entry point, for tests whose subject is
@@ -38,7 +45,7 @@ fn link(main: &[u8], libs: &[&[u8]]) -> Result<Vec<u8>, LinkError> {
 fn link_with_warnings(main: &[u8], libs: &[&[u8]]) -> Result<LinkOutput, LinkError> {
     let module = sole_import_module(main);
     let pairs: Vec<(&str, &[u8])> = libs.iter().map(|b| (module.as_str(), *b)).collect();
-    raw_link_with_warnings(main, &pairs)
+    raw_link_with_warnings(main, &pairs, None)
 }
 
 /// The single logical module `main` imports from, or the empty string when it
@@ -1942,7 +1949,7 @@ fn two_externals_identical_globals_stay_distinct() {
     let lib_a = counter_lib("bump_a");
     let lib_b = counter_lib("bump_b");
 
-    let linked = raw_link(&main, &[("liba", &lib_a), ("libb", &lib_b)])
+    let linked = raw_link(&main, &[("liba", &lib_a), ("libb", &lib_b)], None)
         .expect("two global-bearing externals must merge");
     assert_valid(&linked);
 
@@ -2860,14 +2867,14 @@ fn external_importing_its_environment_is_unsupported() {
 fn invalid_main_bytes_are_a_parse_error() {
     // `raw_link` directly: the `link` test helper parses `main` to derive the
     // import module, so garbage main bytes must go straight to the linker.
-    let err = raw_link(b"not a wasm module", &[]).expect_err("garbage must not parse");
+    let err = raw_link(b"not a wasm module", &[], None).expect_err("garbage must not parse");
     assert!(matches!(err, LinkError::Parse(_)), "expected Parse, got {err:?}");
 }
 
 #[test]
 fn invalid_external_bytes_are_a_parse_error() {
     let main = main_with_sum_and_sub();
-    let err = raw_link(&main, &[("mathlib", b"\0asm broken")])
+    let err = raw_link(&main, &[("mathlib", b"\0asm broken")], None)
         .expect_err("garbage external must not parse");
     assert!(matches!(err, LinkError::Parse(_)), "expected Parse, got {err:?}");
 }
@@ -3223,7 +3230,7 @@ fn main_with_two_memories_is_rejected() {
     module.section(&mems);
     let main = module.finish();
 
-    let err = raw_link(&main, &[]).expect_err("a two-memory main must be rejected");
+    let err = raw_link(&main, &[], None).expect_err("a two-memory main must be rejected");
     assert!(
         matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("memor")),
         "expected an UnsupportedConstruct mentioning the multiple memories, got {err:?}"
@@ -3404,7 +3411,7 @@ fn same_field_two_modules_binds_the_named_module_not_the_first() {
 
     // The decoy `aaa` sorts before `bbb`; the field-keyed merge would have
     // picked it. Pass it first to make the slice order also favor the decoy.
-    let linked = raw_link(&main, &[("aaa", &sub_lib), ("bbb", &add_lib)])
+    let linked = raw_link(&main, &[("aaa", &sub_lib), ("bbb", &add_lib)], None)
         .expect("the bbb-bound `sum` must satisfy the import");
     assert_valid(&linked);
     assert!(function_imports(&linked).is_empty());
@@ -3416,7 +3423,7 @@ fn same_field_two_modules_binds_the_named_module_not_the_first() {
 
     // Reversing the slice order must not change which body is merged: the
     // binding is on the logical module, not the position.
-    let reversed = raw_link(&main, &[("bbb", &add_lib), ("aaa", &sub_lib)])
+    let reversed = raw_link(&main, &[("bbb", &add_lib), ("aaa", &sub_lib)], None)
         .expect("order must not matter");
     assert!(
         body_has_i32_add(&reversed, 1),
@@ -3471,7 +3478,7 @@ fn same_field_two_modules_get_distinct_prefixed_names() {
         "#,
     );
 
-    let linked = raw_link(&main, &[("alib", &alib), ("blib", &blib)])
+    let linked = raw_link(&main, &[("alib", &alib), ("blib", &blib)], None)
         .expect("both same-field modules must satisfy their respective imports");
     assert_valid(&linked);
     assert!(function_imports(&linked).is_empty());
@@ -3532,7 +3539,7 @@ fn a_path_separated_logical_module_name_prefixes_deterministically() {
         "#,
     );
 
-    let linked = raw_link(&main, &[("crypto::sha256", &lib)])
+    let linked = raw_link(&main, &[("crypto::sha256", &lib)], None)
         .expect("a `::`-separated logical module must link without panicking");
     assert_valid(&linked);
 
@@ -3921,7 +3928,7 @@ fn malformed_main_with_out_of_range_type_index_is_a_clean_error_not_a_panic() {
 
     // No externals: the merge still parses, plans, and emits the main module, so
     // the out-of-range type index is reached on the emit path.
-    let err = raw_link(&main, &[])
+    let err = raw_link(&main, &[], None)
         .expect_err("a main with an out-of-range type index must be a clean rejection");
     assert!(
         matches!(&err, LinkError::Parse(_)),
@@ -5302,7 +5309,7 @@ fn adversarial_corpus_never_panics_and_only_emits_valid_modules() {
         // `link` is panic-free by contract; wrap it so a reintroduced panic fails
         // here with the offending fixture named rather than aborting the run.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_link(&probe.main, &pairs)
+            raw_link(&probe.main, &pairs, None)
         }));
 
         let result = outcome.unwrap_or_else(|_| {
@@ -6697,4 +6704,452 @@ fn malformed_post_1_0_external_is_parse_not_unsupported_feature() {
         matches!(&via_link, LinkError::Parse(_)),
         "the link entry must report the structural defect as Parse, not a feature name, got {via_link:?}"
     );
+}
+
+/// The checked write-set mode, driven directly with hand-built contracts.
+///
+/// Every other test in this file takes the unchecked mode, because a WAT fixture
+/// has no `external fn` declaration behind it. These supply the declaration the
+/// front end would have produced, which lets the two modes be compared on
+/// *identical bytes* — the only way to show that a rejection came from the
+/// contract and not from the closure.
+mod declared_write_sets {
+    use super::*;
+    use inference_wasm_linker::ImportWriteSet;
+
+    /// A main importing `memlib::store_at(ptr, val)` and calling it.
+    fn main_calling_store_at() -> Vec<u8> {
+        wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (import "memlib" "store_at" (func (;0;) (type 0)))
+              (memory (;0;) 1 1)
+              (func (;1;) (type 0) (param i32 i32)
+                local.get 0
+                local.get 1
+                call 0)
+              (export "memory" (memory 0))
+              (export "run" (func 1)))
+            "#,
+        )
+    }
+
+    /// `store_at(ptr, val)`: writes `val` at the caller's `ptr`. Tier B, and its
+    /// write set is `{0}`.
+    fn storing_lib() -> Vec<u8> {
+        wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (memory (;0;) 1)
+              (func (;0;) (type 0) (param i32 i32)
+                local.get 0
+                local.get 1
+                i32.store)
+              (export "store_at" (func 0)))
+            "#,
+        )
+    }
+
+    /// The same signature over the same memory, reading instead of writing, so
+    /// the pair differs only in the operator under test.
+    fn reading_lib() -> Vec<u8> {
+        wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (memory (;0;) 1)
+              (func (;0;) (type 0) (param i32 i32)
+                local.get 0
+                i32.load
+                drop)
+              (export "store_at" (func 0)))
+            "#,
+        )
+    }
+
+    fn contract(mut_params: &[u32], param_names: &[Option<&str>]) -> Vec<ImportWriteSet> {
+        vec![ImportWriteSet {
+            module: "memlib".to_string(),
+            field: "store_at".to_string(),
+            mut_params: mut_params.to_vec(),
+            param_names: param_names
+                .iter()
+                .map(|n| n.map(str::to_string))
+                .collect(),
+        }]
+    }
+
+    #[test]
+    fn an_empty_declaration_rejects_a_closure_that_stores() {
+        let contracts = contract(&[], &[Some("ptr"), Some("val")]);
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("a declaration claiming no write must not admit a storing body");
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndeclaredExternWrite { module, field, param_index, param_name }
+                    if module == "memlib"
+                        && field == "store_at"
+                        && *param_index == 0
+                        && param_name.as_deref() == Some("ptr")
+            ),
+            "the rejection must name the import and the offending parameter, got {err:?}"
+        );
+    }
+
+
+    /// The same signature writing through the **second** parameter, so a
+    /// rejection that names parameter 0 has read nothing.
+    fn stores_through_the_second_parameter() -> Vec<u8> {
+        wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32)))
+              (memory (;0;) 1)
+              (func (;0;) (type 0) (param i32 i32)
+                local.get 1
+                local.get 0
+                i32.store)
+              (export "store_at" (func 0)))
+            "#,
+        )
+    }
+
+    #[test]
+    fn an_empty_declaration_names_the_parameter_the_body_actually_writes() {
+        // `an_empty_declaration_rejects_a_closure_that_stores` cannot tell the
+        // attributed index from a default: its body writes through parameter 0,
+        // which is also what any degenerate answer would say. This body writes
+        // through parameter 1, so the reported index and name can only come from
+        // the attribution.
+        let contracts = contract(&[], &[Some("ptr"), Some("val")]);
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &stores_through_the_second_parameter())],
+            Some(&contracts),
+        )
+        .expect_err("a declaration claiming no write must not admit a storing body");
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndeclaredExternWrite { param_index, param_name, .. }
+                    if *param_index == 1 && param_name.as_deref() == Some("val")
+            ),
+            "the rejection must name parameter 1 (`val`), the one the body stores \
+             through, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_declaration_that_covers_the_wrong_parameter_is_rejected() {
+        // The `D != 0` arm, which the structural no-store check never reaches:
+        // the declaration does claim a write, just not the one the body performs.
+        // Only the attributed set can separate this from an accepted link.
+        let contracts = contract(&[1], &[Some("ptr"), Some("val")]);
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("declaring `mut val` does not cover a store through `ptr`");
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndeclaredExternWrite { param_index, param_name, .. }
+                    if *param_index == 0 && param_name.as_deref() == Some("ptr")
+            ),
+            "the rejection must name the uncovered parameter, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_declaration_covering_the_write_admits_the_same_bytes() {
+        let contracts = contract(&[0], &[Some("ptr"), Some("val")]);
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect("declaring `mut ptr` covers the only store the body performs");
+    }
+
+    #[test]
+    fn the_unchecked_mode_admits_what_the_checked_mode_rejects() {
+        // The same bytes the first test refuses, with no contract supplied. This
+        // is what makes the two modes distinguishable rather than a nullable
+        // spelling of one: the verdict differs on identical input, so `None`
+        // cannot be reconstructed from an empty list.
+        raw_link(&main_calling_store_at(), &[("memlib", &storing_lib())], None)
+            .expect("the unchecked mode performs merge mechanics only");
+    }
+
+    #[test]
+    fn an_import_no_contract_mentions_is_held_to_writing_nothing() {
+        // Fail-closed: a missing entry is an empty declaration, never an
+        // exemption. Supplying a contract for a *different* field leaves
+        // `store_at` unmentioned, and the storing body must still be refused.
+        let contracts = vec![ImportWriteSet {
+            module: "memlib".to_string(),
+            field: "load_at".to_string(),
+            mut_params: vec![0],
+            param_names: vec![Some("ptr".to_string())],
+        }];
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("an unmentioned import must be held to an empty write set");
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndescribedExternWrite { module, field, param_index }
+                    if module == "memlib" && field == "store_at" && *param_index == 0
+            ),
+            "the unmentioned import must be the one rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unmentioned_import_is_not_told_it_used_an_unnamed_parameter() {
+        // The two ways a rejection can arrive with no parameter name in hand are
+        // different situations, and the message must not conflate them. An
+        // unnamed parameter is a declaration the linker read, whose repair is to
+        // give the parameter a name; an unmentioned import has no declaration
+        // behind it at all, so that advice would describe a declaration that
+        // played no part in the verdict — and, on the live pipeline, one whose
+        // parameters are in fact all named.
+        let contracts = vec![ImportWriteSet {
+            module: "memlib".to_string(),
+            field: "load_at".to_string(),
+            mut_params: vec![0],
+            param_names: vec![Some("ptr".to_string())],
+        }];
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("an unmentioned import must be held to an empty write set");
+        let text = err.to_string();
+        assert!(
+            text.contains("describes no such import"),
+            "the message must say the contract did not describe the import, got: {text}"
+        );
+        assert!(
+            !text.contains("unnamed form"),
+            "an unmentioned import must not be told its parameter was unnamed, got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_parameter_still_gets_the_naming_advice() {
+        // The control for the test above: a contract that *does* describe the
+        // import but writes the offending parameter without a name keeps the
+        // advice that is specific to it. Without this the previous assertion
+        // would also pass if the naming branch had simply been deleted.
+        let contracts = contract(&[], &[None, None]);
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("a declaration claiming no write must not admit a storing body");
+        let text = err.to_string();
+        assert!(
+            matches!(
+                &err,
+                LinkError::UndeclaredExternWrite { param_name, .. } if param_name.is_none()
+            ),
+            "an unnamed parameter must report no name, got {err:?}"
+        );
+        assert!(
+            text.contains("unnamed form"),
+            "an unnamed parameter must keep the advice to name it first, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_closure_satisfies_an_unmentioned_import() {
+        // The other half: an unmentioned import is held to writing nothing, and a
+        // body that only loads meets that claim. Without this, the rejection
+        // above could be a blanket refusal of every unmentioned import rather
+        // than the write-set check it is meant to be.
+        let contracts = vec![ImportWriteSet {
+            module: "memlib".to_string(),
+            field: "load_at".to_string(),
+            mut_params: vec![0],
+            param_names: vec![Some("ptr".to_string())],
+        }];
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &reading_lib())],
+            Some(&contracts),
+        )
+        .expect("a closure that never stores writes nothing, which is what nothing declared says");
+    }
+
+    /// A contract list is a map written as a slice, so two entries for one
+    /// `(module, field)` have to be refused rather than resolved by position.
+    ///
+    /// The pair below is chosen so that order alone flips the verdict: the
+    /// permissive entry covers the body's store and the restrictive one does
+    /// not. If the duplicate were resolved by first match, one ordering would
+    /// link the very bytes the other refuses — which is what a caller who wrote
+    /// the two entries in either order would never be told.
+    #[test]
+    fn two_entries_for_one_import_are_refused_in_either_order() {
+        let permissive = ImportWriteSet {
+            module: "memlib".to_string(),
+            field: "store_at".to_string(),
+            mut_params: vec![0],
+            param_names: vec![Some("ptr".to_string()), Some("val".to_string())],
+        };
+        let restrictive = ImportWriteSet {
+            mut_params: Vec::new(),
+            ..permissive.clone()
+        };
+
+        for (label, contracts) in [
+            (
+                "permissive first",
+                vec![permissive.clone(), restrictive.clone()],
+            ),
+            ("restrictive first", vec![restrictive, permissive]),
+        ] {
+            let err = raw_link(
+                &main_calling_store_at(),
+                &[("memlib", &storing_lib())],
+                Some(&contracts),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("a duplicated contract key must be refused ({label})"));
+            assert!(
+                matches!(
+                    &err,
+                    LinkError::DuplicateWriteContract { module, field }
+                        if module == "memlib" && field == "store_at"
+                ),
+                "the rejection must name the duplicated import ({label}), got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_entries_for_different_imports_are_not_a_duplicate() {
+        // The control: the check keys on the whole `(module, field)` pair, not on
+        // either half. A list naming two distinct imports must link normally.
+        let contracts = vec![
+            ImportWriteSet {
+                module: "memlib".to_string(),
+                field: "store_at".to_string(),
+                mut_params: vec![0],
+                param_names: vec![Some("ptr".to_string()), Some("val".to_string())],
+            },
+            ImportWriteSet {
+                module: "memlib".to_string(),
+                field: "load_at".to_string(),
+                mut_params: vec![0],
+                param_names: vec![Some("ptr".to_string())],
+            },
+        ];
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect("distinct imports in one list are not a duplicated key");
+    }
+
+    #[test]
+    fn a_read_only_closure_satisfies_an_empty_declaration() {
+        // The other half of the first test: the licence an empty declaration
+        // grants is real, and a body that only loads earns it.
+        let contracts = contract(&[], &[Some("ptr"), Some("val")]);
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &reading_lib())],
+            Some(&contracts),
+        )
+        .expect("a closure that never stores is covered by a declaration claiming no write");
+    }
+
+    #[test]
+    fn a_declared_parameter_the_body_never_writes_is_not_an_error() {
+        // `mut` is a permission, not an obligation. A declaration is free to
+        // over-approximate — a library whose write depends on its arguments could
+        // not be declared at all otherwise — so an unexercised `mut` must link.
+        let contracts = contract(&[0, 1], &[Some("ptr"), Some("val")]);
+        raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &reading_lib())],
+            Some(&contracts),
+        )
+        .expect("a `mut` the body never exercises must not itself be a rejection");
+    }
+
+    #[test]
+    fn a_tier_a_closure_satisfies_every_contract() {
+        // Tier A means no memory access at all, so the closure's store set is
+        // empty by construction: every memory arm of the safety allow-list sets
+        // `uses_memory`, which is exactly what routes a closure to Tier B. The
+        // invariant is pinned here rather than re-derived by a second scan that
+        // could disagree with the flag the tier itself turns on.
+        let main = wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32) (result i32)))
+              (import "memlib" "store_at" (func (;0;) (type 0)))
+              (func (;1;) (type 0) (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                call 0)
+              (export "run" (func 1)))
+            "#,
+        );
+        let lib = wasm(
+            r#"
+            (module
+              (type (;0;) (func (param i32 i32) (result i32)))
+              (func (;0;) (type 0) (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.add)
+              (export "store_at" (func 0)))
+            "#,
+        );
+        let contracts = contract(&[], &[Some("ptr"), Some("val")]);
+        raw_link(&main, &[("memlib", &lib)], Some(&contracts))
+            .expect("a memoryless closure writes nothing, so the strictest contract holds");
+    }
+
+    #[test]
+    fn an_unnamed_parameter_is_reported_without_a_name() {
+        // The front end supplies `None` for a parameter written in an unnamed
+        // form, and the rejection has to carry that through: the fix it teaches
+        // ("name it first") is the only one available, and a fabricated name
+        // would send the author looking for a spelling that does not exist.
+        let contracts = contract(&[], &[None, None]);
+        let err = raw_link(
+            &main_calling_store_at(),
+            &[("memlib", &storing_lib())],
+            Some(&contracts),
+        )
+        .expect_err("an unnamed parameter declares no write set");
+        assert!(
+            matches!(&err, LinkError::UndeclaredExternWrite { param_name, .. } if param_name.is_none()),
+            "an unnamed parameter must be reported as unnamed, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("unnamed form") && rendered.contains("give it a name first"),
+            "the message must teach the name-it-first fix; got: {rendered}"
+        );
+    }
 }

@@ -257,6 +257,30 @@ mod tests {
             "fn f() { a:: }",
             "fn f() { a. }",
         ];
+        // External declarations, which the corpus previously omitted entirely.
+        // The `mut` forms matter because `mut` is the one argument modifier
+        // the grammar reports and drops rather than folding into a node, so
+        // its recovery path must stay total: truncated after the keyword,
+        // before a form that names no binding, and repeated.
+        let extern_declarations = [
+            "external",
+            "external fn",
+            "external fn f(",
+            "external fn f(mut",
+            "external fn f(mut);",
+            "external fn f(mut, mut);",
+            "external fn f(mut _: i32);",
+            "external fn g(mut [i32;2]);",
+            "external fn h(mut a: [i32;2]);",
+            "external fn i(mut mut mut a: i32);",
+            "external fn j(mut self);",
+            "external fn k(mut a: [i32;2]) -> i32;",
+            "spec S { external fn m(mut a: i32); }",
+            "fn f(mut",
+            "fn f(mut _: i32) { }",
+            "fn g(mut [i32;2]) { }",
+            "fn h(mut) { }",
+        ];
         let random_bytes = ["@#$%^&*", ";;;;", "}{}{", "::::", "''''", "[[[["];
         let large_repetitive = [
             "(".repeat(500),
@@ -269,6 +293,10 @@ mod tests {
             "fn f() { if true {".repeat(200),
             "[".repeat(500),
             "a::".repeat(500),
+            // A long run of argument modifiers with no binding to qualify:
+            // the parser drains them in a loop, so this must neither spin
+            // nor grow the stack with the run length.
+            format!("fn f({})", "mut ".repeat(500)),
         ];
 
         let mut corpus: Vec<String> = Vec::new();
@@ -277,6 +305,7 @@ mod tests {
         corpus.extend(dangling_operators.iter().map(|s| (*s).to_string()));
         corpus.extend(truncated_operands.iter().map(|s| (*s).to_string()));
         corpus.extend(partial_constructs.iter().map(|s| (*s).to_string()));
+        corpus.extend(extern_declarations.iter().map(|s| (*s).to_string()));
         corpus.extend(random_bytes.iter().map(|s| (*s).to_string()));
         corpus.extend(large_repetitive);
 

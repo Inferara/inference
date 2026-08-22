@@ -137,8 +137,36 @@ fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>,
     }
 }
 
-/// Lowers an `external fn`'s declared argument types and return type into a
-/// [`DeclaredSignature`] of WASM value types.
+/// An `external fn` declaration, lowered into the WASM parameter space.
+///
+/// The signature and the write set are produced by **one walk over one argument
+/// slice**, which is what makes the parameter indices in `mut_params` mean the
+/// same thing as the positions in `signature.params`. Deriving them separately
+/// would put two walks in the tree that agree only by inspection, and the whole
+/// value of the write set is that its coordinates are the linker's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoweredExtern {
+    /// The declared signature, compared against the resolved library's export.
+    pub signature: DeclaredSignature,
+    /// WASM parameter indices declared `mut`: the write set the merged body is
+    /// held to. Only a named argument can carry `mut`; the unnamed forms occupy
+    /// a parameter slot and contribute nothing.
+    pub mut_params: Vec<u32>,
+    /// Declared parameter names, positionally. `None` for an argument written in
+    /// an unnamed form, which the linker quotes to teach the name-it-first fix.
+    pub param_names: Vec<Option<String>>,
+}
+
+/// Lowers an `external fn`'s declared arguments and return type into WASM value
+/// types, together with the write set its `mut` annotations declare.
+///
+/// Every argument form but `self` occupies one WASM parameter slot, in
+/// declaration order, so the index of an argument in `args` is the index of its
+/// parameter — the correspondence codegen's `import_param_types` also relies on.
+/// `self` is unreachable here: the type checker rejects a receiver on an
+/// `external fn`, so no `self` can shift the indices apart. That is asserted
+/// rather than assumed, because if it ever became reachable the write set would
+/// silently name the wrong parameters.
 ///
 /// # Errors
 ///
@@ -149,20 +177,40 @@ pub fn lower_extern_signature(
     arena: &AstArena,
     args: &[inference_ast::nodes::ArgData],
     returns: Option<TypeId>,
-) -> Result<DeclaredSignature, LowerSignatureError> {
+) -> Result<LoweredExtern, LowerSignatureError> {
     let mut params = Vec::with_capacity(args.len());
+    let mut mut_params = Vec::new();
+    let mut param_names = Vec::with_capacity(args.len());
     for arg in args {
-        let ty = match arg.kind {
-            ArgKind::Named { ty, .. } | ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => ty,
+        let (ty, is_mut, name) = match arg.kind {
+            ArgKind::Named { ty, is_mut, name } => (ty, is_mut, Some(arena[name].name.clone())),
+            // The unnamed forms occupy a real parameter slot but carry no
+            // mutability field, and the grammar has no slot for one — so an
+            // external that writes through such a parameter cannot express it,
+            // and the linker's rejection has to say so.
+            ArgKind::Ignored { ty } | ArgKind::TypeOnly(ty) => (ty, false, None),
             // `external fn` declarations have no receiver; the type-checker now
             // rejects a `self` here (H7). Drop it with no param so this validator
             // genuinely agrees with codegen — which also emits no receiver — and
             // a mismatching export is reported as a `SignatureMismatch` rather
             // than silently validating against an extra i32 the call never pushes.
-            ArgKind::SelfRef { .. } => continue,
+            ArgKind::SelfRef { .. } => {
+                debug_assert!(
+                    false,
+                    "an `external fn` cannot declare a receiver, so no `self` may shift the \
+                     parameter indices the write set is phrased in"
+                );
+                continue;
+            }
         };
         match lower_value_type(arena, ty)? {
-            Some(val) => params.push(val),
+            Some(val) => {
+                if is_mut {
+                    mut_params.push(u32::try_from(params.len()).unwrap_or(u32::MAX));
+                }
+                params.push(val);
+                param_names.push(name);
+            }
             None => return Err(LowerSignatureError::UnitParameter),
         }
     }
@@ -172,7 +220,11 @@ pub fn lower_extern_signature(
         None => Vec::new(),
     };
 
-    Ok(DeclaredSignature { params, results })
+    Ok(LoweredExtern {
+        signature: DeclaredSignature { params, results },
+        mut_params,
+        param_names,
+    })
 }
 
 /// A WASM signature mismatch, rendered for diagnostics.
@@ -450,7 +502,7 @@ mod tests {
         let Def::ExternFunction { args, returns, .. } = &arena[extern_def].kind else {
             unreachable!("find_extern only yields externs");
         };
-        lower_extern_signature(&arena, args, *returns)
+        lower_extern_signature(&arena, args, *returns).map(|lowered| lowered.signature)
     }
 
     fn find_extern(

@@ -2,15 +2,18 @@
 // inside a `let` initializer, and an argument of a native call — rather than as
 // a statement of its own. An extern call can appear anywhere an expression can,
 // so the scan's expression descent has to be full and recursive.
+//
+// `probe` declares `mut p`, which is what makes reaching it cost a copy, and
+// what obliges the receiver to be `mut` in turn (A047).
 
-external fn probe(p: Pair) -> i32;
+external fn probe(mut p: Pair) -> i32;
 use { probe } from sortlib;
 
 struct Pair {
     a: i32;
     b: i32;
 
-    fn touch(self) -> i32 {
+    fn touch(mut self) -> i32 {
         let x: i32 = 1 + probe(self);
         return double(x) + self.a * 1000 + self.b;
     }

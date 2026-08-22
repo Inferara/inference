@@ -87,7 +87,7 @@ fn link_like_fuzzer(main: &[u8], externals: &[Vec<u8>]) -> Result<Vec<u8>, infer
         .enumerate()
         .map(|(i, b)| (MODULE_NAMES[i % MODULE_NAMES.len()], b.as_slice()))
         .collect();
-    raw_link(main, &pairs)
+    raw_link(main, &pairs, None)
 }
 
 /// A named seed: its file name, the bytes, and the substring its rejection must

@@ -37,6 +37,40 @@ fn literal_type_source_note(type_name: &str, source: Option<&TypeMismatchContext
     })
 }
 
+/// How the binding an A047 argument is rooted at was declared, which is what
+/// decides the repair the message can offer.
+///
+/// The two forms are both immutable, and only one of them can be made mutable
+/// where it stands. Collapsing them would leave the message naming `const mut`,
+/// a declaration the grammar rejects, with no second sentence to fall back on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImmutableArgumentRoot {
+    /// A `let` binding, a parameter, or a `self` receiver — or an argument with
+    /// no binding behind it at all, which another rule already rejects and whose
+    /// applicable advice is the second half of the same sentence. The
+    /// declaration has a `mut` slot, so asking for it is the direct repair.
+    Binding,
+    /// A `const`. Immutable in a form no `mut` can relax, so the only repair is
+    /// a separate `mut` binding initialized from it.
+    Constant,
+}
+
+/// The repair clause of [`AnalysisDiagnostic::ExternWriteThroughImmutableArgument`],
+/// which differs by how the argument's root is declared.
+fn extern_mut_argument_fix(arg: &str, root: ImmutableArgumentRoot) -> String {
+    match root {
+        ImmutableArgumentRoot::Binding => format!(
+            "`{arg}` is not declared `mut`, so its value must not change across the call; declare \
+             it `mut {arg}` where it is bound, or copy it into a `mut` binding and pass that"
+        ),
+        ImmutableArgumentRoot::Constant => format!(
+            "`{arg}` is a `const`, so its value must not change across the call, and `const mut` \
+             is not a declaration the grammar accepts; copy `{arg}` into a `mut` binding and pass \
+             that instead"
+        ),
+    }
+}
+
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -325,6 +359,29 @@ pub enum AnalysisDiagnostic {
         "the minus sign is separated from the numeric literal `{value}`; a unary minus applied to a numeric literal must be written against the digits, so write `-{value}`; the sign is part of the literal token, and separating it leaves a negation of the bare `{value}`, which is then measured against the target type on its own — that is why the same value would otherwise compile or fail depending on the whitespace"
     )]
     SpacedNegativeLiteral { value: String, location: Location },
+
+    /// `arg` names the binding the argument is rooted at, which is the value
+    /// the foreign store reaches — for `sort_pair(outer.inner)` that is
+    /// `outer`, while the caret sits on the argument as written. An argument
+    /// with no root binding supplies a short shape of itself instead; that
+    /// program is already rejected by another rule, and the message's second
+    /// fix is the applicable one. `ty` is the *parameter's* declared type, not
+    /// the argument's: it says what the declaration asked for, and unlike the
+    /// argument's own type it is spellable in every case, including a `self`
+    /// receiver. `root` selects the repair, because a `const` root cannot take
+    /// the `mut` the other form is asked for.
+    #[error(
+        "cannot pass `{arg}` to parameter `{param}: {ty}` of `external fn {callee}`, which is declared `mut` and may write through it; {fix}",
+        fix = extern_mut_argument_fix(.arg, *.root)
+    )]
+    ExternWriteThroughImmutableArgument {
+        arg: String,
+        param: String,
+        callee: String,
+        ty: String,
+        root: ImmutableArgumentRoot,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -374,7 +431,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ReservedExportName { location, .. }
             | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. }
             | AnalysisDiagnostic::FieldLessStructValue { location, .. }
-            | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. } => location,
+            | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. }
+            | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. } => location,
         }
     }
 
@@ -428,6 +486,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ShiftCountOutOfRange { .. } => "A044",
             AnalysisDiagnostic::FieldLessStructValue { .. } => "A045",
             AnalysisDiagnostic::SpacedNegativeLiteral { .. } => "A046",
+            AnalysisDiagnostic::ExternWriteThroughImmutableArgument { .. } => "A047",
         }
     }
 }
@@ -1672,6 +1731,134 @@ mod tests {
                 "A046 diagnostic must recommend the glued form of `{value}`"
             );
         }
+    }
+
+    /// The A047 message has to carry four separate facts, because none of them
+    /// is visible where the reader is standing: which binding is at risk, which
+    /// parameter claimed the right to write, that the claim is what makes the
+    /// call illegal, and what to write instead. The fix clause is asserted
+    /// without a type annotation on purpose — `mut self` takes none, and the
+    /// receiver is one of the shapes that reaches this message.
+    #[test]
+    fn display_extern_write_through_immutable_argument() {
+        let err = AnalysisDiagnostic::ExternWriteThroughImmutableArgument {
+            arg: "arr".to_string(),
+            param: "a".to_string(),
+            callee: "sort_pair".to_string(),
+            ty: "[i32; 2]".to_string(),
+            root: ImmutableArgumentRoot::Binding,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("cannot pass `arr`"),
+            "A047 diagnostic must name the argument's binding, got: {text}"
+        );
+        assert!(
+            text.contains("parameter `a: [i32; 2]`"),
+            "A047 diagnostic must name the parameter and its declared type, got: {text}"
+        );
+        assert!(
+            text.contains("`external fn sort_pair`"),
+            "A047 diagnostic must name the external function, got: {text}"
+        );
+        assert!(
+            text.contains("declared `mut` and may write through it"),
+            "A047 diagnostic must say why the parameter is dangerous, got: {text}"
+        );
+        assert!(
+            text.contains("`arr` is not declared `mut`"),
+            "A047 diagnostic must say what is wrong with the argument, got: {text}"
+        );
+        assert!(
+            text.contains("its value must not change across the call"),
+            "A047 diagnostic must state the rule being broken, got: {text}"
+        );
+        assert!(
+            text.contains("declare it `mut arr` where it is bound"),
+            "A047 diagnostic must spell the primary fix out, got: {text}"
+        );
+        assert!(
+            text.contains("copy it into a `mut` binding and pass that"),
+            "A047 diagnostic must offer the fix for an argument the caller does \
+             not own, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A047");
+    }
+
+    /// A `self` receiver reaches this message, and `mut self: Pair` is not
+    /// something anyone can write — so the fix clause must stay free of a type
+    /// annotation for every subject it names.
+    #[test]
+    fn display_extern_write_through_immutable_argument_fix_is_spellable() {
+        for (arg, ty) in [("arr", "[i32; 2]"), ("p", "Pair"), ("self", "Pair")] {
+            let err = AnalysisDiagnostic::ExternWriteThroughImmutableArgument {
+                arg: arg.to_string(),
+                param: "a".to_string(),
+                callee: "sort_pair".to_string(),
+                ty: ty.to_string(),
+                root: ImmutableArgumentRoot::Binding,
+                location: test_location(),
+            };
+            let text = err.to_string();
+            assert!(
+                text.contains(&format!("declare it `mut {arg}` where it is bound")),
+                "A047 must recommend a spelling that is legal for `{arg}`, got: {text}"
+            );
+            assert!(
+                !text.contains(&format!("mut {arg}: {ty}")),
+                "A047 must not annotate the fix with a type, got: {text}"
+            );
+        }
+    }
+
+    /// A `const` root reaches this message too, and the repair the other roots
+    /// are given is one it cannot take: `const mut P` is a parse error. The two
+    /// renderings are asserted against each other, so a change that collapses
+    /// them back into one fails here rather than shipping advice the grammar
+    /// rejects.
+    #[test]
+    fn display_extern_write_through_immutable_argument_const_root() {
+        let of_root = |root| {
+            AnalysisDiagnostic::ExternWriteThroughImmutableArgument {
+                arg: "P".to_string(),
+                param: "p".to_string(),
+                callee: "sort_pair".to_string(),
+                ty: "Pair".to_string(),
+                root,
+                location: test_location(),
+            }
+            .to_string()
+        };
+        let constant = of_root(ImmutableArgumentRoot::Constant);
+        let binding = of_root(ImmutableArgumentRoot::Binding);
+
+        assert!(
+            constant.contains("`P` is a `const`"),
+            "A047 must say the root is a `const`, got: {constant}"
+        );
+        assert!(
+            constant.contains("`const mut` is not a declaration the grammar accepts"),
+            "A047 must say why the usual repair is unavailable, got: {constant}"
+        );
+        assert!(
+            constant.contains("copy `P` into a `mut` binding and pass that instead"),
+            "A047 must offer the repair a `const` can take, got: {constant}"
+        );
+        assert!(
+            !constant.contains("declare it `mut P`"),
+            "A047 must never ask a `const` for `mut`, got: {constant}"
+        );
+        assert!(
+            binding.contains("declare it `mut P` where it is bound"),
+            "the other root keeps the direct repair, got: {binding}"
+        );
+        let shared = "cannot pass `P` to parameter `p: Pair` of `external fn sort_pair`, which \
+                      is declared `mut` and may write through it; ";
+        assert!(
+            constant.starts_with(shared) && binding.starts_with(shared),
+            "only the repair clause may differ between the two roots, got:\n{constant}\n{binding}"
+        );
     }
 
     #[test]

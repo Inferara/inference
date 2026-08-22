@@ -3,15 +3,18 @@
 // layout decision taken before any branch is lowered, and a receiver that
 // escapes on one path escapes. This pins that the scan descends into blocks —
 // a scan that only looked at top-level statements would drop the copy here.
+//
+// `sort_pair` declares `mut p`, which is what makes reaching it cost a copy, and
+// what obliges the receiver to be `mut` in turn (A047).
 
-external fn sort_pair(p: Pair);
+external fn sort_pair(mut p: Pair);
 use { sort_pair } from sortlib;
 
 struct Pair {
     a: i32;
     b: i32;
 
-    fn touch(self, c: bool) -> i32 {
+    fn touch(mut self, c: bool) -> i32 {
         if c {
             sort_pair(self);
         }

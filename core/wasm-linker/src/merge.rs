@@ -26,7 +26,7 @@
 //! its global exports untouched.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use inf_wasmparser::ExternalKind;
 use wasm_encoder::{
@@ -38,8 +38,8 @@ use wasm_encoder::{
 use crate::closure;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
 use crate::rewrite::{reencode_body, BodyOrigin, IndexMap};
-use crate::tier::{self, Tier};
-use crate::{LinkError, LinkOutput, LinkWarning};
+use crate::tier::{self, Tier, WriteContract};
+use crate::{ImportWriteSet, LinkError, LinkOutput, LinkWarning};
 
 /// Resolves and merges every satisfiable import of `main` from the supplied
 /// external modules, returning the unified module bytes and everything the
@@ -47,10 +47,22 @@ use crate::{LinkError, LinkOutput, LinkWarning};
 ///
 /// Each external arrives as `(logical_module, bytes)` so the merge can match an
 /// import's recorded `(module, field)` against the external's logical module.
+///
+/// `contracts` carries the two write-set modes documented on [`crate::link`]:
+/// `None` runs merge mechanics only, `Some(list)` holds every satisfied import
+/// to a declared write set — and one `list` does not mention to the claim that
+/// it writes nothing, which is what declaring nothing about it says.
 pub(crate) fn link(
     main_bytes: &[u8],
     externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
 ) -> Result<LinkOutput, LinkError> {
+    // The contract list is checked before anything reads a byte: it is a pure
+    // property of the caller's argument, says nothing about either module, and
+    // decides how every import below is judged, so a defect in it must not be
+    // reported behind a diagnostic about the bytes.
+    validate_contracts(contracts)?;
+
     // Structural validation of the main module on entry. The main module is the
     // linker's own codegen output on the live CLI pipeline, but the public
     // library API (`inference_wasm_linker::link`, `inference::link`) accepts
@@ -85,7 +97,7 @@ pub(crate) fn link(
         .map(|(logical_module, bytes)| ParsedModule::parse_external(bytes, logical_module))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let plan = Plan::build(&main, &externals)?;
+    let plan = Plan::build(&main, &externals, contracts)?;
     let merged = plan.emit(&main, &externals)?;
 
     // Post-merge validation gate. The effect scanner is an allow-list and can
@@ -100,6 +112,68 @@ pub(crate) fn link(
         wasm: merged,
         warnings: plan.warnings,
     })
+}
+
+/// Resolves the write-set contract governing one satisfied import.
+///
+/// The unchecked mode passes straight through. In the checked mode an import the
+/// list does not mention resolves to [`WriteContract::Unmentioned`], which is
+/// checked as strictly as an empty declared write set — "nothing declared" is
+/// exactly the claim that the closure writes nothing — and is never an
+/// exemption. It is kept distinct from an empty [`WriteContract::Declared`] so
+/// the rejection can say which of the two happened rather than describe a
+/// declaration nobody wrote.
+///
+/// The `find` is unambiguous because [`validate_contracts`] has already refused
+/// a list holding two entries for one `(module, field)`.
+fn resolve_contract<'a>(
+    contracts: Option<&'a [ImportWriteSet]>,
+    logical_module: &str,
+    field: &str,
+) -> WriteContract<'a> {
+    let Some(list) = contracts else {
+        return WriteContract::Unchecked;
+    };
+    match list
+        .iter()
+        .find(|c| c.module == logical_module && c.field == field)
+    {
+        Some(contract) => WriteContract::Declared {
+            mut_params: &contract.mut_params,
+            param_names: &contract.param_names,
+        },
+        None => WriteContract::Unmentioned,
+    }
+}
+
+/// Refuses a contract list that holds more than one entry for one
+/// `(module, field)` pair.
+///
+/// The list is a map written as a slice, and the lookup that reads it takes the
+/// first match — so two entries for one key would decide the link by their order
+/// in the slice, silently and in either direction: a permissive entry ahead of a
+/// restrictive one admits bytes the reverse order refuses. Neither answer is
+/// derivable from the pair, so the list is rejected instead of resolved.
+///
+/// Rejecting is what the front end already guarantees. It folds two agreeing
+/// declarations of one import into a single entry and reports a hard error
+/// naming both files when they disagree, so a list it produced never carries a
+/// duplicate key; the check makes the public API hold the same invariant its own
+/// caller does, rather than assume it.
+fn validate_contracts(contracts: Option<&[ImportWriteSet]>) -> Result<(), LinkError> {
+    let Some(list) = contracts else {
+        return Ok(());
+    };
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for contract in list {
+        if !seen.insert((contract.module.as_str(), contract.field.as_str())) {
+            return Err(LinkError::DuplicateWriteContract {
+                module: contract.module.clone(),
+                field: contract.field.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Validates one external against the linker's supported-version contract in two
@@ -192,7 +266,11 @@ struct Plan {
 }
 
 impl Plan {
-    fn build(main: &ParsedModule, externals: &[ParsedModule]) -> Result<Self, LinkError> {
+    fn build(
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+        contracts: Option<&[ImportWriteSet]>,
+    ) -> Result<Self, LinkError> {
         // 0. Reject a main module that carries its own data or element segments.
         //    `emit` rebuilds the main module section-by-section and emits no
         //    `DataSection`/`ElementSection`, so a main-side data segment would be
@@ -367,11 +445,14 @@ impl Plan {
             }
 
             let cl = closure::compute(external, root)?;
+            let logical_module = &main.imported_funcs[import_idx].module;
             let field = &main.imported_funcs[import_idx].field;
             // Tier C is rejected here, before any output index is committed. The
             // classifier runs the address-provenance analysis for memory-using
-            // closures, so an absolute-address access is rejected as Tier C.
-            let verdict = tier::classify(external, &cl, root, field)?;
+            // closures, so an absolute-address access is rejected as Tier C, and
+            // holds a Tier-B closure to the import's declared write set.
+            let contract = resolve_contract(contracts, logical_module, field);
+            let verdict = tier::classify(external, &cl, root, logical_module, field, &contract)?;
             if verdict == Tier::B && !tier_b_fields.contains(field) {
                 tier_b_fields.push(field.clone());
             }

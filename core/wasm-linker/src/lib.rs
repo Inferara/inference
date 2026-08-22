@@ -221,6 +221,147 @@ pub enum LinkError {
     /// fails rather than emit a module that traps at runtime.
     #[error("cannot reconcile linear memory for `{field}`: {reason}")]
     IncompatibleMemory { field: String, reason: String },
+
+    /// A merged external may store through a parameter its `external fn`
+    /// declaration did not declare `mut` (see [`ImportWriteSet`]).
+    ///
+    /// Both `module` and `field` are carried because neither identifies the
+    /// external on its own: two libraries bound under different logical modules
+    /// may export the same field, and the whole error is printed verbatim by
+    /// `infc`.
+    #[error("{}", render_undeclared_write(.module, .field, *.param_index, .param_name.as_deref()))]
+    UndeclaredExternWrite {
+        module: String,
+        field: String,
+        param_index: u32,
+        /// The declared name of the offending parameter, or `None` when the
+        /// declaration wrote it in an unnamed form — which has no place to put
+        /// `mut`, so naming it is a required first step.
+        ///
+        /// `None` means *unnamed*, never *undescribed*: an import no contract
+        /// entry covers is [`LinkError::UndescribedExternWrite`], a different
+        /// situation with a different repair.
+        param_name: Option<String>,
+    },
+
+    /// A merged external may store through a parameter, and the checked mode's
+    /// contract list does not describe this import at all — no entry covers it,
+    /// named or unnamed.
+    ///
+    /// Held apart from [`LinkError::UndeclaredExternWrite`] because the repair
+    /// is not the same one. That error speaks to an author whose declaration the
+    /// linker read and found wanting; this one arises when no declaration
+    /// reached the linker, so telling the author to add `mut` to a parameter —
+    /// or to name an unnamed one — would describe a declaration that plays no
+    /// part in the verdict. On the live pipeline every bound import contributes
+    /// an entry, so this reports a gap between the front end and the linker
+    /// rather than a source defect, and it fails closed: an undescribed import
+    /// is held to writing nothing, never exempted.
+    #[error(
+        "merged external `{module}::{field}` may store through the address parameter \
+         {param_index} denotes, and the write-set contract supplied for this link describes no \
+         such import; an import nothing declares is held to writing nothing, so the store is \
+         refused rather than admitted unchecked — declare the import with an `external fn` whose \
+         parameter {param_index} is `mut`, and bind it, so the declaration reaches the linker"
+    )]
+    UndescribedExternWrite {
+        module: String,
+        field: String,
+        param_index: u32,
+    },
+
+    /// The caller's contract list holds more than one entry for the same
+    /// `(module, field)` pair.
+    ///
+    /// The list is a map written as a slice, and an import is satisfied on
+    /// exactly one `(module, field)`, so two entries for one key leave no basis
+    /// to choose between them: a permissive entry and a restrictive one would
+    /// otherwise decide the link by whichever came first in the slice, silently.
+    ///
+    /// Rejecting matches what the front end already guarantees. It folds two
+    /// declarations of one import into a single entry when they agree, and
+    /// reports a hard error naming both files when they do not, so a list it
+    /// produced never carries a duplicate key. A duplicate therefore means the
+    /// caller has not settled the disagreement, which is not a question the
+    /// linker can answer for it: a union licenses a write the restrictive entry
+    /// refuses, an intersection refuses one the permissive entry allows, and
+    /// first-match is the order dependence itself.
+    #[error(
+        "the write-set contract supplied for this link holds more than one entry for import \
+         `{module}::{field}`; an import is satisfied on exactly one `(module, field)` pair, so \
+         two entries for it leave no basis to choose which governs — supply a single entry per \
+         import"
+    )]
+    DuplicateWriteContract { module: String, field: String },
+}
+
+/// Renders [`LinkError::UndeclaredExternWrite`], which has to teach a different
+/// repair depending on how the declaration spells the offending parameter.
+///
+/// A named parameter takes `mut` directly. An unnamed one (`_: T`, or a bare
+/// type) carries no mutability field and the grammar has no slot for one, so a
+/// write set is unspellable until the parameter is given a name — and that fix
+/// has to be said, because no other one exists.
+///
+/// Both branches speak to an author whose declaration the linker read. An import
+/// the contract list never described is not one of them and does not arrive here
+/// — it is [`LinkError::UndescribedExternWrite`], whose repair is to get a
+/// declaration to the linker at all.
+fn render_undeclared_write(
+    module: &str,
+    field: &str,
+    param_index: u32,
+    param_name: Option<&str>,
+) -> String {
+    let subject = match param_name {
+        Some(name) => format!("parameter {param_index} (`{name}`)"),
+        None => format!("parameter {param_index}"),
+    };
+    let fix = match param_name {
+        Some(name) => format!(
+            "declare it `mut {name}` in the `external fn` declaration, and pass a `mut` binding at \
+             every call"
+        ),
+        None => format!(
+            "the declaration writes parameter {param_index} in an unnamed form, which has nowhere \
+             to put `mut`: give it a name first, then declare it `mut name: type` and pass a `mut` \
+             binding at every call"
+        ),
+    };
+    format!(
+        "merged external `{module}::{field}` may store through the address {subject} denotes, \
+         which its `external fn` declaration does not declare `mut`; a foreign store through a \
+         caller's pointer is invisible in Inference source, so the declaration is what states it — \
+         {fix}"
+    )
+}
+
+/// What an `external fn` declaration says a merged body may write through.
+///
+/// The linker derives, from the merged bytes, which of an exported function's
+/// parameters its closure may *store* through; this is the declaration that
+/// claim is checked against. `mut` on an `external fn` parameter declares that
+/// the foreign body may store through the address that parameter denotes, and
+/// nothing else in the artifact records it — a custom section would not survive
+/// `wasm-opt`, and the merge re-emits a fixed set of sections — so the contract
+/// travels beside the bytes instead.
+///
+/// Keyed on `(module, field)`, the same pair an import is satisfied on. The two
+/// parallel vectors are in **WASM parameter order**, which for an `external fn`
+/// is the declaration's own argument order: every argument form occupies one
+/// parameter slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportWriteSet {
+    /// Logical module the import was bound under.
+    pub module: String,
+    /// Export field the import names.
+    pub field: String,
+    /// WASM parameter indices declared `mut`.
+    pub mut_params: Vec<u32>,
+    /// Declared parameter names, positionally. `None` for a parameter written
+    /// in an unnamed form, which cannot carry `mut` at all — a rejection quotes
+    /// this to teach the name-it-first repair.
+    pub param_names: Vec<Option<String>>,
 }
 
 /// Something a *successful* link owes the user: the merge produced a valid
@@ -302,8 +443,9 @@ pub struct LinkOutput {
 /// unified module together with every warning the merge raised.
 ///
 /// Identical to [`link`] in every respect but the return type; see [`link`] for
-/// the resolution rules, the fail-closed contract, and the error conditions.
-/// Use this form wherever the warnings can reach the user.
+/// the resolution rules, the fail-closed contract, the two `contracts` modes,
+/// and the error conditions. Use this form wherever the warnings can reach the
+/// user.
 ///
 /// # Errors
 ///
@@ -311,8 +453,9 @@ pub struct LinkOutput {
 pub fn link_with_warnings(
     main_wasm: &[u8],
     externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
 ) -> Result<LinkOutput, LinkError> {
-    merge::link(main_wasm, externals)
+    merge::link(main_wasm, externals, contracts)
 }
 
 /// Merges the satisfiable imports of `main_wasm` from `externals`, returning a
@@ -344,15 +487,51 @@ pub fn link_with_warnings(
 /// speaks to a user should call [`link_with_warnings`] instead: a discarded
 /// [`LinkWarning`] is a claim about the artifact the user never hears.
 ///
+/// # The two `contracts` modes
+///
+/// `contracts` decides whether the write-set check ([`ImportWriteSet`]) runs at
+/// all, and the choice is an explicit mode rather than an emptiness test:
+///
+/// * `None` — **merge mechanics only.** No declaration governs these imports, so
+///   the check does not run. This is the mode for a caller that has no Inference
+///   source behind the main module: a hand-written `.wasm`, the fuzz target, and
+///   the tests whose subject is the merge itself.
+/// * `Some(list)` — **checked.** Every satisfied import is held to a declared
+///   write set. An import `list` does not mention is held to the claim that it
+///   writes nothing, so any store through a parameter rejects it; a missing
+///   entry is never a skipped check. It rejects under its own
+///   [`LinkError::UndescribedExternWrite`], because the repair for an import
+///   nothing described is not the one for a declaration that covered too little.
+///
+/// An `Option` rather than an empty slice, because this is the one entry point:
+/// [`link_with_warnings`] and this function are the same merge, so an empty
+/// slice would have to mean both "check nothing, nothing was declared" and
+/// "check everything, nothing may be written".
+///
+/// `list` is a map written as a slice, and it is validated as one: two entries
+/// for the same `(module, field)` are refused
+/// ([`LinkError::DuplicateWriteContract`]) rather than resolved by their order,
+/// which would otherwise let the same bytes link or fail depending on which
+/// entry the caller wrote first.
+///
 /// # Errors
 ///
 /// Returns a [`LinkError`] if any module fails to parse or an external fails
 /// structural validation ([`LinkError::Parse`]), a merged closure reaches a
-/// host import, a closure falls into the unsupported Tier C, or more than one
+/// host import, a closure falls into the unsupported Tier C, more than one
 /// external is bound under the same `(module, field)` pair an import names
-/// ([`LinkError::AmbiguousImport`]).
-pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> Result<Vec<u8>, LinkError> {
-    link_with_warnings(main_wasm, externals).map(|out| out.wasm)
+/// ([`LinkError::AmbiguousImport`]), or — in the checked mode — `contracts`
+/// holds two entries for one import ([`LinkError::DuplicateWriteContract`]), a
+/// merged closure may store through a parameter its declaration did not declare
+/// `mut` ([`LinkError::UndeclaredExternWrite`]), or a merged closure stores and
+/// no entry described its import at all
+/// ([`LinkError::UndescribedExternWrite`]).
+pub fn link(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
+) -> Result<Vec<u8>, LinkError> {
+    link_with_warnings(main_wasm, externals, contracts).map(|out| out.wasm)
 }
 
 /// Validates one external `.wasm` against the linker's supported-version

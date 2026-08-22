@@ -297,12 +297,12 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Forty rules are registered in `all_rules()`. Thirty-five are
+Forty-four rules are registered in `all_rules()`. Thirty-nine are
 error-severity — they block compilation — and five are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
-(A013, A021, A030) are currently unassigned. The tables below group the rules
-by the invariant family they protect; the descriptions are condensed from the
-rules' own doc comments.
+(A013, A021, A030) are currently unassigned, so the assigned ids run from
+A001 to A047. The tables below group the rules by the invariant family they
+protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
 
@@ -365,11 +365,17 @@ is rejected rather than silently mis-lowered.
 | A026 | nested compound type depth must not exceed the maximum |
 | A029 | compound literals in compound assignments are rejected |
 | A031 | unsupported compound return expressions are rejected |
+| A045 | a field-less struct cannot be used as a value |
 
 Compound values live in linear memory, not on the WASM value stack (see
 [Memory Allocation](memory-allocation-in-wasm-codegen.md)). Every rule in this
 family fences off a position where a compound value would need to materialize
-without a named destination to own its memory.
+without a named destination to own its memory. A045 is the family's odd rule
+out in mechanism rather than in subject: a field-less struct occupies zero
+bytes, so it fences off every position that would need to hold *a* value of
+it — literal, binding, parameter, return, field, `self` receiver — rather
+than one unsupported expression shape. Declaring such a struct, and using it
+as a pure method namespace, stays legal.
 
 ### Values and indexing
 
@@ -378,12 +384,19 @@ without a named destination to own its memory.
 | A019 | an array index must be a 32-bit integer type |
 | A022 | a numeric literal must fit the valid range of its target type |
 | A037 | a constant array index must be within the array's bounds |
+| A044 | a literal shift count must fit the operand type's bit width |
 
 A022 exists because WebAssembly arithmetic wraps silently — the rule closes
 the front door on values that could never round-trip through their declared
 type (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)).
 A037 turns a guaranteed runtime trap into a compile-time error when the index
-is statically known.
+is statically known. A044 closes the same front door as A022, aimed at a
+shift's count operand rather than an assigned or compared value: WebAssembly's
+runtime shift already takes the count modulo the operand's bit width, so `x <<
+32` on an `i32` silently becomes `x << 0`, and A044 rejects a statically-known
+literal count outside `0..width` as a program error instead of letting it fold
+to a value the source never wrote. Dynamic and const-declared counts are out
+of its scope, the same statically-known-literal boundary A022 draws.
 
 ### Language restrictions
 
@@ -412,6 +425,42 @@ fail on a space (`- 100` fits `i8`, `- 128` does not, though `-128` is a valid
 `i8`). Rejecting the separated spelling is what keeps whitespace out of the
 meaning of a program, in the same spirit as A033's ban on combined unary
 operators.
+
+### External function write-through
+
+| ID | What it enforces |
+|----|------------------|
+| A047 | a compound argument at a `mut` `external fn` parameter must be rooted at a `mut` binding |
+
+A linked external shares the program's single linear memory, so a compound
+(struct or array) argument at its call boundary is not copied at all: the
+callee receives a raw pointer into the caller's own frame, and the foreign
+body may store through it. `mut` on an `external fn` parameter is the
+declaration that this may happen (see
+[External Functions and WASM Linking](external-functions-and-wasm-linking.md)),
+and the linker checks the claim against the merged bytes at link time. That
+makes this the one place in the language where a write to a binding is
+invisible in source — the store lives in a `.wasm` the type checker never
+reads — so A047 requires the call site to carry the statement instead: a
+struct or array argument at a `mut` position must be rooted at a `mut`
+binding, exactly as an assignment through that binding would require. A
+scalar argument is out of A047's scope, deliberately: a scalar passes a
+value rather than a region, so there is no binding at the call site for the
+rule to check, and the documented `external fn store_at(mut ptr: i32, val:
+i32);` idiom is unaffected. This is an accepted gap, not an absence of
+risk: the shadow stack occupies `[0, stack_size)` of the very same linear
+memory a scalar `i32` addresses, and under the default layout — one page,
+entirely stack — a caller's own frame sits just below address 65536, so
+`store_at(65528, 7)` overwrites that caller's own locals through a plain
+`i32.store`. The linker admits it, because Tier B's derivation proof does not
+bound *where* a parameter-derived address lands, only that it derives from a
+parameter; A047 stays silent, because a scalar carries no binding for it to
+check. The exemption is kept anyway, to preserve the book's own
+`external fn store_at(mut ptr: i32, val: i32);` idiom — the declaration still
+has to say `mut`, because the linker's write-set check is type-agnostic; what
+the exemption buys is that the *call site* is not held to a `mut` binding,
+since the argument is an integer rather than a region. Closing the gap the
+exemption leaves open is tracked in issue #420.
 
 ### Advisory rules
 

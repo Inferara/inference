@@ -473,7 +473,12 @@ mod gate {
             .map(|(name, bytes)| (*name, bytes.as_slice()))
             .collect();
         let main = compile_fixture(file, module_name, CompilationMode::Proof);
-        let linked = inference::link(&main, &lib_refs)
+        // The unchecked write-set mode: each external here is supplied as bytes
+        // by the fixture itself rather than resolved from the program's `use`
+        // clauses, so no declaration-derived contract is in hand. The subject is
+        // the emitted `.v`, and a write-set declaration has no representation in
+        // it — the merged body has no imports left to describe.
+        let linked = inference::link(&main, &lib_refs, None)
             .unwrap_or_else(|e| panic!("link failed for {file}: {e}"));
         translate(file, module_name, &linked)
     }
