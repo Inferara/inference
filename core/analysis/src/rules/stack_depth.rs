@@ -38,8 +38,10 @@
 //! Two further sources of slack sit outside the size computation, and each is
 //! argued at the function that introduces it. Every `self` receiver is charged a
 //! full slot, where codegen copies the receiver into the frame only when the body
-//! assigns through it or forwards it to an `external fn` — so a method that only
-//! reads `self` is charged for a frame codegen does not build. The
+//! assigns through it or forwards it to an argument of an `external fn` whose
+//! declaration marks a parameter `mut` — so a method that only reads `self`, or
+//! forwards it only to a wholly read-only external, is charged for a frame
+//! codegen does not build. The
 //! self-referential scratch charge is a flat maximum over the whole body, both
 //! arms of an `if` included; that mirrors codegen's own scan rather than
 //! exceeding it, but neither side is branch-aware, so a function whose two arms
@@ -290,8 +292,9 @@ fn params_frame_bytes(
                 bytes = bytes.saturating_add(slot_bytes(ctx, &type_info.kind, module_path));
             }
             // Codegen copies the receiver into the callee's frame when the
-            // method body assigns through it or forwards it to an `external
-            // fn`, so either receiver shape can carry a real slot. Every
+            // method body assigns through it or forwards it to an argument of
+            // an `external fn` whose declaration marks a parameter `mut`, so
+            // either receiver shape can carry a real slot. Every
             // `self` receiver is charged rather than re-deriving that
             // condition in this crate: the estimate is licensed to be loose,
             // but never to under-count.

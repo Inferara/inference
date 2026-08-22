@@ -537,12 +537,12 @@ struct FrameLayoutInput<'a> {
 /// picks a declaration out of a bare name is where the name is written: the
 /// declaring file, and the `spec` block within it. Two passes ask the same
 /// question of that scope — [`Compiler::lower_function_call`], which emits the
-/// call, and [`Compiler::param_escapes_to_extern`], which decides whether a
-/// compound parameter may be passed by reference. They must answer identically:
-/// a gate narrower than emission drops an entry copy and lets a foreign store
-/// land in the caller's memory. Routing both through one scope and one
-/// [`ExternCallScope::import_target`] makes that agreement structural rather
-/// than a coincidence between two separate walks.
+/// call, and [`Compiler::param_extern_reach`], which decides whether a compound
+/// parameter may be passed by reference. They must answer identically: a gate
+/// narrower than emission drops an entry copy and lets a foreign store land in
+/// the caller's memory. Routing both through one scope and one
+/// [`ExternCallScope::import_decl`] makes that agreement structural rather than
+/// a coincidence between two separate walks.
 #[derive(Clone, Copy)]
 struct ExternCallScope<'a> {
     index: &'a ExternIndex,
@@ -553,15 +553,80 @@ struct ExternCallScope<'a> {
     imports: &'a FxHashMap<DefId, u32>,
 }
 
+/// What the `external fn` declarations a compound parameter reaches say
+/// about writing through it.
+///
+/// The strongest outcome wins: [`Compiler::param_extern_reach`] reports
+/// `MayWrite` as soon as one call site produces it, however many read-only
+/// calls sit beside it.
+///
+/// A compound `external fn` parameter is lowered to a raw `i32` pointer and
+/// the call site passes the argument's address through unchanged, while a
+/// linked external shares the program's single linear memory. A foreign body
+/// can therefore store through that pointer, and a parameter passed by
+/// reference would have those stores land in the *caller's* memory. What
+/// separates the two outcomes is the declaration: `mut` on an `external fn`
+/// parameter declares that the foreign body may store through the address it
+/// denotes, and the linker admits a merged body only against that
+/// declaration.
+///
+/// The classification is whole-declaration rather than per-argument-position
+/// on purpose. What the link proves is which declared parameter a store's
+/// *address derives from*, as an affine form — never which bytes the store
+/// reaches. A body admitted for `writer(mut a, b)` may store at `a + 8`,
+/// outside `a`'s region entirely, so a position-wise rule would hand `b`'s
+/// caller storage to a body free to land in it. Only the empty write set
+/// closes without a containment premise: a declaration marking nothing `mut`
+/// links only if the merged body records no store at all, and a body that
+/// never stores cannot disturb anything a caller elided. Lifting this to the
+/// mixed declaration needs a containment analysis the linker does not have
+/// (#420).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExternReach {
+    /// No call to a bound `external fn` takes an argument rooted at the
+    /// parameter.
+    None,
+    /// Every such call names a declaration that marks no parameter `mut`.
+    ReadOnly,
+    /// Some such call names a declaration that marks a parameter `mut`.
+    MayWrite,
+}
+
 impl ExternCallScope<'_> {
-    /// The WASM import index a call to `callee_name` lowers to here, or `None`
-    /// when the name is not a bound `external fn` at this point — either
+    /// The `external fn` declaration a call to `callee_name` reaches here, or
+    /// `None` when the name is not a bound `external fn` at this point — either
     /// because no declaration of that name is in scope, or because the one that
     /// is has no binding `use … from` clause and so registered no import.
+    ///
+    /// The declaration, not the import index, is what carries the contract a
+    /// caller is compiled against: its `mut` markers are the write set the
+    /// linker holds the merged body to. A consumer that needs to read them
+    /// resolves through here so that it reads the very declaration whose
+    /// signature was lowered into that contract.
+    ///
+    /// Two declarations in different files may bind the same `(module, field)`
+    /// and fold onto one import, in which case the linker performs one check
+    /// while this resolves each caller against its own declaration. That is safe
+    /// only because external resolution rejects two such declarations whose
+    /// `mut` markers disagree; without it a file declaring nothing `mut` would
+    /// elide copies against a contract only the other file satisfied.
+    fn import_decl(&self, callee_name: &str) -> Option<DefId> {
+        let decl = self
+            .index
+            .lookup(self.module_path, self.spec, callee_name)?;
+        self.imports.contains_key(&decl).then_some(decl)
+    }
+
+    /// The WASM import index a call to `callee_name` lowers to here, or `None`
+    /// under exactly the conditions [`Self::import_decl`] returns `None`.
+    ///
+    /// Defined in terms of [`Self::import_decl`] rather than repeating the
+    /// lookup: emission asks this question and the by-reference gate asks the
+    /// other one, and a scope in which only one of them recognizes a call is a
+    /// dropped entry copy.
     fn import_target(&self, callee_name: &str) -> Option<u32> {
-        self.index
-            .lookup(self.module_path, self.spec, callee_name)
-            .and_then(|decl| self.imports.get(&decl).copied())
+        let decl = self.import_decl(callee_name)?;
+        self.imports.get(&decl).copied()
     }
 
     /// Whether the program registered any import at all. A program with none
@@ -1604,8 +1669,8 @@ impl Compiler {
             // slot to is copied out of the caller's memory into that slot, so the
             // callee reads and writes its own data (value semantics). A compound
             // parameter with no slot is by reference — nothing in the body writes
-            // it and nothing forwards it to an `external fn` — and is read
-            // straight through the caller's pointer.
+            // it and it reaches no `external fn` declared to write through it —
+            // and is read straight through the caller's pointer.
             //
             // Every arm keys on slot presence and nothing else. Slot presence is
             // the single source of truth for this decision, so an allocated slot
@@ -2084,31 +2149,30 @@ impl Compiler {
         })
     }
 
-    /// Returns `true` if the function body forwards the parameter `param_name` —
-    /// or a projection of it — to an `external fn`.
+    /// Reports what the parameter `param_name` — or a projection of it — reaches
+    /// when the function body hands it to an `external fn`.
     ///
-    /// A compound `external fn` parameter is lowered to a raw `i32` pointer and
-    /// the call site passes the argument's address through unchanged, while a
-    /// linked external shares the program's single linear memory. A foreign body
-    /// can therefore store through that pointer. A parameter that is otherwise
-    /// passed by reference would have those stores land in the *caller's* memory,
-    /// mutating a value the caller owns; when this returns `true`,
-    /// [`Self::compute_frame_layout`] gives the parameter its own frame slot and
-    /// the entry copy redirects the foreign stores into it.
+    /// [`ExternReach::MayWrite`] is what earns the parameter a frame slot and an
+    /// entry copy in [`Self::compute_frame_layout`], redirecting the foreign
+    /// stores into it. [`ExternReach::ReadOnly`] does not: every declaration the
+    /// parameter reaches marks no parameter `mut`, which the linker admits only
+    /// for a merged body that records no store anywhere, so the copy would be
+    /// unobservable.
     ///
-    /// The scan is deliberately type-blind: *any* argument whose root is
-    /// `param_name` triggers, whether or not that argument is compound. Refining
-    /// it by type would require a second predicate that must agree with
-    /// `lower_expression`'s treatment of the argument, and a disagreement there
-    /// fails in the unsafe direction — a missing copy. A false positive only
-    /// costs one extra copy.
+    /// The scan is deliberately type-blind about the *argument*: any argument
+    /// whose root is `param_name` counts, whether or not that argument is
+    /// compound. Refining it by type would require a second predicate that must
+    /// agree with `lower_expression`'s treatment of the argument, and a
+    /// disagreement there fails in the unsafe direction — a missing copy. A
+    /// false positive only costs one extra copy. The `mut` markers are read off
+    /// the declaration instead, where they are a stated contract rather than an
+    /// inference about lowering.
     ///
     /// Callee resolution mirrors emission because it *is* emission's: this scan
-    /// and [`Self::lower_function_call`] ask [`ExternCallScope::import_target`]
-    /// about the same name in the same scope, so neither can recognize a call
-    /// the other does not. `register_imports` fills that scope's import map
-    /// before any body is compiled, so the answer is already final when a frame
-    /// is laid out.
+    /// and [`Self::lower_function_call`] ask [`ExternCallScope`] about the same
+    /// name in the same scope, so neither can recognize a call the other does
+    /// not. `register_imports` fills that scope's import map before any body is
+    /// compiled, so the answer is already final when a frame is laid out.
     ///
     /// That a bare identifier is the only callee shape worth checking is not an
     /// approximation but a consequence of the grammar and of how an extern call
@@ -2119,26 +2183,78 @@ impl Compiler {
     /// never resolve to an extern. Should externs ever become exportable, this
     /// gate silently starts missing them and must be widened with the arm that
     /// lowers them.
-    fn param_escapes_to_extern(
+    fn param_extern_reach(
         arena: &AstArena,
         block_id: BlockId,
         extern_scope: ExternCallScope<'_>,
         param_name: &str,
-    ) -> bool {
-        Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
+    ) -> ExternReach {
+        let mut reached_read_only = false;
+        let may_write = Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
             let Expr::FunctionCall { function, args, .. } = &arena[expr_id].kind else {
                 return false;
             };
-            let callee_is_extern = matches!(
-                &arena[*function].kind,
-                Expr::Identifier(ident_id)
-                    if extern_scope.import_target(&arena[*ident_id].name).is_some()
-            );
-            callee_is_extern
-                && args
-                    .iter()
-                    .any(|(_, arg)| Self::expr_root_is(arena, *arg, param_name))
-        })
+            let Expr::Identifier(ident_id) = &arena[*function].kind else {
+                return false;
+            };
+            let Some(decl) = extern_scope.import_decl(&arena[*ident_id].name) else {
+                return false;
+            };
+            if !args
+                .iter()
+                .any(|(_, arg)| Self::expr_root_is(arena, *arg, param_name))
+            {
+                return false;
+            }
+            if Self::extern_declares_a_mut_param(arena, decl) {
+                return true;
+            }
+            reached_read_only = true;
+            false
+        });
+        if may_write {
+            ExternReach::MayWrite
+        } else if reached_read_only {
+            ExternReach::ReadOnly
+        } else {
+            ExternReach::None
+        }
+    }
+
+    /// Whether an `external fn` declaration marks any parameter `mut`, and so
+    /// declares a non-empty write set for the foreign body bound to it.
+    ///
+    /// Only the forms that name a binding carry the marker. The unnamed forms
+    /// occupy a real parameter slot but have no `mut` slot in the grammar, so a
+    /// declaration written with them declares the empty write set — which is
+    /// what the linker then holds the merged body to.
+    ///
+    /// This must agree with the write set the driver lowers out of the same
+    /// declaration and hands the linker, in one direction at least: answering
+    /// `false` where the linker's set is non-empty would elide a copy the
+    /// foreign body may write into. It cannot, because the linker's set is
+    /// populated from the same `is_mut` test and is only ever narrower — a `mut`
+    /// parameter whose type does not lower fails the link outright rather than
+    /// dropping out of the set.
+    ///
+    /// Every arm is enumerated rather than swept by a wildcard, so a new
+    /// argument form must be classified here instead of defaulting to "declares
+    /// nothing" — the direction that drops a copy.
+    fn extern_declares_a_mut_param(arena: &AstArena, decl: DefId) -> bool {
+        match &arena[decl].kind {
+            Def::ExternFunction { args, .. } => args.iter().any(|arg| match arg.kind {
+                // A receiver on an `external fn` is rejected by the type checker
+                // and asserted unreachable where the linker's write set is
+                // lowered; it is read here anyway, so that becoming reachable
+                // would cost a copy rather than lose one.
+                ArgKind::Named { is_mut, .. } | ArgKind::SelfRef { is_mut } => is_mut,
+                ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => false,
+            }),
+            // `ExternIndex` records nothing but `external fn` declarations, so
+            // this is unreachable. Answering "may write" keeps the entry copy,
+            // which is the harmless direction should that ever stop holding.
+            _ => true,
+        }
     }
 
     /// Returns `true` if any assignment in the function body is rooted at the
@@ -2149,8 +2265,8 @@ impl Compiler {
     /// of writes a body can perform on its own frame. It covers writes *through*
     /// the parameter (`p.x = 9`, `arr[0] = 9`, `g.cells[1].y = 9`) as well as
     /// whole-binding reassignment (`p = P { .. }`, `p = @`): all of them reduce
-    /// to the same root test. Together with [`Self::param_escapes_to_extern`]
-    /// this decides whether a compound parameter needs a private copy at all.
+    /// to the same root test. Together with [`Self::param_extern_reach`] this
+    /// decides whether a compound parameter needs a private copy at all.
     ///
     /// Root extraction goes through [`Self::expr_root_is`], which additionally
     /// peels `Expr::Parenthesized` where the type checker's own
@@ -2254,11 +2370,20 @@ impl Compiler {
     /// its value semantics — but only a parameter something can *write* needs
     /// that copy, and a callee's region can be written in exactly two ways: an
     /// assignment rooted at the parameter, and the parameter reaching an
-    /// `external fn` argument, whose foreign body shares the same linear memory
-    /// and may store through the pointer it is handed. A parameter that does
-    /// neither is observationally identical whether it is copied or not, so the
-    /// copy, the slot and — when nothing else in the function needs a frame — the
-    /// whole prologue, epilogue and `__stack_pointer` mutation are dropped.
+    /// argument of an `external fn` **whose declaration marks a parameter
+    /// `mut`**, whose foreign body shares the same linear memory and may store
+    /// through the pointer it is handed. A parameter that does neither is
+    /// observationally identical whether it is copied or not, so the copy, the
+    /// slot and — when nothing else in the function needs a frame — the whole
+    /// prologue, epilogue and `__stack_pointer` mutation are dropped.
+    ///
+    /// The declaration is what makes the second clause decidable here. Reaching
+    /// an external is not by itself a write: a declaration marking nothing `mut`
+    /// links only against a merged body that records no store at all, so nothing
+    /// it is handed can be disturbed. Reaching one that marks *any* parameter
+    /// `mut` keeps the copy for *every* parameter it is handed — see
+    /// [`ExternReach`] for why the position the argument occupies cannot narrow
+    /// that.
     ///
     /// The write test is a body scan rather than the `mut` marker. Keying on
     /// `mut` would attach a performance cliff to the annotation whose job is to
@@ -2307,21 +2432,30 @@ impl Compiler {
         }
 
         // The gate costs a full body walk, so a program that registered no
-        // imports skips it outright: there is nothing for the parameter to escape
-        // to, and the common case pays nothing.
-        if input.extern_scope.has_imports()
-            && Self::param_escapes_to_extern(
+        // imports skips it outright: there is nothing for the parameter to reach,
+        // and the common case pays nothing. The short-circuit stays at "any
+        // import" rather than "any import declaring `mut`" so that a parameter
+        // reaching a wholly read-only external is still classified, and the
+        // decision to elide is recorded rather than merely defaulted into.
+        if input.extern_scope.has_imports() {
+            match Self::param_extern_reach(
                 input.arena,
                 input.block_id,
                 input.extern_scope,
                 param_name,
-            )
-        {
-            cov_mark::hit!(wasm_codegen_param_escapes_to_extern);
-            if matches!(arg.kind, ArgKind::SelfRef { is_mut: false }) {
-                cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
+            ) {
+                ExternReach::MayWrite => {
+                    cov_mark::hit!(wasm_codegen_param_escapes_to_extern);
+                    if matches!(arg.kind, ArgKind::SelfRef { is_mut: false }) {
+                        cov_mark::hit!(wasm_codegen_self_escapes_to_extern);
+                    }
+                    return Ok(false);
+                }
+                ExternReach::ReadOnly => {
+                    cov_mark::hit!(wasm_codegen_param_reaches_read_only_extern);
+                }
+                ExternReach::None => {}
             }
-            return Ok(false);
         }
 
         cov_mark::hit!(wasm_codegen_param_by_reference);
@@ -2403,9 +2537,10 @@ impl Compiler {
                         }
                         // A struct parameter reaches here only when it is *not* by
                         // reference — it is assigned somewhere in the body, or it
-                        // reaches an `external fn` whose foreign body can store
-                        // through the address it is handed — so the callee must
-                        // work on its own copy and needs a slot to hold it.
+                        // reaches an `external fn` whose declaration marks a
+                        // parameter `mut`, so its foreign body may store through
+                        // the address it is handed — and the callee must work on
+                        // its own copy and needs a slot to hold it.
                         // `Custom` carries a bare name and `Qualified`/`QualifiedName`
                         // a `::`-joined path; both name a struct that must be
                         // resolved relative to the defining file (a same-named
@@ -2445,9 +2580,10 @@ impl Compiler {
                 }
                 // The receiver reaches here only when it is *not* by reference —
                 // it is assigned somewhere in the body, or it reaches an
-                // `external fn` whose foreign body can store through the address
-                // it is handed. Either way the callee must not write through the
-                // caller's pointer, so it gets a slot of its own.
+                // `external fn` whose declaration marks a parameter `mut`, so its
+                // foreign body may store through the address it is handed. Either
+                // way the callee must not write through the caller's pointer, so
+                // it gets a slot of its own.
                 ArgKind::SelfRef { .. } => {
                     let struct_name = method_struct_name.expect(
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
@@ -7372,22 +7508,27 @@ mod tests {
         }
     }
 
-    /// Tests for [`Compiler::param_escapes_to_extern`], the gate that decides
-    /// whether a compound parameter — here the `self` receiver — needs its own
-    /// frame slot.
+    /// Tests for [`Compiler::param_extern_reach`], the gate that decides whether
+    /// a compound parameter — here the `self` receiver — needs its own frame
+    /// slot.
     ///
     /// The scan reads only the AST and the extern scope the body sits in, so
     /// these drive it directly on parsed source rather than through codegen:
     /// the emitted bytes are pinned by the codegen fixtures, while these pin the
     /// *shapes* the gate must recognize. A missed shape is a silently missing
     /// copy, so the negative cases are as load-bearing as the positive ones.
+    ///
+    /// Both writing declarations carry `mut`, which is what makes the receiver
+    /// they are handed keep its copy; `peek` is the wholly read-only control
+    /// that must not.
     mod self_escape_scan {
         use super::*;
 
         const PREAMBLE: &str = "\
-external fn sort_pair(p: Pair);
-external fn probe(p: Pair) -> i32;
-use { sort_pair, probe } from sortlib;
+external fn sort_pair(mut p: Pair);
+external fn probe(mut p: Pair) -> i32;
+external fn peek(p: Pair) -> i32;
+use { sort_pair, probe, peek } from sortlib;
 ";
 
         /// Parses `body` as the body of `Pair::touch` and returns the arena and
@@ -7428,10 +7569,14 @@ struct Pair {{
             (arena, block_id)
         }
 
-        fn escapes(body: &str) -> bool {
+        fn reach(body: &str) -> ExternReach {
             let (arena, block_id) = touch_body(body);
             let registered = RegisteredExterns::all(&arena);
-            Compiler::param_escapes_to_extern(&arena, block_id, registered.scope(), "self")
+            Compiler::param_extern_reach(&arena, block_id, registered.scope(), "self")
+        }
+
+        fn escapes(body: &str) -> bool {
+            reach(body) == ExternReach::MayWrite
         }
 
         /// Every argument shape whose root peels to `self` hands the external an
@@ -7491,6 +7636,50 @@ struct Pair {{
                 assert!(!escapes(body), "must not escape:\n{body}");
             }
         }
+
+        /// A receiver handed only to declarations that mark no parameter `mut`
+        /// is classified as reaching a read-only external, not as escaping.
+        ///
+        /// That is a distinct answer from reaching nothing at all, and the
+        /// distinction is the licence for the elision: the linker admits a body
+        /// for such a declaration only if the merged bytes record no store
+        /// anywhere, so there is nothing the receiver's caller could observe.
+        #[test]
+        fn receivers_reaching_only_read_only_declarations_are_read_only() {
+            for body in [
+                "        return peek(self);",
+                "        return peek(self.a);",
+                "        return peek(self) + peek(self.b);",
+                "        if peek(self) > 0 { return 1; }\n        return 0;",
+            ] {
+                assert_eq!(reach(body), ExternReach::ReadOnly, "body:\n{body}");
+            }
+        }
+
+        /// One writing declaration decides the receiver however many read-only
+        /// calls sit beside it, in either order.
+        #[test]
+        fn one_writing_declaration_outweighs_the_read_only_ones() {
+            for body in [
+                "        let x: i32 = peek(self);\n        sort_pair(self);\n        return x;",
+                "        sort_pair(self);\n        return peek(self);",
+            ] {
+                assert_eq!(reach(body), ExternReach::MayWrite, "body:\n{body}");
+            }
+        }
+
+        /// A body that hands the receiver to nothing foreign reaches nothing —
+        /// the answer that is not merely "not writing".
+        #[test]
+        fn receivers_that_reach_no_extern_report_none() {
+            for body in [
+                "        return self.a;",
+                "        return peek(other);",
+                "        return helper(self);",
+            ] {
+                assert_eq!(reach(body), ExternReach::None, "body:\n{body}");
+            }
+        }
     }
 
     /// Tests for the two scans behind
@@ -7509,9 +7698,10 @@ struct Pair {{
         use super::*;
 
         const PREAMBLE: &str = "\
-external fn scramble(h: Holder);
-external fn probe(h: Holder) -> i32;
-use { scramble, probe } from lib;
+external fn scramble(mut h: Holder);
+external fn probe(mut h: Holder) -> i32;
+external fn peek(h: Holder) -> i32;
+use { scramble, probe, peek } from lib;
 
 struct Cell {
     x: i32;
@@ -7574,10 +7764,14 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             Compiler::param_is_written(&arena, block_id, param)
         }
 
-        fn escapes(body: &str, param: &str) -> bool {
+        fn reach(body: &str, param: &str) -> ExternReach {
             let (arena, block_id) = subject_body(body);
             let registered = RegisteredExterns::all(&arena);
-            Compiler::param_escapes_to_extern(&arena, block_id, registered.scope(), param)
+            Compiler::param_extern_reach(&arena, block_id, registered.scope(), param)
+        }
+
+        fn escapes(body: &str, param: &str) -> bool {
+            reach(body, param) == ExternReach::MayWrite
         }
 
         /// The `left` expression of the first assignment in the subject body.
@@ -7818,6 +8012,37 @@ fn subject(mut g: Holder, mut arr: [i32; 4], mut n: i32) -> i32 {{
             }
         }
 
+        /// The gate reads the *declaration*, so the same forwarding shape
+        /// answers differently for a declaration that marks a parameter `mut`
+        /// and one that does not.
+        ///
+        /// The rows are otherwise identical, which is what makes this the whole
+        /// content of the refined decision: `scramble` and `peek` take the same
+        /// argument, in the same position, from the same body.
+        #[test]
+        fn the_declarations_mut_markers_decide_the_reach() {
+            for (body, expected) in [
+                ("        scramble(g);", ExternReach::MayWrite),
+                ("        peek(g);", ExternReach::ReadOnly),
+                ("        return peek(g.cells[1].y);", ExternReach::ReadOnly),
+                ("        native(g);", ExternReach::None),
+                (
+                    "        peek(g);\n        scramble(g);",
+                    ExternReach::MayWrite,
+                ),
+                (
+                    "        scramble(g);\n        peek(g);",
+                    ExternReach::MayWrite,
+                ),
+                (
+                    "        peek(g);\n        scramble(arr);",
+                    ExternReach::ReadOnly,
+                ),
+            ] {
+                assert_eq!(reach(body, "g"), expected, "body:\n{body}");
+            }
+        }
+
         /// Whether the subject program's `external fn` declarations are handed to
         /// the decision as registered imports.
         ///
@@ -8005,7 +8230,7 @@ fn writes_in_a_nondet_block(mut p: Pair) -> i32 {{
         #[test]
         fn parameters_forwarded_to_an_extern_are_not_by_reference() {
             let source = "\
-external fn scramble(h: Holder);
+external fn scramble(mut h: Holder);
 use { scramble } from lib;
 
 struct Holder {
@@ -8013,7 +8238,7 @@ struct Holder {
     other: i32;
 }
 
-fn forwards(h: Holder) -> i32 {
+fn forwards(mut h: Holder) -> i32 {
     scramble(h);
     return h.tag;
 }
@@ -8026,6 +8251,67 @@ fn forwards(h: Holder) -> i32 {
                 by_reference(source, "forwards", 0, Imports::Unregistered),
                 "with no import registered there is nothing to escape to, and the \
                  same body is by reference"
+            );
+        }
+
+        /// The same forwarding body against a declaration that marks nothing
+        /// `mut` is by reference.
+        ///
+        /// This and the test above differ in one keyword, which is exactly the
+        /// claim: it is the declaration, not the act of forwarding, that costs
+        /// the caller a copy. A declaration with an empty write set links only
+        /// against a merged body that stores nowhere at all, so the elided
+        /// storage cannot be reached.
+        #[test]
+        fn parameters_forwarded_to_a_read_only_extern_are_by_reference() {
+            let source = "\
+external fn peek(h: Holder) -> i32;
+use { peek } from lib;
+
+struct Holder {
+    tag: i32;
+    other: i32;
+}
+
+fn forwards(h: Holder) -> i32 {
+    return peek(h) + h.tag;
+}
+";
+            assert!(
+                by_reference(source, "forwards", 0, Imports::Registered),
+                "a wholly read-only declaration cannot store, so the caller's \
+                 storage is handed over as it lies"
+            );
+        }
+
+        /// A declaration marking *any* parameter `mut` keeps the copy for every
+        /// parameter handed to it, including one at a position declared without
+        /// `mut`.
+        ///
+        /// The link bounds which declared parameter a store's address derives
+        /// from, never which bytes it reaches, so a body admitted for
+        /// `mixed(mut a, b)` may store outside `a`'s region. Narrowing this to
+        /// the `mut` positions would hand `b`'s caller storage to a body free to
+        /// land in it (#420).
+        #[test]
+        fn a_non_mut_position_of_a_writing_declaration_still_keeps_its_copy() {
+            let source = "\
+external fn mixed(mut a: Holder, b: Holder);
+use { mixed } from lib;
+
+struct Holder {
+    tag: i32;
+    other: i32;
+}
+
+fn forwards(mut a: Holder, b: Holder) -> i32 {
+    mixed(a, b);
+    return b.tag;
+}
+";
+            assert!(
+                !by_reference(source, "forwards", 1, Imports::Registered),
+                "the argument at the non-`mut` position keeps its copy too"
             );
         }
 

@@ -54,7 +54,8 @@ Before instruction emission, `compute_frame_layout()` walks the entire function 
 **Key insight**: an array-typed parameter gets copy space in the callee's frame only when
 something can write through it, which is what enforces **value semantics**. The caller always
 passes a pointer. If the callee's body assigns through the parameter, or forwards it to an
-`external fn` whose foreign body may store through the pointer, the callee copies the data into
+`external fn` whose declaration marks a parameter `mut` — the statement that its foreign body
+may store through the pointer — the callee copies the data into
 its own frame slot so those writes cannot reach the caller's data. If neither is true, the
 parameter is read where it lies and gets no slot at all — the copy would be unobservable, and
 skipping it can leave the function with no frame whatsoever. `compound_param_is_by_reference()`
@@ -576,10 +577,23 @@ Aligned: (12 + 15) & ~15 = 16 bytes
 
 - The parameter is **copied on entry** if the body assigns through it (`arr[0] = 9`, `p.x = 9`,
   `p = @`, whole-binding reassignment — `Stmt::Assign` is the language's only write statement),
-  or if it reaches an `external fn` argument, whose foreign body shares the same linear memory
-  and may store through the pointer it is handed.
+  or if it reaches an argument of an `external fn` **whose declaration marks any parameter
+  `mut`**. Such a foreign body shares the same linear memory and has declared that it may store
+  through the pointer it is handed.
 - Otherwise it is **passed by reference**: no frame slot, no copy, and reads go straight to the
   caller's memory.
+
+The declaration is what makes the second clause decidable. `mut` on an `external fn` parameter
+declares that the foreign body may store through the address that parameter denotes, and the
+linker checks the merged bytes against that declaration; a declaration marking nothing `mut`
+declares the empty write set, and the link then requires the merged body to record no store at
+all. Reaching such an external therefore cannot disturb anything, and the copy is dropped.
+
+The classification is whole-declaration, not per-argument-position. The link proves which
+declared parameter a store's *address derives from*, never which bytes it reaches, so a body
+admitted for `writer(mut a, b)` may store outside `a`'s region — and narrowing the gate to the
+`mut` positions would hand `b`'s caller storage to a body free to land in it. Lifting that needs
+a containment analysis the linker does not have (#420).
 
 The copy path is:
 1. Allocate space in the frame (computed by `compute_frame_layout()`)
@@ -1189,9 +1203,10 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_memcpy_bulk` | `emit_memcpy_via_locals()` | A region was copied with one `memory.copy` because the build permits bulk memory |
 | `wasm_codegen_memcpy_via_stack_bulk` | `emit_memcpy_via_stack()` | A body-level compound copy consumed its two pushed addresses with one `memory.copy` |
 | `wasm_codegen_emit_sret_copy` | `emit_sret_copy()` | A whole compound value was moved into the caller-provided sret destination |
-| `wasm_codegen_param_by_reference` | `compound_param_is_by_reference()` | A compound parameter is neither written nor forwarded to an extern, so it gets no slot and no copy |
+| `wasm_codegen_param_by_reference` | `compound_param_is_by_reference()` | A compound parameter is not written, and every `external fn` argument it reaches (if any) declares nothing `mut`, so it gets no slot and no copy |
 | `wasm_codegen_param_written_in_body` | `compound_param_is_by_reference()` | An assignment rooted at the parameter was found, so it keeps its slot and copy |
-| `wasm_codegen_param_escapes_to_extern` | `compound_param_is_by_reference()` | The parameter reaches an `external fn` argument, so it keeps its slot and copy |
+| `wasm_codegen_param_escapes_to_extern` | `compound_param_is_by_reference()` | The parameter reaches an argument of an `external fn` declaring a `mut` parameter, so it keeps its slot and copy |
+| `wasm_codegen_param_reaches_read_only_extern` | `compound_param_is_by_reference()` | The parameter reaches an `external fn` argument, but every declaration it reaches marks nothing `mut`, so it is still by reference |
 | `wasm_codegen_self_escapes_to_extern` | `compound_param_is_by_reference()` | The escaping parameter was an immutable `self` receiver |
 
 ## Examples
@@ -1271,7 +1286,7 @@ pub fn sum_array(arr: [i32; 3]) -> i32 {
 
 **Key codegen points**:
 1. Parameter `arr` gets local index 0 (pointer)
-2. Nothing assigns through `arr` and it reaches no `external fn`, so
+2. Nothing assigns through `arr` and it reaches no `external fn` at all, so
    `compound_param_is_by_reference()` returns `true` and it gets no frame slot
 3. Nothing else in the function needs memory, so `compute_frame_layout()` returns `None` —
    no `__frame_ptr` local, no prologue, no epilogue, no `__stack_pointer` mutation

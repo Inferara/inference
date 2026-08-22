@@ -1,12 +1,14 @@
-// A `mut self` receiver that also forwards itself to an `external fn`. A
-// mutable receiver already gets a frame slot and an entry copy, so the escape
-// adds nothing: exactly one copy, and the same bytes as before the gate existed.
+// A receiver the body itself assigns, which *also* forwards itself to an
+// `external fn` declared to write through the parameter it lands on. A written
+// receiver already gets a frame slot and an entry copy, so the escape adds
+// nothing: exactly one copy, and the same bytes as before the gate existed.
 //
 // The two conditions are disjunctive over one slot rather than two independent
 // copies, and that is what this fixture holds in place — a second slot would
-// leave `self` rebound to whichever copy was written last.
+// leave `self` rebound to whichever copy was written last. The write is checked
+// first, so this fixture is the one that reports the write and not the escape.
 
-external fn sort_pair(p: Pair);
+external fn sort_pair(mut p: Pair);
 use { sort_pair } from sortlib;
 
 struct Pair {

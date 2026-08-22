@@ -1,9 +1,13 @@
-// A sub-object of an immutable `self` forwarded to an `external fn`. The
-// argument is `self.inner`, whose address lies inside the receiver, so a
-// foreign store through it reaches the caller's struct just as a whole-`self`
-// argument would. The scan peels member accesses to their root for this reason.
+// A sub-object of a `self` receiver forwarded to an `external fn` declared to
+// write through the parameter it lands on. The argument is `self.inner`, whose
+// address lies inside the receiver, so a foreign store through it reaches the
+// caller's struct just as a whole-`self` argument would. The scan peels member
+// accesses to their root for this reason.
+//
+// The receiver is `mut` because `scramble` declares `mut p`: a projection of an
+// immutable binding at such a position is an A047 error.
 
-external fn scramble(p: Inner);
+external fn scramble(mut p: Inner);
 use { scramble } from sortlib;
 
 struct Inner {
@@ -15,7 +19,7 @@ struct Outer {
     inner: Inner;
     tag: i32;
 
-    fn touch(self) -> i32 {
+    fn touch(mut self) -> i32 {
         scramble(self.inner);
         return self.inner.x * 1000 + self.tag;
     }

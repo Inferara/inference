@@ -327,6 +327,12 @@ pub use inference_wasm_linker::LinkError;
 /// direct dependency on `inference-wasm-linker`.
 pub use inference_wasm_linker::{LinkOutput, LinkWarning};
 
+/// Re-export of the linker's write-set contract, which
+/// [`wasm_link::resolve_external_modules`] produces and [`link`] consumes, so a
+/// caller can carry one to the other without a direct dependency on
+/// `inference-wasm-linker`.
+pub use inference_wasm_linker::ImportWriteSet;
+
 /// Re-export of the `inference.spec_funcs` custom-section identifiers so
 /// downstream consumers (CLI tools, integration tests) share a single source
 /// of truth with the codegen and translator crates.
@@ -740,12 +746,36 @@ pub fn codegen(
 /// without externs links to byte-identical output, so callers can route every
 /// program through this step unconditionally.
 ///
+/// # The two `contracts` modes
+///
+/// `contracts` carries what each bound `external fn` declaration said its
+/// parameters may be written through, and it decides whether that check runs at
+/// all. It is an explicit mode rather than an emptiness test, because an empty
+/// list is a real and *strict* answer:
+///
+/// * `None` — **merge mechanics only.** Nothing is held to a write set. This is
+///   the mode for a caller with no Inference source behind `main_wasm`.
+/// * `Some(list)` — **checked.** Every satisfied import is held to the write set
+///   `list` declares for it, and a merged closure that may store through a
+///   parameter no entry declares `mut` fails the link. An import `list` does not
+///   mention is held to writing nothing, never exempted.
+///
+/// The compiler driver supplies `Some(..)` for every program it compiles from
+/// Inference source, with one entry per bound import, so the check is on
+/// throughout the live pipeline.
+///
 /// # Errors
 ///
 /// Returns an error if any module fails to parse, an import is left unsatisfied
 /// by the supplied externals, or a merged function falls into the unsupported
 /// Tier C — its module declares a data or element segment, or its closure names
-/// the table space. The underlying error downcasts to [`LinkError`].
+/// the table space. In the checked mode it additionally fails when a merged
+/// closure may store through a parameter the declaration did not declare `mut`
+/// ([`LinkError::UndeclaredExternWrite`]), when no contract entry describes a
+/// storing import at all ([`LinkError::UndescribedExternWrite`]), or when
+/// `contracts` holds two entries for one `(module, field)`
+/// ([`LinkError::DuplicateWriteContract`]). The underlying error downcasts to
+/// [`LinkError`].
 ///
 /// Globals are classified on use, not declaration: a closure that reads or
 /// writes one is Tier A — or Tier B if it also touches memory — and the
@@ -756,18 +786,22 @@ pub fn codegen(
 /// toolchain artifact linkable when its closure genuinely reads or writes a
 /// module global — a counter, a mode flag, a seed — and not only when its leaf
 /// functions leave lld's `__stack_pointer` untouched.
-pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
-    link_with_warnings(main_wasm, externals).map(|out| out.wasm)
+pub fn link(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
+) -> anyhow::Result<Vec<u8>> {
+    link_with_warnings(main_wasm, externals, contracts).map(|out| out.wasm)
 }
 
 /// Folds external `.wasm` modules into the codegen output, reporting what the
 /// completed link owes the user.
 ///
 /// Identical to [`link`], including the byte-identical no-op path for a program
-/// without externs, but keeps the [`LinkWarning`]s the merge raised instead of
-/// dropping them. Any caller that can put text in front of a user should prefer
-/// this form: a warning describes the artifact that was just written, and
-/// [`link`] discards it.
+/// without externs and the two `contracts` modes documented there, but keeps the
+/// [`LinkWarning`]s the merge raised instead of dropping them. Any caller that
+/// can put text in front of a user should prefer this form: a warning describes
+/// the artifact that was just written, and [`link`] discards it.
 ///
 /// This wrapper is **not** interchangeable with
 /// [`inference_wasm_linker::link_with_warnings`] on an empty `externals`. The
@@ -775,12 +809,16 @@ pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec
 /// so main-side shapes the linker rejects are accepted here: a data or element
 /// segment, a start function, a table, a second memory, a float, `v128`, or
 /// reference-typed value in one of main's own signatures, and a duplicated or
-/// malformed `inference.spec_funcs` or `inference.hspecs` custom section. Two
-/// entry points reaching different verdicts on identical bytes is recorded
-/// because a later caller will otherwise assume it cannot happen. It is benign
-/// on the live pipeline — main is always this compiler's own codegen output —
-/// and the documented error contract is honoured as written, since every input
-/// carrying an import to satisfy goes through the linker.
+/// malformed `inference.spec_funcs` or `inference.hspecs` custom section. The
+/// same holds for a malformed `contracts` argument: a list holding two entries
+/// for one `(module, field)` is rejected by the linker and passes here, because
+/// the fast path returns before the list is read. Two entry points reaching
+/// different verdicts on identical bytes is recorded because a later caller will
+/// otherwise assume it cannot happen. It is benign on the live pipeline — main
+/// is always this compiler's own codegen output, and a program with no import to
+/// satisfy has no declaration to contract — and the documented error contract is
+/// honoured as written, since every input carrying an import to satisfy goes
+/// through the linker.
 ///
 /// # Errors
 ///
@@ -788,6 +826,7 @@ pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec
 pub fn link_with_warnings(
     main_wasm: &[u8],
     externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
 ) -> anyhow::Result<LinkOutput> {
     // Byte-identical fast path *only* for a module that is provably import-free —
     // it is already the self-contained artifact this step would produce. A module
@@ -813,7 +852,7 @@ pub fn link_with_warnings(
         });
     }
     Ok(inference_wasm_linker::link_with_warnings(
-        main_wasm, externals,
+        main_wasm, externals, contracts,
     )?)
 }
 

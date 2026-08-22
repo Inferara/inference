@@ -1,0 +1,44 @@
+// The receiver reaches an external and is *not* copied.
+//
+// `mut` on an `external fn` parameter declares that the foreign body may store
+// through the address it denotes. A declaration marking nothing `mut` declares
+// the empty write set, and the link then requires the merged bytes to record no
+// store at all — so nothing the receiver's address is handed to can disturb it,
+// and the caller's struct is read where it lies.
+//
+// Two things make that a decision rather than an accident. The module registers
+// an import and `touch` hands the whole receiver to it, so the scan reaches the
+// call and classifies its declaration; and `sort_pair`, declared `mut w` and
+// bound from the same library, sits in the same module keeping
+// `Writable.touch`'s receiver in a frame slot. A gate that keyed on the module
+// having imports, or on the receiver reaching any extern at all, would copy
+// both.
+
+external fn read_pair(p: Pair) -> i32;
+external fn sort_pair(mut w: Writable);
+use { read_pair, sort_pair } from sortlib;
+
+struct Pair {
+    a: i32;
+    b: i32;
+
+    fn touch(self) -> i32 {
+        return read_pair(self) + self.a * 1000 + self.b;
+    }
+}
+
+struct Writable {
+    a: i32;
+    b: i32;
+
+    fn touch(mut self) -> i32 {
+        sort_pair(self);
+        return self.a * 1000 + self.b;
+    }
+}
+
+pub fn run() -> i32 {
+    let p: Pair = Pair { a: 5, b: 2 };
+    let w: Writable = Writable { a: 5, b: 2 };
+    return p.touch() * 100 + w.touch();
+}

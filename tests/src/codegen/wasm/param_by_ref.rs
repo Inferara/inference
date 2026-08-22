@@ -5,10 +5,12 @@
 //! to be copied into the callee's own frame on entry, unconditionally. Only a
 //! parameter something can *write* needs that copy, and a callee's region can be
 //! written in exactly two ways: an assignment rooted at the parameter, and the
-//! parameter reaching an `external fn` argument, whose foreign body shares the
-//! same linear memory. A parameter that does neither now gets no frame slot, no
-//! entry copy and no rebinding — and when nothing else in the function needs a
-//! frame, the prologue, the epilogue and the `__stack_pointer` write go with it.
+//! parameter reaching an argument of an `external fn` whose declaration marks a
+//! parameter `mut` — the statement that its foreign body, which shares the same
+//! linear memory, may store through the address it is handed. A parameter that
+//! does neither now gets no frame slot, no entry copy and no rebinding — and
+//! when nothing else in the function needs a frame, the prologue, the epilogue
+//! and the `__stack_pointer` write go with it.
 //!
 //! The family is arranged around two questions the goldens alone cannot answer.
 //!
@@ -464,20 +466,23 @@ mod param_by_ref_tests {
         );
     }
 
-    /// The gate: a parameter reaching an `external fn` argument keeps its copy.
-    ///
-    /// This fixture is the only thing in the corpus that exercises the escape
-    /// mark at all — no other fixture declares an external with a compound
-    /// parameter — so it is the sole coverage of the one condition that makes
-    /// the elision sound in the presence of foreign code.
+    /// The gate: a parameter reaching an `external fn` **declared to write**
+    /// keeps its copy.
     ///
     /// Both lowering arms are counted separately. A struct copy is emitted as
     /// one region move and an array copy as element-wise stores, so a gate that
     /// reached only one of them would leave the other handing the caller's
     /// pointer to a body that may store through it.
+    ///
+    /// The forwarding parameters are `mut` because A047 requires it at a `mut`
+    /// declared position. The marker is not what keeps the copy —
+    /// `mut_never_written` above states that a `mut` parameter nothing writes is
+    /// elided — so the escape count is what this fixture rests on.
     #[test]
     fn extern_forward_golden_test() {
         cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 2);
+        cov_mark::check_count!(wasm_codegen_param_reaches_read_only_extern, 0);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 0);
         cov_mark::check_count!(wasm_codegen_param_by_reference, 1);
         cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 1);
         cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 1);
@@ -488,6 +493,37 @@ mod param_by_ref_tests {
         assert_param_copied(&wasm, "forward_array", "a");
         assert_copy_form(&wasm, "forward_array", false);
         assert_frameless(&wasm, "no_forward");
+    }
+
+    /// The other side of the gate: a parameter reaching an `external fn` whose
+    /// declaration marks nothing `mut` is passed by reference.
+    ///
+    /// This is what the refined decision buys — a read-only external stops
+    /// costing its callers a copy — and it is sound without any containment
+    /// premise: the link admits a body for such a declaration only if the merged
+    /// bytes record no store at all, so there is nothing for the elided storage
+    /// to observe. Both lowering arms are covered again, because a gate that
+    /// reached only the struct arm would keep copying every array.
+    ///
+    /// The fixture holds all four outcomes in one module, which is what makes it
+    /// a per-declaration claim rather than a per-module one: `write_struct`
+    /// forwards to a `mut`-declaring external under the same import section and
+    /// keeps its copy, and `read_then_write` shows that the body's own write
+    /// still decides regardless of what the declaration says.
+    #[test]
+    fn extern_forward_read_only_golden_test() {
+        cov_mark::check_count!(wasm_codegen_param_reaches_read_only_extern, 2);
+        cov_mark::check_count!(wasm_codegen_param_by_reference, 2);
+        cov_mark::check_count!(wasm_codegen_param_escapes_to_extern, 1);
+        cov_mark::check_count!(wasm_codegen_param_written_in_body, 1);
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 2);
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 0);
+        let wasm = assert_golden("extern_forward_read_only");
+
+        assert_frameless(&wasm, "read_struct");
+        assert_frameless(&wasm, "read_array");
+        assert_param_copied(&wasm, "write_struct", "p");
+        assert_param_copied(&wasm, "read_then_write", "p");
     }
 
     // What the module keeps when the last frame goes ---
@@ -945,6 +981,12 @@ mod regenerate {
     #[ignore]
     fn regenerate_extern_forward_wasm() {
         regenerate("extern_forward");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_extern_forward_read_only_wasm() {
+        regenerate("extern_forward_read_only");
     }
 
     #[test]

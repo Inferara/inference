@@ -6,7 +6,9 @@
 use crate::{
     errors::TypeMismatchContext,
     extern_index::ExternIndex,
-    symbol_table::{EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable},
+    symbol_table::{
+        BindingMutability, EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable,
+    },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -126,6 +128,37 @@ pub struct TypedContext {
     /// truth for what a literal denotes, and nothing about how a program
     /// compiles depends on which position supplied that type.
     literal_type_sources: FxHashMap<ExprId, TypeMismatchContext>,
+    /// How the declaration of the binding an identifier expression resolves to
+    /// constrains a write to it, keyed by the identifier's expression id.
+    ///
+    /// **Contract.** An entry exists exactly for an identifier that resolves to
+    /// a *scope variable*, which is every `let` binding, every function or
+    /// method parameter, the `self` receiver, and — because a `const` is
+    /// registered as a scope variable so an intra-file use site resolves it by
+    /// value — every `const`. A `const` is therefore present, as
+    /// [`BindingMutability::Constant`]: the reason it is not writable is
+    /// recorded, not flattened into the same answer a non-`mut` `let` gives.
+    /// That distinction is load-bearing rather than descriptive, because
+    /// `const mut` is a parse error, so a diagnostic that asked a `const` for
+    /// `mut` would name a declaration form the grammar rejects.
+    ///
+    /// An identifier naming a function, a type, or nothing at all has no entry,
+    /// so `None` means "not a resolvable binding", never "a binding whose
+    /// mutability was not recorded".
+    ///
+    /// The fact cannot be recovered afterwards. Mutability lives on the scope
+    /// entry the symbol table walks from its *current* scope cursor, and that
+    /// cursor is meaningless once checking has finished — so a later phase
+    /// asking how a binding was declared has no scope to ask from. This map is
+    /// written where the answer is still available, at the identifier arm of
+    /// inference.
+    ///
+    /// Read by A047, which requires a compound argument at a `mut` `external fn`
+    /// parameter to be rooted at a `mut` binding: a linked external shares the
+    /// caller's linear memory and may store through the pointer it is handed, so
+    /// the binding's value changes across the call and the source must say it
+    /// may.
+    binding_mutability: FxHashMap<ExprId, BindingMutability>,
     /// Every `external fn` declaration in the program, keyed by the scope that
     /// introduces it. A pure function of the arena, so it is built at
     /// construction and is already answering queries while type checking runs.
@@ -155,6 +188,7 @@ impl TypedContext {
             definition_order: Vec::new(),
             resolved_call_targets: FxHashMap::default(),
             literal_type_sources: FxHashMap::default(),
+            binding_mutability: FxHashMap::default(),
         }
     }
 
@@ -174,6 +208,25 @@ impl TypedContext {
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn literal_type_source(&self, expr_id: ExprId) -> Option<&TypeMismatchContext> {
         self.literal_type_sources.get(&expr_id)
+    }
+
+    /// Records how the declaration of the binding the identifier at `expr_id`
+    /// names constrains a write to it. Called from the identifier arm of
+    /// inference, the one point at which the scope cursor still resolves the
+    /// name — see the contract on [`Self::binding_mutability`].
+    pub(crate) fn set_binding_mutability(
+        &mut self,
+        expr_id: ExprId,
+        mutability: BindingMutability,
+    ) {
+        self.binding_mutability.insert(expr_id, mutability);
+    }
+
+    /// How the binding the identifier at `expr_id` resolves to was declared, or
+    /// `None` when the identifier names no binding.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn binding_mutability(&self, expr_id: ExprId) -> Option<BindingMutability> {
+        self.binding_mutability.get(&expr_id).copied()
     }
 
     /// Records the defining-file identity of a resolved call, keyed by its

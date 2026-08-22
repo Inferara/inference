@@ -192,6 +192,20 @@ The predicate lives in `walker::separated_negated_literal` and is shared with A0
 
 Negating anything that is not a literal stays legal (`- x`, `- g()`): there is no token to glue the sign to and so no second spelling to choose between. Binary subtraction (`a - 1`, `a-1`) has a left operand, is never a `PrefixUnary`, and is never seen. Two documented non-scopes: `~ 5` and `! x`, since only `-` is folded into a literal by the lexer and so only `-` has a whitespace-dependent alternative to remove; and `-(128)`, whose operand is a parenthesized expression rather than a literal — it cannot be closed up into a token, A022's reading of it is unchanged, and peeling the parentheses would demand a rewrite the syntax does not offer.
 
+### External Write Through an Immutable Argument (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A047 | `ExternMutArgument` | error | a compound argument at a `mut` `external fn` parameter whose root binding is not declared `mut` |
+
+A047 requires that a struct or array argument landing on a `mut` `external fn` parameter be rooted at a `mut` binding. A linked external shares the caller's single linear memory, so a compound argument is not copied across the call at all: the caller hands over a raw pointer into its own frame, and the foreign body reads and writes the caller's bytes directly. `mut` on the declaration is the statement that it may store through that address, and the linker checks the claim against the merged body. That makes this the one place a write to a binding is invisible in Inference source — the store lives in a `.wasm` the type checker never reads — so the call site has to carry the statement instead, exactly as it would for an assignment written out in full.
+
+Four conditions decide the report: the callee resolves through `ExternIndex` to an `external fn` declaration; that declaration's parameter at the argument's position is `mut`; the parameter's declared type passes a *region*, meaning an array at any depth or a name that resolves to a struct; and the argument is not rooted at a `mut` binding. Correspondence is positional — `call_args[i]` is declaration parameter `i` whether or not the call labels its arguments, since nothing in the pipeline reorders by label — and a call whose arity does not match the declaration is a type error reported before analysis runs.
+
+An enum is out of scope because it lowers to a bare `i32` tag, and so is every scalar: neither passes a region, which is what keeps the documented `external fn store_at(mut ptr: i32, ..)` idiom untouched. The region predicate deliberately does not mirror codegen's own compound test, which is private to `inference-wasm-codegen` — a crate this one does not and must not depend on — and it carries no field-less-struct carve-out, because A045 already rejects a field-less struct as an `external fn` parameter type at any array depth; a future relaxation of A045 must revisit it.
+
+Resolution is scope-aware, as in A024: an `external fn` may be declared at a file's top level or inside a `spec`, the two may share a name, and each call is measured against the declaration visible from where it stands. Mutability is read from the argument's *root* binding, so `p`, `p.inner`, `arr[i]` and `(p)` are all judged by the binding they reach into — a projection of a `mut` binding is memory that binding's own declaration already says may change. An argument rooted at no binding at all (a compound literal, the result of a call, a draw) is reported rather than silently accepted, but it is never the only diagnostic such a program gets: A012, A016 and A014/A039 already reject those shapes as arguments, so this half of the rule is defense in depth.
+
 ## Diagnostic Output Format
 
 ```
@@ -299,6 +313,7 @@ Test files are organized by rule group:
 | `rules_a044.rs` | A044 (shift count literal out of range) |
 | `rules_a045.rs` | A045 (field-less struct values) |
 | `rules_a046.rs` | A046 (unary minus separated from the literal it negates) |
+| `rules_a047.rs` | A047 (compound argument at a `mut` `external fn` parameter) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

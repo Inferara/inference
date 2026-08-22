@@ -116,7 +116,7 @@ fn mathlib_sum() -> Vec<u8> {
 /// external.
 fn link_against_mathlib(main: &[u8]) -> Vec<u8> {
     let lib = mathlib_sum();
-    raw_link(main, &[("mathlib", &lib)])
+    raw_link(main, &[("mathlib", &lib)], None)
         .unwrap_or_else(|e| panic!("link must accept the fixture, got {e:?}"))
 }
 
@@ -209,7 +209,7 @@ fn assert_output_rejected_as_nondet(label: &str, main: &[u8]) {
 /// classification instead of the diagnostic's phrasing.
 fn assert_link_rejected_as_unmodeled(label: &str, main: &[u8], family: &str) {
     let lib = mathlib_sum();
-    let err = raw_link(main, &[("mathlib", &lib)])
+    let err = raw_link(main, &[("mathlib", &lib)], None)
         .err()
         .unwrap_or_else(|| panic!("{label}: the linker must refuse a retracted family"));
 
@@ -818,7 +818,7 @@ fn main_body_past_the_control_depth_cap_is_rejected_before_translation() {
     // translatable. The link must now reject it up front.
     let main = main_with_nested_blocks(256);
     let lib = mathlib_sum();
-    let err = raw_link(&main, &[("mathlib", &lib)])
+    let err = raw_link(&main, &[("mathlib", &lib)], None)
         .expect_err("a main body past the control-depth cap must be rejected by the linker");
     match err {
         inference_wasm_linker::LinkError::UnsupportedConstruct(msg) => assert!(

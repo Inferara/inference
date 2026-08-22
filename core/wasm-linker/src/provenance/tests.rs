@@ -758,7 +758,7 @@ fn single_function_memory_closure_is_still_analyzed() {
 
 /// Runs the interprocedural verifier over a whole `module_wat`, treating
 /// `func_index` as the closure root and every function as in the closure.
-fn verify(module_wat: &str, func_indices: &[u32], root: u32) -> Result<(), LinkError> {
+fn verify(module_wat: &str, func_indices: &[u32], root: u32) -> Result<RootWriteSet, LinkError> {
     let m = module(module_wat);
     verify_param_addressing(&m, func_indices, root, "export")
 }
@@ -1839,11 +1839,18 @@ fn r3_locals_under_the_cap_are_analyzed() {
 #[test]
 fn deeply_nested_blocks_fail_closed_without_aborting() {
     // A body nested far past the analysis depth cap must be rejected as a normal
-    // `Ok(false)` (Tier C), never recurse until the analysis stack overflows.
-    let depth = super::MAX_ANALYSIS_DEPTH + 50;
-    let mut wat = String::from(
-        "(module (memory 1) (func (param i32) (result i32) local.get 0 ",
-    );
+    // `Ok(false)` (Tier C), never recurse until the analysis stack overflows, so
+    // the assertion is a verdict rather than the absence of an abort.
+    assert!(!accepts(
+        &deeply_nested_load_module(super::MAX_ANALYSIS_DEPTH + 50),
+        1
+    ));
+}
+
+/// A single-function module whose `i32.load` sits `depth` structured blocks deep,
+/// for the cases that drive the analysis past its nesting cap.
+fn deeply_nested_load_module(depth: usize) -> String {
+    let mut wat = String::from("(module (memory 1) (func (param i32) (result i32) local.get 0 ");
     for _ in 0..depth {
         wat.push_str("(block (result i32) ");
     }
@@ -1852,10 +1859,7 @@ fn deeply_nested_blocks_fail_closed_without_aborting() {
         wat.push(')');
     }
     wat.push_str(") (export \"f\" (func 0)))");
-
-    // Past the depth cap the analysis fails closed (rejects), and it must return
-    // a verdict rather than abort.
-    assert!(!accepts(&wat, 1));
+    wat
 }
 
 /// Builds a raw function body whose single locals group declares `count` locals
@@ -1895,4 +1899,578 @@ fn write_leb_u32(out: &mut Vec<u8>, mut value: u32) {
             break;
         }
     }
+}
+
+
+// ===========================================================================
+// Root write set — which of the root's parameters a closure may STORE through.
+//
+// Every module-level row below (`w1`–`w11`, `w17`–`w21`) is a closure the
+// derivation proof already admits, so what is under test is the attribution
+// alone. Each root carries at least one parameter the closure never writes
+// through, so an assertion is an equality and not merely a lower bound: an
+// attribution that widened everything to "all parameters" would go red here.
+//
+// Three properties are easy to get wrong and each has a row that catches it:
+//
+// - the read/write split — `memory.copy`'s source is read and its destination
+//   written, so only the destination may appear (`w3`);
+// - `Linear::support`, never `Linear::odd` — a scaled index contributes to a
+//   store's address without carrying its odd coefficient, at the store itself
+//   (`w8`) and across a call site (`w9`);
+// - the root is a transfer target like any other function (`w6`).
+//
+// `w12`–`w16` and `w22`–`w23` drive the attribution directly; see the sub-banner
+// below for why they cannot be modules.
+// ===========================================================================
+
+/// Runs the interprocedural verifier and returns the write set of a closure the
+/// analysis must admit, so a row that stops being admitted fails loudly rather
+/// than silently asserting about a rejection.
+fn write_set(module_wat: &str, func_indices: &[u32], root: u32) -> RootWriteSet {
+    verify(module_wat, func_indices, root).expect("fixture closure must be admitted")
+}
+
+#[test]
+fn w1_load_only_closure_records_no_store() {
+    // Reads through both parameters and writes nothing. `never_stores` is the
+    // structural fact, held independently of the parameter set being empty.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0 i32.load
+            local.get 1 i32.load
+            i32.add)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert!(w.never_stores());
+    assert!(!w.is_unattributed());
+    assert_eq!(w.may_store_through(), Vec::<u32>::new());
+}
+
+#[test]
+fn w2_store_through_one_param_attributes_only_that_param() {
+    // `store(p0, p1)`: p0 is the address, p1 is the stored *value*. Only the
+    // address parameter is written through.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert!(!w.never_stores());
+    assert_eq!(w.may_store_through(), vec![0]);
+}
+
+#[test]
+fn w3_memory_copy_attributes_its_destination_and_not_its_source() {
+    // The case the read/write split exists for: `memory.copy(dest=p0, src=p1,
+    // size=p2)` reads through p1 and writes through p0. Before the split both
+    // addresses were one kind, and p1 would appear in the write set. The size
+    // operand is an extent, which names no location and attributes nothing.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0
+            local.get 1
+            local.get 2
+            memory.copy)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0]);
+}
+
+#[test]
+fn w4_memory_fill_attributes_its_destination() {
+    // `memory.fill(dest=p1, byte, size=p2)` writes through p1. p0 is untouched
+    // and p2 is an extent, so a set that merely said "some parameter" would not
+    // distinguish any of the three.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 1
+            i32.const 0
+            local.get 2
+            memory.fill)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![1]);
+}
+
+#[test]
+fn w5_store_in_a_called_helper_attributes_the_root_param_it_was_passed() {
+    // The sortlib shape: the root forwards one of its own pointers to a
+    // non-exported helper, and the helper does the storing. The write set is in
+    // the *root's* coordinates, so it must name p1 — the parameter the root
+    // passed on — and not p0, which the root only reads through.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 i32.store)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0 i32.load
+            drop
+            local.get 1 i32.const 7 call 0)
+          (export "sort" (func 1)))
+        "#,
+        &[0, 1],
+        1,
+    );
+    assert_eq!(w.may_store_through(), vec![1]);
+}
+
+#[test]
+fn w6_recursive_root_swapping_its_arguments_may_write_through_both() {
+    // The root recurses with two of its arguments exchanged and then stores
+    // through parameter 0. On the recursive invocation that address is whatever
+    // the *caller* passed as parameter 1, so the true may-write set is both —
+    // which the attribution sees only because the root is a transfer target like
+    // any other function, its seed an initial value rather than a fixed point.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 1 local.get 0 local.get 2 call 0
+            local.get 0 i32.const 7 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w7_store_at_the_sum_of_two_params_attributes_both() {
+    // `store(p0 + p1)`. Both parameters contribute to the address, so both are
+    // written through; p2 is untouched.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 local.get 1 i32.add
+            i32.const 7
+            i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w8_store_at_a_scaled_index_attributes_the_index_param() {
+    // `store(p0 + (p1 << 2))`, the array-element idiom. The shift makes p1's
+    // coefficient even, so the dependence has `odd == {0}` while `support ==
+    // {0, 1}`. Attribution reads `support`: p1 chose part of the address, so a
+    // declaration naming only p0 must not cover this body.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0
+            local.get 1 i32.const 2 i32.shl
+            i32.add
+            i32.const 7
+            i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w9_scaled_index_passed_to_a_helper_attributes_the_index_param() {
+    // `w8`'s point at the *call site* rather than at the store: the root hands a
+    // helper `p0 + (p1 << 2)` and the helper stores through it. The transfer
+    // reads the argument's `support`, so the helper's parameter derives from both
+    // root parameters even though only p0 carries the odd coefficient.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (type (;1;) (func (param i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0
+            local.get 1 i32.const 2 i32.shl
+            i32.add
+            call 1)
+          (func (;1;) (type 1) (param i32)
+            local.get 0 i32.const 7 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0, 1],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w10_first_undeclared_names_the_lowest_uncovered_param() {
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 local.get 1 i32.add
+            i32.const 7
+            i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+    assert_eq!(w.first_undeclared(&[0, 1]), None);
+    assert_eq!(w.first_undeclared(&[0]), Some(1));
+    assert_eq!(w.first_undeclared(&[1]), Some(0));
+    assert_eq!(w.first_undeclared(&[]), Some(0));
+}
+
+#[test]
+fn w11_a_closure_that_never_stores_is_covered_by_an_empty_declaration() {
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            local.get 0 i32.load)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert!(w.never_stores());
+    assert_eq!(w.first_undeclared(&[]), None);
+}
+
+#[test]
+fn w17_a_body_the_analysis_cannot_walk_records_a_store() {
+    // The structural fail-closed access. When `interpret` cannot walk a body the
+    // summary records one unprovable access, and it is a *store*: an unanalyzable
+    // body may write anywhere. The closure rejects on that access either way, so
+    // the kind is only observable at the summary — but a write set built from a
+    // partially-walked body must never read as read-only, so the choice is pinned
+    // here rather than left to the rejection to hide.
+    let wat = deeply_nested_load_module(super::MAX_ANALYSIS_DEPTH + 50);
+    let m = ParsedModule::default();
+    let summary = summarize_function(&m, &first_body(&wat), 1).expect("analysis runs");
+    assert_eq!(
+        summary.accesses.len(),
+        1,
+        "the depth guard fires before the inner load is reached"
+    );
+    assert_eq!(summary.accesses[0].kind, AccessKind::Store);
+}
+
+#[test]
+fn w18_a_store_two_calls_below_the_root_attributes_the_forwarded_param() {
+    // Propagation past a single call: the root stores through p0 and forwards p1
+    // through a middle function to a leaf that stores through it. Both stores
+    // must land in one set, and the transfer must survive two hops.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (type (;1;) (func (param i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 i32.const 7 i32.store
+            local.get 1 call 1)
+          (func (;1;) (type 1) (param i32)
+            local.get 0 call 2)
+          (func (;2;) (type 1) (param i32)
+            local.get 0 i32.const 7 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0, 1, 2],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w19_mutually_recursive_helpers_swapping_arguments_write_through_both() {
+    // `w6`'s swap between two *non-root* helpers, where the growth is not seeded.
+    // Function 2 hands function 1 its own parameters exchanged, so on the second
+    // trip around the cycle the address function 2 stores through derives from
+    // the root's p1. The origin sets therefore keep growing after their first
+    // visit, which only a worklist that re-enqueues on growth will follow.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32)))
+          (type (;1;) (func (param i32 i32 i32)))
+          (func (;0;) (type 1) (param i32 i32 i32)
+            local.get 0 local.get 1 call 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0 local.get 1 call 2)
+          (func (;2;) (type 0) (param i32 i32)
+            local.get 1 local.get 0 call 1
+            local.get 0 i32.const 7 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0, 1, 2],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w20_diamond_legs_carrying_different_root_params_union_at_the_leaf() {
+    // One leaf reached from two middles, each carrying a *different* root
+    // parameter. The leaf's parameter derives from both, so its single store
+    // attributes to both — a transfer that stopped at the first call site would
+    // see only one.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32 i32 i32)))
+          (type (;1;) (func (param i32)))
+          (func (;0;) (type 0) (param i32 i32 i32)
+            local.get 0 call 1
+            local.get 1 call 2)
+          (func (;1;) (type 1) (param i32)
+            local.get 0 call 3)
+          (func (;2;) (type 1) (param i32)
+            local.get 0 call 3)
+          (func (;3;) (type 1) (param i32)
+            local.get 0 i32.const 7 i32.store)
+          (export "f" (func 0)))
+        "#,
+        &[0, 1, 2, 3],
+        0,
+    );
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w21_memory_init_attributes_its_destination() {
+    // `memory.init(dest=p0, segment_offset, size=p1)` writes through p0. A module
+    // with a data segment is Tier C, so this shape cannot reach the attribution
+    // through `link`; the destination is still classified as a store, because a
+    // future relaxation must not inherit a `memory.init` that reads as read-only.
+    let w = write_set(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (data (;0;) "abcd")
+          (type (;0;) (func (param i32 i32)))
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            i32.const 0
+            local.get 1
+            memory.init 0)
+          (export "f" (func 0)))
+        "#,
+        &[0],
+        0,
+    );
+    assert!(!w.never_stores());
+    assert_eq!(w.may_store_through(), vec![0]);
+}
+
+// ---------------------------------------------------------------------------
+// The `unattributed` widening, on hand-built summaries.
+//
+// It cannot be reached through a real module: the public path rejects every body
+// that would produce it before a write set is ever built (see the argument at
+// `verify_param_addressing`), so an end-to-end fixture would pass for the wrong
+// reason. These drive the attribution directly instead.
+// ---------------------------------------------------------------------------
+
+/// A summary with one memory access and no calls.
+fn summary_with_access(param_count: usize, kind: AccessKind, dep: Linear) -> FunctionSummary {
+    FunctionSummary {
+        param_count,
+        accesses: vec![Access { kind, dep }],
+        calls: Vec::new(),
+    }
+}
+
+#[test]
+fn w12_a_store_depending_on_no_param_widens_to_every_root_param() {
+    // The shape the structural fail-closed access takes when `interpret` cannot
+    // walk a body: a store with an empty dependence. Nothing attributes it, so
+    // the set widens rather than reading as "writes nothing".
+    let summaries = std::collections::BTreeMap::from([(
+        0u32,
+        summary_with_access(2, AccessKind::Store, Linear::default()),
+    )]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(w.is_unattributed());
+    assert!(!w.never_stores());
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w13_a_store_in_a_root_unreachable_function_widens_to_every_root_param() {
+    // A function no call site reaches has empty origins for its parameters, so
+    // its store cannot be traced to any root parameter. The set widens.
+    let summaries = std::collections::BTreeMap::from([
+        (
+            0u32,
+            FunctionSummary {
+                param_count: 2,
+                ..FunctionSummary::default()
+            },
+        ),
+        (
+            7u32,
+            summary_with_access(1, AccessKind::Store, Linear::of_param(0)),
+        ),
+    ]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(w.is_unattributed());
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w14_a_reachable_store_is_not_widened() {
+    // The control for `w12`/`w13`: the same driver over a well-formed summary
+    // attributes normally, so those two are not passing on a broken harness.
+    let summaries = std::collections::BTreeMap::from([(
+        0u32,
+        summary_with_access(2, AccessKind::Store, Linear::of_param(1)),
+    )]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(!w.is_unattributed());
+    assert_eq!(w.may_store_through(), vec![1]);
+}
+
+#[test]
+fn w15_a_load_that_cannot_be_attributed_is_not_a_write() {
+    // Only a store is attributed. An unattributable *load* leaves the write set
+    // empty and `never_stores` true — the widening is not a blanket panic button.
+    let summaries = std::collections::BTreeMap::from([(
+        0u32,
+        summary_with_access(2, AccessKind::Load, Linear::default()),
+    )]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(w.never_stores());
+    assert!(!w.is_unattributed());
+    assert_eq!(w.may_store_through(), Vec::<u32>::new());
+}
+
+#[test]
+fn w16_the_widening_reaches_root_params_past_the_mask_range() {
+    // `ParamMask` saturates at 64 bits, and its fail-closed polarity inverts in a
+    // write set: an absent bit would mean *not written*. Representing "every root
+    // parameter" as a mask would let a root with more than 64 parameters read as
+    // writing nothing above index 63, so the widening is its own variant and must
+    // name those parameters.
+    let summaries = std::collections::BTreeMap::from([(
+        0u32,
+        summary_with_access(70, AccessKind::Store, Linear::default()),
+    )]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 70);
+    assert!(w.is_unattributed());
+    assert_eq!(w.may_store_through().len(), 70);
+    assert_eq!(w.may_store_through().last().copied(), Some(69));
+
+    let declared: Vec<u32> = (0..64).collect();
+    assert_eq!(w.first_undeclared(&declared), Some(64));
+}
+
+#[test]
+fn w22_one_unattributed_store_widens_even_beside_an_attributed_one() {
+    // The widening is not conditional on the attributed set being empty: one
+    // store nothing can trace poisons a closure whose other stores traced fine.
+    let summaries = std::collections::BTreeMap::from([(
+        0u32,
+        FunctionSummary {
+            param_count: 2,
+            accesses: vec![
+                Access {
+                    kind: AccessKind::Store,
+                    dep: Linear::of_param(0),
+                },
+                Access {
+                    kind: AccessKind::Store,
+                    dep: Linear::default(),
+                },
+            ],
+            calls: Vec::new(),
+        },
+    )]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(w.is_unattributed());
+    assert_eq!(w.may_store_through(), vec![0, 1]);
+}
+
+#[test]
+fn w23_a_call_site_arity_mismatch_contributes_nothing() {
+    // A call site recording fewer arguments than its callee has parameters cannot
+    // panic and cannot invent an attribution: `arg_dep` yields the default
+    // dependence, whose empty support contributes nothing, so the callee's second
+    // parameter stays unattributed and the store through it widens the set. The
+    // trust fixpoint reads the same accessor and reaches the matching verdict —
+    // it treats that argument as unjustified.
+    let summaries = std::collections::BTreeMap::from([
+        (
+            0u32,
+            FunctionSummary {
+                param_count: 2,
+                accesses: Vec::new(),
+                calls: vec![CallSite {
+                    callee: 1,
+                    arg_deps: vec![Linear::of_param(0)],
+                }],
+            },
+        ),
+        (
+            1u32,
+            summary_with_access(2, AccessKind::Store, Linear::of_param(1)),
+        ),
+    ]);
+
+    let w = super::attribution::root_write_set(&summaries, 0, 2);
+    assert!(w.is_unattributed());
 }

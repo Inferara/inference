@@ -1171,6 +1171,25 @@ fn test_parse_external_function() {
     assert_custom_type(&arena, ret.unwrap(), "Address");
 }
 
+#[test]
+fn test_parse_external_function_mut_args() {
+    // `mut` on an external parameter survives to `Def::ExternFunction` through
+    // the integration surface. The unannotated second parameter gives the test
+    // teeth: mutability is recorded per argument, not per declaration.
+    let (arena, defs) = parse_defs("external fn sort_pair(mut a: [i32; 2], n: i32);");
+    assert_eq!(defs.len(), 1);
+
+    let (args, _) =
+        assert_extern_function_def(&arena, defs[0], "sort_pair", Visibility::Private, 2, false);
+
+    let ty0 = assert_named_arg(&arena, &args[0], "a", true);
+    let (element, _) = assert_array_type(&arena, ty0);
+    assert_simple_type(&arena, element, SimpleTypeKind::I32);
+
+    let ty1 = assert_named_arg(&arena, &args[1], "n", false);
+    assert_simple_type(&arena, ty1, SimpleTypeKind::I32);
+}
+
 // ---------------------------------------------------------------------------
 // Type alias definitions
 // ---------------------------------------------------------------------------

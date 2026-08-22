@@ -270,20 +270,74 @@
 //! results are always `NotParam`. Finally every memory access is verified with
 //! the same [`is_live`] predicate against its function's `trusted` set; any
 //! access that fails rejects the whole closure.
+//!
+//! ## Reads, writes, and the root write set
+//!
+//! Derivation is proved for every memory operand alike, but *what* the operand
+//! does is recorded too, because one consumer needs more than a verdict. A `mut`
+//! on an `external fn` parameter declares that the foreign body may store
+//! through the address that parameter denotes, and the link is what checks the
+//! declaration — so the analysis must be able to say which root parameters a
+//! closure writes through, not merely that every address is caller-derived.
+//!
+//! [`AccessKind`] therefore separates a `Load` from a `Store`, and
+//! [`attribution`] maps each store's dependence back to the closure root's own
+//! parameter indices — the coordinate space a declaration is written in. Nothing
+//! about the derivation proof changes: both kinds are held to exactly the same
+//! [`is_live`] rule, correlation clause included, so the split is invisible to
+//! every verdict this module reached before it. Only the bulk-memory extent is
+//! still checked more weakly, for the reason argued above.
+//!
+//! ### The second obligation on `support`
+//!
+//! The two masks were introduced to serve the derivation property, which turns on
+//! [`Linear::odd`]. The write set makes a different claim and reads the *other*
+//! mask: it is a may-write, so every possible contributor counts, and
+//! [`Linear::support`] is the one that over-approximates them. [`attribution`]
+//! argues why at length.
+//!
+//! What that lands on the rules below is a second reason to preserve `support`.
+//! They already do — no rule keeps a `Param` tag while dropping a contributor
+//! from `support` — but it is now load-bearing twice over, so a future rule that
+//! narrowed `support` to tighten the subset check would silently narrow the write
+//! set with it.
+//!
+//! ### What the write set does not say
+//!
+//! It bounds which root parameter a store's address *derives from*, and says
+//! nothing about which bytes are written — for exactly the reason the derivation
+//! property says nothing about containment. A store at `p + 1048576` is
+//! attributed to `p` and lands nowhere near what the caller granted. A consumer
+//! that needs "the write stayed inside the region" needs the numeric domain of
+//! issue #420, not this.
 
 use inf_wasmparser::{BinaryReader, BlockType, FunctionBody, Operator};
 
 use crate::parse::{FuncSig, ParsedModule};
 use crate::LinkError;
 
+mod attribution;
+
+pub(crate) use attribution::RootWriteSet;
+
 /// A set of a single function's parameter indices, as a 64-bit bitset.
 ///
 /// WebAssembly permits more parameters than 64, but a function with that many is
-/// neither produced by Inference codegen nor a realistic shared-memory helper;
-/// any parameter whose index is `>= 64` cannot be represented, so it is treated
-/// as **never trusted** — its bit is simply absent, a value deriving solely from
-/// it stays `NotParam`, and a dereference through it is rejected. This is a sound
-/// over-rejection at the high-arity tail, never an unsound admission.
+/// neither produced by Inference codegen nor a realistic shared-memory helper.
+/// **No index at 64 or above is representable**: its bit is simply absent, so
+/// every consumer must be fail-closed under that truncation. The masks are read
+/// with two opposite polarities, so the argument belongs at each consumer rather
+/// than here:
+///
+/// - [`TrustModel::trusted`] reads an absent bit as *untrusted*, and
+///   [`summarize_function`] seeds a parameter at 64 or above as
+///   [`Prov::NotParam`], so a value deriving solely from it never becomes
+///   `Param` and a dereference through it is rejected — a sound over-rejection
+///   at the high-arity tail.
+/// - [`Linear::support`] reads a present bit as *the form may mention this
+///   parameter*, where the same truncation would read as *not mentioned*. The
+///   write-set attribution built on it closes that with a variant of its own
+///   rather than a mask; see [`attribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct ParamMask(u64);
 
@@ -339,6 +393,25 @@ impl ParamMask {
         } else {
             self
         }
+    }
+
+    /// Whether `index` is in the mask. An index past the representable range is
+    /// never present, matching [`ParamMask::single`].
+    fn contains(self, index: usize) -> bool {
+        index < 64 && self.0 & (1 << index) != 0
+    }
+
+    /// The parameter indices in the mask, ascending.
+    fn indices(self) -> impl Iterator<Item = usize> {
+        let mut bits = self.0;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            let index = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            Some(index)
+        })
     }
 }
 
@@ -573,16 +646,38 @@ struct CallSite {
     arg_deps: Vec<Linear>,
 }
 
-/// What a recorded memory operand is, which decides how strictly it is checked.
+/// The dependence `call` passes in the callee's parameter position `index`.
+///
+/// A call site whose recorded argument count disagrees with the callee's arity
+/// yields the default dependence, which has no odd coefficient and empty
+/// support. That single policy is what keeps the two fixpoints consistent:
+/// [`compute_trusted_params`] must treat such an argument as *unjustified* and
+/// [`attribution`] must treat it as *contributing nothing*, and those agree only
+/// while both read the argument through here.
+fn arg_dep(call: &CallSite, index: usize) -> Linear {
+    call.arg_deps.get(index).copied().unwrap_or_default()
+}
+
+/// What a recorded memory operand is, which decides how strictly it is checked
+/// and whether it contributes to the closure's write set.
+///
+/// `Load` and `Store` are both addresses and are held to exactly the same
+/// [`is_live`] rule, correlation clause included: the derivation proof does not
+/// care which direction the bytes move. They are separated because
+/// [`attribution`] does — only a store can change what a caller observes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessKind {
-    /// A linear-memory address. Held to the full [`is_live`] rule, correlation
-    /// clause included.
-    Address,
+    /// A linear-memory address a body reads from.
+    Load,
+    /// A linear-memory address a body writes to. The only kind the write set
+    /// attributes back to root parameters.
+    Store,
     /// The size operand of a bulk-memory op, which bounds the region touched
-    /// rather than naming it. Held to the same rule minus the correlation
+    /// rather than naming it. Held to the address rule minus the correlation
     /// clause, so a helper may still combine two caller-supplied lengths; see
-    /// "Address masks and extent masks are checked differently".
+    /// "Address masks and extent masks are checked differently". An extent names
+    /// no location, so it attributes nothing: the address it accompanies is
+    /// recorded separately with the kind that says whether the region is written.
     Extent,
 }
 
@@ -615,29 +710,47 @@ struct FunctionSummary {
 
 /// Verifies that every memory access across the whole closure addresses memory
 /// through a value derived from the closure **root's** parameters, propagated
-/// across internal `call`s that pass param-derived arguments. Returns `Ok(())`
-/// when the closure is provably parameter-addressing (sound for Tier B), or
-/// [`LinkError::RequiresRelocatableBuild`] naming `field` when any function
-/// performs a memory access whose address cannot be proven caller-supplied.
+/// across internal `call`s that pass param-derived arguments. Returns the
+/// closure's [`RootWriteSet`] when it is provably parameter-addressing (sound for
+/// Tier B), or [`LinkError::RequiresRelocatableBuild`] naming `field` when any
+/// function performs a memory access whose address cannot be proven
+/// caller-supplied.
 ///
 /// `func_indices` are the global function indices of the closure (as produced by
 /// [`crate::closure::compute`], ascending); `root` is the satisfied export, whose
 /// parameters are the trusted caller pointers. Each function is summarised once,
 /// then a greatest-fixpoint over the call graph computes which of every
-/// function's parameters are trusted, and finally every access is checked against
-/// its function's trusted set.
+/// function's parameters are trusted, every access is checked against its
+/// function's trusted set, and finally a least fixpoint attributes each surviving
+/// store back to the root's own parameters.
+///
+/// # Preconditions
+///
+/// Every function in `func_indices` is direct-call reachable from `root`, which
+/// is what [`crate::closure::compute`] produces: it walks a worklist from the
+/// root, and its only non-`call` enqueue (`ref.func`) marks the closure as
+/// naming the table space, so [`crate::tier::classify`] rejects such a closure
+/// before it reaches here. (`return_call` also enqueues, but the safety
+/// allow-list rejects the tail-call family before that arm is reached.) The unit
+/// tests deliberately violate the precondition in one place, to model a function
+/// reachable only through a table; the attribution's own assertion below is
+/// stated against the precondition rather than unconditionally for exactly that
+/// reason.
+#[must_use = "the closure's write set is what an `external fn` declaration is checked against"]
 pub(crate) fn verify_param_addressing(
     module: &ParsedModule,
     func_indices: &[u32],
     root: u32,
     field: &str,
-) -> Result<(), LinkError> {
+) -> Result<RootWriteSet, LinkError> {
     let base = module.local_func_base();
 
     // 1. Summarise every closure function once (param i seeded Param({i})).
-    //    `summaries` is keyed by global function index for O(1) fixpoint lookup.
+    //    `summaries` is keyed by global function index, so both fixpoints walk
+    //    the closure in one deterministic order.
     let mut summaries: std::collections::BTreeMap<u32, FunctionSummary> =
         std::collections::BTreeMap::new();
+    let mut root_param_count = None;
     for &func_idx in func_indices {
         let param_count = module
             .func_sig(func_idx)
@@ -647,6 +760,9 @@ pub(crate) fn verify_param_addressing(
                     "closure function {func_idx} has no function type for provenance analysis"
                 ))
             })?;
+        if func_idx == root {
+            root_param_count = Some(param_count);
+        }
         let local = module
             .local_funcs
             .get((func_idx - base) as usize)
@@ -658,18 +774,31 @@ pub(crate) fn verify_param_addressing(
         summaries.insert(func_idx, summarize_function(module, &local.body, param_count)?);
     }
 
+    // The root's arity names the coordinate space the write set is phrased in.
+    // A root outside its own closure is structurally impossible for every
+    // producer of `func_indices`; fail closed rather than attribute into an
+    // empty parameter space.
+    let root_param_count = root_param_count.ok_or_else(|| {
+        LinkError::Parse(format!(
+            "closure root {root} is not among the functions given for provenance analysis"
+        ))
+    })?;
+
     // 2. Greatest fixpoint: trusted[g] starts as all of g's params, root keeps
     //    them all, and any param contradicted at a reachable call site is removed
     //    until the assignment stabilises.
     let trust_model = compute_trusted_params(&summaries, root);
 
     // 3. Verify every recorded operand against its function's trusted set, with
-    //    the correlation clause applied only to addresses.
+    //    the correlation clause applied only to addresses. A load and a store are
+    //    both addresses and are held to the identical rule; only an extent is
+    //    checked more weakly.
     for (&func_idx, summary) in &summaries {
         let trust = trust_model.trusted_of(func_idx);
         let correlated = trust_model.is_correlated(func_idx);
         for access in &summary.accesses {
-            let correlation_applies = correlated && access.kind == AccessKind::Address;
+            let correlation_applies =
+                correlated && matches!(access.kind, AccessKind::Load | AccessKind::Store);
             if !is_live(access.dep, trust, correlation_applies) {
                 return Err(reject(
                     field,
@@ -682,7 +811,66 @@ pub(crate) fn verify_param_addressing(
         }
     }
 
-    Ok(())
+    // 4. Attribute every surviving store back to the root's own parameters.
+    let write_set = attribution::root_write_set(&summaries, root, root_param_count);
+
+    // No store can be left unattributed once every access above has passed;
+    // `summaries_are_rooted` documents the argument and why the guard is written
+    // against the precondition rather than unconditionally.
+    debug_assert!(
+        !write_set.is_unattributed() || !summaries_are_rooted(&summaries, root),
+        "a closure whose every access is provably caller-derived cannot leave a store \
+         unattributed"
+    );
+
+    Ok(write_set)
+}
+
+/// Whether every summarised function is reachable from `root` along direct
+/// `call` edges — [`verify_param_addressing`]'s precondition, checked to keep its
+/// attribution assertion honest about inputs that violate it.
+///
+/// The assertion that guard serves is that a closure surviving
+/// [`verify_param_addressing`]'s access loop cannot leave a store unattributed:
+///
+/// - the loop returns on the first access failing [`is_live`], which demands a
+///   non-empty `odd`, and every [`Linear`] constructor maintains `odd ⊆ support`
+///   — so a surviving store has non-empty support;
+/// - `is_live` also demands `support ⊆ trusted[g]`, and every `i` in `trusted[g]`
+///   has a non-empty `origin[g][i]`. That holds by induction on `g`'s direct-call
+///   distance from the root: the root's own parameters are seeded `{j}`, and a
+///   `g` at distance `n` has a call site from some `f` at distance `n - 1` whose
+///   argument in position `i` is live in `f` — so its support is non-empty and
+///   inside `trusted[f]`, and the transfer carries `f`'s non-empty origins into
+///   `origin[g][i]`.
+///
+/// The induction's base case is the reachability this function tests, which a
+/// hand-built `func_indices` can violate: two unreachable mutually recursive
+/// functions justify each other's parameters optimistically while nothing seeds
+/// their origins. Guarding the assertion with this predicate makes such an input
+/// yield a verdict rather than a panic.
+///
+/// The `unattributed` flag itself stays for a future relaxation that admits
+/// table-reached closures, where the base case genuinely disappears. It is not
+/// dead in release either: widening the write set to every root parameter makes a
+/// declaration check fail, turning an unprovable attribution into a rejected
+/// link. `debug_assert!` type-checks its body in a release build, so this
+/// function is not `cfg`-gated — the branch is eliminated, not the function.
+fn summaries_are_rooted(
+    summaries: &std::collections::BTreeMap<u32, FunctionSummary>,
+    root: u32,
+) -> bool {
+    let mut reached: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(func_idx) = queue.pop_front() {
+        if !reached.insert(func_idx) {
+            continue;
+        }
+        if let Some(summary) = summaries.get(&func_idx) {
+            queue.extend(summary.calls.iter().map(|call| call.callee));
+        }
+    }
+    summaries.keys().all(|idx| reached.contains(idx))
 }
 
 /// Which parameters of each closure function are caller-derived, and which
@@ -771,8 +959,7 @@ fn compute_trusted_params(
                         continue;
                     }
                     for j in 0..summary.param_count {
-                        let arg = call.arg_deps.get(j).copied().unwrap_or_default();
-                        if !is_live(arg, caller_trust, caller_correlated) {
+                        if !is_live(arg_dep(call, j), caller_trust, caller_correlated) {
                             justified = justified.without(j);
                         }
                     }
@@ -867,8 +1054,11 @@ fn summarize_function(
     if interp.interpret(0, body_end, entry, 0)?.is_none() {
         // Record an unprovable access so the verifier rejects this function even
         // if it had no explicit memory op (a deep-nesting / structural reject).
+        // A body the pass could not walk may write anywhere, so it is recorded as
+        // a store: the closure rejects either way, but a write set built from a
+        // partially-walked body must never read as read-only.
         summary.accesses.push(Access {
-            kind: AccessKind::Address,
+            kind: AccessKind::Store,
             dep: Linear::default(),
         });
     }
@@ -1335,24 +1525,30 @@ impl<'a, 'b> Interp<'a, 'b> {
                 state.stack.push(Prov::NotParam);
             }
 
-            // -- Loads: pop the address, record its mask, push NotParam contents --
+            // -- Loads: pop the address, record its mask, push NotParam contents.
+            //    `f32.load`/`f64.load` are listed for exhaustiveness only: the
+            //    Inference language has no float types and `safety::check_operator`
+            //    rejects every float instruction before a body reaches this pass,
+            //    so no input can produce a float access here. --
             I32Load { .. } | I64Load { .. } | F32Load { .. } | F64Load { .. }
             | I32Load8S { .. } | I32Load8U { .. } | I32Load16S { .. }
             | I32Load16U { .. } | I64Load8S { .. } | I64Load8U { .. }
             | I64Load16S { .. } | I64Load16U { .. } | I64Load32S { .. }
             | I64Load32U { .. } => {
                 let addr = pop(state);
-                record_address(summary, addr);
+                record_address(summary, AccessKind::Load, addr);
                 state.stack.push(Prov::NotParam);
             }
 
-            // -- Stores: pop value then address, record the address mask --
+            // -- Stores: pop value then address, record the address mask.
+            //    `f32.store`/`f64.store` are unreachable for the same reason as
+            //    the float loads above. --
             I32Store { .. } | I64Store { .. } | F32Store { .. } | F64Store { .. }
             | I32Store8 { .. } | I32Store16 { .. } | I64Store8 { .. }
             | I64Store16 { .. } | I64Store32 { .. } => {
                 pop(state); // the stored value
                 let addr = pop(state);
-                record_address(summary, addr);
+                record_address(summary, AccessKind::Store, addr);
             }
 
             // -- Bulk memory: both the address AND the extent operand must be
@@ -1369,36 +1565,40 @@ impl<'a, 'b> Interp<'a, 'b> {
             MemoryFill { .. } => {
                 // Stack: [dest, value, size]. The size bounds the clobbered
                 // extent, so it must be caller-derived; the value is the fill
-                // byte (neither an address nor an extent) and is discarded.
+                // byte (neither an address nor an extent) and is discarded. The
+                // destination is written.
                 let size = pop(state);
                 record_extent(summary, size);
                 pop(state); // value (the fill byte)
                 let dest = pop(state);
-                record_address(summary, dest);
+                record_address(summary, AccessKind::Store, dest);
             }
             MemoryCopy { .. } => {
                 // Stack: [dest, src, size]; both dest and src are addresses and
                 // the size bounds the copied extent, so all three must be
                 // trusted. Each is recorded as its own access; the verifier
                 // rejects if any is empty or not a subset of the trusted set.
+                // The copy reads `src` and writes `dest`, so only `dest`
+                // contributes to the write set.
                 let size = pop(state);
                 record_extent(summary, size);
                 let src = pop(state);
                 let dest = pop(state);
-                record_address(summary, dest);
-                record_address(summary, src);
+                record_address(summary, AccessKind::Store, dest);
+                record_address(summary, AccessKind::Load, src);
             }
             MemoryInit { .. } => {
-                // Stack: [dest, offset, size]; dest is the address and size
-                // bounds the written extent (both caller-derived). The offset is
-                // a data-segment offset, not a linear-memory address, so it is
-                // discarded. (memory.init also implies a data segment -> already
-                // Tier C; this is defense-in-depth on the destination and extent.)
+                // Stack: [dest, offset, size]; dest is the written address and
+                // size bounds the written extent (both caller-derived). The
+                // offset is a data-segment offset, not a linear-memory address,
+                // so it is discarded. (memory.init also implies a data segment ->
+                // already Tier C; this is defense-in-depth on the destination and
+                // extent.)
                 let size = pop(state);
                 record_extent(summary, size);
                 pop(state); // offset (into the data segment, not linear memory)
                 let dest = pop(state);
-                record_address(summary, dest);
+                record_address(summary, AccessKind::Store, dest);
             }
 
             // -- memory.size / memory.grow yield page counts, never addresses --
@@ -1439,7 +1639,10 @@ impl<'a, 'b> Interp<'a, 'b> {
                 apply_call(sig.as_ref(), state);
             }
             ReturnCall { .. } => {
-                // Tail call terminates this path locally.
+                // Tail call terminates this path locally. Unreachable in
+                // practice: `safety::check_operator` rejects the tail-call family
+                // as unmodeled before a body reaches this pass, so no input can
+                // produce a callee whose accesses this arm would drop.
                 return Ok(StepOutcome::Unreachable);
             }
             CallIndirect { type_index, .. } => {
@@ -1526,9 +1729,19 @@ impl<'a, 'b> Interp<'a, 'b> {
 
             // -- Any operator whose precise stack effect the analysis does not
             //    model: widen the stack to empty so later pops read the
-            //    fail-closed NotParam default. The safety allow-list has already
-            //    confined the operator set, so this is unreachable for a body that
-            //    passed `check_operator`; it is defense in depth. --
+            //    fail-closed NotParam default.
+            //
+            //    This is reached, not dead. The safety allow-list confines the
+            //    operator set, but it is a *different* list from the arms above:
+            //    it admits several operators this interpreter has no arm for,
+            //    `global.set` among them — globals are deliberately not a Tier-C
+            //    signal, so a body that writes one passes `check_operator` and
+            //    arrives here. The consequence is fail-closed over-rejection: the
+            //    cleared stack makes every operand after the unmodeled operator
+            //    read `NotParam`, so an address that was in fact parameter-derived
+            //    is no longer provably so and the closure is refused as Tier C. A
+            //    body storing through its parameter links, and the same body with
+            //    a `global.set` between the address and the value does not. --
             _ => {
                 state.stack.clear();
             }
@@ -1677,14 +1890,26 @@ enum StepOutcome {
     Unreachable,
 }
 
-/// Records one memory address operand into `summary`. `memarg.offset` is
-/// deliberately not consulted: a `param + N` effective address still varies with
-/// the caller's pointer and can never reach a caller-independent host location,
-/// so the offset cannot turn a trusted base into an untrusted one. A dependence
-/// with no proven odd coefficient is recorded as-is; the verifier rejects it.
-fn record_address(summary: &mut FunctionSummary, addr: Prov) {
+/// Records one memory address operand into `summary`, as a read (`kind` =
+/// [`AccessKind::Load`]) or a write ([`AccessKind::Store`]).
+///
+/// Both kinds are verified identically; the distinction exists so the write set
+/// can attribute a store, and only a store, back to a root parameter. Passing
+/// [`AccessKind::Extent`] here would be a category error — use
+/// [`record_extent`].
+///
+/// `memarg.offset` is deliberately not consulted: a `param + N` effective
+/// address still varies with the caller's pointer and can never reach a
+/// caller-independent host location, so the offset cannot turn a trusted base
+/// into an untrusted one. A dependence with no proven odd coefficient is
+/// recorded as-is; the verifier rejects it.
+fn record_address(summary: &mut FunctionSummary, kind: AccessKind, addr: Prov) {
+    debug_assert!(
+        matches!(kind, AccessKind::Load | AccessKind::Store),
+        "an address is either read or written"
+    );
     summary.accesses.push(Access {
-        kind: AccessKind::Address,
+        kind,
         dep: addr.dependence(),
     });
 }

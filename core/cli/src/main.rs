@@ -151,7 +151,7 @@ mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
 use inference::wasm_link::{
-    resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
+    resolve_external_modules, ManifestDeps, ResolvedExternals, SearchPath,
 };
 use inference::{
     AnalysisOptions, analyze_with_options, link_with_warnings, parse_project, type_check, wasm_to_v,
@@ -202,7 +202,7 @@ fn resolve_externals(
     typed_context: &inference::TypedContext,
     lib_dirs: &[PathBuf],
     manifest_deps: &ManifestDeps,
-) -> anyhow::Result<Vec<ResolvedExternalModule>> {
+) -> anyhow::Result<ResolvedExternals> {
     let mut search_path = SearchPath::new();
     for dir in lib_dirs {
         search_path.push_lib_dir(dir.clone());
@@ -680,18 +680,19 @@ fn run() {
             process::exit(1);
         }
     };
-    let external_modules = match &typed_context {
+    let externals = match &typed_context {
         Some(tctx) if need_codegen => {
             match resolve_externals(tctx, &args.wasm_lib_dirs, &manifest_deps) {
-                Ok(modules) => modules,
+                Ok(externals) => externals,
                 Err(e) => {
                     eprintln!("External module resolution failed: {e}");
                     process::exit(1);
                 }
             }
         }
-        _ => Vec::new(),
+        _ => ResolvedExternals::default(),
     };
+    let external_modules = &externals.modules;
     if need_codegen {
         let Some(tctx) = typed_context else {
             eprintln!("Internal error: type check phase did not produce typed context");
@@ -727,14 +728,20 @@ fn run() {
         // paired with the logical module it was bound under, so the merge
         // matches each import's recorded `(module, field)` against the right
         // external. With no externs this is a byte-identical pass-through.
-        let external_bytes: Vec<(&str, &[u8])> = external_modules
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
         // The warning-carrying entry point, not the discarding `link`: the merge
         // reports where its own guarantee stops short of what a reader would
         // assume, and a diagnostic nobody prints is one nobody acts on.
-        let linked = match link_with_warnings(codegen_output.wasm(), &external_bytes) {
+        //
+        // The checked write-set mode: every declaration this program made is in
+        // `externals.contracts`, so each merged body is held to what its
+        // `external fn` says it may write through — and an import no declaration
+        // covers is held to writing nothing at all.
+        let linked = match link_with_warnings(
+            codegen_output.wasm(),
+            &external_bytes,
+            Some(&externals.contracts),
+        ) {
             Ok(linked) => linked,
             Err(e) => {
                 eprintln!("Linking external modules failed: {e}");

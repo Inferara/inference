@@ -209,9 +209,15 @@ parameter.
 linear memory.** What limits the damage today is not this analysis but a single
 declared page: an out-of-region address is usually out of bounds and traps. That
 is an accidental backstop, not a guarantee, and it weakens as the declared memory
-grows beyond what the program uses. Issue #420 tracks closing the gap (a
+grows beyond what the program uses. Issue #420 tracks closing the gap with a
 numeric/interval domain plus declared pointee sizes for `external fn`
-parameters); #333 would supply part of the same channel.
+parameters. #333 supplies a related but narrower channel: a declared **write
+set** — which of an external's parameters its merged body may store through,
+via `mut` on the `external fn` declaration — checked by the linker at link
+time (see [Declared Write-Set Check](#declared-write-set-check)). That check
+narrows *which* parameter a store may be attributed to; it says nothing about
+which bytes within that parameter's region are touched, so it does not by
+itself close the gap this section describes.
 
 Because the memory is now configurable, a link that admits a Tier-B external into
 a reconciled memory of more than one page raises a
@@ -219,6 +225,80 @@ a reconciled memory of more than one page raises a
 [Entry Point](#entry-point). The condition is the *reconciled* page count, not a
 raised manifest setting: a main configured to two pages and a memoryless main
 adopting a seventeen-page external memory have lost the same backstop.
+
+#### Declared Write-Set Check
+
+Tier-B admission alone answers *whether* an address is caller-derived, not
+*which* parameter a caller-supplied write is licensed against. `mut` on an
+`external fn` parameter is the Inference-side declaration of that licence: it
+states that the foreign body may store through the address that parameter
+denotes. The linker checks the claim, keyed on `(module, field)` — the same
+pair an import is satisfied on:
+
+- **No parameter marked `mut`** (an empty declared set) is checked
+  *structurally* — the merged closure must record no `Store` access at all,
+  not merely an attributed write set that came out empty — because a caller
+  relying on "this closure writes nothing, anywhere" inherits none of the
+  attribution pass's own assumptions.
+- **Some parameter marked `mut`** is checked against a second, forward
+  least-fixpoint attribution pass, distinct from the greatest-fixpoint
+  `trusted[g]` pass above: it computes, for every function in the closure,
+  which of the *root export's* parameters each of that function's own
+  parameters may derive from, seeded at the root and propagated along every
+  call site's argument dependencies. Every `Store` access's address is then
+  attributed to the union of root parameters its dependencies may derive
+  from — using the full may-contribute support, not just the narrower
+  bijective-derivation subset the Tier-B admission proof itself uses. The
+  attributed set must be a subset of the declared one, or the link fails with
+  `LinkError::UndeclaredExternWrite`, naming the offending parameter by index
+  and, where the declaration named it, by name.
+
+An import the checked mode's declaration list does not mention is treated as
+declaring **no** `mut` parameter, never skipped — see
+[Entry Point](#entry-point) for the two `contracts` modes that decide whether
+this check runs at all.
+
+**This licenses derivation-to-a-parameter, not containment within it** — the
+same limit the previous section describes. `W ⊆ D` bounds which parameter a
+store's *address* derives from; it says nothing about which *bytes* the store
+touches or whether they stay inside the region the caller meant that
+parameter to grant. `external fn writer(mut a: [i32; 2], b: [i32; 2]);` whose
+body stores at `a + 8` — past `a`'s own two elements — links cleanly, because
+the address still derives from parameter 0.
+
+That narrower guarantee nonetheless licenses one thing safely:
+`core/wasm-codegen`'s by-reference optimization elides a compound parameter's
+entry copy only when **every** external it reaches declares no `mut`
+parameter at all. An empty declared set forces the structural "no `Store`
+access anywhere" fact above, and a closure that never stores cannot disturb a
+caller's elided copy — no containment property is needed for that narrower
+claim. A *mixed* declaration (`writer(mut a, b)`) still costs every parameter
+it reaches a copy, including `b`'s: per-position elision is deliberately not
+implemented, since it would need the containment property this check does not
+have. See `core/wasm-codegen/docs/arrays-and-memory.md` for the codegen side
+of this decision.
+
+The attribution's affine support also makes the required declaration broader
+than "this parameter is a written-through address" suggests: it counts every
+parameter that may contribute a term to a store's address, base pointer and
+scaling index alike. `set_elem(ptr: i32, idx: i32, val: i32)` storing at
+`ptr + (idx << 2)` attributes `W = {0, 1}` — both `ptr` and `idx` — so the
+declaration must mark `idx` `mut` too, though `idx` never itself denotes a
+location the body writes to; it only scales `ptr`'s. Narrowing the
+attribution to the operand that syntactically looks like a base pointer would
+need to distinguish that role from an offset's, which an affine form alone
+does not carry; over-attributing is the safe direction, since it can only
+widen the required declaration, never admit a body whose real write set
+exceeds it.
+
+The read/write split (`AccessKind::{Load, Store, Extent}`) is what keeps this
+from over-reaching further: `memory.copy(dest, src, size)` records `dest` as
+a `Store` but `src` as a `Load`, and only `Store` dependencies seed the
+write-set attribution, so a pure source pointer never contributes to `W`
+merely because the same instruction also writes `dest`. The over-attribution
+above is specific to a *store's own* address computation — every affine
+contributor to where a write lands, `idx`-style scaling parameters included
+— not to every parameter an instruction touches.
 
 ### Tier C — Own Static Data, Table Use, or an Address the Caller Did Not Supply
 
@@ -267,6 +347,15 @@ closure as Tier B or produces the fourth Tier-C reason, *accesses memory at an
 address not derived from the exported function's parameters*. A rejection there is
 reported as `RequiresRelocatableBuild` exactly like the three above, and is always
 alone — the analysis stops at the first address it cannot account for.
+
+Success carries a second obligation now, not only the tier verdict. On
+admission `verify_param_addressing` also returns the closure's may-write
+set — which root parameters each `Store` access's address may derive from,
+computed by a distinct forward least-fixpoint attribution pass over the same
+call graph — and `tier::classify` checks it against the `external fn`
+declaration's `mut` parameters before returning `Tier::B`, failing with
+`LinkError::UndeclaredExternWrite` rather than `RequiresRelocatableBuild` when
+the declaration falls short. See [Declared Write-Set Check](#declared-write-set-check).
 
 Global use contributes no reason and decides no tier.
 
@@ -388,13 +477,32 @@ use inference_wasm_linker::{link, LinkError};
 let unified: Vec<u8> = link(
     main_wasm,
     &[("arith", arith_wasm), ("crypto", crypto_wasm)],
+    None,
 )?;
 ```
 
-`link` takes the main module bytes and a slice of `(logical_module, bytes)`
-pairs — each external is tagged with the logical module name codegen emitted for
-it. It returns the unified module bytes, or a `LinkError` if any module fails to
-parse, a merged closure reaches a transitive host import, or a closure is Tier C.
+`link` takes the main module bytes, a slice of `(logical_module, bytes)`
+pairs — each external tagged with the logical module name codegen emitted for
+it — and a third argument, `contracts: Option<&[ImportWriteSet]>`. It returns
+the unified module bytes, or a `LinkError` if any module fails to parse, a
+merged closure reaches a transitive host import, a closure is Tier C, or — in
+the checked mode — a Tier-B closure's write set is not covered by its
+declaration (`LinkError::UndeclaredExternWrite`).
+
+`contracts` is an explicit mode rather than an optional slice, because `link`
+and `link_with_warnings` are the *only* entry point — every caller passes
+through one of them — so an empty slice would have to mean two different
+things at once:
+
+- **`None`** — merge mechanics only; [Declared Write-Set Check](#declared-write-set-check)
+  does not run. The mode for a caller with no Inference declaration behind the
+  main module: hand-written `.wasm` fixtures, the fuzz target, and this
+  crate's own integration tests.
+- **`Some(list)`** — every satisfied import is held to a declared write set.
+  An import `list` does not mention is treated as declaring **no** `mut`
+  parameter, never as a skipped check. This is the mode `core/inference`'s
+  driver builds from every bound `external fn` declaration in the program and
+  passes for the `infc`/`infs` pipeline.
 
 `link_with_warnings` is the same merge, returning a `LinkOutput` that keeps the
 `LinkWarning`s the merge raised alongside the bytes. `link` is its
@@ -423,6 +531,7 @@ to a same-named `sum` exported by a different module.
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
 | `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
+| `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
 
 ## Supported Subset
 
@@ -470,7 +579,9 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 | `src/lib.rs` | Public API (`link`, `LinkError`), crate-level documentation |
 | `src/parse.rs` | `ParsedModule` — section-by-section owned representation; `ParsedModule::parse` |
 | `src/closure.rs` | `compute` — transitive closure via BFS; `ClosureEffects` for tier classification |
-| `src/tier.rs` | `classify` — Tier A/B/C feasibility decision |
+| `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
+| `src/provenance.rs` | `verify_param_addressing` — the address-provenance abstract interpretation proving Tier-B addresses are parameter-derived; also runs the root write-set attribution and returns it |
+| `src/provenance/attribution.rs` | `root_write_set` — the forward least-fixpoint pass computing, for a memory-touching closure, which of the *root export's* parameters each `Store` access's address may be attributed to |
 | `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode |
 | `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space |
 | `src/spec_funcs.rs` | Codec for the `inference.spec_funcs` custom section — mirrors `inference_wasm_codegen`'s encoder as a self-contained copy rather than a cross-crate dependency (the sibling `inference.hspecs` section, by contrast, shares its codec via the `inference-hassert` crate) |
@@ -517,6 +628,16 @@ Test coverage includes:
   `adversarial_corpus_never_panics_and_only_emits_valid_modules`, asserting the
   contract on every input: `link` returns `Err` **or** a validator-clean module,
   and never panics, hangs, or emits a silently-invalid artifact
+- **Declared write-set check** — an empty declaration rejects a storing closure
+  and names the parameter the *attribution* found (not a default), including
+  when the store lands on the second parameter; a non-empty declaration that
+  covers the wrong parameter is still rejected; a declaration covering the real
+  store, an unexercised `mut`, an unmentioned import (held to an empty write
+  set, never skipped), a read-only closure against an empty declaration, a
+  Tier-A closure against every declaration, and an unnamed parameter's
+  "name it first" message are all pinned; the unchecked (`None`) mode is shown
+  to admit what the checked mode rejects on identical bytes, so the two modes
+  are distinguishable rather than a nullable spelling of one
 
 ## Fuzzing
 

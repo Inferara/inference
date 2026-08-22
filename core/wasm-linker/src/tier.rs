@@ -106,8 +106,35 @@
 
 use crate::closure::{Closure, ClosureEffects};
 use crate::parse::ParsedModule;
-use crate::provenance;
+use crate::provenance::{self, RootWriteSet};
 use crate::LinkError;
+
+/// What a closure's may-write set is checked against.
+///
+/// The two variants are the two modes of the `contracts` argument to
+/// [`crate::link`], resolved for one import. They are deliberately not one
+/// nullable slice: an import with no declared `mut` parameter and an import with
+/// no declaration at all demand opposite verdicts on the same closure.
+pub(crate) enum WriteContract<'a> {
+    /// No Inference declaration governs this import, so no write-set check runs.
+    Unchecked,
+    /// The declaration's write set, as the contract list gave it.
+    Declared {
+        /// WASM parameter indices the declaration marked `mut`.
+        mut_params: &'a [u32],
+        /// Declared parameter names, positionally; `None` for an unnamed form.
+        param_names: &'a [Option<String>],
+    },
+    /// The checked mode's contract list holds no entry for this import.
+    ///
+    /// Checked exactly as an empty [`WriteContract::Declared`] — "nothing
+    /// declared" is the claim that the closure writes nothing, so a store still
+    /// rejects — and never as [`WriteContract::Unchecked`]. It is a separate
+    /// variant only so the rejection can say which of the two it is: no
+    /// declaration reached the linker, as against a declaration that reached it
+    /// and covered too little.
+    Unmentioned,
+}
 
 /// The feasibility tier of a merge candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,11 +182,22 @@ pub(crate) enum Tier {
 /// justify, or an indirect/table-dispatched call result would silently alias the
 /// host program's own linear memory, so it is rejected as Tier C rather than
 /// merged.
+///
+/// A Tier-B closure is additionally held to `contract`: the parameters it may
+/// store through must be covered by what the `external fn` declaration marked
+/// `mut`. See [`check_write_contract`] for what each mode requires and why the
+/// empty declaration is the interesting one.
+///
+/// `logical_module` and `field` together name the import; neither identifies it
+/// alone, because two libraries bound under different logical modules may export
+/// the same field.
 pub(crate) fn classify(
     module: &ParsedModule,
     closure: &Closure,
     root: u32,
+    logical_module: &str,
     field: &str,
+    contract: &WriteContract<'_>,
 ) -> Result<Tier, LinkError> {
     let reasons = tier_c_reasons(module, &closure.effects);
     if !reasons.is_empty() {
@@ -170,11 +208,103 @@ pub(crate) fn classify(
     }
 
     if closure.effects.uses_memory {
-        provenance::verify_param_addressing(module, &closure.local_func_indices, root, field)?;
+        let write_set =
+            provenance::verify_param_addressing(module, &closure.local_func_indices, root, field)?;
+        check_write_contract(&write_set, logical_module, field, contract)?;
         Ok(Tier::B)
     } else {
+        // Tier A performs no memory access at all, so its write set is empty by
+        // construction and every contract is satisfied. That is held as an
+        // invariant of `safety::check_operator` — every load, store, fill, copy,
+        // init, size and grow arm sets `uses_memory`, so a closure reaching here
+        // contains no store to attribute — rather than re-derived by a second
+        // scan, which could disagree with the flag the tier itself turns on.
+        // `tier_a_closure_satisfies_every_contract` pins it.
         Ok(Tier::A)
     }
+}
+
+/// Holds a Tier-B closure's may-write set to what the `external fn` declaration
+/// permits.
+///
+/// The two arms are checked differently on purpose:
+///
+/// * **`D = ∅`** — the declaration marks no parameter `mut`, so the claim it
+///   makes is the strong one a caller takes a licence from: *this closure writes
+///   nothing, anywhere*. It is therefore checked **structurally**, against
+///   [`RootWriteSet::never_stores`] — "the merged bytes record no store" — and
+///   not by observing that the attributed parameter set came out empty. A
+///   consumer resting on the licence then inherits none of the attribution's
+///   assumptions.
+/// * **`D ≠ ∅`** — the declaration names the parameters the body may write
+///   through, so the attributed set must be covered by it. This arm is the one
+///   the attribution governs.
+///
+/// An import the checked mode's contract list does not mention is held to the
+/// *same* strong claim as the first arm — a missing entry is a strict check, not
+/// a skipped one — but reports [`LinkError::UndescribedExternWrite`] instead. It
+/// is a different situation from a declaration that named no `mut` parameter,
+/// and the two must not share a message: the repair for the first arm is to add
+/// `mut` to a declaration the linker read, and there is no such declaration
+/// here.
+///
+/// Note what this does **not** demand: a declared `mut` parameter the body never
+/// writes through is accepted. `mut` is a permission, not an obligation — a
+/// declaration is free to over-approximate, and a rule requiring every `mut` to
+/// be exercised would reject a library whose write depends on its arguments.
+fn check_write_contract(
+    write_set: &RootWriteSet,
+    logical_module: &str,
+    field: &str,
+    contract: &WriteContract<'_>,
+) -> Result<(), LinkError> {
+    let (declared, param_names) = match contract {
+        WriteContract::Unchecked => return Ok(()),
+        WriteContract::Declared {
+            mut_params,
+            param_names,
+        } => (*mut_params, *param_names),
+        WriteContract::Unmentioned => {
+            if write_set.never_stores() {
+                return Ok(());
+            }
+            // The same fallback argument as the `D = ∅` arm below: a closure that
+            // provably stores must be refused whether or not the offending
+            // parameter can be named.
+            return Err(LinkError::UndescribedExternWrite {
+                module: logical_module.to_string(),
+                field: field.to_string(),
+                param_index: write_set.first_undeclared(&[]).unwrap_or(0),
+            });
+        }
+    };
+
+    let offending = if declared.is_empty() {
+        if write_set.never_stores() {
+            return Ok(());
+        }
+        // A closure that stores always attributes that store to at least one root
+        // parameter, so this names a real one: `verify_param_addressing` returns
+        // only after every access proved live, which demands a non-empty odd mask
+        // inside the storing function's trusted set — a root with no parameters
+        // trusts none, so it cannot carry a surviving store. Falling back to
+        // parameter 0 keeps the rejection total rather than fail-open, since a
+        // closure that provably stores must be refused whether or not the
+        // offending parameter can be named.
+        write_set.first_undeclared(declared).unwrap_or(0)
+    } else {
+        match write_set.first_undeclared(declared) {
+            Some(param_index) => param_index,
+            None => return Ok(()),
+        }
+    };
+
+    Err(LinkError::UndeclaredExternWrite {
+        module: logical_module.to_string(),
+        field: field.to_string(),
+        param_index: offending,
+        param_name: param_names.get(offending as usize).cloned().flatten(),
+    })
 }
 
 /// Collects every reason the module fails Tier-A/B feasibility. Empty means the
@@ -270,7 +400,14 @@ mod tests {
             .exported_func_index(root_export)
             .expect("root export present");
         let cl = closure::compute(&module, root).expect("closure computes");
-        classify(&module, &cl, root, root_export)
+        classify(
+            &module,
+            &cl,
+            root,
+            "testlib",
+            root_export,
+            &WriteContract::Unchecked,
+        )
     }
 
     /// The Tier-C reasons for `root`'s closure, or an empty vector when the
@@ -782,7 +919,15 @@ mod tests {
 
             let root = module.exported_func_index(root_export).unwrap();
             let cl = closure::compute(&module, root).expect("closure computes");
-            classify(&module, &cl, root, root_export).expect("fixture must be admitted");
+            classify(
+                &module,
+                &cl,
+                root,
+                "testlib",
+                root_export,
+                &WriteContract::Unchecked,
+            )
+            .expect("fixture must be admitted");
             saw_a_globals_using_closure |= cl.effects.uses_globals;
 
             let base = module.local_func_base();

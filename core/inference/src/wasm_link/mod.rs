@@ -17,13 +17,13 @@ pub mod resolve;
 pub mod validate;
 
 pub use driver::{
-    resolve_external_modules, ExternalResolutionError, ResolvedExternalModule,
+    resolve_external_modules, ExternalResolutionError, ResolvedExternalModule, ResolvedExternals,
     MAX_EXTERNAL_MODULE_BYTES,
 };
 pub use resolve::{
     resolve_wasm_module, ManifestDeps, ModulePath, ModulePathError, ResolveError, SearchPath,
 };
 pub use validate::{
-    lower_extern_signature, validate_extern, DeclaredSignature, LowerSignatureError,
-    SignatureMismatch, ValidateError, WasmValType,
+    lower_extern_signature, validate_extern, DeclaredSignature, LoweredExtern,
+    LowerSignatureError, SignatureMismatch, ValidateError, WasmValType,
 };

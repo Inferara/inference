@@ -74,10 +74,7 @@ mod extern_link_toolchain_tests {
         search_path.push_lib_dir(wasmlib_dir());
         let externals = resolve_external_modules(&typed, &search_path, None)
             .expect("the committed artifact resolves and validates");
-        let external_bytes: Vec<(&str, &[u8])> = externals
-            .iter()
-            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
-            .collect();
+        let external_bytes = externals.module_bytes();
 
         let layout = MemoryLayout::resolve(Some(pages), None, MemoryLayoutSource::Flag)
             .expect("the requested memory layout is legal");
@@ -91,8 +88,13 @@ mod extern_link_toolchain_tests {
         )
         .expect("main codegen succeeds");
 
-        let linked =
-            link_with_warnings(output.wasm(), &external_bytes).expect("the merge succeeds");
+        // The checked write-set mode, the same one `infc` uses. The artifact's
+        // exports are read-only, so every declaration below leaves its parameters
+        // unannotated and the merge must confirm the foreign bodies record no
+        // store at all — which is the acceptance criterion a *foreign* toolchain
+        // artifact has to meet before a caller may skip a defensive copy.
+        let linked = link_with_warnings(output.wasm(), &external_bytes, Some(&externals.contracts))
+            .expect("the merge succeeds");
         inf_wasmparser::validate(&linked.wasm).expect("the merged module is valid wasm");
         (linked.wasm, linked.warnings)
     }

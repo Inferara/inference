@@ -241,7 +241,7 @@ fn lowers_extern_declaration_to_wasm_signature() {
 
     let declared = lower_extern_signature(&arena, args, *returns).expect("lower");
     assert_eq!(
-        declared,
+        declared.signature,
         sig(
             &[WasmValType::I32, WasmValType::I64, WasmValType::I32],
             &[WasmValType::I64],
