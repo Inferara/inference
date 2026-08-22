@@ -249,6 +249,58 @@ fn guard_width(decl_ty: &str) -> HNumType {
     }
 }
 
+/// The bound a declaration at `decl_ty` puts on the term `x`, or `None` where
+/// the declaration admits every value of the class its readouts ride in.
+///
+/// The per-type domain table this file checks emission against, and
+/// deliberately spelled out from the primitive builders above rather than
+/// routed through the pass's own resolver — see the harness note: an
+/// expectation that asks production code what to expect cannot fail when
+/// production code is wrong. Every test below that pins a domain restates
+/// these rows literally; this helper is what the multi-slot expectations
+/// assemble from, not a single source the tests defer to.
+fn domain_of(decl_ty: &str, x: &HTerm) -> Option<HAssert> {
+    let x = || x.clone();
+    match decl_ty {
+        "bool" => Some(nz(ltu(x(), i32c(2)))),
+        "u8" => Some(nz(ltu(x(), i32c(256)))),
+        "u16" => Some(nz(ltu(x(), i32c(65536)))),
+        "i8" => Some(and(nz(les(i32c(-128), x())), nz(lts(x(), i32c(128))))),
+        "i16" => Some(and(nz(les(i32c(-32768), x())), nz(lts(x(), i32c(32768))))),
+        "i32" | "u32" | "i64" | "u64" => None,
+        other => panic!("no declared domain is recorded here for `{other}`"),
+    }
+}
+
+/// The one hypothesis an introduction of `x` declared at `decl_ty` contributes:
+/// its typing guard conjoined with the values its declaration admits, or the
+/// bare typing guard where the declaration admits the whole class.
+fn hypothesis_of(decl_ty: &str, x: &HTerm) -> HAssert {
+    let typing = hastype(x.clone(), guard_width(decl_ty));
+    match domain_of(decl_ty, x) {
+        Some(bound) => and(typing, bound),
+        None => typing,
+    }
+}
+
+/// The antecedent one slot declared at `decl_ty` sits under.
+fn guard_of(decl_ty: &str, n: u32) -> HAssert {
+    hypothesis_of(decl_ty, &local(n))
+}
+
+/// The antecedent the guard drain builds over `slots` in introduction order:
+/// one right fold across the single hypothesis each slot contributes. That is
+/// not the same tree as conjoining the slots pairwise, so the fold is spelled
+/// out rather than assembled from per-slot antecedents.
+fn guards_of(slots: &[(&str, u32)]) -> HAssert {
+    slots
+        .iter()
+        .map(|(decl_ty, n)| guard_of(decl_ty, *n))
+        .rev()
+        .reduce(|acc, hypothesis| and(hypothesis, acc))
+        .expect("every slot contributes at least its typing guard")
+}
+
 // convenience relop/binop shorthands at i32/signed (the common width)
 fn eqs(l: HTerm, r: HTerm) -> HTerm {
     rel(HNumType::I32, HRelop::Eq, l, r)
@@ -258,6 +310,9 @@ fn gts(l: HTerm, r: HTerm) -> HTerm {
 }
 fn lts(l: HTerm, r: HTerm) -> HTerm {
     rel(HNumType::I32, HRelop::LtS, l, r)
+}
+fn les(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::LeS, l, r)
 }
 fn ges(l: HTerm, r: HTerm) -> HTerm {
     rel(HNumType::I32, HRelop::GeS, l, r)
@@ -346,11 +401,10 @@ fn lhs_term_of_binary(decl_ty: &str, op: &str) -> HTerm {
     let HAssert::Imp(antecedent, claim) = obligation else {
         panic!("expected a guarded implication, got {obligation:?}");
     };
-    let width = guard_width(decl_ty);
     assert_eq!(
         *antecedent,
-        and(hastype(local(0), width), hastype(local(1), width)),
-        "both universal slots must be guarded at their declared width"
+        guards_of(&[(decl_ty, 0), (decl_ty, 1)]),
+        "both universal slots must state their declared width and domain"
     );
     // `nz(relop Eq lhs rhs)`; the outer relop width is the operand width (I64 for
     // 64-bit operands), which is irrelevant here — only `lhs` is under test.
@@ -505,7 +559,7 @@ fn unary_operators_mirror_codegen() {
     assert_eq!(
         obligation_of("", body),
         imp(
-            guard(0),
+            guard_of("bool", 0),
             nz(rel(
                 HNumType::I32,
                 HRelop::Eq,
@@ -527,7 +581,7 @@ fn literal_const_of(decl_ty: &str, literal: &str) -> HTerm {
         panic!("expected a guarded implication, got {obligation:?}");
     };
     // Only `a` takes a slot: a pure `let` inlines its constant and is unguarded.
-    assert_eq!(*antecedent, hastype(local(0), guard_width(decl_ty)));
+    assert_eq!(*antecedent, guard_of(decl_ty, 0));
     match *claim {
         HAssert::Not(inner) => match *inner {
             HAssert::TermEq(HTerm::Relop(_, HRelop::Eq, _, rhs), _) => *rhs,
@@ -572,7 +626,7 @@ fn literals_parse_per_width_including_cast_signed() {
     assert_eq!(
         obligation_of("", body),
         imp(
-            guard(0),
+            guard_of("bool", 0),
             nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(1)))
         )
     );
@@ -585,7 +639,7 @@ fn enum_variant_lowers_to_its_tag_constant() {
     assert_eq!(
         obligation,
         imp(
-            guard(0),
+            and(guard(0), nz(ltu(local(0), i32c(3)))),
             nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(2)))
         )
     );
@@ -1615,10 +1669,12 @@ fn a_bare_call_statement_is_a_guarded_app_ok() {
     );
 }
 
-/// The declared type fixes the guard's width: only `i64`/`u64` guard at 64
-/// bits, while bool, enums, and every sub-word integer ride i32.
+/// The declared type fixes both halves of a slot's hypothesis. The width: only
+/// `i64`/`u64` guard at 64 bits, while bool, enums, and every sub-word integer
+/// ride i32. And the value domain: every type but the four full widths admits
+/// fewer values than its class holds, and says so.
 #[test]
-fn slot_guard_width_follows_the_declared_type() {
+fn slot_guards_state_the_declared_width_and_domain() {
     for decl_ty in ["bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"] {
         let body = format!("forall {{ let x: {decl_ty} = @; assert(x == x); }}");
         let obligation = obligation_of("", &body);
@@ -1627,16 +1683,16 @@ fn slot_guard_width_follows_the_declared_type() {
         };
         assert_eq!(
             *antecedent,
-            hastype(local(0), guard_width(decl_ty)),
-            "guard width for a `{decl_ty}` slot"
+            guard_of(decl_ty, 0),
+            "the hypothesis a `{decl_ty}` slot carries"
         );
     }
-    // An enum slot is its i32 tag.
+    // An enum slot is its i32 tag, below the variant count.
     let body = "forall { let c: Color = @; assert(c == Color::Red); }";
     assert_eq!(
         obligation_of("enum Color { Red, Green, Blue }", body),
         imp(
-            guard(0),
+            and(guard(0), nz(ltu(local(0), i32c(3)))),
             nz(rel(HNumType::I32, HRelop::Eq, local(0), i32c(0)))
         )
     );
@@ -4022,7 +4078,7 @@ fn witness_inside_a_literal_element_scopes_over_the_rest() {
     assert_eq!(
         obligation_of("", body),
         imp(
-            and(guard(0), guard(1)),
+            guards_of(&[("bool", 0), ("bool", 1)]),
             ex(and(witness_def, nz(eqs(lvar(0), local(0)))))
         )
     );
@@ -4734,5 +4790,773 @@ fn the_nested_universal_binder_is_not_an_existential() {
     assert!(
         matches!(*inner, HAssert::All(_)),
         "the nested `forall` must bind a universal variable, got {inner:?}"
+    );
+}
+
+// ----- 17. declared value domains of narrow scalars -----------------------
+
+fn leu(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::LeU, l, r)
+}
+
+/// The zero-extending sub-word widths are bounded *unsigned*, strictly, at the
+/// exclusive top of the set their normalization mask produces. The whole
+/// obligation is compared literally here rather than through `guard_of`,
+/// because the signedness and the strictness are exactly what a downstream
+/// narrow-idiom lemma matches on and a wrong choice reads as plausible.
+#[test]
+fn a_u8_draw_is_bounded_unsigned_below_its_exclusive_top() {
+    let body = "forall { let a: u8 = @; assert(a <= 200); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(256)))),
+            nz(leu(local(0), i32c(200)))
+        )
+    );
+}
+
+#[test]
+fn a_u16_draw_is_bounded_unsigned_below_its_exclusive_top() {
+    let body = "forall { let a: u16 = @; assert(a <= 1000); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(65536)))),
+            nz(leu(local(0), i32c(1000)))
+        )
+    );
+}
+
+/// A sign-extending width states *both* bounds: the assertion language has no
+/// range predicate, so a one-sided signed bound would characterize nothing —
+/// every negative value below the lower end would still satisfy it.
+#[test]
+fn an_i8_draw_is_bounded_by_a_signed_pair() {
+    let body = "forall { let a: i8 = @; assert(a <= 100); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(nz(les(i32c(-128), local(0))), nz(lts(local(0), i32c(128))))
+            ),
+            nz(rel(HNumType::I32, HRelop::LeS, local(0), i32c(100)))
+        )
+    );
+}
+
+#[test]
+fn an_i16_draw_is_bounded_by_a_signed_pair() {
+    let body = "forall { let a: i16 = @; assert(a <= 100); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(
+                guard(0),
+                and(
+                    nz(les(i32c(-32768), local(0))),
+                    nz(lts(local(0), i32c(32768)))
+                )
+            ),
+            nz(rel(HNumType::I32, HRelop::LeS, local(0), i32c(100)))
+        )
+    );
+}
+
+/// `bool` has two normalization forms in compiled code — a mask for a draw, a
+/// non-zero test for an entry parameter — and both land on `{0, 1}`, so one
+/// bound covers the declaration.
+#[test]
+fn a_bool_draw_is_bounded_below_two() {
+    let body = "forall { let a: bool = @; assert(a); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(and(guard(0), nz(ltu(local(0), i32c(2)))), nz(local(0)))
+    );
+}
+
+/// An enum's domain is its zero-based tags, so the bound is the variant count
+/// and moves with it. Two enums of different sizes pin that it is the count
+/// rather than a constant.
+#[test]
+fn an_enum_draw_is_bounded_by_its_variant_count() {
+    let body = "forall { let b: Bit = @; assert(b == Bit::Off); }";
+    assert_eq!(
+        obligation_of("enum Bit { Off, On }", body),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(2)))),
+            nz(eqs(local(0), i32c(0)))
+        )
+    );
+    let body = "forall { let d: Dir = @; assert(d == Dir::W); }";
+    assert_eq!(
+        obligation_of("enum Dir { N, E, S, W }", body),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(4)))),
+            nz(eqs(local(0), i32c(3)))
+        )
+    );
+}
+
+/// A `::`-qualified enum resolves to the same variant count an unqualified one
+/// would, through the by-path lookup: a bare name and a path must classify
+/// identically or a cross-module declaration would silently lose its bound.
+#[test]
+fn a_cross_module_enum_draw_resolves_its_variant_count() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use lib;\nspec S {\n  fn f() forall {\n    let c: lib::Level = @;\n    assert(c == c);\n  }\n}\n",
+        ),
+        (vec!["lib"], "pub enum Level { Low, Mid, High }\n"),
+    ]);
+    let (map, diagnostics) = translate(&ctx);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        obligation_named(&map, "S", "S.f"),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(3)))),
+            nz(eqs(local(0), local(0)))
+        )
+    );
+}
+
+/// A cross-module enum whose name collides with a local one resolves by the
+/// *key* the type checker recorded, not by the name.
+///
+/// The two lookups the resolver tries in order disagree here and only here: a
+/// bare-name lookup relative to the referencing file finds the local `Level`,
+/// while the key names the one the callee declared. The site is an anonymous
+/// `@` in call-argument position, so the domain comes from a *recorded*
+/// expression type — the resolved spelling, the only carrier that has a key at
+/// all — and the callee's three variants are the set the choice ranges over.
+///
+/// The collision is what makes this observable. Resolving by name here would
+/// bound the choice at the local declaration's variant count, and a *tighter*
+/// universal antecedent is the unsound direction: it makes a claim provable
+/// over fewer values than the program can produce. Code generation resolves the
+/// same pair in the same order when it emits the draw's normalization, so the
+/// two would also stop agreeing about the value set.
+#[test]
+fn a_colliding_cross_module_enum_argument_resolves_by_key_not_by_name() {
+    let ctx = type_check_multi(&[
+        (
+            vec![],
+            "use lib;\nenum Level { Only }\nspec S {\n  fn f() forall {\n    \
+             assert(lib::g(@) == 1);\n  }\n}\n",
+        ),
+        (
+            vec!["lib"],
+            "pub enum Level { Low, Mid, High }\npub fn g(v: Level) -> i32 {\n  return 1;\n}\n",
+        ),
+    ]);
+    let (map, diagnostics) = translate(&ctx);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        obligation_named(&map, "S", "S.f"),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(3)))),
+            nz(eqs(app("lib.g", vec![local(0)]), i32c(1)))
+        )
+    );
+}
+
+/// The four full widths are untouched: their antecedent is exactly one
+/// `HA_has_type` and nothing beside it, so a bound stated where the declaration
+/// already admits every value of its class fails here rather than quietly
+/// moving every existing obligation.
+#[test]
+fn the_full_widths_state_their_typing_and_nothing_else() {
+    for decl_ty in ["i32", "u32", "i64", "u64"] {
+        let body = format!("forall {{ let x: {decl_ty} = @; assert(x == x); }}");
+        let obligation = obligation_of("", &body);
+        let HAssert::Imp(antecedent, _) = obligation else {
+            panic!("expected a guarded implication for `{decl_ty}`, got {obligation:?}");
+        };
+        assert_eq!(
+            *antecedent,
+            hastype(local(0), guard_width(decl_ty)),
+            "a `{decl_ty}` slot admits every value of its class, so it states only its typing"
+        );
+    }
+}
+
+/// A narrow *parameter* states the same set a narrow draw does. A `spec`
+/// function is compiled in proof mode but never exported, so its parameters
+/// receive neither ABI normalization nor an enum tag guard: the antecedent is
+/// the only place the declaration's meaning is written down.
+#[test]
+fn a_narrow_spec_parameter_states_its_domain() {
+    let source = "spec S { fn f(p: u8) forall { assert(p <= 255); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(256)))),
+            nz(leu(local(0), i32c(255)))
+        )
+    );
+}
+
+/// An existential bound is an `HA_and` conjunct *inside* its binder, never an
+/// antecedent. In antecedent position the prover would pick a witness that
+/// refutes the bound and discharge the obligation without ever meeting the
+/// payload, so the connective is asserted on its own as well as through the
+/// whole tree.
+#[test]
+fn an_existential_narrow_draw_bounds_its_witness_as_a_conjunct() {
+    let body = "forall { exists { let a: u8 = @; assert(a == 44); } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(nz(ltu(lvar(0), i32c(256))), teq(lvar(0), i32c(44))))
+    );
+    let HAssert::Ex(inner) = obligation_of("", body) else {
+        panic!("the existential `@` binds a witness");
+    };
+    assert!(
+        matches!(*inner, HAssert::And(..)),
+        "the bound must constrain the witness, not sit in an antecedent the witness can \
+         refute: {inner:?}"
+    );
+}
+
+/// An existential `@` nothing reads keeps its vacuity. The bound is dropped
+/// with every other unread binder definition, so the obligation still folds to
+/// `HA_true` and is still refused. Conjoined unconditionally it would be
+/// trivially true, say nothing about the program, and no longer look vacuous.
+#[test]
+fn an_unread_existential_narrow_draw_stays_vacuous_and_is_refused() {
+    let unread = err("spec S { fn f() forall { exists { let a: u8 = @; } } }");
+    assert!(unread.contains("error[P010]"), "{unread}");
+}
+
+/// Under the nested universal quantifier the bound lands inside the `Hall`,
+/// beside the typing guard and under the same implication. Both name a
+/// `T_lvar`, which denotes nothing outside the binder that introduced it.
+#[test]
+fn a_nested_universal_narrow_draw_states_its_domain_inside_its_hall() {
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let x: u8 = @; assert(x <= 200); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                and(hastype(lvar(0), HNumType::I32), nz(ltu(lvar(0), i32c(256)))),
+                nz(leu(lvar(0), i32c(200)))
+            ))
+        ))
+    );
+}
+
+/// An anonymous `@` has no annotation, so its domain comes from the type
+/// recorded for the argument — the callee's declared parameter type — exactly
+/// as its guard width does.
+#[test]
+fn an_anonymous_narrow_argument_takes_its_domain_from_the_callee() {
+    let prelude = "fn g(x: u8) -> i32 {\n  return 1;\n}";
+    let body = "forall { assert(g(@) == 1); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            and(guard(0), nz(ltu(local(0), i32c(256)))),
+            nz(eqs(app("g", vec![local(0)]), i32c(1)))
+        )
+    );
+}
+
+/// The existential twin of the anonymous form: the binder is not *pinned* — a
+/// `@` is the free choice itself — but it is *bounded*, as a conjunct on the
+/// binder rather than through the guard channel, which drains outside the wrap
+/// where the variable is no longer bound.
+#[test]
+fn an_anonymous_narrow_argument_bounds_its_existential_binder() {
+    let prelude = "fn g(x: u8) -> i32 {\n  return 1;\n}";
+    let body = "forall { exists { assert(g(@) == 1); } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        ex(and(
+            nz(ltu(lvar(0), i32c(256))),
+            teq(app("g", vec![lvar(0)]), i32c(1))
+        ))
+    );
+}
+
+/// A reachability payload is unchanged by any of this, and stays that way on
+/// purpose. It denotes against the frame an actual run reaches, where the slot
+/// already holds a value the compiled body drew and masked; the judgment counts
+/// only runs that reduce normally, and every payload-contributing statement
+/// traps when its condition fails, so the raw reading is already restricted to
+/// the vectors a proof would pick. A bound here would be dead weight at best.
+#[test]
+fn a_reach_mode_narrow_draw_states_no_domain() {
+    let source = "spec S { fn f() exists { let a: u8 = @; assert(a == 44); } }";
+    assert_eq!(sole_obligation(&ok(source), "S"), teq(local(0), i32c(44)));
+}
+
+/// The nested-universal *anonymous* `@` carries its hypothesis on the binder
+/// itself rather than through the guard channel, so the two spellings of the
+/// same hypothesis are pinned separately. The channel drains around the
+/// statement — outside the wrap, where the variable no longer denotes — which
+/// is why this position cannot reuse it, and why a domain lost here would be
+/// invisible to every test of the named form.
+#[test]
+fn a_nested_universal_anonymous_argument_states_its_domain_on_its_binder() {
+    let prelude = "fn g(x: u8) -> i32 {\n  return 1;\n}";
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { assert(g(@) == 1); } } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        ex(and(
+            teq(lvar(0), i32c(0)),
+            all(imp(
+                and(hastype(lvar(0), HNumType::I32), nz(ltu(lvar(0), i32c(256)))),
+                nz(eqs(app("g", vec![lvar(0)]), i32c(1)))
+            ))
+        ))
+    );
+}
+
+/// A nested-universal binder whose variable the claim never reads keeps the
+/// binder and drops its hypothesis. The binder has to stay — removing it would
+/// shift the level of every binder allocated inside it — while the hypothesis
+/// is an assumption about a variable nothing mentions, and stating it would put
+/// an antecedent in front of a claim that has nothing to do with it.
+#[test]
+fn an_unread_nested_universal_binder_keeps_no_hypothesis() {
+    let prelude = "fn g(x: u8) -> i32 {\n  return 1;\n}";
+    let body = "forall { exists { let k: i32 = @; assume { assert(k == 0); } \
+                forall { let t: i32 = g(@) + 1; assert(k == 0); } } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        ex(and(teq(lvar(0), i32c(0)), all(nz(eqs(lvar(1), i32c(0))))))
+    );
+}
+
+/// The same drop taken to its vacuous end: a nested-universal `@` in a
+/// statement that contributes nothing leaves `HA_true` behind, which is refused
+/// rather than emitted.
+#[test]
+fn a_nested_universal_binder_over_a_vacuous_statement_is_refused() {
+    let prelude = "fn g(x: u8) -> i32 {\n  return 1;\n}";
+    let source = format!(
+        "{prelude}\nspec S {{ fn f() forall {{ exists {{ forall {{ if g(@) == 1 {{ }} }} }} }} }}"
+    );
+    let refused = err(&source);
+    assert!(refused.contains("error[P010]"), "{refused}");
+}
+
+// ----- 18. declared value domains of aggregate leaves ---------------------
+
+fn gtu(l: HTerm, r: HTerm) -> HTerm {
+    rel(HNumType::I32, HRelop::GtU, l, r)
+}
+
+/// An array's leaves state what their declared *element* type admits, so a
+/// narrow element reached one aggregate level deep is exactly as constrained as
+/// the same declaration written as a scalar. Without this a `u8` element would
+/// range over every `i32` while a `u8` variable did not — a soundness asymmetry
+/// with no justification in the language.
+#[test]
+fn a_narrow_array_bounds_every_leaf_at_its_element_type() {
+    let body = "forall { let a: [u8; 2] = @; assert(a[0] <= a[1]); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards_of(&[("u8", 0), ("u8", 1)]),
+            nz(leu(local(0), local(1)))
+        )
+    );
+}
+
+/// A `bool` array's leaves land on `{0, 1}` like a `bool` variable's.
+#[test]
+fn a_bool_array_bounds_every_leaf_below_two() {
+    let body = "forall { let a: [bool; 2] = @; assert(a[0] == a[1]); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards_of(&[("bool", 0), ("bool", 1)]),
+            nz(eqs(local(0), local(1)))
+        )
+    );
+}
+
+/// Rank is irrelevant: the element domain travels down every array layer, so
+/// all four leaves of a `[[i8; 2]; 2]` carry the signed pair.
+#[test]
+fn a_multi_rank_narrow_array_bounds_every_leaf() {
+    let body = "forall { let m: [[i8; 2]; 2] = @; assert(m[0][0] == m[1][1]); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            guards_of(&[("i8", 0), ("i8", 1), ("i8", 2), ("i8", 3)]),
+            nz(eqs(local(0), local(3)))
+        )
+    );
+}
+
+/// An array of enum leaves is bounded by the variant count, exactly as an enum
+/// variable is.
+#[test]
+fn an_enum_array_bounds_every_leaf_by_the_variant_count() {
+    let body = "forall { let a: [Color; 2] = @; assert(a[0] == a[1]); }";
+    assert_eq!(
+        obligation_of("enum Color { Red, Green, Blue }", body),
+        imp(
+            and(
+                and(guard(0), nz(ltu(local(0), i32c(3)))),
+                and(guard(1), nz(ltu(local(1), i32c(3))))
+            ),
+            nz(eqs(local(0), local(1)))
+        )
+    );
+}
+
+/// Each struct field states its own field type's domain, so a narrow field and
+/// a full-width field in the same struct get different hypotheses. A per-struct
+/// or per-introduction decision would show up here as one shape for both.
+#[test]
+fn a_struct_bounds_each_field_at_its_own_declared_type() {
+    let prelude = "struct Mixed { small: u8; wide: i32; }";
+    let body = "forall { let m: Mixed = @; assert(m.small == 1 && m.wide == 2); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guards_of(&[("u8", 0), ("i32", 1)]),
+            and(nz(eqs(local(0), i32c(1))), nz(eqs(local(1), i32c(2))))
+        )
+    );
+}
+
+/// A struct's enum field resolves its variant count, and a 64-bit field beside
+/// it keeps its own class — the field loop states each field's own two halves
+/// rather than one shape for the struct.
+#[test]
+fn a_struct_bounds_an_enum_field_by_its_variant_count() {
+    let prelude = "enum Color { Red, Green, Blue }\nstruct Tagged { tag: Color; payload: i64; }";
+    let body = "forall { let t: Tagged = @; assert(t.tag == Color::Red); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            and(
+                and(guard(0), nz(ltu(local(0), i32c(3)))),
+                hastype(local(1), HNumType::I64)
+            ),
+            nz(eqs(local(0), i32c(0)))
+        )
+    );
+}
+
+/// A one-dimensional scalar-array *field* is the second shape a struct admits,
+/// and its element domain travels the same way an array introduction's does.
+#[test]
+fn a_narrow_array_field_bounds_its_elements() {
+    let prelude = "struct Row { xs: [u16; 2]; }";
+    let body = "forall { let r: Row = @; assert(r.xs[0] == r.xs[1]); }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        imp(
+            guards_of(&[("u16", 0), ("u16", 1)]),
+            nz(eqs(local(0), local(1)))
+        )
+    );
+}
+
+/// A full-width aggregate is untouched: its leaves state their typing and
+/// nothing else, so a bound leaking onto a class that admits every value fails
+/// here rather than quietly moving every existing obligation.
+#[test]
+fn a_full_width_array_states_only_its_leaf_typings() {
+    let body = "forall { let a: [i32; 3] = @; assert(a[0] <= a[2]); }";
+    assert_eq!(
+        obligation_of("", body),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            nz(rel(HNumType::I32, HRelop::LeS, local(0), local(2)))
+        )
+    );
+}
+
+/// A narrow aggregate *parameter* states its leaf domains too — the only mode
+/// an aggregate parameter binds in, since parameters bind at function entry.
+#[test]
+fn a_narrow_aggregate_parameter_bounds_its_leaves() {
+    let source = "spec S { fn f(a: [u8; 2]) forall { assert(a[0] <= a[1]); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(
+            guards_of(&[("u8", 0), ("u8", 1)]),
+            nz(leu(local(0), local(1)))
+        )
+    );
+}
+
+/// Under the nested universal quantifier the leaf hypotheses ride the same
+/// channel a nested-universal scalar's does, and stay inside the `Hall` wraps
+/// their `T_lvar`s are bound by.
+#[test]
+fn a_nested_universal_narrow_array_bounds_its_leaves_inside_its_halls() {
+    let body = "forall { exists { forall { let a: [u8; 2] = @; assert(a[0] <= a[1]); } } }";
+    assert_eq!(
+        obligation_of("", body),
+        all(all(imp(
+            and(
+                and(hastype(lvar(1), HNumType::I32), nz(ltu(lvar(1), i32c(256)))),
+                and(hastype(lvar(0), HNumType::I32), nz(ltu(lvar(0), i32c(256))))
+            ),
+            nz(leu(lvar(1), lvar(0)))
+        )))
+    );
+}
+
+/// An existential aggregate bounds each witness as an `HA_and` conjunct inside
+/// that witness's own binder — never an antecedent, which the prover could
+/// refute to discharge the obligation without meeting the payload.
+#[test]
+fn an_existential_narrow_array_bounds_each_witness_as_a_conjunct() {
+    let body = "forall { exists { let a: [u8; 2] = @; assert(a[0] > 200); } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(and(
+            nz(ltu(lvar(0), i32c(256))),
+            ex(nz(gtu(lvar(1), i32c(200))))
+        ))
+    );
+}
+
+/// The bound belongs to the leaf that was allocated it. The binders wrap
+/// innermost-first, so the last leaf allocated is the innermost quantifier;
+/// walking them the other way would attach each bound to a different leaf, and
+/// with leaves of two declared types that shows up as a `u8` bound over the
+/// `i8` field and back.
+#[test]
+fn an_existential_struct_bounds_each_witness_at_its_own_field_type() {
+    let prelude = "struct Pair { small: u8; signed: i8; }";
+    let body = "forall { exists { let p: Pair = @; assert(p.small == 1 && p.signed == 2); } }";
+    assert_eq!(
+        obligation_of(prelude, body),
+        ex(and(
+            nz(ltu(lvar(0), i32c(256))),
+            ex(and(
+                and(nz(les(i32c(-128), lvar(0))), nz(lts(lvar(0), i32c(128)))),
+                and(teq(lvar(1), i32c(1)), teq(lvar(0), i32c(2)))
+            ))
+        ))
+    );
+}
+
+/// A leaf the claim never reads keeps its binder and drops its bound, like
+/// every other unread binder definition. Reading only the *second* leaf pins
+/// which binder the surviving bound sits on: the outer binder is the unread
+/// one, so a bound there would be over the wrong variable as well as
+/// trivially satisfiable.
+#[test]
+fn an_unread_existential_array_leaf_carries_no_bound() {
+    let body = "forall { exists { let a: [u8; 2] = @; assert(a[1] == 1); } }";
+    assert_eq!(
+        obligation_of("", body),
+        ex(ex(and(nz(ltu(lvar(0), i32c(256))), teq(lvar(0), i32c(1)))))
+    );
+}
+
+/// An existential aggregate nothing reads keeps its vacuity: every bound is
+/// dropped, the binders collapse, and the obligation is still refused rather
+/// than becoming a trivially true range claim.
+#[test]
+fn an_unread_existential_narrow_array_stays_vacuous_and_is_refused() {
+    let unread = err("spec S { fn f() forall { exists { let a: [u8; 2] = @; } } }");
+    assert!(unread.contains("error[P010]"), "{unread}");
+}
+
+/// The asymmetry this closes, stated as the two spellings of one claim: a
+/// witness outside the declared domain is refutable at scalar position and at
+/// aggregate position alike. Both emit the same bound over the witness they
+/// read, so neither can be discharged by a value the program cannot draw.
+#[test]
+fn a_witness_outside_the_declared_domain_is_bounded_at_either_nesting() {
+    let scalar = "forall { exists { let a: u8 = @; assert(a > 255); } }";
+    assert_eq!(
+        obligation_of("", scalar),
+        ex(and(
+            nz(ltu(lvar(0), i32c(256))),
+            nz(gtu(lvar(0), i32c(255)))
+        ))
+    );
+    let leaf = "forall { exists { let a: [u8; 2] = @; assert(a[0] > 255); } }";
+    assert_eq!(
+        obligation_of("", leaf),
+        ex(and(
+            nz(ltu(lvar(0), i32c(256))),
+            ex(nz(gtu(lvar(1), i32c(255))))
+        ))
+    );
+}
+
+// ----- 19. uninhabited declared types -------------------------------------
+
+/// The refusal every position shares: a variantless enum admits no value, so
+/// there is nothing to quantify. `⊥` would discharge every claim over it for
+/// the wrong reason and any inhabited bound would be a lie, so the introduction
+/// is refused instead of encoded.
+fn uninhabited_refusal(source: &str) -> String {
+    let refused = err(source);
+    assert!(
+        refused.contains("error[P015]"),
+        "expected the uninhabited-type refusal, got {refused}"
+    );
+    refused
+}
+
+/// A `let … = @;` at a variantless enum, in every mode the statement translator
+/// has. The universal, nested-universal and existential modes all quantify the
+/// declaration outright; the reachability mode quantifies it operationally,
+/// through a choice parameter of a run — no reading of it has a value to offer,
+/// so all four refuse.
+#[test]
+fn a_variantless_enum_draw_is_refused_in_every_mode() {
+    let univ = uninhabited_refusal(
+        "enum Void { }\nspec S { fn f() forall { let a: Void = @; assert(a == a); } }",
+    );
+    assert!(
+        univ.contains("`@` over enum `Void`, which has no variants, quantifies nothing"),
+        "{univ}"
+    );
+    assert!(univ.contains("give `Void` at least one variant"), "{univ}");
+
+    uninhabited_refusal(
+        "enum Void { }\nspec S { fn f() forall { exists { let a: Void = @; assert(a == a); } } }",
+    );
+    uninhabited_refusal(
+        "enum Void { }\nspec S { fn f() forall { exists { forall { let a: Void = @; \
+         assert(a == a); } } } }",
+    );
+    uninhabited_refusal(
+        "enum Void { }\nspec S { fn f() exists { let a: Void = @; assert(a == a); } }",
+    );
+}
+
+/// A *parameter* is refused in the reader's own words: it is a declaration, not
+/// a `@`, and naming it as one would send the author looking for a draw that is
+/// not there.
+#[test]
+fn a_variantless_enum_parameter_is_refused_by_name() {
+    let refused =
+        uninhabited_refusal("enum Void { }\nspec S { fn f(p: Void) forall { assert(p == p); } }");
+    assert!(
+        refused.contains("parameter `p` over enum `Void`, which has no variants"),
+        "{refused}"
+    );
+}
+
+/// An anonymous call-argument `@` takes its domain from the callee's declared
+/// parameter type, so an uninhabited parameter there is refused at the call
+/// site — where the `@` the author can remove actually is.
+///
+/// All three modes this position reaches, because the refusal is raised ahead of
+/// the mode split rather than on the branch that happens to want the domain. The
+/// third wrapper is an `exists`-quantified *function*, whose body translates in
+/// the reachability mode: there a `@` is an operationally existential choice
+/// parameter and the domain is never read at all, so a refusal placed after the
+/// split would silently let an uninhabited choice through.
+#[test]
+fn a_variantless_enum_call_argument_is_refused() {
+    let prelude = "enum Void { }\nfn g(v: Void) -> i32 {\n  return 1;\n}";
+    uninhabited_refusal(&format!(
+        "{prelude}\nspec S {{ fn f() forall {{ assert(g(@) == 1); }} }}"
+    ));
+    uninhabited_refusal(&format!(
+        "{prelude}\nspec S {{ fn f() forall {{ exists {{ assert(g(@) == 1); }} }} }}"
+    ));
+    uninhabited_refusal(&format!(
+        "{prelude}\nspec S {{ fn f() exists {{ assert(g(@) == 1); }} }}"
+    ));
+}
+
+/// An aggregate leaf is refused too — the leaf is a quantified variable like
+/// any other, and an array of an uninhabited type is itself uninhabited.
+///
+/// One line for the array whatever its length, but not because the enumeration
+/// is de-duplicated: an array shape holds one element shape however many
+/// elements it has, so a walk over the shape visits its scalar leaf exactly
+/// once. What the count pins here is that the shape walk does not multiply the
+/// element out — the de-duplication itself is what
+/// [`two_leaves_of_one_uninhabited_enum_are_one_refusal`] covers, over the only
+/// shape that can reach a second leaf of the same declaration.
+#[test]
+fn a_variantless_enum_aggregate_leaf_is_refused() {
+    let refused = uninhabited_refusal(
+        "enum Void { }\nspec S { fn f() forall { let a: [Void; 2] = @; assert(a[0] == a[1]); } }",
+    );
+    assert!(
+        refused.contains("a leaf of the `@` over enum `Void`"),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.lines().count(),
+        1,
+        "an array shape holds one element shape, so its leaf is visited once: {refused}"
+    );
+
+    let field = uninhabited_refusal(
+        "enum Void { }\nstruct Holder { tag: Void; n: i32; }\n\
+         spec S { fn f(h: Holder) forall { assert(h.n == 1); } }",
+    );
+    assert!(
+        field.contains("a leaf of parameter `h` over enum `Void`"),
+        "{field}"
+    );
+}
+
+/// Two fields of the *same* variantless enum are one mistake, reported once.
+///
+/// A struct is the only shape whose walk reaches two distinct leaves of one
+/// declaration — an array holds a single element shape — so this is the one
+/// source that can produce a duplicate at all, and the only place the
+/// enumeration's per-name collapse is observable. Reporting it twice would send
+/// the author to one declaration twice.
+#[test]
+fn two_leaves_of_one_uninhabited_enum_are_one_refusal() {
+    let refused = uninhabited_refusal(
+        "enum Void { }\nstruct Both { a: Void; b: Void; }\n\
+         spec S { fn f() forall { let x: Both = @; assert(x.a == x.b); } }",
+    );
+    assert_eq!(
+        refused.lines().count(),
+        1,
+        "one declaration to change is one refusal: {refused}"
+    );
+}
+
+/// Two variantless enums in one aggregate are two mistakes, and the author
+/// should see both rather than recompiling to find the second.
+#[test]
+fn two_uninhabited_leaf_enums_are_refused_separately() {
+    let refused = uninhabited_refusal(
+        "enum Void { }\nenum Nil { }\nstruct Both { a: Void; b: Nil; }\n\
+         spec S { fn f() forall { let x: Both = @; assert(x.a == x.a); } }",
+    );
+    assert!(refused.contains("enum `Void`"), "{refused}");
+    assert!(refused.contains("enum `Nil`"), "{refused}");
+}
+
+/// Nothing outside a specification body is touched. Analysis rule `A009` warns
+/// about the declaration itself and executable code generation compiles a
+/// program that uses one, so a variantless enum reaching this pass only through
+/// executable code raises nothing: the refusal is about *quantifying* an
+/// uninhabited type, which is something only a specification does.
+#[test]
+fn a_variantless_enum_outside_a_specification_is_untouched() {
+    let source = "enum Void { }\nfn use_it(v: Void) -> i32 {\n  return 0;\n}\n\
+                  spec S { fn f(p: i32) forall { assert(p == p); } }";
+    assert_eq!(
+        sole_obligation(&ok(source), "S"),
+        imp(guard(0), nz(eqs(local(0), local(0))))
     );
 }

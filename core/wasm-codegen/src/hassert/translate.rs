@@ -77,6 +77,35 @@
 //! that introduces no slot is untouched — its antecedent is `⊤`, which
 //! [`HAssert::imp`] absorbs (issue #353).
 //!
+//! ## A narrow scalar also states the domain it was declared over
+//!
+//! A typing guard names only the machine class a readout rides in, and `u8`,
+//! `u16`, `i8`, `i16`, `bool` and an enum tag all ride `i32`. Stated alone it
+//! leaves the downstream valuation free to pick values the declaration forbids:
+//! a property that holds of every `u8` is unprovable at `300`, and its
+//! existential mirror — a witness the program could never draw — discharges
+//! while saying nothing. Every scalar introduction therefore states the *set*
+//! its declaration admits beside the class it rides in ([`ScalarDomain`]), and
+//! that set is the one code generation's normalization of a draw produces
+//! (`emit_uzumaki_domain_constraint`, whose table this one is paired with), so
+//! the obligation and the compiled body it constrains speak about the same
+//! values. Only the *sets* pair: the instruction that realizes one differs by
+//! row — a mask for the zero-extending widths and `bool`, a `shl`/`shr_s` pair
+//! for the sign-extending ones, and an `i32.rem_u N` for an enum tag.
+//!
+//! **The polarity belongs to the quantifier, not to the constraint.** Under
+//! universal quantification the domain joins the width guard as an `Himpl`
+//! antecedent: it narrows what the claim has to cover. Under existential
+//! quantification it is an `HA_and` conjunct *inside* the binder: it bounds the
+//! witness. That asymmetry is the one place a mechanical copy from one position
+//! to the other is silently unsound — an `Himpl` beneath an `HA_ex` lets the
+//! prover choose a value that refutes the antecedent and discharge the
+//! obligation without ever meeting the payload. [`quantify`] holds the decision
+//! so that no introduction site has to restate it, and an existential domain
+//! bound is dropped there, like any binder definition, when the body never reads
+//! the variable — a bound nothing reads would turn an obligation that claims
+//! nothing into a trivially true one and hide it from [`PCode::P010`].
+//!
 //! ## An aggregate is its ordered scalar leaves
 //!
 //! There is no aggregate *term*. An aggregate introduction — a compound `@`, a
@@ -97,15 +126,23 @@
 //! and the indices are user-visible the moment a proof fails, so they are part
 //! of the contract rather than an implementation detail.
 //!
-//! In a universal payload a guard is pushed for *every* leaf, including leaves
-//! the claim never reads. The guards are antecedents, so extra ones only weaken
-//! the obligation, and uniformity beats a use analysis that would make the slot
-//! numbering depend on what the body happens to mention. The cost is real and
-//! worth knowing: an N-leaf aggregate puts N guards in front of every
-//! obligation of its function. An existential leaf carries no guard — the
-//! prover chooses the value, so there is no unconstrained valuation to
-//! constrain — and a literal's leaves are constants that neither bind nor
-//! guard.
+//! In a universal payload a hypothesis is pushed for *every* leaf, including
+//! leaves the claim never reads. They are antecedents, so extra ones only
+//! weaken the obligation, and uniformity beats a use analysis that would make
+//! the slot numbering depend on what the body happens to mention. The cost is
+//! real and worth knowing: an N-leaf aggregate puts N hypotheses in front of
+//! every obligation of its function. A literal's leaves are constants that
+//! neither bind nor guard.
+//!
+//! A leaf states the same hypothesis its declared element or field type would
+//! state as a scalar, which is why [`AggShape`] carries a leaf's value domain
+//! beside its numeric class: the declared type is out of reach by the time a
+//! leaf is materialized, and a `u8` element quantified over the whole `i32`
+//! class would make `a[0] > 255` provable at a value the program can never
+//! draw. An existential leaf differs on the typing half only — the guard exists
+//! to make an unconstrained valuation denote, and a prover-chosen value denotes
+//! by construction — and keeps its declared bound, as a conjunct inside its own
+//! binder, wherever the claim reads it.
 //!
 //! A rejected introduction still advances the slot counter — one slot for a
 //! refused non-scalar parameter, the full leaf count for an aggregate over the
@@ -302,17 +339,48 @@ enum Binding {
 /// compound parameters, and array/struct literals) — [`PCode::P013`] past it.
 ///
 /// The resource the cap protects is the assertion-tree depth budget
-/// (`inference_hassert::MAX_TREE_DEPTH`, measured at 255 usable levels): slot
-/// guards nest right-associated one level per leaf and accumulate across *all*
-/// introductions until the first structural statement, so a per-introduction
-/// cap would not bound the resource it names — four introductions of 64 leaves
-/// each would still overrun the encoder. 64 as a per-function total is safe
-/// with roughly half the measured ceiling to spare for the obligation itself,
-/// in universal and existential positions alike. The check must run against
-/// the *type* before any leaf is materialized: the translator keeps going
-/// after a diagnostic, and a materialized many-thousand-node conjunction
-/// overflows the stack in its derived `Drop` — the exact hazard the codec's
-/// `MAX_TREE_DEPTH` documentation names.
+/// (`inference_hassert::MAX_TREE_DEPTH`, 256 levels, all of them usable — the
+/// codec refuses a tree *deeper* than the maximum, so one exactly at it
+/// validates): leaf hypotheses nest right-associated and accumulate across
+/// *all* introductions until the first structural statement, so a
+/// per-introduction cap would not bound the resource it names — four
+/// introductions of 64 leaves each would still overrun the encoder.
+///
+/// The metric is narrower than it looks, and eyeballing it gets it wrong.
+/// `codec.rs::validate_assert` is entered at depth 1 and counts **assertion
+/// nodes only**: `TermEq`/`HasType`/`Defined`/`AppOk` hand their terms to
+/// `validate_term` on a *fresh* counter, so a term never extends the assertion
+/// depth however deeply it nests. Printed-paren nesting in the emitted `.v` is
+/// a different number and cannot stand in for this one.
+///
+/// Measured at the budget's exact ceiling, every leaf read:
+///
+/// | shape | depth |
+/// | --- | --- |
+/// | `[i32; 64]`, universal | 66 |
+/// | `[u8; 64]` / `[u16; 64]` / `[bool; 64]`, universal | 67 |
+/// | `[i8; 64]` / `[i16; 64]`, universal | 68 |
+/// | `[i32; 64]`, existential | 128 |
+/// | any narrow width at 64 leaves, existential | 192 |
+///
+/// Universally a leaf costs one level whatever its declared type: its guard is
+/// a single entry of the antecedent's `HA_and` spine, and the domain grouped
+/// into that entry deepens only the entry's own subtree, which the fold does not
+/// continue along. Existentially that equality fails, and it is the worst case:
+/// a read narrow leaf is emitted as `HA_ex (HA_and bound body)` where a
+/// full-width one's `⊤` definition is absorbed and leaves a bare `HA_ex` — two
+/// accumulating levels against one. Signedness makes no difference there, since
+/// a signed pair's `HA_and` of two bounds sits inside that one conjunct node.
+///
+/// So the deepest 64-leaf introduction reaches 192 of 256 and leaves 64 levels
+/// for the claim itself. Any *scalar* ceiling quoted alongside these must name
+/// the shape it was measured on: `N` draws drained at one `assert` and `N`
+/// draws each with its own `assert` are different trees.
+///
+/// The check must run against the *type* before any leaf is materialized: the
+/// translator keeps going after a diagnostic, and a materialized
+/// many-thousand-node conjunction overflows the stack in its derived `Drop` —
+/// the exact hazard the codec's `MAX_TREE_DEPTH` documentation names.
 const SPEC_FN_MAX_QUANTIFIED_LEAVES: u32 = 64;
 
 /// A translated aggregate value: the shape-preserving tree whose leaves are
@@ -427,8 +495,9 @@ impl ChainValue {
 /// product over the type's structure, computable without materializing a
 /// single leaf.
 enum AggShape {
-    /// A scalar leaf at its numeric class.
-    Scalar(HNumType),
+    /// A scalar leaf's numeric class and the value domain its declared element
+    /// or field type admits.
+    Scalar(HNumType, ScalarDomain),
     /// An array of `u32` children of one shape.
     Array(Box<AggShape>, u32),
     /// A struct, `(field_name, field_shape)` in field-layout order.
@@ -440,7 +509,7 @@ impl AggShape {
     /// "over the cap", and the cap is far below the saturation point.
     fn leaf_count(&self) -> u32 {
         match self {
-            AggShape::Scalar(_) => 1,
+            AggShape::Scalar(..) => 1,
             AggShape::Array(elem, len) => elem.leaf_count().saturating_mul(*len),
             AggShape::Struct(fields) => fields
                 .iter()
@@ -514,14 +583,17 @@ enum ResultClass {
 enum Binder {
     /// `∃v. (definition ∧ body)` — a short-circuit witness, an element pinned
     /// by a non-constant index, or a call-argument `@` in an existential
-    /// context. The definition *pins* the variable, so it is a conjunct.
+    /// context. The definition says what the witness must satisfy — a value it
+    /// is pinned to, or, where the choice is the program's own, the declared
+    /// domain it is bounded by — so it is a conjunct either way.
     Ex,
     /// `∀v. (definition → body)` — a call-argument `@` under
     /// [`Mode::UnivLvl`]. Nothing pins a universally quantified value; its
-    /// definition is the typing guard its readers depend on, which is an
-    /// assumption rather than a claim, so it enters as an antecedent. This is
-    /// also what keeps such a guard *inside* its own binder: a `T_lvar` guard
-    /// that escaped its quantifier would name a variable nothing binds.
+    /// definition is what its readers may assume about it — the typing guard
+    /// and the values the declaration admits — so it enters as an antecedent
+    /// rather than as a claim. This is also what keeps such a hypothesis
+    /// *inside* its own binder: a `T_lvar` guard that escaped its quantifier
+    /// would name a variable nothing binds.
     All,
 }
 
@@ -564,14 +636,23 @@ pub(super) struct SpecFnTranslator<'a> {
     /// entry `i` is the *defining constraint* of the binder at level
     /// `depth + i`.
     ///
-    /// A binder nothing pins carries [`HAssert::True`] — an existential
-    /// call-argument `@`, which the prover chooses freely, or a witness whose
-    /// constraint moved into a conditional arm. Every allocation site drains
-    /// its own binders around its own statement, so this is empty at every
-    /// statement boundary.
+    /// A binder nothing constrains carries [`HAssert::True`] — a witness whose
+    /// constraint moved into a conditional arm, or a call-argument `@` at a
+    /// type whose declaration admits every value of its class. A narrow one
+    /// carries its declared domain instead: the prover still chooses the value
+    /// freely, but only from the set the declaration names. Every allocation
+    /// site drains its own binders around its own statement, so this is empty
+    /// at every statement boundary.
     pending: Vec<PendingBinder>,
-    /// Typing guards for the universal slots introduced since the last
-    /// structural statement, in introduction order, awaiting their drain.
+    /// The hypotheses the universal introductions made since the last
+    /// structural statement depend on, in introduction order, awaiting their
+    /// drain. One entry per introduction, whatever its declared type and
+    /// whichever carrier names it — a `T_local` slot or a `T_lvar` level — and
+    /// each entry is the introduction's typing guard conjoined with the values
+    /// its declaration admits, or the bare typing guard where the declaration
+    /// admits every value of its class. Grouping rather than pairing is what
+    /// keeps the drain's fold one level deep per introduction; the drain reads
+    /// this vector as a flat list and would spend a level on each entry.
     univ_guards: Vec<HAssert>,
     /// Running total of quantified scalar leaves this function's aggregate
     /// introductions have materialized, checked against
@@ -727,9 +808,15 @@ impl<'a> SpecFnTranslator<'a> {
     ) -> Binding {
         if self.type_is_scalar(ty) {
             let slot = self.next_slot();
+            // Resolved and admitted ahead of the mode split, like every other
+            // introduction: an uninhabited declaration is meaningless to
+            // quantify whichever judgment consumes the body, so the refusal
+            // cannot live on the branch that happens to need the constraint.
+            let declared = self.declared_domain(ty);
+            let domain = self.admitted_domain(declared, location, &format!("parameter `{name}`"));
             if mode.is_universal() {
                 let width = self.declared_class(ty);
-                self.push_univ_guard(slot, width);
+                self.push_univ_guard(slot, width, &domain);
             }
             return Binding::Slot(slot);
         }
@@ -759,6 +846,7 @@ impl<'a> SpecFnTranslator<'a> {
                 return Binding::Aggregate(AggValue::Sentinel);
             }
             self.leaves_introduced += count;
+            self.admit_aggregate_leaves(&shape, location, &format!("a leaf of parameter `{name}`"));
             let value = match mode {
                 Mode::Univ => self.univ_agg_value(&shape),
                 Mode::UnivLvl | Mode::Exist | Mode::Reach => unreachable!(
@@ -913,10 +1001,11 @@ impl<'a> SpecFnTranslator<'a> {
         let antecedent = self.drain_guards_over(HAssert::True);
         debug_assert!(
             mode.is_universal() || antecedent == HAssert::True,
-            "typing guards pend only under universal quantification: existential translation \
-             pins its variables with defining constraints instead, and reachability translation \
+            "the guard channel pends only under universal quantification: an existential \
+             variable is constrained inside its own binder instead — pinned to a value, or \
+             bounded by the values its declaration admits — and reachability translation \
              deliberately pushes no guard for any slot (its payload denotes against the real \
-             reached frame), so none can be pending in either mode"
+             reached frame), so nothing can be pending in either mode"
         );
         let tail = self.t_stmts(rest, mode);
         HAssert::imp(antecedent, HAssert::and(contribution, tail))
@@ -931,25 +1020,50 @@ impl<'a> SpecFnTranslator<'a> {
             .fold(seed, |acc, guard| HAssert::and(guard, acc))
     }
 
-    /// Records the typing a newly-introduced universal slot depends on.
-    fn push_univ_guard(&mut self, slot: u32, width: HNumType) {
-        self.univ_guards
-            .push(HAssert::HasType(HTerm::Local(slot), width));
+    /// Records the typing and the declared value domain a newly-introduced
+    /// universal slot depends on.
+    fn push_univ_guard(&mut self, slot: u32, width: HNumType, domain: &ScalarDomain) {
+        let term = HTerm::Local(slot);
+        self.push_guard(term, width, domain);
     }
 
-    /// Records the typing a newly-introduced universal *logical variable*
-    /// depends on ([`Mode::UnivLvl`]).
+    /// Records the typing and the declared value domain a newly-introduced
+    /// universal *logical variable* depends on ([`Mode::UnivLvl`]).
     ///
-    /// The guard travels the same channel as a slot's, but unlike a `T_local` —
-    /// which names something wherever it is written — a `T_lvar` is meaningful
-    /// only inside the binder that introduced it. Every caller must therefore
-    /// keep the drain within its own [`HAssert::all`] wrap, which the
+    /// The hypotheses travel the same channel as a slot's, but unlike a
+    /// `T_local` — which names something wherever it is written — a `T_lvar` is
+    /// meaningful only inside the binder that introduced it. Every caller must
+    /// therefore keep the drain within its own [`HAssert::all`] wrap, which the
     /// statement-list translation does by construction: the wrap encloses the
     /// translation of the rest of the block, and that is where the drain
     /// happens.
-    fn push_lvar_guard(&mut self, level: u32, width: HNumType) {
+    fn push_lvar_guard(&mut self, level: u32, width: HNumType, domain: &ScalarDomain) {
+        let term = HTerm::LVar(level);
+        self.push_guard(term, width, domain);
+    }
+
+    /// The shared body of the two pushers: **one** channel entry per
+    /// introduction, holding the typing guard over `term` conjoined with the
+    /// values its declaration admits.
+    ///
+    /// One entry rather than two adjacent ones, for three reasons that agree.
+    /// The channel drains as a right fold, so every entry is one level of the
+    /// antecedent's `HA_and` spine and a second entry per introduction would
+    /// halve how many narrow introductions fit under the encoder's tree-depth
+    /// cap — a body that translated before would start being refused. The
+    /// grouped shape is also the one [`Self::bind_universal`] builds for the
+    /// same width-and-domain pair, so the two carriers of the same hypothesis
+    /// stop disagreeing about how they spell it. And it is the shape the
+    /// downstream narrow-idiom proofs are written against: one
+    /// `HA_and (HA_has_type x T) bound` per variable.
+    ///
+    /// A domain that says nothing beyond the class contributes nothing here,
+    /// because [`HAssert::and`] absorbs the `⊤` its constraint builds — a
+    /// full-width introduction pushes the bare typing guard it always did.
+    fn push_guard(&mut self, term: HTerm, width: HNumType, domain: &ScalarDomain) {
+        let constraint = domain.constraint(&term);
         self.univ_guards
-            .push(HAssert::HasType(HTerm::LVar(level), width));
+            .push(HAssert::and(HAssert::HasType(term, width), constraint));
     }
 
     /// `let` translation. A bare `@` right-hand side binds a slot (universal) or
@@ -1016,18 +1130,24 @@ impl<'a> SpecFnTranslator<'a> {
         mode: Mode,
     ) -> HAssert {
         if self.type_is_scalar(ty) {
+            // Resolved once for every mode, including the reachability mode
+            // that has no use for it: an uninhabited declaration is meaningless
+            // to quantify whichever judgment consumes the body, so the refusal
+            // cannot live on the branch that happens to need the constraint.
+            let declared = self.declared_domain(ty);
+            let domain = self.admitted_domain(declared, self.arena[value_expr].location, "`@`");
             return match mode {
                 Mode::Univ => {
                     let slot = self.next_slot();
                     let width = self.declared_class(ty);
-                    self.push_univ_guard(slot, width);
+                    self.push_univ_guard(slot, width, &domain);
                     self.env.insert(name, Binding::Slot(slot));
                     self.t_stmts(rest, Mode::Univ)
                 }
                 Mode::UnivLvl => {
                     let level = self.depth;
                     let width = self.declared_class(ty);
-                    self.push_lvar_guard(level, width);
+                    self.push_lvar_guard(level, width, &domain);
                     self.env.insert(name, Binding::Level(level));
                     self.depth += 1;
                     let body = self.t_stmts(rest, Mode::UnivLvl);
@@ -1040,13 +1160,26 @@ impl<'a> SpecFnTranslator<'a> {
                     self.depth += 1;
                     let body = self.t_stmts(rest, Mode::Exist);
                     self.depth -= 1;
-                    HAssert::ex(body)
+                    // The only introduction with a definition of its own to
+                    // attach to a binder it builds itself, so it borrows the
+                    // polarity and vacuity rules from the shared helper rather
+                    // than restating them here.
+                    quantify(
+                        Binder::Ex,
+                        level,
+                        domain.constraint(&HTerm::LVar(level)),
+                        body,
+                    )
                 }
                 Mode::Reach => {
-                    // The choice already lives in its appended parameter: code
-                    // generation normalized the drawn value into the parameter
-                    // itself, so the payload reads the same frame slot the
-                    // compiled body binds — no binder, no guard.
+                    // The choice already lives in its appended parameter, and a
+                    // *named* one is normalized into that parameter: the `let`'s
+                    // own `local.set` writes the narrowed value back, so the
+                    // payload and the compiled body read the same value from the
+                    // same frame slot. (An anonymous choice is normalized at its
+                    // use site instead, which is sound for the separate reason
+                    // `Self::uzumaki_argument` records.) Either way: no binder,
+                    // no guard.
                     let slot = self.choice_slot(value_expr);
                     self.env.insert(name, Binding::Slot(slot));
                     self.t_stmts(rest, Mode::Reach)
@@ -1101,6 +1234,11 @@ impl<'a> SpecFnTranslator<'a> {
                 return self.t_stmts(rest, mode);
             }
             self.leaves_introduced += count;
+            self.admit_aggregate_leaves(
+                &shape,
+                self.arena[value_expr].location,
+                "a leaf of the `@`",
+            );
             return match mode {
                 Mode::Univ => {
                     let value = self.univ_agg_value(&shape);
@@ -1118,12 +1256,24 @@ impl<'a> SpecFnTranslator<'a> {
                 }
                 Mode::Exist => {
                     let mut next_level = self.depth;
-                    let value = exist_agg_value(&shape, &mut next_level);
+                    let mut bounds = Vec::new();
+                    let value = exist_agg_value(&shape, &mut next_level, &mut bounds);
                     self.env.insert(name, Binding::Aggregate(value));
                     self.depth += count;
                     let body = self.t_stmts(rest, Mode::Exist);
                     self.depth -= count;
-                    (0..count).fold(body, |acc, _| HAssert::ex(acc))
+                    // Innermost first, so the last level allocated becomes the
+                    // innermost binder and a bound dropped over an unread leaf
+                    // cascades outward — the same walk, and the same shared
+                    // decision, every other binder site goes through.
+                    bounds.into_iter().rev().fold(body, |acc, (level, domain)| {
+                        quantify(
+                            Binder::Ex,
+                            level,
+                            domain.constraint(&HTerm::LVar(level)),
+                            acc,
+                        )
+                    })
                 }
                 Mode::Reach => unreachable!("excluded above"),
             };
@@ -1979,36 +2129,58 @@ impl<'a> SpecFnTranslator<'a> {
     /// A `@` in call-argument position: an anonymous universal slot, a pending
     /// binder (universal or existential, per the context) to be wrapped around
     /// the enclosing statement, or — in a reachability body — the choice
-    /// parameter the pre-scan planned for it. An anonymous `@` has no declared
-    /// type, so its guard width comes from the type recorded for the argument.
+    /// parameter the pre-scan planned for it. An anonymous `@` has no
+    /// annotation of its own, so both its guard width and its value domain come
+    /// from the type recorded for the argument — the callee's declared
+    /// parameter type.
     ///
-    /// Unlike a short-circuit witness, this binder carries no defining
-    /// constraint: `@` *is* the free choice, so pinning it to a value would be
-    /// the opposite of what it means. A nested-universal binder still carries
-    /// its typing guard, which assumes rather than pins.
+    /// Unlike a short-circuit witness, this binder is never *pinned*: `@` is
+    /// the free choice itself, so fixing it to a value would be the opposite of
+    /// what it means. Bounding it is a different act, and a necessary one — the
+    /// choice ranges over the argument's declared type, not over its machine
+    /// class, so an existential binder carries that type's value domain as a
+    /// conjunct and a nested-universal one carries it beside the typing guard,
+    /// where both assume rather than demand.
     ///
-    /// A reachability body reads the raw choice parameter: code generation
-    /// normalizes an anonymous narrow choice at its use site, not in the
-    /// parameter itself, but the judgment quantifies whole choice vectors and
-    /// every in-domain value is a fixed point of the normalization, so the raw
-    /// and normalized readings coincide on exactly the vectors a proof would
-    /// pick. In a `unique` body an anonymous choice is rejected outright
+    /// A reachability body reads the raw choice parameter, and nothing here
+    /// bounds it. Code generation normalizes an anonymous narrow choice at its
+    /// use site rather than in the parameter itself, so the payload's reading of
+    /// the parameter and the body's reading of the normalized value differ off
+    /// the declared domain — which is sound because of a gate the payload does
+    /// not have to restate.
+    ///
+    /// The reachability judgment (`reaches_hassert_fi_at`, in the verifier's
+    /// `Exists.v`) counts only runs that reduce *normally* to an exit state; a
+    /// trap is not such a reduction. Every payload-contributing statement of a
+    /// reachability body — `assert` and `assume` alike — compiles to
+    /// `… eqz; if unreachable`, so a choice vector that fails the source
+    /// condition on the normalized values traps and is not a run the judgment
+    /// counts at all. What remains are exactly the vectors satisfying the source
+    /// condition on normalized values, and every in-domain value is a fixed
+    /// point of the normalization, so on those the raw and normalized readings
+    /// coincide. A false specification therefore traps on every vector and stays
+    /// correctly unprovable, and a true one has an in-domain witness whose two
+    /// readings agree.
+    ///
+    /// In a `unique` body an anonymous choice is rejected outright
     /// ([`PCode::P012`]): it is excluded from the source-visible observation
     /// the judgment compares, so distinct choices nothing names would collapse
     /// into one observation — a silent weakening of uniqueness.
     fn uzumaki_argument(&mut self, arg: ExprId, mode: Mode) -> HTerm {
+        let recorded = self.expr_domain(arg);
+        let domain = self.admitted_domain(recorded, self.arena[arg].location, "`@`");
         match mode {
             Mode::Univ => {
                 let slot = self.next_slot();
                 let width = self.expr_class(arg);
-                self.push_univ_guard(slot, width);
+                self.push_univ_guard(slot, width, &domain);
                 HTerm::Local(slot)
             }
             Mode::UnivLvl => {
                 let width = self.expr_class(arg);
-                self.bind_universal(width)
+                self.bind_universal(width, &domain)
             }
-            Mode::Exist => self.bind_witness(|_| HAssert::True),
+            Mode::Exist => self.bind_witness(move |v| domain.constraint(v)),
             Mode::Reach => {
                 let (planned, unique) = {
                     let reach = self
@@ -2330,6 +2502,108 @@ impl<'a> SpecFnTranslator<'a> {
         num_class(Some(&TypeInfo::from_type_id(self.arena, ty).kind))
     }
 
+    /// The declared value domain of a declared type — the domain twin of
+    /// [`Self::declared_class`].
+    fn declared_domain(&self, ty: TypeId) -> ScalarDomain {
+        self.domain_of_kind(
+            &TypeInfo::from_type_id(self.arena, ty).kind,
+            self.module_path,
+        )
+    }
+
+    /// The declared value domain of an expression's recorded type — the domain
+    /// twin of [`Self::expr_class`], and the only resolver an *anonymous* `@`
+    /// can use, since it has no annotation of its own and takes its domain from
+    /// the parameter it is passed to. An expression the checker left untyped
+    /// reads [`ScalarDomain::Full`], the same latitude [`Self::expr_class`]
+    /// takes for its number class.
+    fn expr_domain(&self, expr: ExprId) -> ScalarDomain {
+        self.ctx
+            .get_node_typeinfo(node_expr(expr))
+            .map_or(ScalarDomain::Full, |info| {
+                self.domain_of_kind(&info.kind, self.module_path)
+            })
+    }
+
+    /// The domain a quantified introduction is translated under, refusing an
+    /// uninhabited one first.
+    ///
+    /// `subject` names what is being quantified, in the reader's own words for
+    /// the position — a parameter is not a `@`. The refusal is [`PCode::P015`],
+    /// raised once per introduction; translation then continues over
+    /// [`ScalarDomain::Full`], as it does after every diagnostic, because a
+    /// diagnosed function contributes no obligation and the shape of the tree
+    /// it would have produced no longer matters.
+    fn admitted_domain(
+        &mut self,
+        domain: ScalarDomain,
+        location: Location,
+        subject: &str,
+    ) -> ScalarDomain {
+        if let ScalarDomain::Empty { enum_name } = &domain {
+            let message = format!(
+                "{subject} over enum `{enum_name}`, which has no variants, quantifies nothing: \
+                 an uninhabited type has no value for the claim to range over, so the obligation \
+                 would either say nothing or be unprovable for a reason that has nothing to do \
+                 with the program — give `{enum_name}` at least one variant"
+            );
+            self.error(PCode::P015, location, message);
+            return ScalarDomain::Full;
+        }
+        domain
+    }
+
+    /// Refuses every uninhabited enum an aggregate introduction's leaves would
+    /// quantify, once each, in enumeration order.
+    ///
+    /// Per distinct enum rather than per leaf: `[Void; 64]` names one
+    /// declaration to change, while a struct with two variantless fields names
+    /// two mistakes and the author should see both.
+    ///
+    /// Only the *report* is centralized here. Unlike a scalar introduction —
+    /// which takes [`Self::admitted_domain`]'s replacement domain and translates
+    /// under it — a leaf's domain lives on the shape, which this walk does not
+    /// rewrite, so the materializers still meet
+    /// [`ScalarDomain::Empty`] and its constraint builder answers for it.
+    fn admit_aggregate_leaves(&mut self, shape: &AggShape, location: Location, subject: &str) {
+        let mut names = Vec::new();
+        uninhabited_leaf_enums(shape, &mut names);
+        for enum_name in names {
+            self.admitted_domain(ScalarDomain::Empty { enum_name }, location, subject);
+        }
+    }
+
+    /// The declared value domain of a type kind, as referenced from the file
+    /// whose module path is `module_path` — the resolution scope matters for
+    /// the reason it does in [`Self::kind_is_scalar_in`]: a bare enum name
+    /// resolves relative to its referencing file.
+    ///
+    /// The two carriers that reach this pass disagree on how they spell an
+    /// enum, which is why one function handles all three spellings: a *declared*
+    /// annotation arrives as the bare name or the `::`-qualified path it was
+    /// written as, while a *recorded* expression type arrives already resolved.
+    /// A name that resolves to no enum is [`ScalarDomain::Full`] — whether it is
+    /// a scalar at all is decided, and reported, elsewhere, and a second
+    /// complaint here would double-report one mistake.
+    fn domain_of_kind(&self, kind: &TypeInfoKind, module_path: &[String]) -> ScalarDomain {
+        let resolved = match kind {
+            TypeInfoKind::Bool => return ScalarDomain::BelowU { hi_excl: 2 },
+            TypeInfoKind::Number(width) => return number_domain(*width),
+            TypeInfoKind::Enum(name, key) => self
+                .ctx
+                .lookup_enum(key)
+                .or_else(|| self.ctx.lookup_enum_in(name, module_path)),
+            TypeInfoKind::Custom(name) => self.ctx.lookup_enum_in(name, module_path),
+            TypeInfoKind::Qualified(path) => {
+                let segments: Vec<String> = path.split("::").map(str::to_string).collect();
+                self.ctx
+                    .lookup_enum_by_qualified_path(&segments, module_path)
+            }
+            _ => None,
+        };
+        resolved.map_or(ScalarDomain::Full, |info| enum_tag_domain(&info))
+    }
+
     /// Whether a declared type is a scalar the term language can represent (a
     /// bool, an integer, or an enum).
     fn type_is_scalar(&self, ty: TypeId) -> bool {
@@ -2437,15 +2711,22 @@ impl<'a> SpecFnTranslator<'a> {
 
     /// The shape of a scalar array's element: scalar leaves at any rank; an
     /// element that is (or contains) a struct is out of the surface (A028).
+    ///
+    /// A leaf records the class its readouts ride in *and* the values its
+    /// declared element type admits, resolved against the referencing file,
+    /// because a leaf is materialized long after the declared type is out of
+    /// reach and a narrow element that arrived carrying only its class would be
+    /// quantified over the whole class.
     fn scalar_array_shape(&self, kind: &TypeInfoKind) -> Option<AggShape> {
         match kind {
             TypeInfoKind::Array(elem, len) => Some(AggShape::Array(
                 Box::new(self.scalar_array_shape(&elem.kind)?),
                 *len,
             )),
-            _ if self.kind_is_scalar_in(kind, self.module_path) => {
-                Some(AggShape::Scalar(num_class(Some(kind))))
-            }
+            _ if self.kind_is_scalar_in(kind, self.module_path) => Some(AggShape::Scalar(
+                num_class(Some(kind)),
+                self.domain_of_kind(kind, self.module_path),
+            )),
             _ => None,
         }
     }
@@ -2454,7 +2735,10 @@ impl<'a> SpecFnTranslator<'a> {
     /// `compute_struct_field_layout` also lays them out in, and the order the
     /// runtime unrolling enumerates — each a scalar or a 1-D scalar array.
     /// Field types resolve relative to the struct's *defining* file, exactly
-    /// as the layout computation resolves them (#63). A struct field or a
+    /// as the layout computation resolves them, and both halves of a
+    /// leaf's record — the class and the values the declaration admits —
+    /// resolve there, since an enum field named by a bare name means whatever
+    /// that name means where the struct was written. A struct field or a
     /// multidimensional-array field puts the whole struct out of the surface
     /// (A027).
     fn flat_struct_shape(&self, info: &inference_type_checker::StructInfo) -> Option<AggShape> {
@@ -2463,12 +2747,15 @@ impl<'a> SpecFnTranslator<'a> {
         for field in &info.fields {
             let kind = &field.type_info.kind;
             let shape = if self.kind_is_scalar_in(kind, &defining) {
-                AggShape::Scalar(num_class(Some(kind)))
+                AggShape::Scalar(num_class(Some(kind)), self.domain_of_kind(kind, &defining))
             } else if let TypeInfoKind::Array(elem, len) = kind
                 && self.kind_is_scalar_in(&elem.kind, &defining)
             {
                 AggShape::Array(
-                    Box::new(AggShape::Scalar(num_class(Some(&elem.kind)))),
+                    Box::new(AggShape::Scalar(
+                        num_class(Some(&elem.kind)),
+                        self.domain_of_kind(&elem.kind, &defining),
+                    )),
                     *len,
                 )
             } else {
@@ -2492,12 +2779,18 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Materializes a universal aggregate introduction: one fresh slot and one
-    /// typing guard per scalar leaf, in enumeration order.
+    /// hypothesis per scalar leaf, in enumeration order.
+    ///
+    /// A leaf states the same hypothesis a scalar introduction of its declared
+    /// element or field type would — its class and the values that type admits
+    /// — which is why the leaf skeleton carries both: a narrow leaf reached
+    /// through an aggregate is exactly as constrained as the same declaration
+    /// written as a scalar.
     fn univ_agg_value(&mut self, shape: &AggShape) -> AggValue {
         match shape {
-            AggShape::Scalar(width) => {
+            AggShape::Scalar(width, domain) => {
                 let slot = self.next_slot();
-                self.push_univ_guard(slot, *width);
+                self.push_univ_guard(slot, *width, domain);
                 AggValue::Scalar(HTerm::Local(slot))
             }
             AggShape::Array(elem, len) => {
@@ -2514,16 +2807,18 @@ impl<'a> SpecFnTranslator<'a> {
 
     /// Materializes a nested-universal aggregate introduction: consecutive
     /// absolute binder levels from `*next_level`, one per scalar leaf in
-    /// enumeration order, each with the typing guard its readers depend on.
+    /// enumeration order, each with the hypothesis its readers depend on.
     ///
-    /// The guards go through the pending channel, so the caller's
+    /// The hypotheses go through the pending channel, so the caller's
     /// [`HAssert::all`] wraps must enclose the translation that drains them.
+    /// A leaf states its class and its declared domain, for the reason
+    /// [`Self::univ_agg_value`] gives.
     fn univ_lvl_agg_value(&mut self, shape: &AggShape, next_level: &mut u32) -> AggValue {
         match shape {
-            AggShape::Scalar(width) => {
+            AggShape::Scalar(width, domain) => {
                 let level = *next_level;
                 *next_level += 1;
-                self.push_lvar_guard(level, *width);
+                self.push_lvar_guard(level, *width, domain);
                 AggValue::Scalar(HTerm::LVar(level))
             }
             AggShape::Array(elem, len) => AggValue::Array(
@@ -2932,7 +3227,7 @@ impl<'a> SpecFnTranslator<'a> {
         while let Expr::Parenthesized { expr: inner } = &self.arena[child].kind {
             child = *inner;
         }
-        if let AggShape::Scalar(_) = shape {
+        if let AggShape::Scalar(..) = shape {
             let term = self.term(child, mode);
             return AggValue::Scalar(term);
         }
@@ -3233,12 +3528,13 @@ impl<'a> SpecFnTranslator<'a> {
         level_count(self.pending.len())
     }
 
-    /// Allocates the next pending binder and pins it with the constraint
-    /// `define` builds over its own term.
+    /// Allocates the next pending binder and constrains it with what `define`
+    /// builds over its own term — a value it is pinned to, or a domain it is
+    /// bounded by.
     ///
     /// The binder takes the level just past every binder already in scope or
     /// pending, so it may be defined in terms of any of them but none of them in
-    /// terms of it. A binder nothing pins passes `HAssert::True`.
+    /// terms of it. A binder nothing constrains passes `HAssert::True`.
     fn bind_witness<F>(&mut self, define: F) -> HTerm
     where
         F: FnOnce(&HTerm) -> HAssert,
@@ -3253,17 +3549,21 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Allocates the next pending binder as a *universal* one, carrying the
-    /// typing guard its readers depend on.
+    /// typing guard and the declared value domain its readers depend on.
     ///
-    /// The guard rides with the binder rather than through the `univ_guards`
-    /// channel because this binder is wrapped around the enclosing statement's
-    /// atom, while that channel drains around the statement — outside the
-    /// wrap, where the variable is no longer bound.
-    fn bind_universal(&mut self, width: HNumType) -> HTerm {
+    /// Both ride with the binder rather than through the `univ_guards` channel
+    /// because this binder is wrapped around the enclosing statement's atom,
+    /// while that channel drains around the statement — outside the wrap, where
+    /// the variable is no longer bound.
+    fn bind_universal(&mut self, width: HNumType, domain: &ScalarDomain) -> HTerm {
         let variable = HTerm::LVar(self.depth + self.pending_len());
+        let definition = HAssert::and(
+            HAssert::HasType(variable.clone(), width),
+            domain.constraint(&variable),
+        );
         self.pending.push(PendingBinder {
             quant: Binder::All,
-            definition: HAssert::HasType(variable.clone(), width),
+            definition,
         });
         variable
     }
@@ -3286,9 +3586,11 @@ impl<'a> SpecFnTranslator<'a> {
     /// right — on the arm the source skips, nothing reads it.
     ///
     /// A *universal* binder keeps its definition where it is. That definition is
-    /// a typing guard, which assumes rather than demands, so leaving it at the
-    /// wrap costs the skipped arm nothing; moving it would turn the assumption
-    /// into a conjunct the proof has to establish for every value.
+    /// a hypothesis — the typing guard and, at a narrow type, the values the
+    /// declaration admits — and a hypothesis assumes rather than demands, so
+    /// leaving it at the wrap costs the skipped arm nothing; moving it would
+    /// turn the assumption into a conjunct the proof has to establish for every
+    /// value.
     fn capture_definitions<T, F>(&mut self, f: F) -> (T, HAssert)
     where
         F: FnOnce(&mut Self) -> T,
@@ -3695,6 +3997,125 @@ fn num_class(kind: Option<&TypeInfoKind>) -> HNumType {
     }
 }
 
+/// The set of values a declared scalar type may hold, as the constraint that
+/// characterizes it over one term — the companion of [`num_class`], which
+/// answers only which class the values ride in.
+///
+/// The sets are exactly those code generation's normalization of a draw
+/// produces, so an obligation and the body it constrains range over the same
+/// values. The paired table is `emit_uzumaki_domain_constraint` in
+/// `crate::compiler`, and the two must move together; the instruction that
+/// realizes a domain differs per row (a mask for `u8`, `u16` and `bool`, a
+/// `shl`/`shr_s` pair for the sign-extending widths, an `i32.rem_u N` for an
+/// enum tag), so it is the *set* that pairs the tables, not the shape of the
+/// code.
+///
+/// Two properties of the shapes below are load-bearing rather than cosmetic,
+/// both dictated by the hypotheses the downstream narrow-idiom lemmas take:
+///
+/// * **Signedness follows the normalization, not the source spelling.** The
+///   widths whose normalization zero-extends (`u8`, `u16`, `bool`, an enum tag)
+///   are bounded *unsigned*; the widths whose normalization sign-extends (`i8`,
+///   `i16`) take a *signed* pair. A signed guard against an unsigned bound, or
+///   the reverse, is an obligation no lemma consumes — and one that no green
+///   translation gate can see, since a false antecedent type-checks exactly as
+///   well as a true one.
+/// * **The upper bound is strict, at the domain's exclusive top**, and a signed
+///   width states both of its bounds: there is no range predicate in the
+///   assertion language, so a one-sided signed bound characterizes nothing.
+#[derive(Clone)]
+enum ScalarDomain {
+    /// Every value of the term's class: `i32`, `u32`, `i64`, `u64`.
+    Full,
+    /// `x <u hi_excl` — the zero-extending widths, `bool`, and enum tags.
+    BelowU { hi_excl: i32 },
+    /// `lo_incl <=s x /\ x <s hi_excl` — the sign-extending widths.
+    BetweenS { lo_incl: i32, hi_excl: i32 },
+    /// Uninhabited: an enum declared with no variants, named so the refusal can
+    /// point at the declaration that has to change.
+    Empty { enum_name: String },
+}
+
+impl ScalarDomain {
+    /// The assertion characterizing this domain over the term `x`, or `⊤` where
+    /// the declaration admits everything its class holds.
+    ///
+    /// Every domain predicate compares at `i32`: no narrow type is 64-bit, so a
+    /// bound is only ever stated about a value riding the 32-bit class.
+    fn constraint(&self, x: &HTerm) -> HAssert {
+        match *self {
+            // ⊤ for both, for different reasons. A full-width declaration
+            // admits every value of its class, so there is nothing left to say
+            // about it; an uninhabited one has no honest constraint at all —
+            // `⊥` would discharge every claim over it for the wrong reason, and
+            // any inhabited bound would be a lie. Saying nothing keeps a
+            // diagnosed function's obligation from silently hardening, and
+            // refusing the introduction is a diagnostic's job rather than a
+            // constraint builder's.
+            //
+            // `Empty` arrives here from the aggregate-leaf channel and only
+            // from there. A scalar introduction is handed `Full` in place of an
+            // uninhabited domain at the refusal, while a leaf's domain lives on
+            // the shape the refusal walked, which that walk does not rewrite —
+            // so the leaf is materialized from it afterwards, still `Empty`.
+            ScalarDomain::Full | ScalarDomain::Empty { .. } => HAssert::True,
+            ScalarDomain::BelowU { hi_excl } => HAssert::nz(relop(
+                HNumType::I32,
+                HRelop::LtU,
+                x.clone(),
+                HTerm::Const(HConst::I32(hi_excl)),
+            )),
+            ScalarDomain::BetweenS { lo_incl, hi_excl } => HAssert::and(
+                HAssert::nz(relop(
+                    HNumType::I32,
+                    HRelop::LeS,
+                    HTerm::Const(HConst::I32(lo_incl)),
+                    x.clone(),
+                )),
+                HAssert::nz(relop(
+                    HNumType::I32,
+                    HRelop::LtS,
+                    x.clone(),
+                    HTerm::Const(HConst::I32(hi_excl)),
+                )),
+            ),
+        }
+    }
+}
+
+/// The value domain of an integer width: the sub-word widths at the set their
+/// normalization produces — a mask for the zero-extending ones, a `shl`/`shr_s`
+/// pair for the sign-extending ones — and the full widths unconstrained.
+fn number_domain(width: NumberType) -> ScalarDomain {
+    match width {
+        NumberType::U8 => ScalarDomain::BelowU { hi_excl: 256 },
+        NumberType::U16 => ScalarDomain::BelowU { hi_excl: 65536 },
+        NumberType::I8 => ScalarDomain::BetweenS {
+            lo_incl: -128,
+            hi_excl: 128,
+        },
+        NumberType::I16 => ScalarDomain::BetweenS {
+            lo_incl: -32768,
+            hi_excl: 32768,
+        },
+        NumberType::I32 | NumberType::U32 | NumberType::I64 | NumberType::U64 => ScalarDomain::Full,
+    }
+}
+
+/// The value domain of an enum: its zero-based variant tags, `0..variants-1`.
+/// An enum with no variants is uninhabited. An enum with more variants than an
+/// `i32` tag can index has no layout to speak of, so nothing narrower than the
+/// class is honest to state about it.
+fn enum_tag_domain(info: &inference_type_checker::EnumInfo) -> ScalarDomain {
+    match i32::try_from(info.variants.len()) {
+        Ok(0) => ScalarDomain::Empty {
+            enum_name: info.name.clone(),
+        },
+        Ok(count) => ScalarDomain::BelowU { hi_excl: count },
+        Err(_) => ScalarDomain::Full,
+    }
+}
+
 /// The level offset a binder count contributes. A specification body cannot
 /// approach `u32::MAX` binders — the arena would have run out of expressions
 /// first — so the conversion is an invariant, not a case to handle.
@@ -3722,25 +4143,57 @@ fn disjoin(assertions: Vec<HAssert>) -> HAssert {
         .unwrap_or(HAssert::False)
 }
 
+/// The uninhabited enums a leaf skeleton would quantify, in enumeration order
+/// and once per name.
+fn uninhabited_leaf_enums(shape: &AggShape, out: &mut Vec<String>) {
+    match shape {
+        AggShape::Scalar(_, ScalarDomain::Empty { enum_name }) => {
+            if !out.iter().any(|name| name == enum_name) {
+                out.push(enum_name.clone());
+            }
+        }
+        AggShape::Scalar(..) => {}
+        AggShape::Array(elem, _) => uninhabited_leaf_enums(elem, out),
+        AggShape::Struct(fields) => {
+            for (_, field) in fields {
+                uninhabited_leaf_enums(field, out);
+            }
+        }
+    }
+}
+
 /// Materializes an existential aggregate introduction: consecutive absolute
 /// binder levels starting at `*next_level`, one per scalar leaf, in
 /// enumeration order.
-fn exist_agg_value(shape: &AggShape, next_level: &mut u32) -> AggValue {
+///
+/// Each leaf's level and declared value domain is appended to `bounds`, in
+/// allocation order, so the caller can wrap the binders with the bound each
+/// witness has to satisfy. The pairs travel rather than being re-derived from
+/// the level range because the caller must not have to reconstruct which leaf
+/// of a mixed-type aggregate got which level — a bound attached to the wrong
+/// witness constrains the wrong variable and nothing about the emitted tree
+/// looks wrong.
+fn exist_agg_value(
+    shape: &AggShape,
+    next_level: &mut u32,
+    bounds: &mut Vec<(u32, ScalarDomain)>,
+) -> AggValue {
     match shape {
-        AggShape::Scalar(_) => {
+        AggShape::Scalar(_, domain) => {
             let level = *next_level;
             *next_level += 1;
+            bounds.push((level, domain.clone()));
             AggValue::Scalar(HTerm::LVar(level))
         }
         AggShape::Array(elem, len) => AggValue::Array(
             (0..*len)
-                .map(|_| exist_agg_value(elem, next_level))
+                .map(|_| exist_agg_value(elem, next_level, bounds))
                 .collect(),
         ),
         AggShape::Struct(fields) => AggValue::Struct(
             fields
                 .iter()
-                .map(|(name, field)| (name.clone(), exist_agg_value(field, next_level)))
+                .map(|(name, field)| (name.clone(), exist_agg_value(field, next_level, bounds)))
                 .collect(),
         ),
     }
@@ -3758,25 +4211,46 @@ fn const_value(constant: HConst, unsigned: bool) -> i128 {
     }
 }
 
+/// Wraps `body` in the quantifier `quant` binding the variable at absolute
+/// `level`, attaching `definition` at the polarity that quantifier reads it in.
+///
+/// The two quantifiers attach their definitions differently, because the
+/// definitions mean different things: an existential binder is *pinned* or
+/// *bounded* by its constraint, so the constraint is a conjunct the witness has
+/// to satisfy, while a universal binder is *typed and bounded* by its guard, an
+/// assumption its readers depend on and therefore an antecedent. Both readings
+/// keep the definition inside its own binder, which is what lets the variable
+/// appear in it at all.
+///
+/// Copying either shape into the other position is unsound, which is why this
+/// decision lives in one place. An existential definition in antecedent
+/// position is silently vacuous: the prover picks a value that refutes it and
+/// discharges the whole obligation without ever reaching the body.
+///
+/// A binder whose variable does not occur in `body` is emitted *without* its
+/// definition. A definition pins or bounds a value, so keeping one for a
+/// variable nothing reads would turn a specification that claims nothing into a
+/// claim — `let unused: bool = 10 / x == 0 || true;` alone must stay `HA_true`,
+/// and a range bound over an unread choice would be just as trivially true
+/// while no longer looking vacuous. Only the definition is dropped, never the
+/// binder: dropping the binder would shift the level of every binder allocated
+/// inside it. [`HAssert::ex`]/[`HAssert::all`] collapse the resulting
+/// `∃x. ⊤`/`∀x. ⊤` away.
+fn quantify(quant: Binder, level: u32, definition: HAssert, body: HAssert) -> HAssert {
+    match (quant, assert_mentions_level(&body, level)) {
+        (Binder::Ex, true) => HAssert::ex(HAssert::and(definition, body)),
+        (Binder::Ex, false) => HAssert::ex(body),
+        (Binder::All, true) => HAssert::all(HAssert::imp(definition, body)),
+        (Binder::All, false) => HAssert::all(body),
+    }
+}
+
 /// Wraps `body` in one quantifier per entry of `binders`, which occupy levels
 /// `base_level ..` in allocation order. Folding innermost-first puts the
 /// first-allocated binder outermost, so a later definition may name an earlier
-/// binder: `∃v₀. (def₀ ∧ ∃v₁. (def₁ ∧ … ∧ body))`.
-///
-/// The two quantifiers attach their definitions differently, because the
-/// definitions mean different things: an existential binder is *pinned* by its
-/// constraint (a conjunct), while a universal binder is *typed* by its guard (an
-/// antecedent). Both readings keep the definition inside its own binder, which
-/// is what lets the variable appear in it at all.
-///
-/// A binder whose variable does not occur in the accumulated body is emitted
-/// *without* its definition. A definition pins a value, so keeping one for a
-/// variable nothing reads would turn a specification that claims nothing into a
-/// refutable claim — `let unused: bool = 10 / x == 0 || true;` alone must stay
-/// `HA_true`. Only the definition is dropped, never the binder: dropping the
-/// binder would shift the level of every binder allocated inside it. The
-/// innermost-first order lets one dropped definition cascade outward, and
-/// [`HAssert::ex`]/[`HAssert::all`] collapse the resulting `∃x. ⊤`/`∀x. ⊤` away.
+/// binder: `∃v₀. (def₀ ∧ ∃v₁. (def₁ ∧ … ∧ body))`, and it lets one dropped
+/// definition cascade outward. Each binder attaches through [`quantify`],
+/// which holds the polarity and vacuity rules.
 fn wrap_binders(body: HAssert, group: PendingGroup) -> HAssert {
     let PendingGroup {
         binders,
@@ -3786,13 +4260,7 @@ fn wrap_binders(body: HAssert, group: PendingGroup) -> HAssert {
     let mut acc = body;
     for binder in binders.into_iter().rev() {
         level -= 1;
-        let read = assert_mentions_level(&acc, level);
-        acc = match (binder.quant, read) {
-            (Binder::Ex, true) => HAssert::ex(HAssert::and(binder.definition, acc)),
-            (Binder::Ex, false) => HAssert::ex(acc),
-            (Binder::All, true) => HAssert::all(HAssert::imp(binder.definition, acc)),
-            (Binder::All, false) => HAssert::all(acc),
-        };
+        acc = quantify(binder.quant, level, binder.definition, acc);
     }
     acc
 }

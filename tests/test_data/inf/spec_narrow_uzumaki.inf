@@ -1,14 +1,47 @@
-// Universal slots at every scalar width. Each slot is read by an assertion,
-// which is what makes its `HA_has_type` guard observable: a slot nothing reads
-// guards nothing, so the translator drops its guard and the obligation this
-// fixture exists to cover would never reach the printer.
+// Narrow `@` draws: the corpus producer of every row of the declared-value-domain
+// table, and of every position a draw can be introduced from.
 //
-// The identity helpers live at file scope so each assertion carries a real
-// `T_app` over the slot rather than a claim the typing guard alone discharges.
+// A narrow slot states two things, grouped into one guard: the class its values
+// ride in (`HA_has_type … T_i32`) and the set its declaration admits. Without the
+// second half a `u8` claim that holds on `0..255` is quantified over every `i32`
+// and cannot be discharged, so the bound is the whole point of the fixture — the
+// six rows below are `u8` and `u16` (an unsigned bound), `i8` and `i16` (a signed
+// pair, because the sign-extending widths have a lower bound too), `bool`, and an
+// enum tag (bounded by its variant count).
+//
+// The positions matter as much as the widths, because the bound is attached by a
+// different mechanism in each: a slot guard under plain `forall`, a `T_lvar` guard
+// under a `forall` nested in an existential context, an `HA_and` conjunct inside
+// an `HA_ex` binder, and one of those per scalar leaf for an array or a struct.
+// The mode also fixes the *polarity* — an antecedent universally, a conjunct
+// existentially — and copying one into the other position is silently unsound, so
+// each is exercised here rather than argued from symmetry. A reachability body
+// is here too, for the opposite reason: it is the one narrow draw position that
+// must emit no bound at all. Anonymous draws in call-argument position live in
+// `spec_narrow_abi.inf`, where the callee's declared parameter type is what
+// supplies their domain.
+//
+// Every slot is read by an assertion, which is what makes its guard observable: a
+// slot nothing reads guards nothing, so the translator drops what it would have
+// stated and the obligation this fixture exists to cover would never reach the
+// printer. The identity helpers live at file scope so each assertion carries a
+// real `T_app` over the slot rather than a claim the guard alone discharges, and
+// every claim is true, so the emitted obligations are dischargeable rather than
+// merely well-typed.
 enum Color {
     Red,
     Green,
     Blue,
+}
+
+// A narrow leaf of each kind the shape surface admits: a scalar field, a
+// sign-extending one, an enum tag, and a full-width field whose leaf must stay
+// bound-free beside them.
+struct Pixel {
+    level: u8;
+    span: i16;
+    tint: Color;
+    wide: i32;
 }
 
 pub fn id_u8(v: u8) -> u8 { return v; }
@@ -50,6 +83,10 @@ spec NarrowUzu {
         assert(id_color(f) == f);
     }
 
+    // The full widths admit every value of their class, so their guards must stay
+    // exactly one `HA_has_type` apiece: the ⊤ a full-width domain builds is
+    // absorbed rather than emitted, and a bound appearing here would mean the
+    // table had grown a row that does not belong to it.
     fn full_width() forall {
         let g: i32 = @;
         let h: u32 = @;
@@ -59,5 +96,88 @@ spec NarrowUzu {
         assert(id_u32(h) == h);
         assert(id_i64(i) == i);
         assert(id_u64(j) == j);
+    }
+
+    // A `forall` nested inside an existential context binds a logical variable
+    // rather than a slot, so the bound rides in the antecedent *inside* the
+    // `Hall` — a `T_lvar` names nothing outside the quantifier that introduced
+    // it.
+    fn nested_universal_scalar() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                let x: u8 = @;
+                assert(id_u8(x) == x);
+            }
+        }
+    }
+
+    // Existentially the bound is a *conjunct inside the binder*, not an
+    // antecedent: an implication under `HA_ex` would let a proof pick an
+    // out-of-domain witness, refute the guard, and discharge the obligation
+    // without ever reaching the claim.
+    fn existential_scalar() forall {
+        let n: i32 = @;
+        assume {
+            assert(n == 0);
+        }
+        exists {
+            let m: i8 = @;
+            assert(id_i8(m) == m);
+        }
+    }
+
+    // One bound per scalar leaf, at the element's declared type.
+    fn array_leaves() forall {
+        let a: [u8; 2] = @;
+        assert(id_u8(a[0]) == a[0]);
+    }
+
+    // A struct parameter leaf-expands the same way, and each field's type
+    // resolves where the struct was written rather than where it is read — an
+    // enum field's variant count comes from the declaring file's `Color`.
+    fn struct_leaves(p: Pixel) forall {
+        assume {
+            assert(p.wide == 0);
+        }
+        assert(id_color(p.tint) == p.tint);
+    }
+
+    fn nested_universal_leaves() forall {
+        exists {
+            let k: i32 = @;
+            assume {
+                assert(k == 0);
+            }
+            forall {
+                let a: [i16; 2] = @;
+                assert(id_i16(a[0]) == a[0]);
+            }
+        }
+    }
+
+    fn existential_leaves() forall {
+        let n: i32 = @;
+        assume {
+            assert(n == 0);
+        }
+        exists {
+            let a: [u16; 2] = @;
+            assert(id_u16(a[0]) == a[0]);
+        }
+    }
+
+    // The one narrow position whose correct emission is an *absence*. An
+    // `exists`-quantified function is a reachability claim: its choices are real
+    // parameters of the runs the judgment quantifies, not variables an assertion
+    // binds, so there is nothing to bound. Code generation writes the narrowed
+    // value back into the parameter a named choice lives in, and the payload
+    // reads that same slot, so the two already speak about the same value.
+    fn reachable_narrow() exists {
+        let c: u8 = @;
+        assert(id_u8(c) == c);
     }
 }

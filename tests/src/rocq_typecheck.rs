@@ -56,10 +56,13 @@ mod gate {
     /// `core/wasm-codegen/src/hassert/tests.rs` and end-to-end by
     /// `build_v_rejects_unique_block_with_p002` in `apps/infs`).
     ///
-    /// `spec_quantifier_alternation.inf` is the sole producer of the `Hall`
-    /// universal-binder sugar: only a `forall` block nested inside an
-    /// existential context emits one, so without this fixture that stub
-    /// declaration would never be elaborated by the compile below.
+    /// The `Hall` universal-binder sugar is reached only by a `forall` block
+    /// nested inside an existential context, so the compile below elaborates
+    /// that stub declaration only because some fixture writes one.
+    /// `spec_quantifier_alternation.inf` is where the shape itself is
+    /// exercised, at every nesting the language admits; the two narrow
+    /// fixtures reach it incidentally, for the guard a narrow logical variable
+    /// carries.
     ///
     /// The operator-matrix entries exist for operator coverage rather than for
     /// a proof shape: between them they put every arithmetic, bitwise, shift
@@ -79,6 +82,7 @@ mod gate {
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
         ("spec_short_circuit.inf", "spec_short_circuit"),
         ("spec_narrow_abi.inf", "spec_narrow_abi"),
+        ("spec_narrow_discharge.inf", "spec_narrow_discharge"),
         ("spec_literal_ctx.inf", "spec_literal_ctx"),
         ("spec_negative_consts.inf", "spec_negative_consts"),
         ("spec_bitwise_arith.inf", "spec_bitwise_arith"),
@@ -266,12 +270,49 @@ mod gate {
         "T_local ",
         "HA_ex",
         // The universal binder, reached only by a `forall` block nested inside
-        // an existential context. `spec_quantifier_alternation.inf` is its sole
-        // producer, so without that fixture `coqc` would never elaborate the
-        // `Hall` Definition and a drift in it would pass unnoticed — the hole
-        // this needle list exists to keep closed.
+        // an existential context — `spec_quantifier_alternation.inf` and the
+        // two narrow fixtures are its only producers, so without them `coqc`
+        // would never elaborate the `Hall` Definition and a drift in it would
+        // pass unnoticed — the hole this needle list exists to keep closed.
         "Hall ",
         "HA_has_type ",
+        // The declared value domain a narrow slot is quantified over, which
+        // rides in the same conjunct as the width guard above. `HA_has_type`
+        // alone cannot stand in for it: a slot whose declaration admits every
+        // value of its class states only its width, so deleting the domain
+        // emission outright leaves every needle before this point satisfied
+        // while the obligations it protects go back to ranging a `u8` over all
+        // of `i32`.
+        //
+        // Each needle is a contiguous form that names no slot, so it holds
+        // wherever in a specification the narrow introduction sits. The first
+        // is the grouped guard of a narrow universal *binder*, entire — the
+        // variable a binder introduces is relative index 0 inside its own
+        // guard at every nesting depth, which is what makes the whole
+        // width-and-domain pair spellable as one substring. The other two are
+        // the halves of a signed pair: the sign-extending widths take a lower
+        // bound as well as an upper one, and the lower one is the only
+        // comparison the corpus emits with a constant *left* operand.
+        //
+        // What these pin is the shape, not its provenance — a source
+        // comparison written to the same spelling would satisfy them. The
+        // fixtures that produce them are `spec_narrow_uzumaki.inf` and
+        // `spec_narrow_abi.inf`, whose own comments record which position each
+        // obligation covers.
+        //
+        // `spec_narrow_discharge.inf` is the third, and is here for a reason
+        // this gate cannot itself deliver: it type-checks, but it rewrites
+        // `Qed.` to `Admitted.` first, so it can no more tell a correct bound
+        // from a false one than it can tell a proof from a stub. That fixture's
+        // two obligations are discharged for real against wasm-verifier
+        // (`theories/examples/Issue357NarrowDomainExample.v`), where the proof
+        // stops closing if either bound is dropped or loosened by one. Its
+        // presence here keeps the emitted text and the discharged text from
+        // drifting apart silently.
+        "HA_and (HA_has_type (T_lvar 0) T_i32) (HA_not (term_eq (T_relop T_i32 \
+         (Relop_i (ROI_lt SX_U)) (T_lvar 0)",
+        "(Relop_i (ROI_le SX_S)) (T_const (Vi32 (-128)))",
+        "(Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_const (Vi32 128))",
         "BT_valtype (Some",
         // The reachability grammar, in its applied forms: the kind-selected
         // theorems, the partition list's type ascription, and a record field
