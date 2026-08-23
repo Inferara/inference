@@ -309,7 +309,15 @@ The translator emits only what the vendored WasmCert proof stub in `rocq-stub/` 
 | Any SIMD/vector instruction | SIMD proposal — the wasm-verifier proof contract covers no vector types |
 | Any conversion instruction naming a float on either side (`trunc`, `trunc_sat`, `convert`, `demote`, `promote`, `reinterpret`) | the contract declares no floating-point number type, so a conversion naming one has no lowering |
 | `f32`, `f64`, or `v128` as a value type, in any position | as above, per type, plus the position it occupies |
-| GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops | no lowering under the wasm-verifier proof contract |
+| GC, exception handling, stack switching, tail calls, wide arithmetic, typed references, `memory.discard`, segment-indexed table ops — at the **instruction** surface | no lowering under the wasm-verifier proof contract |
+| GC struct/array and `cont` types, declared subtyping (`sub`, non-final), and shared composites — at the **type-section** surface | worded apart from the instruction arms above, so a fixture carrying both keeps testing both |
+| `table64`, shared tables, and tables with an element initializer | the emitted `Mt` carries limits and an element type only |
+| A memory index other than `0`, on a load/store `memarg` or on `memory.init`/`memory.copy`/`memory.fill` | the model has one linear memory, so the index has nowhere to go |
+| The tag section, any unrecognised section id, and component-model sections | content the emitted `.v` could not account for |
+
+A proposal family appearing in this table twice is the point, not duplication. GC and stack switching each reach the module through *two* surfaces — an instruction and a type-section entry — and rejecting only the instruction left the type surface emitting a dangling `::` into `mod_types`. Any future family added here needs the same question asked of it: which surfaces can carry it?
+
+Structural contradictions inside the binary are rejected as `WasmParse` rather than `UnsupportedFeature`, because the input is malformed rather than merely unmodelled: a repeated or out-of-order core section, a data count disagreeing with the data section, function and code sections of different lengths, operators after a body's terminating `end`, a truncated locals vector or operator stream, and a declared locals count above the limit WebAssembly engines share.
 
 The **integer-to-integer** width conversions are not on this list. `i32.wrap_i64` and `i64.extend_i32_s/u` translate to `BI_cvtop` with the contract's `CVO_wrap`/`CVO_extend`, and the five sign-extension operators (`i32.extend8_s`, `i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s`) translate to `BI_unop t (Unop_extend n)` — the contract classifies sign-extension as a *unop*, not a conversion, so the WASM mnemonics group them misleadingly. `Unop_extend`'s argument is the source width in **bits**; a byte count would type-check and denote a constant-zero extension, so the emitter's spelling is pinned by byte comparison rather than left to `coqc`.
 
