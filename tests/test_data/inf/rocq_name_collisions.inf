@@ -1,0 +1,35 @@
+// Every emitted `.v` spends its top-level names on a fixed preamble
+// (`Vi32 Vi64 Mt Mm Mg Mi Me Ma`), then one `Definition` per function, then the
+// module record and the theorem that judges it. Rocq definitions are not
+// overloadable, so this fixture names functions after three of those: a preamble
+// helper, the module record (the name the module is translated under), and that
+// module's validity theorem. Each must reach the `.v` under a disambiguated
+// name; if any one is emitted verbatim, `coqc` refuses the whole file with
+// `already exists` and nothing in it elaborates.
+//
+// Without this fixture the gate is blind to the entire defect class: every other
+// corpus entry is translated under a name matching its own file stem while its
+// entry function is `main`, so a module name and a function name never coincide,
+// and no amount of corpus growth in that shape can ever produce the collision.
+fn Me(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn rocq_name_collisions(x: i32) -> i32 {
+    return Me(x);
+}
+
+fn valid_rocq_name_collisions(x: i32) -> i32 {
+    return rocq_name_collisions(x);
+}
+
+pub fn main() -> i32 {
+    return valid_rocq_name_collisions(0);
+}
+
+spec CollisionSpec {
+    fn collision_prop() forall {
+        let x: i32 = @;
+        assert(rocq_name_collisions(x) == rocq_name_collisions(x));
+    }
+}

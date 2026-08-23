@@ -181,16 +181,17 @@
 use std::collections::HashMap;
 
 use inf_wasmparser::{
-    BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems, ElementKind, Export,
-    FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
-    RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
+    BinaryReaderError, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
+    ElementKind, Export, FunctionBody, Global, Import, MAX_WASM_FUNCTION_LOCALS, MemoryType,
+    Operator, OperatorsIterator, OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef,
+    ValType as wpValType,
 };
 use inference_fn_key::merged_name;
 use inference_hassert::{HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errors::WasmToVError;
-use crate::gallina::z_literal;
+use crate::gallina::{escape_string_literal, z_literal};
 use crate::hassert_print;
 
 const LCB: &str = "{|\n";
@@ -785,12 +786,15 @@ impl WasmParseData<'_> {
 
         let mut created_function_types = String::new();
         for rec_group in &self.function_types {
-            // created_function_types.push(LRB);
+            // One list element per flattened `SubType`, so `mod_types` position
+            // equals the WASM type index. An empty `(rec)` contributes none.
             match translate_function_type(rec_group) {
-                Ok(translated_function_type) => {
-                    created_function_types.push_str("    ");
-                    created_function_types.push_str(translated_function_type.as_str());
-                    created_function_types.push_str(LIST_EXT);
+                Ok(translated_function_types) => {
+                    for translated_function_type in translated_function_types {
+                        created_function_types.push_str("    ");
+                        created_function_types.push_str(translated_function_type.as_str());
+                        created_function_types.push_str(LIST_EXT);
+                    }
                 }
                 Err(e) => {
                     errors.push(e);
@@ -1401,11 +1405,18 @@ impl WasmParseData<'_> {
     //Record module_func
     fn translate_functions(&mut self, remap: &FuncRemap) -> anyhow::Result<()> {
         // Rocq `Definition`s are not overloadable, so every emitted function
-        // name must be globally unique. A static merge can fold an external
+        // name must be globally unique *against the whole file*, not merely
+        // against the other functions. A static merge can fold an external
         // library's private function (carrying its own debug name) next to a
-        // main-module function of the same name. We disambiguate by appending
-        // the WASM function index on collision, deriving the `Definition` and
-        // the matching `mod_funcs` entry from the same per-index name.
+        // main-module function of the same name; independently, a function can
+        // be named after something the module itself already spells — a
+        // preamble helper, the module record, or the module's validity theorem
+        // — which is what an entry file named `main.inf` containing `fn main`
+        // does. Both are the same problem, so both take the same answer: seed
+        // the set with the names the module reserves, then disambiguate by
+        // appending the WASM function index on collision, deriving the
+        // `Definition` and the matching `mod_funcs` entry from the same
+        // per-index name.
         //
         // `function_bodies` is indexed 0-based over the *code section*, but the
         // name section, start/export descriptors, and the
@@ -1416,9 +1427,17 @@ impl WasmParseData<'_> {
         // imports, which appear via `mod_imports`). With no imports — every
         // post-link artifact — the offset is zero and output is unchanged.
         let func_import_base = self.func_import_count();
-        let mut used_names: FxHashSet<String> = FxHashSet::default();
+        let mut used_names = crate::rocq_names::reserved_top_level_names(&self.mod_name);
         for (index, function_body) in self.function_bodies.iter().enumerate() {
-            let modfunc_type = *self.function_type_indexes.get(index).unwrap_or(&0);
+            // The parse phase reconciles the function and code section lengths,
+            // so a missing entry is unreachable — but it is reported rather than
+            // defaulted or unwrapped. Defaulting is what fabricated a
+            // `modfunc_type := 0%N` for a body the binary never typed.
+            let modfunc_type = *self.function_type_indexes.get(index).ok_or_else(|| {
+                anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                    "function body {index} has no function-section entry"
+                )))
+            })?;
             let abs_index = (func_import_base + index) as u32;
             // A forall/plain spec function is a downstream contract
             // obligation, not part of the executable module: omit its body and
@@ -1449,14 +1468,29 @@ impl WasmParseData<'_> {
             let func_name = unique_function_name(base_name, abs_index, &mut used_names);
             self.translated_function_names.push(func_name.clone());
 
+            // A locals vector that cannot be read is a malformed body, not an
+            // absent one. Swallowing the failure emitted `modfunc_locals := nil`
+            // for a function that has locals — a module record describing a
+            // different program than the one compiled, at exit 0.
+            let locals_reader = function_body
+                .get_locals_reader()
+                .map_err(|e| malformed_wasm("function locals", &e))?;
             let mut modfunc_locals = String::new();
-            if let Ok(locals_reader) = function_body.get_locals_reader() {
-                for local in locals_reader {
-                    let (reps, val_type) = local.unwrap();
-                    let val_type = translate_value_type(&val_type, "a function local")?;
-                    for _ in 0..reps {
-                        modfunc_locals.push_str(format!("{val_type} :: ").as_str());
-                    }
+            // Accumulated across groups, not per group: the limit is on the
+            // function's total declared locals, and checking each group alone
+            // would let a handful of legal-looking groups sum past it. Checked
+            // before the expansion below so an oversized count is rejected
+            // rather than materialized.
+            let mut declared_locals: u32 = 0;
+            for local in locals_reader {
+                let (reps, val_type) = local.map_err(|e| malformed_wasm("function locals", &e))?;
+                declared_locals = match declared_locals.checked_add(reps) {
+                    Some(total) if total as usize <= MAX_WASM_FUNCTION_LOCALS => total,
+                    _ => return Err(too_many_locals()),
+                };
+                let val_type = translate_value_type(&val_type, "a function local")?;
+                for _ in 0..reps {
+                    modfunc_locals.push_str(format!("{val_type} :: ").as_str());
                 }
             }
             modfunc_locals.push_str("nil");
@@ -1466,8 +1500,10 @@ impl WasmParseData<'_> {
                 .as_ref()
                 .and_then(|func_locals_name_map| func_locals_name_map.get(&abs_index).cloned());
             let ctx = OperatorContext { local_name_map };
-            let modfunc_body =
-                translate_expr(&mut function_body.get_operators_reader()?, ctx, remap)?;
+            let mut operators_reader = function_body
+                .get_operators_reader()
+                .map_err(|e| malformed_wasm("function body", &e))?;
+            let modfunc_body = translate_expr(&mut operators_reader, ctx, remap)?;
 
             self.translated_functions_string
                 .push_str(format!("Definition {func_name} : module_func := ").as_str());
@@ -1547,10 +1583,12 @@ fn translate_value_type(val_type: &wpValType, role: &'static str) -> anyhow::Res
 
 //Record module_import
 fn translate_module_import(import: &Import) -> anyhow::Result<String> {
-    let imp_name = String::from(import.name);
-    let imp_module = String::from(import.module);
-    // let definition_name =
-    //     imp_module.clone() + &imp_name.clone().remove(0).to_uppercase().to_string();
+    // Both names reach a Gallina string literal, and a WASM name may contain any
+    // byte — including the `"` that would close the literal and let its
+    // remainder be read as Gallina. Escaped, not sanitized: these are data the
+    // emitted `list_byte_of_string` must round-trip byte for byte.
+    let imp_name = escape_string_literal(import.name);
+    let imp_module = escape_string_literal(import.module);
     let imp_desc = translate_module_import_desc(import)?;
     Ok(format!("Mi \"{imp_module}\" \"{imp_name}\" ({imp_desc})"))
 }
@@ -1596,6 +1634,21 @@ fn translate_mutability(mutable: bool) -> String {
 
 //Record limits
 fn translate_table_type_limits(table_type: &TableType) -> anyhow::Result<String> {
+    // The same hazard the memory sibling below rejects, on the table side: the
+    // emitted `{|lim_min; lim_max|}` has no field for either flag, so a 64-bit
+    // or shared table would be silently re-encoded as a 32-bit, non-shared one.
+    // `table64` is not cosmetic — it changes the index type of every table
+    // operation the module performs.
+    if table_type.table64 {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "table64 (i64-indexed) table".into(),
+        }));
+    }
+    if table_type.shared {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "shared table (shared-everything-threads proposal)".into(),
+        }));
+    }
     let lim_min = format!("{}%N", table_type.initial);
     let lim_max = match table_type.maximum {
         Some(max) => format!("Some({max}%N)"),
@@ -1637,7 +1690,9 @@ fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<Stri
 
 //Inductive translate_export_module
 fn translate_export_module(export: &Export, remap: &FuncRemap) -> anyhow::Result<String> {
-    let modexp_name = export.name;
+    // See `translate_module_import`: an export name is data reaching a Gallina
+    // string literal, so a `"` in it is escaped rather than rewritten.
+    let modexp_name = escape_string_literal(export.name);
     let modexp_desc = translate_module_export_desc(export, remap)?;
     Ok(format!("Me \"{modexp_name}\" ({modexp_desc})"))
 }
@@ -1670,6 +1725,17 @@ fn translate_module_export_desc(export: &Export, remap: &FuncRemap) -> anyhow::R
 
 //Record table_type
 fn translate_table_type(table: &Table) -> anyhow::Result<String> {
+    // The contract's `module_table` carries a table type and nothing else, so a
+    // table declared with an element initializer would be emitted as one whose
+    // every slot is null — a different table than the module declares. Checked
+    // here rather than in the shared limits helper because only a defined table
+    // carries an initializer; an imported one (`TypeRef::Table`) has no such
+    // field, and the check would be dead there.
+    if matches!(table.init, inf_wasmparser::TableInit::Expr(_)) {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "table with a non-null element initializer".into(),
+        }));
+    }
     let tt_limits = translate_table_type_limits(&table.ty)?;
     let tt_elem_type = translate_ref_type(&table.ty.element_type)?;
     Ok(format!("Mt {tt_limits} {tt_elem_type}"))
@@ -1821,6 +1887,40 @@ impl Expression<'_> {
     }
 }
 
+/// Wraps a WASM reader failure as [`WasmToVError::WasmParse`] behind a prefix
+/// this crate owns.
+///
+/// `structure` names what was being read — `function body`, `function locals`,
+/// `function section` — and it is the needle a rejection test greps. The
+/// reader's own message is appended for detail only: it belongs to the parser,
+/// so a test pinned to that wording would break on a parser upgrade while
+/// saying nothing about this crate.
+///
+/// Without this, a truncated body left the translate phase as a bare
+/// `BinaryReaderError`, which the CLI could not classify and reported through
+/// its generic "translation failed" line.
+fn malformed_wasm(structure: &'static str, e: &BinaryReaderError) -> anyhow::Error {
+    anyhow::anyhow!(WasmToVError::WasmParse(format!("{structure}: {e}")))
+}
+
+/// A declared-locals count no WebAssembly engine accepts.
+///
+/// The bound is the parser fork's own [`MAX_WASM_FUNCTION_LOCALS`], shared
+/// across engines, so no module any engine would instantiate can reach it and
+/// no artifact this pipeline produces moves. It is enforced *here* rather than
+/// inherited: the translator deliberately constructs no `Validator` (the
+/// rejection-row fixtures are stack-invalid on purpose), so nothing else on the
+/// `-v` path checks it. Without the cap, a seven-byte locals declaration
+/// advertising billions of repetitions drives the emission loop into an
+/// unbounded `String` and the process is OOM-killed — a signal, not an error,
+/// so no `?` can recover from it.
+fn too_many_locals() -> anyhow::Error {
+    anyhow::anyhow!(WasmToVError::WasmParse(format!(
+        "function locals: declared count exceeds the {MAX_WASM_FUNCTION_LOCALS}-local limit \
+         shared by WebAssembly engines"
+    )))
+}
+
 /// Maximum structured-control-flow nesting depth the translator recurses
 /// through before rejecting a body as too deeply nested.
 ///
@@ -1852,7 +1952,9 @@ fn translate_expression<'a>(
     }
     let mut result = Expression::default();
     while let Some(next_operator) = operators_reader.next() {
-        let next_operator = next_operator.as_ref().unwrap();
+        let next_operator = next_operator
+            .as_ref()
+            .map_err(|e| malformed_wasm("function body", e))?;
         match next_operator {
             inf_wasmparser::Operator::Block { .. }
             | inf_wasmparser::Operator::Loop { .. }
@@ -1869,10 +1971,17 @@ fn translate_expression<'a>(
             }
             inf_wasmparser::Operator::If { .. } => {
                 let then_arm = translate_expression(operators_reader, depth + 1)?;
-                let else_arm = if matches!(
-                    then_arm.last_part().unwrap(),
-                    ExpressionPart::Operator(Operator::End)
-                ) {
+                // An arm with no parts at all means the operator stream ran out
+                // inside it: the recursion only returns empty when its first
+                // `next()` yielded nothing. A well-formed `if` always closes,
+                // so the legal empty-then form `if end` still arrives here with
+                // its terminating `End` in hand.
+                let Some(then_tail) = then_arm.last_part() else {
+                    return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                        "function body: an `if` arm ends without its terminating `end`".to_string(),
+                    )));
+                };
+                let else_arm = if matches!(then_tail, ExpressionPart::Operator(Operator::End)) {
                     Expression::default()
                 } else {
                     translate_expression(operators_reader, depth + 1)?
@@ -1910,7 +2019,25 @@ fn translate_expr(
     // Render through the fallible `print_with_offset` directly rather than the
     // `Display` impl, so that an unsupported operator surfaces as a returned
     // `WasmToVError` instead of being swallowed into placeholder text.
-    expression.print_with_offset(2, 0, remap)
+    let rendered = expression.print_with_offset(2, 0, remap)?;
+
+    // `translate_expression` stops at the first top-level `end`. Anything left
+    // after it is content the emitted body would silently omit — a shorter
+    // function than the `.wasm` describes, returned as success. Checked on the
+    // clone, since that is the reader that was actually advanced; the caller's
+    // is never moved.
+    //
+    // Deliberately after rendering: an operator this contract does not model is
+    // the more useful diagnostic, and some of them — the legacy exception
+    // handling `try`, which opens a block this translator does not treat as one
+    // — leave their own `end` behind and would otherwise be reported as trailing
+    // operators instead of by name.
+    if peekable_operators_reader.next().is_some() {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+            "function body: operators follow the terminating `end`".to_string(),
+        )));
+    }
+    Ok(rendered)
 }
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
@@ -1925,8 +2052,36 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
     Ok(res)
 }
 
+/// Rejects a memory index the single-memory proof model cannot name.
+///
+/// `operand` names which immediate carried it (`memory.copy source`), because
+/// an operator with two memory operands otherwise gives the same message twice
+/// and says nothing about which one to look at.
+fn reject_multi_memory(operand: &str, index: u32) -> anyhow::Result<()> {
+    if index != 0 {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: format!("multi-memory (memory index {index} on {operand})"),
+        }));
+    }
+    Ok(())
+}
+
 //Record memarg
 fn translate_memarg(memarg: &inf_wasmparser::MemArg) -> anyhow::Result<String> {
+    // The emitted `Ma` carries an offset and an alignment but no memory index,
+    // because the model has exactly one linear memory. Every load and store
+    // routes its immediate through here, so guarding the index once covers the
+    // whole family — including any operator added later — instead of repeating
+    // the check per arm. Dropping it would emit the memory-0 term for an access
+    // to a different memory: not a rejected module, a silently wrong one.
+    if memarg.memory != 0 {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: format!(
+                "multi-memory (memory index {} on a load or store)",
+                memarg.memory
+            ),
+        }));
+    }
     let memarg_offset = memarg.offset.to_string();
     let memarg_align = memarg.align.to_string();
     Ok(format!("Ma {memarg_offset}%N {memarg_align}%N"))
@@ -2032,11 +2187,43 @@ fn translate_element(element: &Element, remap: &FuncRemap) -> anyhow::Result<Str
 //     }
 // }
 
-//Inductive function_type
-fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
-    let mut res = String::new();
-    // let id = get_id();
+/// Renders one recursion group as one `mod_types` element per flattened
+/// `SubType`, in declaration order.
+///
+/// A `Vec` rather than one concatenated `String`, because the WASM type index
+/// space flattens recursion groups: type index N is the Nth `SubType` across
+/// all groups, so `mod_types` position N must be that same entry. Every
+/// consumer already assumes it — [`WasmParseData::defined_func_param_count`]
+/// reads `function_types.iter().flat_map(RecGroup::types).nth(type_idx)` — but
+/// the producer did not provide it. One element per group made an empty `(rec)`
+/// occupy an index it does not have, ran a multi-member group's entries
+/// together into `Tf (…) (…)Tf (…) (…)` (which Rocq reads as an over-applied
+/// `Tf`), and shifted every later index by the number of surplus members.
+///
+/// The four rejections below all precede the `Func` arm, because none of the
+/// shapes they name has any representation in the target model's
+/// `function_type`, and emitting nothing for them — the previous behaviour —
+/// silently dropped the entry and moved every index after it.
+fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<Vec<String>> {
+    let mut entries = Vec::new();
     for ty in rec_group.types() {
+        // A non-final type, or one naming a supertype, declares participation in
+        // a subtyping hierarchy. The model's `function_type` is a bare
+        // parameter/result pair with no notion of a subtype relation, so the
+        // declaration would be silently discarded along with whatever the
+        // downstream proof would need it for.
+        if !ty.is_final || ty.supertype_idx.is_some() {
+            return Err(unsupported_family(
+                "declared subtyping in the type section (`sub`, non-final types)",
+            ));
+        }
+        // `shared` is a property of the type itself under shared-everything
+        // threads, and the model has no field to carry it.
+        if ty.composite_type.shared {
+            return Err(unsupported_family(
+                "a shared composite in the type section (shared-everything threads)",
+            ));
+        }
         match &ty.composite_type.inner {
             CompositeInnerType::Func(ft) => {
                 let mut params_str = String::new();
@@ -2053,16 +2240,28 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
                 }
                 results_str.push_str("nil");
 
-                res.push_str(format!("Tf ({params_str}) ({results_str})").as_str());
+                entries.push(format!("Tf ({params_str}) ({results_str})"));
             }
-            CompositeInnerType::Array(_)
-            | CompositeInnerType::Struct(_)
-            | CompositeInnerType::Cont(_) => {
-                //TODO
+            // Deliberately worded apart from the operator arms' "garbage
+            // collection" and "stack switching" labels. A fixture carrying one
+            // of these composites *also* carries the operator that uses it, and
+            // the type section is rendered first, so this rejection is the one
+            // observed — sharing their wording would let these rows keep passing
+            // while the operator arms they were written for stopped being
+            // exercised at all.
+            CompositeInnerType::Array(_) | CompositeInnerType::Struct(_) => {
+                return Err(unsupported_family(
+                    "a garbage-collected aggregate in the type section (struct / array)",
+                ));
+            }
+            CompositeInnerType::Cont(_) => {
+                return Err(unsupported_family(
+                    "a continuation type in the type section (`cont`)",
+                ));
             }
         }
     }
-    Ok(res)
+    Ok(entries)
 }
 
 /// The rejection every unmodeled proposal family shares: valid WASM the
@@ -2129,8 +2328,19 @@ fn translate_basic_operator(
                     .into(),
             }));
         }
-        Operator::Else => String::new(),
-        Operator::End => String::new(),
+        // Structural terminators, not instructions: `print_with_offset` renders
+        // them as part of the block that owns them and never routes them here.
+        // Returning an empty string instead made a caller that *did* reach them
+        // silently drop an operator; an `Err` makes that a diagnostic. No test
+        // can reach these arms — every entry point filters them first — so this
+        // is refactor safety, not covered behaviour.
+        Operator::Else | Operator::End => {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "function body: a structural `else`/`end` reached instruction \
+                 translation, where it has no encoding"
+                    .to_string(),
+            )));
+        }
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}%N"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}%N"),
         Operator::BrTable { targets } => {
@@ -2535,13 +2745,26 @@ fn translate_basic_operator(
         Operator::RefI31 | Operator::I31GetS | Operator::I31GetU | Operator::RefI31Shared => {
             return Err(unsupported_family("i31 references (ref.i31 / i31.get_s)"));
         }
-        Operator::MemoryInit { data_index, mem: _ } => format!("BI_memory_init {data_index}%N"),
+        // The bulk-memory constructors carry no memory operand, for the same
+        // reason `Ma` carries no memory index: the model has one linear memory.
+        // These three name their memories explicitly rather than through a
+        // `memarg`, so each needs its own check — binding the operands as `_`
+        // emitted the memory-0 constructor for an operation on another memory,
+        // the miscompile the `memory.size` / `memory.grow` arms already refuse.
+        Operator::MemoryInit { data_index, mem } => {
+            reject_multi_memory("memory.init", *mem)?;
+            format!("BI_memory_init {data_index}%N")
+        }
         Operator::DataDrop { data_index } => format!("BI_data_drop {data_index}%N"),
-        Operator::MemoryCopy {
-            dst_mem: _,
-            src_mem: _,
-        } => "BI_memory_copy".to_string(),
-        Operator::MemoryFill { mem: _ } => "BI_memory_fill".to_string(),
+        Operator::MemoryCopy { dst_mem, src_mem } => {
+            reject_multi_memory("memory.copy destination", *dst_mem)?;
+            reject_multi_memory("memory.copy source", *src_mem)?;
+            "BI_memory_copy".to_string()
+        }
+        Operator::MemoryFill { mem } => {
+            reject_multi_memory("memory.fill", *mem)?;
+            "BI_memory_fill".to_string()
+        }
         Operator::TableInit { .. } | Operator::ElemDrop { .. } | Operator::TableCopy { .. } => {
             return Err(unsupported_family(
                 "segment-indexed table initialization (table.init / elem.drop / table.copy)",

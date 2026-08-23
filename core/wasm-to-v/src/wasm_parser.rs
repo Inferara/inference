@@ -54,32 +54,37 @@
 //!
 //! ## Component Model Sections
 //!
-//! WebAssembly component model sections are recognized but generate empty stubs:
+//! A component binary is refused at its version header: it shares the core
+//! preamble's first four bytes and differs only in the layer field, so accepting
+//! one produced an empty core module — complete with its validity theorem —
+//! describing content that was never read. The component-model section arms are
+//! refused too, so the property is local to the match rather than inherited from
+//! the version check.
 //!
-//! - `ModuleSection` - Nested modules
-//! - `InstanceSection` - Module instances
-//! - `ComponentSection` - Component definitions
-//! - `ComponentTypeSection` - Component type definitions
-//! - `ComponentInstanceSection` - Component instances
-//! - `ComponentAliasSection` - Component aliases
-//! - `ComponentCanonicalSection` - Canonical ABI definitions
-//! - `ComponentStartSection` - Component start function
-//! - `ComponentImportSection` - Component imports
-//! - `ComponentExportSection` - Component exports
+//! ## Structural Consistency
 //!
-//! These sections are silently ignored during translation.
+//! No [`inf_wasmparser::Validator`] is constructed here, deliberately: the
+//! rejection fixtures in this crate's tests are stack-invalid on purpose and must
+//! still translate. What *is* checked is the structure a binary asserts about
+//! itself, since a contradiction there yields a `.v` describing a different
+//! program rather than a rejected one:
+//!
+//! - the core version, and that the binary is a module rather than a component;
+//! - no repeated core section, and none out of the order the format fixes (see
+//!   [`section_rank`] — the ids are not monotonic in that order);
+//! - the data count section against the data section it describes;
+//! - the function section against the code section, so no body's type is
+//!   fabricated from a default.
+//!
+//! Value-level validation — that indices point at things that exist — is *not*
+//! performed. A caller outside the linker pipeline owns it.
 //!
 //! ## Error Handling
 //!
-//! Parse errors are propagated using [`anyhow::Result`]. The parser **fails fast**
-//! on invalid bytecode:
-//!
-//! - Malformed WASM magic number or version
-//! - Invalid section data
-//! - Out-of-bounds indices
-//! - Unsupported WASM features (when explicitly detected)
-//!
-//! The translation phase (Phase 2) uses error recovery, but the parsing phase does not.
+//! Both phases fail closed. Every rejection is a typed [`WasmToVError`] carrying
+//! a prefix this crate owns, so a caller can classify it and a test can grep it
+//! without depending on the parser's wording. No input reaches a panic, an
+//! unbounded allocation, or a silently truncated translation.
 
 use inf_wasmparser::{
     Parser,
@@ -93,11 +98,14 @@ use inf_wasmparser::{
     },
 };
 use inference_hassert::HSpecMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 
 use crate::errors::WasmToVError;
-use crate::rocq_names::{sanitize_rocq_identifier, validate_rocq_identifier};
+use crate::gallina::neutralize_comment_delimiters;
+use crate::rocq_names::{
+    sanitize_rocq_identifier, validate_module_name_available, validate_rocq_identifier,
+};
 use crate::translator::WasmParseData;
 
 /// Translates WebAssembly bytecode into Rocq (Coq) formal verification code.
@@ -171,6 +179,10 @@ pub fn translate_bytes(
     // (`decode_spec_funcs_section`), so the per-spec loop inside
     // `WasmParseData::translate` is no longer needed.
     validate_rocq_identifier(mod_name)?;
+    // Syntactic legality is not availability: the emitted preamble already
+    // occupies eight top-level `Definition` names, and the module record claims
+    // this one.
+    validate_module_name_available(mod_name)?;
     for spec_name in spec_funcs_by_spec.keys() {
         validate_rocq_identifier(spec_name)?;
     }
@@ -215,7 +227,10 @@ pub fn translate_bytes(
 /// - **Code Section**: Function bodies with local variables and instructions
 /// - **Custom Section**: Name mappings for functions and local variables (debug info)
 ///
-/// Unsupported sections (component model, tags, unknown sections) are silently ignored.
+/// Sections outside the core module format — component-model sections, the tag
+/// section, and any unrecognised id — are rejected rather than ignored: a `.v`
+/// emitted alongside content this translator did not read would describe only
+/// the part of the module it happened to understand.
 ///
 /// # Parameters
 ///
@@ -243,14 +258,56 @@ fn parse(
     let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
     let mut embedded_hspecs: Option<HSpecMap> = None;
     let mut seen_name_section = false;
+    let mut seen_sections: FxHashSet<u8> = FxHashSet::default();
+    let mut last_rank = 0u8;
+    let mut declared_data_count: Option<u32> = None;
 
     for payload in parser.parse_all(data) {
-        match payload? {
+        let payload = payload?;
+
+        // Cross-section structure, checked before the payload is consumed.
+        // Custom sections (id 0) are exempt from both rules: they may legally
+        // repeat and may appear anywhere, which is why the `name`,
+        // `inference.spec_funcs` and `inference.hspecs` decoders carry their own
+        // per-name duplicate guards instead.
+        if let Some((id, _)) = payload.as_section()
+            && id != 0
+        {
+            if !seen_sections.insert(id) {
+                return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                    "duplicate WASM section id {id}"
+                ))));
+            }
+            let rank = section_rank(id);
+            if rank < last_rank {
+                return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                    "WASM section id {id} appears out of order"
+                ))));
+            }
+            last_rank = rank;
+        }
+
+        match payload {
             // Sections for WebAssembly modules
-            Version { .. } => {
-                /*
-                    we do not use it
-                */
+            // A component binary shares the core preamble's first four bytes and
+            // differs only in the layer field, so without this check an 8-byte
+            // component header parsed as an empty core module and produced a
+            // complete `ValidModule` theorem about a program whose content was
+            // never read. This arm also runs for each nested core module's own
+            // header, so it must not assume it fires once.
+            Version { num, encoding, .. } => {
+                if encoding != inf_wasmparser::Encoding::Module {
+                    return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                        description: "WebAssembly component binary (the proof contract \
+                                      models core modules only)"
+                            .into(),
+                    }));
+                }
+                if num != 1 {
+                    return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                        "unsupported core WASM version {num} (expected 1)"
+                    ))));
+                }
             }
             TypeSection(type_section) => {
                 for ty in type_section {
@@ -263,9 +320,15 @@ fn parse(
                 }
             }
             FunctionSection(functions) => {
-                functions.into_iter().for_each(|f| {
-                    wasm_parse_data.function_type_indexes.push(f.unwrap());
-                });
+                // Read like every sibling section arm: a malformed entry is
+                // propagated, not unwrapped. The prefix is this crate's own, so
+                // a rejection test greps it rather than the parser's wording.
+                for f in functions {
+                    let type_index = f.map_err(|e| {
+                        anyhow::anyhow!(WasmToVError::WasmParse(format!("function section: {e}")))
+                    })?;
+                    wasm_parse_data.function_type_indexes.push(type_index);
+                }
             }
             TableSection(tables_section) => {
                 for table in tables_section {
@@ -277,7 +340,15 @@ fn parse(
                     wasm_parse_data.memory_types.push(memory?);
                 }
             }
-            TagSection(_) => {}
+            // A module declaring tags uses exception handling, which the proof
+            // contract does not model. Ignoring the section emitted a `.v` for a
+            // module without them, while a tag reaching an import or an export
+            // is already refused — the same construct cannot be both.
+            TagSection(_) => {
+                return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                    description: "tag section (exception-handling proposal)".into(),
+                }));
+            }
             GlobalSection(globals) => {
                 for global in globals {
                     wasm_parse_data.globals.push(global?);
@@ -296,7 +367,11 @@ fn parse(
                     wasm_parse_data.elements.push(element?);
                 }
             }
-            DataCountSection { .. } => {}
+            // Recorded rather than ignored: the count is a claim about the data
+            // section, reconciled against it once the module has been read.
+            DataCountSection { count, .. } => {
+                declared_data_count = Some(count);
+            }
             DataSection(data) => {
                 for datum in data {
                     wasm_parse_data.data.push(datum?);
@@ -312,18 +387,30 @@ fn parse(
                 wasm_parse_data.function_bodies.push(body);
             }
 
-            // Sections for WebAssembly components
-            ModuleSection { .. } => { /* ... */ }
-            InstanceSection(_) => { /* ... */ }
-            CoreTypeSection(_) => { /* ... */ }
-            ComponentSection { .. } => { /* ... */ }
-            ComponentInstanceSection(_) => { /* ... */ }
-            ComponentAliasSection(_) => { /* ... */ }
-            ComponentTypeSection(_) => { /* ... */ }
-            ComponentCanonicalSection(_) => { /* ... */ }
-            ComponentStartSection { .. } => { /* ... */ }
-            ComponentImportSection(_) => { /* ... */ }
-            ComponentExportSection(_) => { /* ... */ }
+            // Component-model sections. The version guard above already refuses
+            // a component binary, so these are unreachable through the current
+            // entry points; they are refused rather than ignored so the property
+            // stays local to this match instead of being derived from an arm
+            // three hundred lines away. Ignoring them once meant a nested core
+            // module's own type, function and code payloads were folded into the
+            // *parent* record.
+            ModuleSection { .. }
+            | InstanceSection(_)
+            | CoreTypeSection(_)
+            | ComponentSection { .. }
+            | ComponentInstanceSection(_)
+            | ComponentAliasSection(_)
+            | ComponentTypeSection(_)
+            | ComponentCanonicalSection(_)
+            | ComponentStartSection { .. }
+            | ComponentImportSection(_)
+            | ComponentExportSection(_) => {
+                return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                    description: "component-model section (the proof contract models \
+                                  core modules only)"
+                        .into(),
+                }));
+            }
 
             CustomSection(custom_section) => {
                 if custom_section.name() == crate::SPEC_FUNCS_SECTION_NAME {
@@ -366,8 +453,11 @@ fn parse(
                                 // The embedded `name` section bypasses the
                                 // CLI-side validation. Re-run validation so
                                 // a hand-crafted binary cannot smuggle an
-                                // invalid identifier into Rocq emission.
+                                // invalid identifier — or a name the emitted
+                                // preamble already occupies — into Rocq
+                                // emission.
                                 validate_rocq_identifier(&wasm_parse_data.mod_name)?;
+                                validate_module_name_available(&wasm_parse_data.mod_name)?;
                             }
                             inf_wasmparser::Name::Function(func_names) => {
                                 let mut func_names_map = HashMap::new();
@@ -408,12 +498,18 @@ fn parse(
                                     let local = local?;
                                     let index = local.index;
                                     func_locals_name_map.entry(index).or_default();
+                                    // Neutralized here rather than at the three
+                                    // emission sites: a local name is only ever
+                                    // rendered inside a `(* … *)` comment, so no
+                                    // consumer needs the raw form, and one
+                                    // boundary cannot drift out of step with
+                                    // itself the way three call sites can.
                                     for naming in local.names {
                                         let naming = naming?;
-                                        func_locals_name_map
-                                            .get_mut(&index)
-                                            .unwrap()
-                                            .insert(naming.index, naming.name.to_string());
+                                        func_locals_name_map.get_mut(&index).unwrap().insert(
+                                            naming.index,
+                                            neutralize_comment_delimiters(naming.name),
+                                        );
                                     }
                                 }
                                 if !func_locals_name_map.is_empty() {
@@ -427,8 +523,14 @@ fn parse(
                 }
             }
 
-            // most likely you'd return an error here
-            UnknownSection { .. } => { /* ... */ }
+            // An unrecognised section id carries content this translator cannot
+            // account for, so a `.v` emitted alongside it would describe only
+            // the part of the module that happened to be understood.
+            UnknownSection { id, .. } => {
+                return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                    description: format!("unknown WASM section id {id}"),
+                }));
+            }
 
             // Once we've reached the end of a parser we either resume
             // at the parent parser or the payload iterator is at its
@@ -439,6 +541,32 @@ fn parse(
                     "unexpected WASM payload variant in module".into(),
                 )));
             }
+        }
+    }
+
+    // Every defined function's type comes from its function-section entry. With
+    // fewer entries than bodies the emitted `modfunc_type` was fabricated from a
+    // default, giving the `.v` a function whose signature the binary never
+    // stated; with more, a declared function has no body at all.
+    if wasm_parse_data.function_type_indexes.len() != wasm_parse_data.function_bodies.len() {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "function section declares {} function(s) but the code section carries {} bod(ies)",
+            wasm_parse_data.function_type_indexes.len(),
+            wasm_parse_data.function_bodies.len(),
+        ))));
+    }
+
+    // The data count section exists so `memory.init` and `data.drop` can be
+    // validated before the data section is read; a count disagreeing with the
+    // segments that follow makes those indices mean something other than what
+    // the module says.
+    if let Some(declared) = declared_data_count {
+        let actual = u32::try_from(wasm_parse_data.data.len()).unwrap_or(u32::MAX);
+        if declared != actual {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "data count section declares {declared} segment(s) but the data \
+                 section carries {actual}"
+            ))));
         }
     }
 
@@ -489,6 +617,35 @@ fn parse(
     }
 
     Ok(wasm_parse_data)
+}
+
+/// Position of a section id in the order the WebAssembly binary format fixes.
+///
+/// The ids are deliberately not compared directly: they are *not* monotonic in
+/// the required order. The data count section carries id 12 but must sit between
+/// the element section (9) and the code section (10), so `id > previous_id`
+/// would reject every module that uses bulk memory. The tag section (13)
+/// likewise belongs between memory and global.
+///
+/// An id outside the core set ranks last; it cannot reach an ordering decision,
+/// because an unknown section is refused outright before its content is read.
+fn section_rank(id: u8) -> u8 {
+    match id {
+        1 => 1,    // type
+        2 => 2,    // import
+        3 => 3,    // function
+        4 => 4,    // table
+        5 => 5,    // memory
+        13 => 6,   // tag
+        6 => 7,    // global
+        7 => 8,    // export
+        8 => 9,    // start
+        9 => 10,   // element
+        12 => 11,  // data count
+        10 => 12,  // code
+        11 => 13,  // data
+        _ => u8::MAX,
+    }
 }
 
 /// Decodes the `inference.spec_funcs` custom section payload.

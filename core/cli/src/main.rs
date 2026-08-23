@@ -379,6 +379,10 @@ fn eprint_translation_error(e: &anyhow::Error) {
                 eprint_spec_join_boundary_error(offender_kind, offender, joined, fix_hint);
                 return;
             }
+            WasmToVError::ModuleNameShadowsPreambleHelper { name, fix_hint } => {
+                eprint_module_name_shadow_error(name, fix_hint);
+                return;
+            }
             WasmToVError::WasmParse(msg) => {
                 eprintln!(
                     "error: malformed WebAssembly binary: {msg}\n\n  \
@@ -433,6 +437,24 @@ fn eprint_spec_join_boundary_error(
          fabricates that separator. {rename}\n\n  \
          Why not auto-encode: proof-mode names appear verbatim in your .v \
          file, so they are kept readable rather than escaped into noise."
+    );
+}
+
+/// Renders the diagnostic for an output module name the generated `.v` already
+/// spends on one of its preamble helpers. The module name comes from the source
+/// file's stem, so the concrete fix is a file rename.
+fn eprint_module_name_shadow_error(name: &str, fix_hint: &str) {
+    eprintln!(
+        "error: the output module name '{name}' is one of the helper definitions \
+         every generated .v opens with, so '{name}' would name two top-level \
+         definitions in one file.\n\n  \
+         The module name comes from the source filename, and the .v spends it \
+         again on 'Definition {name}' for the module record and on 'Theorem \
+         valid_{name}'. Rocq definitions are not overloadable, so a name claimed \
+         twice makes the whole file fail to compile. Rename the source file: \
+         '{name}.inf' -> '{fix_hint}.inf'.\n\n  \
+         Why not auto-rename: proof-mode names appear verbatim in your .v file, \
+         so a proof that imports '{name}' would silently lose its subject."
     );
 }
 

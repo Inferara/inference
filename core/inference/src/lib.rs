@@ -1003,6 +1003,8 @@ fn module_is_import_free(wasm: &[u8]) -> bool {
 ///   shadow a Rocq stdlib type
 /// - `WasmToVError::EmbeddedSpecMismatch` — the caller passed a non-empty
 ///   explicit spec map that disagrees with the binary's embedded section
+/// - `WasmToVError::ModuleNameShadowsPreambleHelper` — the module name is one
+///   of the helper definitions the emitted `.v` preamble always occupies
 /// - `WasmToVError::WasmParse` — the WASM binary is malformed or contains
 ///   unsupported features
 ///

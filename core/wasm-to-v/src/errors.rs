@@ -77,6 +77,34 @@ pub enum WasmToVError {
         fix_hint: String,
     },
 
+    /// The output module name is one of the top-level `Definition` names the
+    /// emitted preamble always occupies. Every generated `.v` opens with those
+    /// helpers, then names the module record `Definition <module> : module` and
+    /// its judgement `Theorem valid_<module>`. Rocq definitions are not
+    /// overloadable, so the file would define one name twice and `coqc` rejects
+    /// it whole — nothing in it elaborates, including the definitions that were
+    /// fine. Emission never noticed, so the failure surfaced only when someone
+    /// tried to check the proof.
+    ///
+    /// The module name is the one name in the file with nowhere to move to: it
+    /// is the `.v`'s identity, the subject of the validity theorem, and the
+    /// prefix of every spec-derived proof name. Rejected with a rename hint
+    /// rather than auto-renamed, for the reason
+    /// [`Self::SpecNameReservesSeparator`] is: proof-mode names appear verbatim
+    /// in the `.v`, so quietly renaming the module would rename the artifact a
+    /// downstream proof imports.
+    #[error(
+        "the output module name `{name}` is one of the helper definitions the emitted Rocq \
+         preamble always occupies, so `{name}` would name two top-level definitions in one \
+         file; rename it to `{fix_hint}`"
+    )]
+    ModuleNameShadowsPreambleHelper {
+        /// The contested name, exactly as it would have been emitted.
+        name: String,
+        /// A concrete free name, so the fix needs no guessing.
+        fix_hint: String,
+    },
+
     /// `translate_bytes` was called with an explicit non-empty spec map and the
     /// WASM binary also embeds an `inference.spec_funcs` section, but the two
     /// disagree. We refuse to silently override either side.
