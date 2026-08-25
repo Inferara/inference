@@ -544,56 +544,92 @@ mod tests {
         );
     }
 
-    /// The scaffolded ignore rules must hide what `coqc` writes, not only what
-    /// `infs` emits. Checking a generated proof by hand leaves a `.vo`, a
-    /// `.glob` and a dot-prefixed `.<module>.aux` beside every `.v` compiled,
-    /// which is three files per module dropped into the project.
+    /// Every rule the scaffolded ignore file needs in order to hide what
+    /// `coqc` writes, and the artifact each one is there for.
     ///
-    /// This runs `git status` against a real scaffolded repository instead of
-    /// matching the template text, because the failure mode is a pattern that
-    /// reads correctly and matches nothing: Rocq names its auxiliary file
-    /// `.main.aux`, not `main.aux`, and anchoring the rules under `/proofs/`
-    /// would miss a proof compiled anywhere else. Listing `src/main.inf` is
-    /// what keeps the assertion honest — without it a `git status` that
-    /// reported nothing at all would pass.
-    #[test]
-    fn test_gitignore_hides_rocq_build_artifacts() {
-        let parent = temp_dir();
-        let project = create_project("rocq_artifacts", Some(parent.path()), true)
-            .expect("scaffold a git-enabled project");
-        assert!(
-            project.join(".git").exists(),
-            "this test needs a real repository, and `git init` produced none \
-             (is `git` on PATH?)"
-        );
+    /// Checking a generated proof by hand leaves a `.vo`, a `.glob` and a
+    /// dot-prefixed `.<module>.aux` beside every `.v` compiled — three files
+    /// per module dropped into the project — plus a solver cache and a native
+    /// compilation directory at the root.
+    const ROCQ_ARTIFACT_RULES: &[(&str, &str)] = &[
+        ("*.vo", "proofs/main.vo"),
+        ("*.vok", "proofs/main.vok"),
+        ("*.vos", "proofs/main.vos"),
+        ("*.glob", "proofs/main.glob"),
+        ("*.aux", "proofs/.main.aux"),
+        (".lia.cache", ".lia.cache"),
+        (".coq-native/", ".coq-native/Nmain.cmi"),
+    ];
 
-        // One full set of `coqc` products under the default output directory,
-        // plus a proof compiled outside it, plus the two artifacts a solver
-        // cache and native compilation add at the project root.
-        let artifacts = [
-            "proofs/main.vo",
-            "proofs/main.vok",
-            "proofs/main.vos",
-            "proofs/main.glob",
-            "proofs/.main.aux",
-            "src/hand_written.vo",
-            "src/hand_written.glob",
-            ".lia.cache",
-            ".coq-native/Nmain.cmi",
-        ];
-        for rel in artifacts {
-            let path = project.join(rel);
+    /// A proof compiled outside the default output directory, which the
+    /// unanchored rules must cover just as well as one under `proofs/`.
+    const ROCQ_ARTIFACTS_OUTSIDE_PROOFS: &[&str] =
+        &["src/hand_written.vo", "src/hand_written.glob"];
+
+    /// Pins every Rocq ignore rule into the template without needing `git`.
+    ///
+    /// This is the always-on half of the pair: it cannot prove that a rule
+    /// *matches* anything, only that nobody dropped one, which is what keeps
+    /// [`test_gitignore_hides_rocq_build_artifacts_from_git`] covering the
+    /// artifact it is named for on a machine where that half cannot run.
+    #[test]
+    fn test_gitignore_lists_every_rocq_build_output() {
+        let content = gitignore_content();
+        for (rule, artifact) in ROCQ_ARTIFACT_RULES {
+            assert!(
+                content.lines().any(|line| line == *rule),
+                "the scaffolded .gitignore no longer carries `{rule}`, so a \
+                 scaffolded project stops hiding `{artifact}`"
+            );
+        }
+    }
+
+    /// Proves `git` agrees: the scaffolded rules actually hide what `coqc`
+    /// leaves behind, and hide nothing a person wrote.
+    ///
+    /// The rules are checked against real `git status` rather than against the
+    /// template text because the failure mode is a rule that reads correctly
+    /// and matches nothing: Rocq names its auxiliary file `.main.aux`, not
+    /// `main.aux`, and a rule anchored under `/proofs/` would miss a proof
+    /// compiled anywhere else. Seeing `src/main.inf` reported is what keeps
+    /// the negative assertions honest — without it a `git status` that
+    /// reported nothing at all would pass them all.
+    ///
+    /// `git init` here rather than [`create_project`]'s: that one is
+    /// deliberately optional (it warns and carries on when `git` is missing,
+    /// because a project without a repository is still a valid project), so
+    /// depending on it would turn a supported production outcome into a test
+    /// failure. This test owns its repository and skips with a message when
+    /// `git` is absent, exactly as the `coqc` round-trip gate skips without
+    /// `coqc`; `test_gitignore_lists_every_rocq_build_output` above is the
+    /// always-on half that still fails if a rule goes missing.
+    #[test]
+    fn test_gitignore_hides_rocq_build_artifacts_from_git() {
+        let project = temp_dir();
+        let root = project.path();
+        std::fs::write(root.join(".gitignore"), gitignore_content()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("main.inf"), main_inf_content()).unwrap();
+
+        let artifacts: Vec<&str> = ROCQ_ARTIFACT_RULES
+            .iter()
+            .map(|(_, artifact)| *artifact)
+            .chain(ROCQ_ARTIFACTS_OUTSIDE_PROOFS.iter().copied())
+            .collect();
+        for rel in &artifacts {
+            let path = root.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "").unwrap_or_else(|e| panic!("write {rel}: {e}"));
         }
 
-        let output = Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=all"])
-            .current_dir(&project)
-            .output()
-            .expect("run git status in the scaffolded project");
-        assert!(output.status.success(), "git status failed in {project:?}");
-        let status = String::from_utf8_lossy(&output.stdout);
+        let Some(status) = git_status_of(root) else {
+            eprintln!(
+                "skipped: git not found on PATH, so what git makes of these rules \
+                 cannot be observed here; test_gitignore_lists_every_rocq_build_output \
+                 still pins each rule"
+            );
+            return;
+        };
 
         // Porcelain v1 is `XY <path>`; compare whole paths so a leaked
         // `main.vok` is not reported against `main.vo`, which is its prefix.
@@ -603,17 +639,49 @@ mod tests {
             .map(str::trim)
             .collect();
 
-        for rel in artifacts {
+        for rel in &artifacts {
             assert!(
-                !reported.contains(&rel),
+                !reported.contains(rel),
                 "`{rel}` is a coqc build artifact and must not reach git status:\n{status}"
             );
         }
         assert!(
             reported.contains(&"src/main.inf"),
-            "git status reported no scaffolded source, so the assertions above \
+            "git status reported no project source, so the assertions above \
              proved nothing:\n{status}"
         );
+    }
+
+    /// Initializes `root` as a repository and returns its porcelain status,
+    /// listing untracked files individually so a directory cannot hide one.
+    ///
+    /// `None` means `git` is not installed — the one outcome a caller may
+    /// treat as "not observable here" rather than as a failure. A `git` that
+    /// runs and then fails is a real failure and panics with its own log.
+    fn git_status_of(root: &Path) -> Option<String> {
+        let run = |args: &[&str]| -> Option<std::process::Output> {
+            match Command::new("git").args(args).current_dir(root).output() {
+                Ok(output) => Some(output),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => panic!("failed to spawn git {args:?}: {e}"),
+            }
+        };
+        let expect_success = |output: std::process::Output, what: &str| {
+            assert!(
+                output.status.success(),
+                "git {what} failed in {}:\n{}",
+                root.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+
+        expect_success(run(&["init"])?, "init");
+        let status = expect_success(
+            run(&["status", "--porcelain", "--untracked-files=all"])?,
+            "status",
+        );
+        Some(String::from_utf8_lossy(&status.stdout).into_owned())
     }
 
     #[test]
