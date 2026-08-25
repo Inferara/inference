@@ -54,17 +54,28 @@ Two logical namespaces, mapped by `_CoqProject`:
 | `wasm_verifier/Exists.v` | The concrete `Record reachability_spec` (a `Parameter` type has no fields to elaborate the emitted `{| … |}` literals against) and the `ValidExistsSpec`/`ValidUniqueSpec` predicates the kind-selected theorems for `exists`/`unique`-bodied spec functions reference | wasm-verifier, `theories/Exists.v` |
 | `_CoqProject` | Maps both physical directories to their logical library names | — |
 
-Compile manually, `Wasm` first (`WasmVerifier` imports it):
+Compile manually from this directory, `Wasm` first (`WasmVerifier` imports
+it). Each `-Q` maps a *physical* directory to its logical name, exactly as
+`_CoqProject` above does — `-Q . Wasm` instead binds `wasm/bytes.v` to
+`Wasm.wasm.bytes`, and the first cross-file import fails with "Unable to
+locate library `Wasm.bytes`":
 
 ```sh
-coqc -Q . Wasm wasm/bytes.v
-coqc -Q . Wasm wasm/numerics.v
-coqc -Q . Wasm wasm/datatypes.v
-coqc -Q . Wasm wasm/host.v
-coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Assertions.v
-coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Verifier.v
-coqc -Q . Wasm -Q . WasmVerifier wasm_verifier/Exists.v
+coqc -Q wasm Wasm wasm/bytes.v
+coqc -Q wasm Wasm wasm/numerics.v
+coqc -Q wasm Wasm wasm/datatypes.v
+coqc -Q wasm Wasm wasm/host.v
+coqc -Q wasm Wasm -Q wasm_verifier WasmVerifier wasm_verifier/Assertions.v
+coqc -Q wasm Wasm -Q wasm_verifier WasmVerifier wasm_verifier/Verifier.v
+coqc -Q wasm Wasm -Q wasm_verifier WasmVerifier wasm_verifier/Exists.v
 ```
+
+This writes a `.vo`, a `.glob` and a `.<module>.aux` beside each source, in
+a directory whose `.v` files are tracked. The repo `.gitignore` covers all
+three, so a manual compile here leaves `git status` clean. Sweep them with
+`git clean -Xdf wasm wasm_verifier` from this directory when done — the two
+namespace directories hold nothing else that is ignored, which is why the
+sweep names them rather than the stub root.
 
 (`tests/src/rocq_typecheck.rs` does this in dependency order into a
 scratch directory automatically; see [How the gate uses it](#how-the-gate-uses-it).)

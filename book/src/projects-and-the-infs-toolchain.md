@@ -38,7 +38,11 @@ The layout mirrors Cargo's conventions: manifest at the root, sources under
 is created automatically by `infc` (relative to its working directory, which
 `infs` sets to the project root). `proofs/` is tracked via `.gitkeep` so that
 curated hand-authored proof sources stay in version control even when generated
-`.wasm`/`.v` artifacts are gitignored by extension.
+`.wasm`/`.v` artifacts are gitignored by extension. What `coqc` writes when one
+of those proofs is checked — a `.vo`, a `.glob`, a `.<module>.aux` — is
+gitignored too, and anywhere in the project rather than only under `proofs/`:
+a `.v` can be hand-authored, so its location decides whether it is output,
+while `coqc`'s products never are and land beside whichever source it is given.
 
 ## The Manifest (`Inference.toml`)
 
