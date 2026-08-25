@@ -551,6 +551,10 @@ mod tests {
     /// dot-prefixed `.<module>.aux` beside every `.v` compiled — three files
     /// per module dropped into the project — plus a solver cache and a native
     /// compilation directory at the root.
+    ///
+    /// Each artifact is spelled as a **git** path, with `/` on every platform,
+    /// because that is the form `git status` reports and the assertions compare
+    /// against; [`artifact_path`] is what turns one into a filesystem path.
     const ROCQ_ARTIFACT_RULES: &[(&str, &str)] = &[
         ("*.vo", "proofs/main.vo"),
         ("*.vok", "proofs/main.vok"),
@@ -617,7 +621,7 @@ mod tests {
             .chain(ROCQ_ARTIFACTS_OUTSIDE_PROOFS.iter().copied())
             .collect();
         for rel in &artifacts {
-            let path = root.join(rel);
+            let path = artifact_path(root, rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "").unwrap_or_else(|e| panic!("write {rel}: {e}"));
         }
@@ -650,6 +654,15 @@ mod tests {
             "git status reported no project source, so the assertions above \
              proved nothing:\n{status}"
         );
+    }
+
+    /// Resolves one of the git paths above under `root`, joining a component at
+    /// a time so the `/` those constants carry is never handed to the platform
+    /// as a separator.
+    fn artifact_path(root: &Path, git_path: &str) -> PathBuf {
+        git_path
+            .split('/')
+            .fold(root.to_path_buf(), |path, component| path.join(component))
     }
 
     /// Initializes `root` as a repository and returns its porcelain status,
