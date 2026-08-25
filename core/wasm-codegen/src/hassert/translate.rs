@@ -219,10 +219,14 @@
 //! is missing rather than merely omitted.
 //!
 //! Out of range the definition is unsatisfiable and the enclosing atom is
-//! refuted. That is a definedness rule, not a mirror of any runtime check
-//! (proof-mode modules emit no bounds check at all): `a[i]` denotes *the
-//! element at index `i`, which exists*, and the constraint saying which element
-//! that is exists only where `i` is in range. The alternative — a guarded
+//! refuted. That is a definedness rule, not a mirror of any runtime check —
+//! not because proof mode is unguarded (it emits the same guard Compile mode
+//! does), but because no compiled access corresponds to this bound: a
+//! `forall`/plain spec function is left out of `mod_funcs`, and the one body
+//! kind that is compiled refuses the non-constant index that would produce the
+//! bound ([`PCode::P016`]). `a[i]` denotes *the element at index `i`, which
+//! exists*, and the constraint saying which element that is exists only where
+//! `i` is in range. The alternative — a guarded
 //! implication that leaves an out-of-range read vacuously satisfied — would
 //! hand back a proof saying nothing about most values of `i`, which is the very
 //! thing [`PCode::P010`] rejects elsewhere.
@@ -2990,8 +2994,53 @@ impl<'a> SpecFnTranslator<'a> {
         None
     }
 
+    /// A non-constant index inside an `exists`/`unique`-quantified body. Such
+    /// a body is compiled and *reduced* by its own obligation, and code
+    /// generation guards a non-constant index with a trap — so the access
+    /// cannot be encoded as a claim about the body without changing what the
+    /// claim says.
+    ///
+    /// The message states the consequence rather than the encoding limit,
+    /// because the consequence is what makes this a rejection instead of a
+    /// missing feature: a reachability judgment fixes the entry values before
+    /// the choices range, so a trap the index reaches at some entry leaves
+    /// that entry with no successful run at all.
+    ///
+    /// The remedy it offers is deliberately short of a call. A retained body
+    /// does call executable functions, and the judgment reduces the whole
+    /// activation — callee frames included — to a value stack, so an
+    /// entry-derived index behind a call reaches the same trap and empties the
+    /// same observation set. Sending an author there would route them into the
+    /// failure this rejection exists to prevent, at a site the rule cannot see.
+    fn reject_reach_dynamic_index(&mut self, index: ExprId) -> Option<ChainValue> {
+        let kind = self.reach_kind();
+        let article = quantifier_article(kind);
+        self.error(
+            PCode::P016,
+            self.arena[index].location,
+            format!(
+                "a non-constant array index has no place in {article} `{kind}`-quantified spec \
+                 function: the compiled body traps on an index outside the array, and this \
+                 function's obligation is a claim about running that very body — the judgment \
+                 fixes the entry values first and only then lets the choices range, so an entry \
+                 whose index trips the trap leaves no successful run at all and makes the claim \
+                 false rather than narrowing it to the entries it admits; make the index \
+                 constant, or move the access into a `forall`-bodied spec function, whose body \
+                 no judgment reduces — moving it into an executable function this body calls \
+                 does not escape the trap, because the judgment reduces the whole activation, \
+                 the callee included"
+            ),
+        );
+        None
+    }
+
     /// Takes the chain's one non-constant index step: the array's elements
     /// become the candidates a later case split chooses among.
+    ///
+    /// A reachability body has no such step. Its rejection leads, so a chain
+    /// carrying two non-constant indices there reports the reason both are
+    /// impossible rather than the encoding limit that would apply to a body
+    /// where one of them is fine.
     fn split_at_symbolic_index(
         &mut self,
         current: ChainValue,
@@ -2999,6 +3048,9 @@ impl<'a> SpecFnTranslator<'a> {
         index: ExprId,
         mode: Mode,
     ) -> Option<ChainValue> {
+        if mode.binds_choice_slots() {
+            return self.reject_reach_dynamic_index(index);
+        }
         let candidates = match current {
             ChainValue::One(AggValue::Array(candidates)) => candidates,
             ChainValue::One(_) => {

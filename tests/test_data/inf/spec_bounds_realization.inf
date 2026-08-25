@@ -1,0 +1,68 @@
+// A dynamic array index and the obligation that makes its bounds guard mean
+// something.
+//
+// Proof mode emits the same `index >=u length -> unreachable` guard a deployed
+// build does, so the trap is present in the very body the emitted `.v`
+// describes. Nothing in the module record claims that trap is unreachable:
+// `ValidModule` is the structural typing judgment, which reduces no
+// instruction and could not carry such a clause — an ordinary `assert` lowers
+// to a reachable `unreachable` too, and no blanket rule separates the two
+// roles.
+//
+// What does carry it is `HA_app_ok`, the atom a *bare statement call* in a
+// specification body emits. Downstream it denotes that the application is
+// realized, and realization is a total-correctness judgment: its conclusion
+// requires the callee's body to reduce to a value stack, and a trapped run
+// reduces to `AI_trap` instead. So the claim is false unless every index the
+// specification's envelope admits is in range, which is exactly the bounds
+// property. The obligation is therefore scoped where a programmer asked for
+// it, by writing an envelope and claiming a call is total on it — nothing is
+// claimed about calls nobody specified.
+//
+// The two arrays have different lengths, and neither is the 4-byte element
+// size, so each guard's comparison operand is legible in the emitted text as
+// its own array's length rather than as the stride the offset arithmetic
+// multiplies by.
+//
+// `lookup` puts both index kinds in one body so the scope boundary is legible
+// too: the parameter-derived index is guarded, the constant one is not. A
+// constant access has no trap for an obligation to be about; its static story
+// is analysis rule A037, which folds it and rejects it when it is out of range.
+fn lookup(i: i32) -> i32 {
+  let table: [i32; 5] = [10, 20, 30, 40, 50];
+  return table[i] + table[0];
+}
+
+// The write half. A read and a write reach the offset computation through two
+// different lowerings, so a guard that rode only on the read would leave every
+// store unproven. `copy_slot` returns nothing, which also makes its obligation
+// the void arity of the realization claim — `HA_app_ok` is emitted at any
+// result arity, where a call in *term* position must have a single scalar
+// result.
+fn copy_slot(dst: i32, src: i32) {
+  let mut buf: [i32; 3] = [1, 2, 3];
+  buf[dst] = buf[src];
+}
+
+spec BoundsRealization {
+  // The envelope is signed and the guard is unsigned, and that is the whole
+  // content of the obligation: `0 <= i` is what rules out the negative indices
+  // the guard sees as huge unsigned values, and `i < 5` is what rules out the
+  // rest. Dropping either half leaves an admitted index that traps, and a
+  // trapped call is not a realized one.
+  fn lookup_is_realized() forall {
+    let i: i32 = @;
+    assume { assert(0 <= i && i < 5); }
+    lookup(i);
+  }
+
+  // Both indices need their own envelope: the two guards are independent trap
+  // sites in one body, and realization is a claim about the whole run.
+  fn copy_slot_is_realized() forall {
+    let dst: i32 = @;
+    let src: i32 = @;
+    assume { assert(0 <= dst && dst < 3); }
+    assume { assert(0 <= src && src < 3); }
+    copy_slot(dst, src);
+  }
+}

@@ -4507,6 +4507,178 @@ fn a_non_constant_index_on_a_rejected_aggregate_stays_silent() {
     assert!(diagnostics[0].contains("error[P008]"), "{diagnostics:?}");
 }
 
+// ----- 15d. non-constant index in a reachability body (P016) --------------
+
+/// The shape `P016` exists for: an index read from an *entry* parameter of an
+/// `exists`-quantified function. Code generation guards the access with a
+/// trap, and the reachability judgment fixes the entry vector before letting
+/// the choices range — so at `i = 2` every choice traps, the observation set
+/// is empty, and the obligation is **false** rather than restricted to the
+/// entries whose index is in range. The Rocq gate admits open proofs, so it
+/// would ship such an obligation green.
+#[test]
+fn p016_rejects_an_entry_derived_index_in_an_exists_body() {
+    let e = err("spec S { fn f(i: i32) exists { let a: [i32; 2] = [1, 2]; assert(a[i] == 1); } }");
+    assert!(e.contains("error[P016]"), "{e}");
+    assert!(
+        e.contains(
+            "a non-constant array index has no place in an `exists`-quantified spec function"
+        ),
+        "{e}"
+    );
+    assert!(
+        e.contains("makes the claim false rather than narrowing it to the entries it admits"),
+        "{e}"
+    );
+    // The remedy, without which the diagnostic only names the problem — and the
+    // route it must not offer. A retained body really does call executable
+    // functions, and the reachability judgment reduces the whole activation,
+    // callee frames included, so an entry-derived index one call deep reaches
+    // the same trap and empties the same observation set. A remedy naming that
+    // route would send the author into the failure this rule exists to prevent,
+    // to a site the rule is lexical enough that it cannot see.
+    assert!(
+        e.contains(
+            "make the index constant, or move the access into a `forall`-bodied spec function, \
+             whose body no judgment reduces"
+        ),
+        "{e}"
+    );
+    assert!(
+        e.contains(
+            "moving it into an executable function this body calls does not escape the trap, \
+             because the judgment reduces the whole activation, the callee included"
+        ),
+        "{e}"
+    );
+}
+
+/// A `unique` body names its own quantifier. Its judgment demands a *singleton*
+/// observation set per entry, which a trapping entry empties exactly as it
+/// empties an `exists` one.
+#[test]
+fn p016_rejects_an_entry_derived_index_in_a_unique_body() {
+    let e = err(
+        "spec S { fn f(i: i32) unique { let a: [i32; 2] = [1, 2]; let n: i32 = @; \
+         assert(a[i] == n); } }",
+    );
+    assert!(e.contains("error[P016]"), "{e}");
+    assert!(
+        e.contains("has no place in a `unique`-quantified spec function"),
+        "{e}"
+    );
+}
+
+/// The rule reads the index, not where its value came from. A choice-derived
+/// index cannot by itself falsify the obligation — a trapping choice is simply
+/// not the witness — but scoping the rejection to entry-derived indices would
+/// make the reach of a diagnostic a dataflow question a reader cannot settle
+/// from the access it fires on.
+#[test]
+fn p016_rejects_a_choice_derived_index_too() {
+    let e = err(
+        "spec S { fn f() exists { let a: [i32; 2] = [1, 2]; let n: i32 = @; \
+         assert(a[n] == 1); } }",
+    );
+    assert!(e.contains("error[P016]"), "{e}");
+}
+
+/// Any step of the chain, not only the one directly under the read: `m[0][i]`
+/// descends through a constant index first and is rejected at the second.
+#[test]
+fn p016_rejects_a_non_constant_index_deeper_in_a_chain() {
+    let e = err(
+        "spec S { fn f(i: i32) exists { let m: [[i32; 2]; 2] = [[1, 2], [3, 4]]; \
+         assert(m[0][i] == 1); } }",
+    );
+    assert!(e.contains("error[P016]"), "{e}");
+}
+
+/// Two non-constant indices in one chain report `P016`, not `P002`'s
+/// one-case-split-per-chain limit. Here neither index is encodable whatever
+/// the budget, so naming the budget would send the author to make one of them
+/// constant and meet the same rejection on the other.
+#[test]
+fn p016_leads_a_chain_carrying_two_non_constant_indices() {
+    let e = err(
+        "spec S { fn f(i: i32, j: i32) exists { let m: [[i32; 2]; 2] = [[1, 2], [3, 4]]; \
+         assert(m[i][j] == 1); } }",
+    );
+    assert!(e.contains("error[P016]"), "{e}");
+    assert!(!e.contains("error[P002]"), "{e}");
+}
+
+/// A `forall`-quantified body keeps its non-constant index. Its function is
+/// omitted from the emitted module's functions and never reduced, so the guard
+/// code generation writes has no bearing on the claim: the index carries the
+/// symbolic range bound the element's own definition states, in the universal
+/// polarity (an `Himpl` antecedent over the slot guards, with the definition
+/// inside the witness binder).
+#[test]
+fn a_non_constant_index_in_a_forall_body_is_untouched() {
+    let src = "spec S { fn f(i: i32) forall { let a: [i32; 2] = @; assert(a[i] > 0); } }";
+    let definition = element_def(&local(0), &lvar(0), &[local(1), local(2)]);
+    assert_eq!(
+        sole_obligation(&ok(src), "S"),
+        imp(
+            and(guard(0), and(guard(1), guard(2))),
+            ex(and(definition, nz(gts(lvar(0), i32c(0)))))
+        )
+    );
+}
+
+/// A nested `exists` block inside a `forall` function keeps it too. The
+/// enclosing function is still the omitted, never-reduced kind — the block
+/// changes the polarity the range bound rides in (a conjunct inside the
+/// binder), not whether the body is executed by a judgment.
+#[test]
+fn a_non_constant_index_in_a_nested_exists_block_is_untouched() {
+    let src = "spec S { fn f(i: i32) forall { exists { let a: [i32; 2] = @; \
+               assert(a[i] > 0); } } }";
+    let definition = element_def(&local(0), &lvar(0), &[lvar(2), lvar(1)]);
+    assert_eq!(
+        sole_obligation(&ok(src), "S"),
+        imp(
+            guard(0),
+            ex(ex(ex(and(definition, nz(gts(lvar(0), i32c(0)))))))
+        )
+    );
+}
+
+/// A constant index in a reachability body descends to its element as it
+/// always did, under either quantifier. Code generation folds it to a static
+/// byte offset and emits no guard at all, so there is no trap for an
+/// obligation to be wrong about.
+#[test]
+fn a_constant_index_in_a_reachability_body_is_untouched() {
+    let exists_src = "spec S { fn f(i: i32) exists { let a: [i32; 2] = [1, 2]; let n: i32 = @; \
+                      assert(a[0] == n); } }";
+    assert_eq!(
+        sole_obligation(&ok(exists_src), "S"),
+        teq(i32c(1), local(1))
+    );
+    let unique_src = "spec S { fn f(i: i32) unique { let a: [i32; 2] = [1, 2]; let n: i32 = @; \
+                      assert(a[1] == n); } }";
+    assert_eq!(
+        sole_obligation(&ok(unique_src), "S"),
+        teq(i32c(2), local(1))
+    );
+}
+
+/// An index named through a constant is constant here, and stays accepted even
+/// though code generation — which folds only a *direct* literal — still guards
+/// it. The two notions differ exactly on statically-known in-range indices,
+/// where the guard it emits can never fire, the retained body cannot trap, and
+/// the obligation stays true. Rejecting these would refuse sound programs to
+/// no purpose; the out-of-range ones are already `P014`, decided by this very
+/// fold one branch away.
+#[test]
+fn a_folded_constant_index_in_a_reachability_body_is_untouched() {
+    let src = "spec S { fn f(i: i32) exists { let a: [i32; 2] = [1, 2]; const K: i32 = 1; \
+               let n: i32 = @; assert(a[K] == n); } }";
+    assert_eq!(sole_obligation(&ok(src), "S"), teq(i32c(2), local(1)));
+}
+
 // ----- 16. quantifier alternation (the nested universal binder) ------------
 
 /// A `@` bound inside a `forall` block adds a `+` over the enclosing

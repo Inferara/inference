@@ -148,6 +148,50 @@ pub(crate) enum PCode {
     /// about an uninhabited type on a footing none of them supports — so the
     /// specification path refuses the introduction instead.
     P015,
+    /// A non-constant array index inside the body of an `exists`/`unique`-
+    /// quantified specification function.
+    ///
+    /// Code generation guards every non-constant index with a trap, and a
+    /// reachability body is the one specification body the downstream judgment
+    /// *reduces*. The judgment fixes an arbitrary typed entry vector and only
+    /// then lets the choices range, so a trap does not restrict the claim to
+    /// the entries whose index is in range: at every entry the guard rejects,
+    /// no choice reaches an exit state, the observation set is empty, and the
+    /// theorem is **false** rather than narrowed. That is the same failure an
+    /// `assume` over an entry parameter produces, and it is invisible to the
+    /// Rocq type-check gate, which admits open proofs and therefore asserts
+    /// well-formedness rather than truth.
+    ///
+    /// The rule reads the index alone, not where its value comes from. Only an
+    /// entry-derived index can actually falsify the theorem, but whether a
+    /// given index is entry-derived is a dataflow question whose answer is not
+    /// visible at the access, and a rule whose reach a reader cannot determine
+    /// from the site it fires on is worse than a stricter one they can.
+    ///
+    /// The rule is also **lexical**, and that is a known limitation rather than
+    /// a property of the problem. A retained body calls executable functions,
+    /// and the judgment reduces the whole activation — callee frames included —
+    /// to a value stack, so a body that calls a function which indexes an array
+    /// by a value derived from an entry parameter still carries the trap, still
+    /// empties the observation set, and still ships a false obligation. This
+    /// rule does not fire there: it sees the access, not the call graph, and
+    /// deciding the interprocedural case needs whole-program dataflow it
+    /// deliberately does not do. So moving a rejected access behind a call is
+    /// not a remedy, and the diagnostic does not offer it as one.
+    ///
+    /// What an author whose reachability body must reach a dynamic index should
+    /// do is keep entry-derived values out of its reachable call graph and let
+    /// the index derive from a `@` choice constrained by `assume`. A choice that
+    /// traps is simply not the witness the existential needs, so the claim still
+    /// holds; an entry that traps has no witness left to offer, so it does not.
+    ///
+    /// A `forall`-quantified body is untouched: it is omitted from the emitted
+    /// module's functions and never reduced, so its non-constant index keeps
+    /// the symbolic range bound the element's own definition states, in both
+    /// the universal and the existential polarity. So is a constant index
+    /// anywhere — it selects an element outright, and [`PCode::P014`] already
+    /// rejects the out-of-bounds ones.
+    P016,
 }
 
 impl fmt::Display for PCode {
@@ -168,6 +212,7 @@ impl fmt::Display for PCode {
             PCode::P013 => "P013",
             PCode::P014 => "P014",
             PCode::P015 => "P015",
+            PCode::P016 => "P016",
         };
         f.write_str(code)
     }
