@@ -1293,6 +1293,10 @@ macro_rules! bail {
 pub use crate::arity::*;
 pub use crate::binary_reader::{BinaryReader, BinaryReaderError, Result};
 pub use crate::features::*;
+// Narrow on purpose: `limits` stays private, so only this one constant — the
+// one a reader-only consumer needs to defend itself with — joins the public
+// surface.
+pub use crate::limits::MAX_WASM_FUNCTION_LOCALS;
 pub use crate::parser::*;
 pub use crate::readers::*;
 

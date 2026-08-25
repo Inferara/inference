@@ -1798,10 +1798,15 @@ mod unsupported_surface {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn unsupported_proposal_families_are_rejected_not_panic() {
-        assert_wat_rejected(
+        // Hand-encoded rather than WAT: a `(struct …)` fixture must declare the
+        // composite in its type section, and the type section is rendered before
+        // any body, so its own rejection would be the one observed and this row
+        // would stop exercising the operator arm while still passing. The raw
+        // body carries `struct.new 0` against the harness's ordinary function
+        // type, which reaches the operator arm and nothing else.
+        assert_raw_rejected(
             "struct.new (GC)",
-            r#"(module (type $s (struct (field i32)))
-                 (func (export "f") i32.const 1 struct.new $s drop))"#,
+            &[0xfb, 0x00, 0x00],
             &["garbage collection", "no lowering"],
         );
         assert_wat_rejected(
@@ -1827,10 +1832,12 @@ mod unsupported_surface {
             r#"(module (func (export "f") try nop catch_all nop end))"#,
             &["legacy exception handling", "no lowering"],
         );
-        assert_wat_rejected(
+        // Hand-encoded for the same reason as `struct.new` above: a `(cont $ft)`
+        // fixture declares a continuation type, and the type-section rejection
+        // would steal this row's needles.
+        assert_raw_rejected(
             "cont.new (stack switching)",
-            r#"(module (type $ft (func)) (type $ct (cont $ft))
-                 (func $g) (func (export "f") ref.func $g cont.new $ct drop))"#,
+            &[0xe0, 0x00],
             &["stack switching", "no lowering"],
         );
         assert_wat_rejected(
@@ -2986,5 +2993,1736 @@ mod reachability_emission {
             ),
             "the rejection must use the retention-aware wording; got: {msg}",
         );
+    }
+}
+
+/// Collisions between the names one emitted `.v` gives its top-level constructs.
+///
+/// A generated `.v` puts everything in one flat namespace: the helper
+/// `Definition`s the preamble always opens with, one `Definition` per retained
+/// function, the `Definition <module> : module` record, and the
+/// `Theorem valid_<module>` that judges it. Rocq definitions are not
+/// overloadable, so a name claimed twice makes `coqc` reject the whole file
+/// with `<name> already exists` — nothing in it elaborates, including the
+/// definitions that were fine. Emission never noticed, so the failure surfaced
+/// only when someone tried to check the proof.
+///
+/// The two halves take opposite answers, and these tests pin both. A *function*
+/// name is disambiguated, because the emitted spelling is read only from
+/// `mod_funcs` — that is what lets an entry file named `main.inf` contain
+/// `fn main`, the standard shape in every language. The *module* name is
+/// rejected, because it is the artifact's identity: the `.v`'s subject, the
+/// `ValidModule` argument, and the prefix of every spec-derived proof name.
+///
+/// The rename assertions deliberately do not pin the disambiguated spelling.
+/// They assert the property that matters — no top-level name appears twice, and
+/// `mod_funcs` names the same definition the file defines — so a future change
+/// to the suffix scheme stays free.
+#[cfg(test)]
+mod emitted_name_collisions {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    /// Every name the preamble occupies, in emission order. Spelled out here
+    /// rather than read from the translator's own list so a name silently
+    /// dropped from that list fails this suite instead of hiding in it.
+    const PREAMBLE_HELPERS: &[&str] = &["Vi32", "Vi64", "Mt", "Mm", "Mg", "Mi", "Me", "Ma"];
+
+    fn translate(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes(
+            mod_name,
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+    }
+
+    /// The whole point of the guard, asserted directly: no `Definition` or
+    /// `Theorem` name occurs twice in one emitted module. This is exactly what
+    /// `coqc` refuses, so a module passing this cannot be refused for a name.
+    fn assert_no_duplicate_top_level_names(v: &str) {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        for line in v.lines() {
+            let Some(rest) = line
+                .strip_prefix("Definition ")
+                .or_else(|| line.strip_prefix("Theorem "))
+            else {
+                continue;
+            };
+            let name = rest
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default();
+            assert!(
+                seen.insert(name),
+                "`{name}` names two top-level definitions, which coqc refuses:\n{v}",
+            );
+        }
+    }
+
+    /// The names of the emitted `module_func` definitions, in emission order.
+    fn module_func_names(v: &str) -> Vec<&str> {
+        v.lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("Definition ")?;
+                let (name, tail) = rest.split_once(' ')?;
+                tail.starts_with(": module_func").then_some(name)
+            })
+            .collect()
+    }
+
+    /// Asserts that translating `bytes` under `mod_name` is rejected as a
+    /// preamble shadow naming the contested name and the rename that frees it.
+    fn assert_module_shadow(
+        mod_name: &str,
+        bytes: &[u8],
+        expected_name: &str,
+        expected_hint: &str,
+    ) {
+        let err = translate(mod_name, bytes).expect_err("a shadowed module name must be rejected");
+        let Some(WasmToVError::ModuleNameShadowsPreambleHelper { name, fix_hint }) =
+            err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("expected ModuleNameShadowsPreambleHelper, got {err:?}");
+        };
+        assert_eq!(name, expected_name, "the contested name");
+        assert_eq!(fix_hint, expected_hint, "the offered rename");
+    }
+
+    /// Translates a one-function module whose function is named `func_name`,
+    /// asserts the file is duplicate-free, and returns the name the function
+    /// was actually emitted under.
+    fn emitted_name_of_the_only_function(mod_name: &str, func_name: &str) -> String {
+        let out = translate(mod_name, &module_with_function_named(func_name))
+            .expect("a function-name collision is renamed, not rejected");
+        assert_no_duplicate_top_level_names(&out);
+        let funcs = module_func_names(&out);
+        assert_eq!(funcs.len(), 1, "one function was emitted:\n{out}");
+        let emitted = funcs[0].to_string();
+        assert!(
+            out.contains(&format!("{emitted} ::")),
+            "mod_funcs must reference the definition the file defines:\n{out}",
+        );
+        emitted
+    }
+
+    fn leb128_u32(mut value: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+        out
+    }
+
+    /// Length-prefixes `text` the way every WASM name is encoded.
+    fn wasm_name(text: &str) -> Vec<u8> {
+        let mut out = leb128_u32(u32::try_from(text.len()).expect("fixture name fits"));
+        out.extend_from_slice(text.as_bytes());
+        out
+    }
+
+    /// Wraps `body` as one subsection of the `name` custom section.
+    fn name_subsection(id: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![id];
+        out.extend(leb128_u32(
+            u32::try_from(body.len()).expect("fixture subsection fits"),
+        ));
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// The `name` custom section carrying `subsections` verbatim.
+    fn name_section(subsections: &[u8]) -> Vec<u8> {
+        let mut content = wasm_name("name");
+        content.extend_from_slice(subsections);
+        let mut out = vec![0x00];
+        out.extend(leb128_u32(
+            u32::try_from(content.len()).expect("fixture section fits"),
+        ));
+        out.extend_from_slice(&content);
+        out
+    }
+
+    /// A module of `count` trivial functions carrying no name section, built
+    /// with `wat` so only the naming under test is hand-encoded.
+    fn skeleton(count: usize) -> Vec<u8> {
+        let wat = format!("(module {})", "(func) ".repeat(count));
+        wat::parse_str(&wat).expect("skeleton assembles")
+    }
+
+    /// A module whose `name` section names function `i` `names[i]`. Hand-encoded
+    /// because `wat` derives function names from symbolic identifiers, which
+    /// cannot repeat and cannot spell every symbol a foreign binary carries.
+    fn module_with_functions_named(names: &[&str]) -> Vec<u8> {
+        let mut entries = leb128_u32(u32::try_from(names.len()).expect("fixture count fits"));
+        for (index, name) in names.iter().enumerate() {
+            entries.extend(leb128_u32(
+                u32::try_from(index).expect("fixture index fits"),
+            ));
+            entries.extend(wasm_name(name));
+        }
+        let mut bytes = skeleton(names.len());
+        bytes.extend(name_section(&name_subsection(0x01, &entries)));
+        bytes
+    }
+
+    fn module_with_function_named(name: &str) -> Vec<u8> {
+        module_with_functions_named(&[name])
+    }
+
+    /// A function named after a preamble helper moves off that name, and the
+    /// preamble keeps it. Every helper is covered: the preamble writes all eight
+    /// unconditionally, so each one is equally contested.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_named_as_a_preamble_helper_is_renamed() {
+        for helper in PREAMBLE_HELPERS {
+            let emitted = emitted_name_of_the_only_function("Prog", helper);
+            assert_ne!(
+                emitted, *helper,
+                "the function must not keep the preamble's name",
+            );
+        }
+    }
+
+    /// A function sharing the module's name moves off it, and the module record
+    /// keeps it — the shape `calc.inf` containing `pub fn calc()` produces, and
+    /// the one `main.inf` containing `pub fn main()` produces.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_named_as_the_module_record_is_renamed() {
+        let emitted = emitted_name_of_the_only_function("calc", "calc");
+        assert_ne!(
+            emitted, "calc",
+            "the function must not keep the record's name"
+        );
+    }
+
+    /// A function named `valid_<module>` moves off the module's validity
+    /// theorem, which is a top-level name like any `Definition`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_named_as_the_module_theorem_is_renamed() {
+        let emitted = emitted_name_of_the_only_function("prog", "valid_prog");
+        assert_ne!(
+            emitted, "valid_prog",
+            "the function must not keep the theorem's name",
+        );
+    }
+
+    /// Control: seeding the disambiguator with the module's reserved names must
+    /// not disturb the collision it already resolved. A static merge folds an
+    /// external library's private function next to a same-named main-module
+    /// function, and neither name is the user's to change.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn two_ordinary_functions_sharing_a_name_still_disambiguate() {
+        let out = translate("Prog", &module_with_functions_named(&["helper", "helper"]))
+            .expect("a function-vs-function collision is renamed, not rejected");
+        assert_no_duplicate_top_level_names(&out);
+        let funcs = module_func_names(&out);
+        assert_eq!(funcs.len(), 2, "both functions were emitted:\n{out}");
+        assert_ne!(funcs[0], funcs[1], "the two must not share one name");
+    }
+
+    /// A module name that is itself a preamble helper is rejected at the public
+    /// API boundary, before any parsing. Unlike a function, it has nowhere to
+    /// move to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_named_as_a_preamble_helper_is_rejected() {
+        for helper in PREAMBLE_HELPERS {
+            assert_module_shadow(
+                helper,
+                &module_with_function_named("f"),
+                helper,
+                &format!("{helper}_module"),
+            );
+        }
+    }
+
+    /// The embedded `name` section overrides the caller's module name *after*
+    /// the API-boundary check has run, so the decode boundary must re-check it —
+    /// otherwise a hand-crafted binary smuggles the collision straight past.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_renamed_by_the_name_section_is_rejected() {
+        let mut bytes = skeleton(1);
+        bytes.extend(name_section(&name_subsection(0x00, &wasm_name("Me"))));
+        assert_module_shadow("Prog", &bytes, "Me", "Me_module");
+    }
+
+    /// Control: a module contesting nothing keeps every name unchanged. This is
+    /// what pins the seeding as inert for ordinary input — the overwhelming
+    /// majority of modules, whose `.v` must not move a byte.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_with_no_collision_is_untouched() {
+        let out = translate("Prog", &module_with_function_named("add_three"))
+            .expect("a clean module translates");
+        assert_no_duplicate_top_level_names(&out);
+        for helper in PREAMBLE_HELPERS {
+            assert!(
+                out.contains(&format!("Definition {helper} ")),
+                "the preamble must still define `{helper}`:\n{out}",
+            );
+        }
+        assert_eq!(
+            module_func_names(&out),
+            vec!["add_three"],
+            "an uncontested function keeps its own name:\n{out}",
+        );
+        assert!(out.contains("Definition Prog : module :="), "{out}");
+        assert!(
+            out.contains("Theorem valid_Prog : ValidModule Prog."),
+            "{out}"
+        );
+    }
+}
+
+/// Malformed function bodies reach a clean rejection, never an abort.
+///
+/// A `.wasm` arriving through the public library API is not the linker's own
+/// output: it can be truncated, hand-crafted, or adversarial. Every failure
+/// below used to end the *process* rather than the translation — four `unwrap`s
+/// on reader results, plus an unbounded expansion of a declared locals count
+/// that the OS resolves with SIGKILL. None of those is recoverable by a caller,
+/// and a SIGKILL is not even observable as an error.
+///
+/// Each row here pins the recoverable outcome and greps a prefix this crate
+/// owns (`function body:`, `function locals:`, `function section:`) rather than
+/// the parser's wording, which belongs to the parser and moves with it. The
+/// positive companions matter as much as the rejections: the shapes next to
+/// each malformed one are legal, and a fix that rejected them too would be a
+/// worse bug than the panic.
+#[cfg(test)]
+mod malformed_bodies {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, ReachMeta, SpecKind};
+    use rustc_hash::FxHashMap;
+
+    fn translate(bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes("Prog", bytes, &FxHashMap::default(), &HSpecMap::default())
+    }
+
+    /// Wraps `body` — the raw bytes *after* a code entry's length prefix, i.e.
+    /// the locals vector followed by the operator stream — into a one-function
+    /// module. Hand-encoded because every shape under test is one `wat` refuses
+    /// to assemble.
+    pub(super) fn module_with_body(body: &[u8]) -> Vec<u8> {
+        let mut code = vec![0x01]; // one function body
+        code.push(u8::try_from(body.len()).expect("fixture body fits one byte"));
+        code.extend_from_slice(body);
+
+        let mut module = vec![
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: () -> ()
+            0x03, 0x02, 0x01, 0x00, // function section: one func, type 0
+        ];
+        module.push(0x0a); // code section id
+        module.push(u8::try_from(code.len()).expect("fixture code section fits one byte"));
+        module.extend_from_slice(&code);
+        module
+    }
+
+    /// The contract every rejection row shares: a recoverable
+    /// [`WasmToVError::WasmParse`] whose message contains each needle.
+    ///
+    /// The sibling of `unsupported_surface::assert_rejected`, which hard-requires
+    /// `UnsupportedFeature` and would report these as the wrong variant. The two
+    /// stay separate because the distinction is the point: a malformed binary and
+    /// a well-formed one outside the proof model need different guidance.
+    ///
+    /// Deliberately no `catch_unwind`: an `unwrap` still reachable for one of
+    /// these fails the test as a panic, which is exactly what this module exists
+    /// to rule out.
+    fn assert_parse_rejected(label: &str, bytes: &[u8], needles: &[&str]) {
+        let err = translate(bytes)
+            .map(|v| panic!("{label}: must be rejected, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+
+        let Some(WasmToVError::WasmParse(message)) = err.downcast_ref::<WasmToVError>() else {
+            panic!("{label}: expected WasmParse, got {err:?}");
+        };
+        for needle in needles {
+            assert!(
+                message.contains(needle),
+                "{label}: rejection must name `{needle}`; got: {message}",
+            );
+        }
+    }
+
+    /// A locals vector whose count LEB128 runs off the end of the body. The
+    /// reader cannot even be constructed; the failure used to be swallowed by an
+    /// `if let Ok(..)`, emitting `modfunc_locals := nil` for a function whose
+    /// locals were never read — a module record describing a different program,
+    /// at exit 0.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_truncated_locals_count_is_rejected() {
+        assert_parse_rejected(
+            "truncated locals count",
+            &module_with_body(&[0x80]),
+            &["function locals"],
+        );
+    }
+
+    /// A locals vector that declares one group and then ends before its value
+    /// type. The reader constructs; the entry fails. This is the `local.unwrap()`
+    /// that used to abort the process.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_truncated_locals_entry_is_rejected() {
+        assert_parse_rejected(
+            "truncated locals entry",
+            &module_with_body(&[0x01, 0x01]),
+            &["function locals"],
+        );
+    }
+
+    /// A single locals group declaring 200 000 repetitions. Six bytes of input
+    /// used to drive the emission loop into an unbounded `String`; the cap
+    /// rejects it before anything is materialized.
+    ///
+    /// 200 000 rather than a headline `u32::MAX`: the point is to exceed the
+    /// engine limit, and a count near `u32::MAX` OOM-kills the test runner
+    /// outright if the cap ever regresses — SIGKILL reads as infrastructure
+    /// flake rather than as this test failing.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_oversized_locals_count_is_rejected() {
+        assert_parse_rejected(
+            "200000 declared locals",
+            // count 1; reps 200000 (LEB `c0 9a 0c`); i32; end
+            &module_with_body(&[0x01, 0xc0, 0x9a, 0x0c, 0x7f, 0x0b]),
+            &["function locals", "exceeds"],
+        );
+    }
+
+    /// The cap is on the function's *total* declared locals, so groups that are
+    /// individually well under it are rejected once they sum past it. Checking
+    /// per group would let this through.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn locals_groups_summing_past_the_cap_are_rejected() {
+        let mut body = vec![0x03]; // three groups
+        for _ in 0..3 {
+            body.extend_from_slice(&[0xc0, 0x9a, 0x0c, 0x7f]); // 200000 x i32
+        }
+        body.push(0x0b);
+        assert_parse_rejected(
+            "three groups of 200000",
+            &module_with_body(&body),
+            &["exceeds"],
+        );
+    }
+
+    /// An operator stream that ends mid-instruction: `i32.const` with no
+    /// immediate. This is the `next_operator.as_ref().unwrap()` that used to
+    /// abort the process.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_truncated_operator_is_rejected() {
+        assert_parse_rejected(
+            "i32.const with no immediate",
+            &module_with_body(&[0x00, 0x41]),
+            &["function body"],
+        );
+    }
+
+    /// An `if` whose arm never closes. The recursion returns an empty arm, and
+    /// `last_part().unwrap()` used to abort on it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_unterminated_if_is_rejected() {
+        assert_parse_rejected(
+            "unterminated if",
+            // 0 locals; i32.const 0; if (empty blocktype); EOF
+            &module_with_body(&[0x00, 0x41, 0x00, 0x04, 0x40]),
+            // The distinctive phrase, so this can only match the empty-arm
+            // rejection and never the generic truncated-operator one, which
+            // shares the `function body` prefix.
+            &["ends without its terminating"],
+        );
+    }
+
+    /// The positive companion to the row above, and the one a naive fix breaks:
+    /// an `if` with an empty `then` arm is legal, and its terminating `end` is
+    /// consumed by the inner recursion — so the arm is *not* empty and must
+    /// still translate.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_empty_then_arm_still_translates() {
+        let bytes = wat::parse_str("(module (func i32.const 0 if end))")
+            .expect("an empty-then `if` assembles");
+        let out = translate(&bytes).expect("a legal empty-then `if` must still translate");
+        assert!(
+            out.contains("BI_if"),
+            "the `if` must reach the emitted body:\n{out}",
+        );
+    }
+
+    /// A function section advertising one entry and carrying none. This is the
+    /// `f.unwrap()` inside the `for_each` closure that used to abort the process.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_truncated_function_section_is_rejected() {
+        let bytes = vec![
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: () -> ()
+            0x03, 0x01, 0x01, // function section: count 1, no entries
+        ];
+        assert_parse_rejected("truncated function section", &bytes, &["function section"]);
+    }
+
+    /// The neighbours of every row above: a body with real locals and a real
+    /// operator stream still translates, and its locals reach the record.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_well_formed_body_with_locals_still_translates() {
+        // one group of two i32 locals, then `end`
+        let out = translate(&module_with_body(&[0x01, 0x02, 0x7f, 0x0b]))
+            .expect("a well-formed body translates");
+        assert!(
+            out.contains("modfunc_locals := T_num T_i32 :: T_num T_i32 :: nil"),
+            "both declared locals must reach the record:\n{out}",
+        );
+    }
+
+    /// One malformed locals vector, translated twice: once with a reachability
+    /// obligation naming the function and once without.
+    ///
+    /// The two paths read the same bytes through different error policies —
+    /// `defined_func_local_count` is fail-closed (`.ok()?`), the emission loop
+    /// was not — so the same input was a clean rejection or a process abort
+    /// depending on whether an unrelated `exists`/`unique` obligation happened
+    /// to be present. Both are now recoverable and both name the locals; the
+    /// wording still differs by design, because the obligation path can name the
+    /// obligation it is about and the emission path can only name the body.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_malformed_locals_vector_rejects_the_same_way_with_and_without_an_obligation() {
+        let bytes = named_module_with_body("target", &[0x01, 0x01]);
+
+        let without = translate(&bytes).expect_err("no obligation: must be rejected");
+        let with = {
+            let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+            spec_funcs.insert("Reach".to_string(), vec![0]);
+            let mut hspecs = HSpecMap::default();
+            hspecs.insert(
+                "Reach".to_string(),
+                vec![HSpecEntry::new(
+                    HFnRef("target".to_string()),
+                    HAssert::Defined(HTerm::Local(0)),
+                    SpecKind::Exists(ReachMeta {
+                        entry_arity: 0,
+                        visible_locs: Vec::new(),
+                    }),
+                )],
+            );
+            translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+                .expect_err("with an obligation: must be rejected")
+        };
+
+        for (label, err) in [("without an obligation", &without), ("with one", &with)] {
+            assert!(
+                err.downcast_ref::<WasmToVError>().is_some(),
+                "{label}: must be a recoverable typed rejection, got {err:?}",
+            );
+            assert!(
+                err.to_string().contains("locals"),
+                "{label}: the rejection must name the locals; got: {err}",
+            );
+        }
+    }
+
+    /// [`module_with_body`] plus a `name` section naming function 0, so an
+    /// obligation can refer to it by symbol.
+    pub(super) fn named_module_with_body(func_name: &str, body: &[u8]) -> Vec<u8> {
+        let mut entries = vec![0x01, 0x00];
+        entries.push(u8::try_from(func_name.len()).expect("fixture name fits one byte"));
+        entries.extend_from_slice(func_name.as_bytes());
+
+        let mut subsection = vec![0x01];
+        subsection.push(u8::try_from(entries.len()).expect("fixture subsection fits one byte"));
+        subsection.extend_from_slice(&entries);
+
+        let mut content = vec![0x04];
+        content.extend_from_slice(b"name");
+        content.extend_from_slice(&subsection);
+
+        let mut bytes = module_with_body(body);
+        bytes.push(0x00);
+        bytes.push(u8::try_from(content.len()).expect("fixture name section fits one byte"));
+        bytes.extend_from_slice(&content);
+        bytes
+    }
+}
+
+/// The type section, read fail-closed.
+///
+/// `mod_types` position N must be WASM type index N: every consumer indexes it
+/// that way, and the emitter did not provide it. A recursion group was rendered
+/// as one list element regardless of how many `SubType`s it flattens to, so an
+/// empty `(rec)` claimed an index it does not have, a multi-member group ran its
+/// entries together into a single over-applied `Tf`, and every index after
+/// either one was wrong. Composites with no `function_type` representation —
+/// GC aggregates, continuations, declared subtypes, shared types — were skipped
+/// silently, which is the same index shift with no output to notice it by.
+///
+/// The rejections and the restructure are tested apart on purpose: a fix that
+/// rejects GC but keeps the concatenation passes every rejection row here, and
+/// only the positional tests catch it.
+#[cfg(test)]
+mod type_section {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    fn translate(bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes(
+            "Prog",
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+    }
+
+    fn assert_rejected(label: &str, bytes: &[u8], needles: &[&str]) {
+        let err = translate(bytes)
+            .map(|v| panic!("{label}: must be rejected, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+        let Some(WasmToVError::UnsupportedFeature { description }) =
+            err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("{label}: expected UnsupportedFeature, got {err:?}");
+        };
+        for needle in needles {
+            assert!(
+                description.contains(needle),
+                "{label}: rejection must name `{needle}`; got: {description}",
+            );
+        }
+    }
+
+    fn assert_wat_rejected(label: &str, wat: &str, needles: &[&str]) {
+        let bytes = wat::parse_str(wat).expect("fixture WAT assembles");
+        assert_rejected(label, &bytes, needles);
+    }
+
+    /// The emitted `mod_types` list, one string per **list element**.
+    ///
+    /// Counting `Tf` occurrences instead would be blind to the defect this
+    /// module is about: concatenating a rec group's members into one element
+    /// leaves every `Tf` substring present and only the element *boundaries*
+    /// wrong. `mod_types` is indexed positionally, so the boundaries are the
+    /// whole invariant.
+    fn mod_types_entries(v: &str) -> Vec<&str> {
+        let block = v
+            .split_once("mod_types :=\n")
+            .expect("every module emits a mod_types list")
+            .1
+            .split_once(";\n")
+            .expect("the mod_types list is terminated")
+            .0;
+        block
+            .lines()
+            .map(|line| line.trim().trim_end_matches("::").trim())
+            .filter(|entry| !entry.is_empty() && *entry != "nil")
+            .collect()
+    }
+
+    /// A GC struct in the type section has no `function_type` to become.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_struct_type_is_rejected() {
+        assert_wat_rejected(
+            "struct type",
+            r#"(module (type $s (struct (field i32))))"#,
+            &["aggregate in the type section"],
+        );
+    }
+
+    /// The same for a GC array.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_array_type_is_rejected() {
+        assert_wat_rejected(
+            "array type",
+            r#"(module (type $a (array i32)))"#,
+            &["aggregate in the type section"],
+        );
+    }
+
+    /// A continuation type, from stack switching.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_continuation_type_is_rejected() {
+        assert_wat_rejected(
+            "cont type",
+            r#"(module (type $ft (func)) (type $ct (cont $ft)))"#,
+            &["continuation type in the type section"],
+        );
+    }
+
+    /// A type declaring participation in a subtyping hierarchy. The model's
+    /// `function_type` is a bare parameter/result pair with no subtype relation.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_declared_subtype_is_rejected() {
+        assert_wat_rejected(
+            "sub func",
+            r#"(module (rec (type $base (sub (func (param i32)))))
+                 (type $derived (sub $base (func (param i32)))))"#,
+            &["declared subtyping"],
+        );
+    }
+
+    /// An empty recursion group, hand-encoded because `wat` will not emit one.
+    /// It occupies no type index, so it must contribute no `mod_types` element —
+    /// and contributing one produced a dangling cons (`::` with nothing before
+    /// it), which is not parseable Gallina at all.
+    ///
+    /// This is a *separate* source of that dangling cons from the GC composites:
+    /// neutralize the composite rejections alone and this row still fails.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_empty_rec_group_contributes_no_entry() {
+        // type section: one entry, `rec` (0x4e) with zero members
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x03, 0x01, 0x4e, 0x00, // type section: (rec)
+        ];
+        let v = translate(&bytes).expect("an empty rec group is legal and contributes nothing");
+        assert!(
+            mod_types_entries(&v).is_empty(),
+            "an empty rec group occupies no type index, so it must contribute no \
+             `mod_types` entry:\n{v}",
+        );
+        assert!(
+            !v.contains("    ::"),
+            "a dangling `::` is unparseable Gallina:\n{v}",
+        );
+    }
+
+    /// A shared composite, hand-encoded because the `wat` in the lock file emits
+    /// composite prefixes this fork rejects for the `shared` form.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_shared_composite_is_rejected() {
+        // type section: one entry, `shared` (0x65) wrapping `func () -> ()`
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x65, 0x60, 0x00, 0x00, // type section: (shared (func))
+        ];
+        assert_rejected("shared composite", &bytes, &["shared composite"]);
+    }
+
+    /// The loud leg of the multi-member group defect: two `Func` members ran
+    /// together with no separator, which Rocq reads as an over-applied `Tf`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_multi_member_rec_group_emits_separate_entries() {
+        let bytes = wat::parse_str(
+            r#"(module (rec (type $a (func (param i32))) (type $b (func (result i32)))))"#,
+        )
+        .expect("a multi-member rec group assembles");
+        let v = translate(&bytes).expect("a rec group of `Func` members translates");
+        assert!(
+            !v.contains(")Tf"),
+            "rec-group members must not run together into one element:\n{v}",
+        );
+        assert_eq!(
+            mod_types_entries(&v).len(),
+            2,
+            "each member must be its own `mod_types` element:\n{v}",
+        );
+    }
+
+    /// The silent leg, and the only one that catches a fix which rejects GC but
+    /// keeps the concatenation: a function typed by the *second* member of a
+    /// recursion group. `modfunc_type` is a positional index into `mod_types`,
+    /// so if the group collapsed into one element the index would name the
+    /// wrong type — or no type at all — with nothing in the output looking
+    /// wrong.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_typed_by_a_later_rec_member_keeps_its_index() {
+        let bytes = wat::parse_str(
+            r#"(module
+                 (rec (type $a (func (param i32))) (type $b (func (result i32))))
+                 (func (type $b) i32.const 7))"#,
+        )
+        .expect("a function typed by the second rec member assembles");
+        let v = translate(&bytes).expect("it translates");
+        assert!(
+            v.contains("modfunc_type := 1%N"),
+            "the function must keep type index 1, the group's second member:\n{v}",
+        );
+        // Asserted as list *elements*, so a concatenated group fails here: both
+        // `Tf` substrings survive concatenation, only the boundary between them
+        // is lost, and that boundary is what `modfunc_type := 1%N` indexes into.
+        assert_eq!(
+            mod_types_entries(&v),
+            vec![
+                "Tf (T_num T_i32 :: nil) (nil)",
+                "Tf (nil) (T_num T_i32 :: nil)"
+            ],
+            "each member must be its own positional entry:\n{v}",
+        );
+    }
+
+    /// The invariant behind the whole class, asserted directly over the shapes
+    /// the emitter is expected to handle: the number of emitted `Tf` forms
+    /// equals the number of flattened `SubType`s, so `mod_types` position is the
+    /// WASM type index. Every defect in this module is one violation of it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn emitted_type_count_matches_the_flattened_subtype_count() {
+        for (label, wat) in [
+            ("no types", "(module)"),
+            ("one func", "(module (type (func)))"),
+            (
+                "three funcs",
+                "(module (type (func)) (type (func (param i32))) (type (func (result i32))))",
+            ),
+            (
+                "a rec group beside a bare type",
+                "(module (rec (type (func)) (type (func (param i64)))) (type (func (result i64))))",
+            ),
+        ] {
+            let bytes = wat::parse_str(wat).expect("fixture assembles");
+            let expected = inf_wasmparser::Parser::new(0)
+                .parse_all(&bytes)
+                .filter_map(|payload| match payload {
+                    Ok(inf_wasmparser::Payload::TypeSection(reader)) => Some(reader),
+                    _ => None,
+                })
+                .flat_map(|reader| reader.into_iter().collect::<Vec<_>>())
+                .filter_map(std::result::Result::ok)
+                .map(|group| group.types().count())
+                .sum::<usize>();
+            let v = translate(&bytes).expect("fixture translates");
+            let entries = mod_types_entries(&v);
+            assert_eq!(
+                entries.len(),
+                expected,
+                "{label}: one `mod_types` entry per flattened SubType:\n{v}",
+            );
+            for entry in &entries {
+                assert_eq!(
+                    entry.matches("Tf (").count(),
+                    1,
+                    "{label}: an entry carrying two `Tf` forms is one over-applied \
+                     `Tf` to Rocq, and shifts every later type index:\n{v}",
+                );
+            }
+        }
+    }
+}
+
+/// Every malformed input this crate is known to reject leaves through the typed
+/// error channel.
+///
+/// The property `translate_bytes` owes its callers: a rejection is always a
+/// downcastable [`WasmToVError`], never a bare parser error the CLI can only
+/// print through its generic "translation failed" line, and never a panic.
+///
+/// This is the totality claim that a blanket wrap at the `translate()` seam
+/// would have made unfalsifiably. Written as a corpus sweep instead: remove any
+/// one of the per-site wraps and this reddens, and every shape a later phase
+/// adds to the corpus extends the claim rather than restating it.
+#[cfg(test)]
+mod rejection_totality {
+    use super::errors::WasmToVError;
+    use super::malformed_bodies::module_with_body;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    /// A module of the given `(section id, body)` pairs, lengths encoded as a
+    /// single LEB byte — sufficient for every fixture here.
+    fn raw(sections: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        for (id, body) in sections {
+            out.push(*id);
+            out.push(u8::try_from(body.len()).expect("fixture section is small"));
+            out.extend_from_slice(body);
+        }
+        out
+    }
+
+    /// A two-memory module whose single function body is `bytes` then `end`, so
+    /// a multi-memory immediate names a memory that exists.
+    fn two_memory_body(bytes: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x00];
+        body.extend_from_slice(bytes);
+        body.push(0x0b);
+        let mut code = vec![0x01];
+        code.push(u8::try_from(body.len()).expect("fixture body is small"));
+        code.extend_from_slice(&body);
+        raw(&[
+            (1, vec![0x01, 0x60, 0x00, 0x00]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x02, 0x00, 0x01, 0x00, 0x01]),
+            (10, code),
+        ])
+    }
+
+    /// Every malformed shape the crate rejects, as (label, module bytes).
+    /// Extended by each phase that adds a rejection.
+    fn corpus() -> Vec<(&'static str, Vec<u8>)> {
+        let wat = |source: &str| wat::parse_str(source).expect("fixture WAT assembles");
+        vec![
+            // Malformed bodies.
+            ("truncated locals count", module_with_body(&[0x80])),
+            ("truncated locals entry", module_with_body(&[0x01, 0x01])),
+            (
+                "oversized locals count",
+                module_with_body(&[0x01, 0xc0, 0x9a, 0x0c, 0x7f, 0x0b]),
+            ),
+            ("truncated operator", module_with_body(&[0x00, 0x41])),
+            (
+                "unterminated if",
+                module_with_body(&[0x00, 0x41, 0x00, 0x04, 0x40]),
+            ),
+            (
+                "truncated function section",
+                vec![
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00,
+                    0x00, 0x03, 0x01, 0x01,
+                ],
+            ),
+            // Type-section shapes with no `function_type` representation.
+            (
+                "struct type",
+                wat(r#"(module (type $s (struct (field i32))))"#),
+            ),
+            ("array type", wat(r#"(module (type $a (array i32)))"#)),
+            (
+                "cont type",
+                wat(r#"(module (type $ft (func)) (type $ct (cont $ft)))"#),
+            ),
+            (
+                "declared subtype",
+                wat(r#"(module (rec (type $base (sub (func (param i32)))))
+                         (type $derived (sub $base (func (param i32)))))"#),
+            ),
+            (
+                "shared composite",
+                vec![
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x65, 0x60,
+                    0x00, 0x00,
+                ],
+            ),
+            // Operators outside the proof contract.
+            (
+                "ref.null",
+                wat(r#"(module (func (result i32) ref.null func drop i32.const 0))"#),
+            ),
+            ("f32 arithmetic", wat(r#"(module (func f32.const 1 drop))"#)),
+            // Shapes the module record has no field to carry.
+            ("table64", raw(&[(4, vec![0x01, 0x70, 0x04, 0x01])])),
+            ("shared table", raw(&[(4, vec![0x01, 0x70, 0x02, 0x01])])),
+            (
+                "table element initializer",
+                wat(r#"(module (func $g) (table 1 funcref (ref.func $g)))"#),
+            ),
+            (
+                "multi-memory load",
+                two_memory_body(&[0x41, 0x00, 0x28, 0x42, 0x01, 0x00]),
+            ),
+            (
+                "multi-memory fill",
+                two_memory_body(&[0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x01]),
+            ),
+            (
+                "tag section",
+                wat(r#"(module (tag $e (param i32)) (func nop))"#),
+            ),
+            ("unknown section", raw(&[(0x0e, vec![0xaa])])),
+            // Structure the binary asserts about itself.
+            (
+                "component binary",
+                vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+            ),
+            (
+                "unknown core version",
+                vec![0x00, 0x61, 0x73, 0x6d, 0x02, 0x00, 0x00, 0x00],
+            ),
+            (
+                "duplicate type section",
+                raw(&[
+                    (1, vec![0x01, 0x60, 0x00, 0x00]),
+                    (1, vec![0x01, 0x60, 0x01, 0x7f, 0x00]),
+                ]),
+            ),
+            (
+                "sections out of order",
+                raw(&[
+                    (5, vec![0x01, 0x00, 0x01]),
+                    (4, vec![0x01, 0x70, 0x00, 0x01]),
+                ]),
+            ),
+            (
+                "data count mismatch",
+                raw(&[
+                    (5, vec![0x01, 0x00, 0x01]),
+                    (12, vec![0x03]),
+                    (11, vec![0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x78]),
+                ]),
+            ),
+            (
+                "function and code lengths disagree",
+                raw(&[
+                    (1, vec![0x01, 0x60, 0x00, 0x00]),
+                    (3, vec![0x02, 0x00, 0x00]),
+                    (10, vec![0x01, 0x02, 0x00, 0x0b]),
+                ]),
+            ),
+            (
+                "operators after the terminating end",
+                raw(&[
+                    (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+                    (3, vec![0x01, 0x00]),
+                    (10, vec![0x01, 0x07, 0x00, 0x41, 0x01, 0x0b, 0x41, 0x02, 0x0b]),
+                ]),
+            ),
+        ]
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_rejection_is_a_typed_error() {
+        for (label, bytes) in corpus() {
+            let err = translate_bytes(
+                "Prog",
+                &bytes,
+                &FxHashMap::default(),
+                &inference_hassert::HSpecMap::default(),
+            )
+            .map(|v| panic!("{label}: expected a rejection, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<WasmToVError>().is_some(),
+                "{label}: every rejection must be downcastable, so the CLI can \
+                 classify it; got an untyped {err:?}",
+            );
+        }
+    }
+}
+
+/// Import names, export names, and name-section local names are *data* copied
+/// out of a `.wasm` into Gallina syntax — a string literal for the first two, a
+/// `(* … *)` comment for the third. A WASM name may carry any byte, including
+/// the delimiters that end those constructs, so an unescaped name does not
+/// merely look wrong: it closes its construct early and the remainder is read
+/// as Gallina, fabricating module content the binary never contained.
+///
+/// Each row below asserts on what the injection actually *produces* rather than
+/// on the delimiter it uses. A quote count or a substring search stays green
+/// under the very defect it is written for, because the injected text keeps
+/// those substrings intact and only the construct boundary moves.
+#[cfg(test)]
+mod gallina_escaping {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    fn translate(bytes: &[u8]) -> String {
+        translate_bytes(
+            "Prog",
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+        .unwrap_or_else(|e| panic!("fixture must translate, got {e:?}"))
+    }
+
+    fn wat(source: &str) -> Vec<u8> {
+        wat::parse_str(source).expect("fixture WAT assembles")
+    }
+
+    /// Returns `v` with every string literal emptied and every comment removed,
+    /// leaving only what Rocq reads as code.
+    ///
+    /// This is what makes the injection rows non-vacuous. An injection payload
+    /// necessarily contains the very text it is trying to smuggle in, so a
+    /// substring search over the raw `.v` finds it whether the escape worked or
+    /// not — the payload is simply quoted instead of executed. Counting only
+    /// outside literals and comments is the difference between "the bytes appear
+    /// somewhere" and "the bytes became module content", which is the defect.
+    ///
+    /// The literal scan honours Coq's doubled-quote escape, so an escaped `""`
+    /// stays inside its literal rather than ending it — the precise behaviour
+    /// under test.
+    fn code_outside_literals_and_comments(v: &str) -> String {
+        let chars: Vec<char> = v.chars().collect();
+        let mut out = String::new();
+        let mut index = 0;
+        let mut comment_depth = 0usize;
+        while index < chars.len() {
+            if comment_depth == 0 && chars[index] == '"' {
+                index += 1;
+                while index < chars.len() {
+                    if chars[index] == '"' {
+                        if chars.get(index + 1) == Some(&'"') {
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                out.push_str("\"\"");
+                continue;
+            }
+            if chars[index] == '(' && chars.get(index + 1) == Some(&'*') {
+                comment_depth += 1;
+                index += 2;
+                continue;
+            }
+            if comment_depth > 0 && chars[index] == '*' && chars.get(index + 1) == Some(&')') {
+                comment_depth -= 1;
+                index += 2;
+                continue;
+            }
+            if comment_depth == 0 {
+                out.push(chars[index]);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn leb128_u32(mut value: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+        out
+    }
+
+    fn wasm_name(text: &str) -> Vec<u8> {
+        let mut out = leb128_u32(u32::try_from(text.len()).expect("fixture name fits"));
+        out.extend_from_slice(text.as_bytes());
+        out
+    }
+
+    /// A module whose single function has one named local, the name hand-encoded
+    /// because `wat` derives local names from symbolic identifiers and cannot
+    /// spell the delimiters under test.
+    fn module_with_local_named(name: &str) -> Vec<u8> {
+        let mut naming = leb128_u32(1);
+        naming.extend(leb128_u32(0));
+        naming.extend(wasm_name(name));
+
+        let mut per_function = leb128_u32(1);
+        per_function.extend(leb128_u32(0));
+        per_function.extend(naming);
+
+        let mut subsection = vec![0x02];
+        subsection.extend(leb128_u32(
+            u32::try_from(per_function.len()).expect("fixture subsection fits"),
+        ));
+        subsection.extend(per_function);
+
+        let mut content = wasm_name("name");
+        content.extend(subsection);
+
+        let mut section = vec![0x00];
+        section.extend(leb128_u32(
+            u32::try_from(content.len()).expect("fixture section fits"),
+        ));
+        section.extend(content);
+
+        let mut bytes = wat(r#"(module (func (local i32) local.get 0 drop))"#);
+        bytes.extend(section);
+        bytes
+    }
+
+    /// The payload closes the string literal and continues in Gallina, so the
+    /// emitted record gains an export the module does not have. One `MED_func`
+    /// is the assertion with teeth: the quote survives either way, the
+    /// fabricated entry does not.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_export_name_cannot_fabricate_a_second_export() {
+        let v = translate(&wat(
+            r#"(module (func) (export "a\22 (MED_func 99%N) :: Me \22b" (func 0)))"#,
+        ));
+        let code = code_outside_literals_and_comments(&v);
+        assert_eq!(
+            code.matches("MED_func").count(),
+            1,
+            "one export was declared, so one `MED_func` may reach the record; \
+             the rest must stay quoted:\n{v}",
+        );
+        assert!(
+            !code.contains("99%N"),
+            "the payload's function index must stay inside the literal:\n{v}",
+        );
+    }
+
+    /// Both interpolation points of `Mi` are covered. A fix that escapes only
+    /// the module argument leaves the field-name leg open, so the two legs are
+    /// separate rows rather than one.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn neither_import_name_can_fabricate_a_second_import() {
+        let module_leg = translate(&wat(
+            r#"(module (import "m\22 (MID_func 0%N) :: Mi \22x" "f" (func)))"#,
+        ));
+        assert_eq!(
+            code_outside_literals_and_comments(&module_leg)
+                .matches("MID_func")
+                .count(),
+            1,
+            "one import was declared:\n{module_leg}",
+        );
+
+        let field_leg = translate(&wat(
+            r#"(module (import "m" "f\22 (MID_func 0%N) :: Mi \22g" (func)))"#,
+        ));
+        assert_eq!(
+            code_outside_literals_and_comments(&field_leg)
+                .matches("MID_func")
+                .count(),
+            1,
+            "the field name is the second interpolation point:\n{field_leg}",
+        );
+    }
+
+    /// A quote reaches the `.v` doubled, which is Coq's own escape, and the
+    /// surrounding bytes are untouched — the name has to round-trip through
+    /// `list_byte_of_string` exactly.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_quote_in_a_name_is_doubled_not_rewritten() {
+        let v = translate(&wat(r#"(module (func) (export "a\22b" (func 0)))"#));
+        assert!(
+            v.contains(r#"Me "a""b""#),
+            "the quote must double and nothing else may move:\n{v}",
+        );
+    }
+
+    /// Coq comments nest, so an unbalanced `(*` swallows the rest of the file
+    /// and a `*)` closes early and lets what follows be read as Gallina.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_local_name_cannot_inject_an_instruction() {
+        let injected = translate(&module_with_local_named("*) :: BI_unreachable :: (*"));
+        let ordinary = translate(&module_with_local_named("x"));
+
+        // A local name is comment prose. Whatever it contains, the code the
+        // comments sit in must be the same module — which is a stronger claim
+        // than "the payload's text is absent", and the only one that survives
+        // the payload necessarily containing its own text.
+        assert_eq!(
+            code_outside_literals_and_comments(&injected),
+            code_outside_literals_and_comments(&ordinary),
+            "a local name may change comment text and nothing else:\n{injected}",
+        );
+        assert!(
+            !code_outside_literals_and_comments(&injected).contains("BI_unreachable"),
+            "the module contains no `unreachable`, so the emitted code must not:\n{injected}",
+        );
+    }
+
+    /// The other half: an opener with no closer.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_unclosed_comment_opener_in_a_local_name_is_neutralized() {
+        let v = translate(&module_with_local_named("(*"));
+        assert_eq!(
+            v.matches("(*").count(),
+            v.matches("*)").count(),
+            "an opener in a local name must not leave the file unbalanced:\n{v}",
+        );
+    }
+
+    /// The byte-identity control. `__frame_ptr` is the local codegen emits for
+    /// every array-using program; routing local names through identifier
+    /// sanitization would render it `f_frame_ptr` and move every byte-compared
+    /// `.v` golden. Only the two comment delimiters may ever be touched.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_ordinary_local_name_renders_unchanged() {
+        let v = translate(&module_with_local_named("__frame_ptr"));
+        assert!(
+            v.contains("(*__frame_ptr*)"),
+            "an ordinary local name must reach the comment verbatim:\n{v}",
+        );
+    }
+
+    /// Ordinary names must survive untouched, or the escapes would be rewriting
+    /// data rather than protecting it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ordinary_import_and_export_names_are_unchanged() {
+        let v = translate(&wat(
+            r#"(module (import "env" "memcpy" (func)) (func) (export "run" (func 1)))"#,
+        ));
+        assert!(v.contains(r#"Mi "env" "memcpy""#), "{v}");
+        assert!(v.contains(r#"Me "run""#), "{v}");
+    }
+
+    /// A name carrying a quote is still a translation, not a rejection: the
+    /// escape is the fix, so nothing here may become a `WasmToVError`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_escaped_name_is_not_a_rejection() {
+        let bytes = wat(r#"(module (func) (export "a\22b" (func 0)))"#);
+        let out = translate_bytes(
+            "Prog",
+            &bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        );
+        assert!(
+            out.is_ok(),
+            "a quoted name is escapable, so it must translate: {:?}",
+            out.err().and_then(|e| e
+                .downcast_ref::<WasmToVError>()
+                .map(std::string::ToString::to_string)),
+        );
+    }
+}
+
+/// Shapes the emitted module record has no field to carry.
+///
+/// Each one was previously emitted as its nearest representable neighbour — a
+/// 64-bit table as a 32-bit one, an access to memory 1 as an access to memory 0,
+/// a tag section as no tag section at all. That is the failure mode this issue
+/// exists to close: not a `.v` that fails to compile, but one that compiles and
+/// describes a different program than the `.wasm` it came from.
+///
+/// Every row is paired with a positive control on the neighbouring legal shape.
+/// Without them a guard that rejected the whole family — every table, every
+/// load — would satisfy the rejection rows while breaking the translator.
+#[cfg(test)]
+mod unrepresentable_shapes {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    fn translate(bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes(
+            "Prog",
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+    }
+
+    fn wat(source: &str) -> Vec<u8> {
+        wat::parse_str(source).expect("fixture WAT assembles")
+    }
+
+    /// Asserts a recoverable `UnsupportedFeature` whose text contains every
+    /// needle, compared lowercased.
+    fn assert_rejected(label: &str, bytes: &[u8], needles: &[&str]) {
+        let err = translate(bytes)
+            .map(|v| panic!("{label}: must be rejected, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+        let Some(WasmToVError::UnsupportedFeature { description }) =
+            err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("{label}: expected UnsupportedFeature, got {err:?}");
+        };
+        let lowered = description.to_lowercase();
+        for needle in needles {
+            assert!(
+                lowered.contains(needle),
+                "{label}: the description must name `{needle}`; got {description:?}",
+            );
+        }
+    }
+
+    fn section(id: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![id];
+        out.push(u8::try_from(body.len()).expect("fixture section is small"));
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn module(sections: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        for s in sections {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// A one-function module whose body is `bytes` followed by `end`, with a
+    /// two-memory memory section so the multi-memory immediates below name a
+    /// memory that exists.
+    fn two_memory_module_with_body(bytes: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x00];
+        body.extend_from_slice(bytes);
+        body.push(0x0b);
+        let mut code = vec![0x01];
+        code.push(u8::try_from(body.len()).expect("fixture body is small"));
+        code.extend_from_slice(&body);
+        module(&[
+            section(1, &[0x01, 0x60, 0x00, 0x00]),
+            section(3, &[0x01, 0x00]),
+            section(5, &[0x02, 0x00, 0x01, 0x00, 0x01]),
+            section(10, &code),
+        ])
+    }
+
+    /// `table64` changes the index type of every table operation, and the
+    /// emitted limits record has no field for it. Hand-encoded: the table's
+    /// flags byte is what carries the bit.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_64_bit_table_is_rejected() {
+        let bytes = module(&[section(4, &[0x01, 0x70, 0x04, 0x01])]);
+        assert_rejected("table64", &bytes, &["table64"]);
+    }
+
+    /// The shared-everything-threads sibling of the same flags byte.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_shared_table_is_rejected() {
+        let bytes = module(&[section(4, &[0x01, 0x70, 0x02, 0x01])]);
+        assert_rejected("shared table", &bytes, &["shared table"]);
+    }
+
+    /// A table whose slots start at something other than null is modelled by an
+    /// all-null table, so it is refused instead.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_table_with_an_element_initializer_is_rejected() {
+        let bytes = wat(r#"(module (func $g) (table 1 funcref (ref.func $g)))"#);
+        assert_rejected("table init expr", &bytes, &["initializer"]);
+    }
+
+    /// Ordinary tables — defined and imported — must keep translating, or the
+    /// three rejections above would be satisfied by a guard that broke tables
+    /// outright.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ordinary_tables_still_translate() {
+        let defined = translate(&wat(r#"(module (table 1 1 funcref))"#))
+            .expect("a plain bounded table translates");
+        assert!(
+            defined.contains("lim_min := 1%N") && defined.contains("lim_max := Some(1%N)"),
+            "{defined}",
+        );
+        translate(&wat(r#"(module (import "env" "t" (table 1 funcref)))"#))
+            .expect("an imported table translates");
+    }
+
+    /// `Ma` carries no memory index, so an access to a memory other than the
+    /// first cannot be represented. Hand-encoded: `wat` will not spell a
+    /// multi-memory `memarg` in every form, and the flag lives in the alignment
+    /// byte's bit 6.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_load_from_a_second_memory_is_rejected() {
+        // i32.const 0; i32.load align=2|0x40 memidx=1 offset=0
+        let bytes = two_memory_module_with_body(&[0x41, 0x00, 0x28, 0x42, 0x01, 0x00]);
+        assert_rejected("multi-memory load", &bytes, &["multi-memory"]);
+    }
+
+    /// The three bulk-memory operators name their memories directly rather than
+    /// through a `memarg`, so each carries its own check.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn bulk_memory_operators_naming_a_second_memory_are_rejected() {
+        // memory.copy dst=1 src=0
+        assert_rejected(
+            "memory.copy destination",
+            &two_memory_module_with_body(&[
+                0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x01, 0x00,
+            ]),
+            &["multi-memory", "destination"],
+        );
+        // memory.copy dst=0 src=1
+        assert_rejected(
+            "memory.copy source",
+            &two_memory_module_with_body(&[
+                0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0a, 0x00, 0x01,
+            ]),
+            &["multi-memory", "source"],
+        );
+        // memory.fill mem=1
+        assert_rejected(
+            "memory.fill",
+            &two_memory_module_with_body(&[0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x0b, 0x01]),
+            &["multi-memory", "memory.fill"],
+        );
+    }
+
+    /// The positive control for the memory guards: the same operators against
+    /// memory 0 still emit their constructors. Without this, rejecting the whole
+    /// bulk-memory family would pass every row above.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn memory_zero_operations_still_translate() {
+        let load = translate(&wat(
+            r#"(module (memory 1) (func (result i32) i32.const 0 i32.load))"#,
+        ))
+        .expect("a load from the only memory translates");
+        assert!(load.contains("BI_load"), "{load}");
+
+        let copy = translate(&wat(
+            r#"(module (memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.copy))"#,
+        ))
+        .expect("memory.copy on the only memory translates");
+        assert!(copy.contains("BI_memory_copy"), "{copy}");
+
+        let fill = translate(&wat(
+            r#"(module (memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.fill))"#,
+        ))
+        .expect("memory.fill on the only memory translates");
+        assert!(fill.contains("BI_memory_fill"), "{fill}");
+    }
+
+    /// A tag section means the module uses exception handling. The fixture
+    /// carries no `throw` or `try_table`, so no operator arm can produce this
+    /// rejection — only the section arm can.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_tag_section_is_rejected() {
+        let bytes = wat(r#"(module (tag $e (param i32)) (func (export "f") nop))"#);
+        assert_rejected("tag section", &bytes, &["tag section"]);
+    }
+
+    /// An unrecognised section id carries content the `.v` cannot account for.
+    /// Asserting the id appears is what stops this passing for some other reason.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_unknown_section_is_rejected() {
+        let bytes = module(&[section(0x0e, &[0xaa])]);
+        assert_rejected("unknown section", &bytes, &["unknown wasm section", "14"]);
+    }
+}
+
+/// Structure the binary asserts about itself, checked against what it actually
+/// carries.
+///
+/// The translator constructs no `Validator` — the rejection fixtures elsewhere
+/// in this file are deliberately stack-invalid and must still translate — so
+/// nothing else on this path notices a module whose sections contradict each
+/// other. Each shape below previously produced a `.v`: a component binary became
+/// an empty core module complete with its `ValidModule` theorem, a body with
+/// operators after its terminating `end` was emitted truncated, and a code
+/// section longer than its function section had its extra bodies typed by a
+/// fabricated default.
+#[cfg(test)]
+mod section_consistency {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    fn translate(bytes: &[u8]) -> anyhow::Result<String> {
+        translate_bytes(
+            "Prog",
+            bytes,
+            &FxHashMap::default(),
+            &inference_hassert::HSpecMap::default(),
+        )
+    }
+
+    /// Asserts a recoverable rejection of either kind whose text names every
+    /// needle. Both variants appear here: a contradiction inside the binary is a
+    /// `WasmParse`, a construct outside the contract is an `UnsupportedFeature`.
+    fn assert_rejected(label: &str, bytes: &[u8], needles: &[&str]) {
+        let err = translate(bytes)
+            .map(|v| panic!("{label}: must be rejected, but a `.v` was emitted:\n{v}"))
+            .unwrap_err();
+        let text = match err.downcast_ref::<WasmToVError>() {
+            Some(e) => e.to_string(),
+            None => panic!("{label}: rejection must be typed, got {err:?}"),
+        };
+        let lowered = text.to_lowercase();
+        for needle in needles {
+            assert!(
+                lowered.contains(needle),
+                "{label}: the rejection must name `{needle}`; got {text:?}",
+            );
+        }
+    }
+
+    fn section(id: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![id];
+        out.push(u8::try_from(body.len()).expect("fixture section is small"));
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn module(sections: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        for s in sections {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    const TYPE_UNIT: [u8; 4] = [0x01, 0x60, 0x00, 0x00];
+
+    /// A component shares the core preamble's first four bytes and differs only
+    /// in the layer field, so it used to arrive as an empty core module — and be
+    /// emitted as one, theorem included.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_component_binary_is_rejected() {
+        let bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+        assert_rejected("component preamble", &bytes, &["component"]);
+    }
+
+    /// A core binary of an unknown version is not this format.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_unknown_core_version_is_rejected() {
+        let bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x02, 0x00, 0x00, 0x00];
+        assert_rejected("core version 2", &bytes, &["version 2"]);
+    }
+
+    /// Two type sections used to concatenate, silently shifting every type index
+    /// that follows the first.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_repeated_section_is_rejected() {
+        let bytes = module(&[
+            section(1, &TYPE_UNIT),
+            section(1, &[0x01, 0x60, 0x01, 0x7f, 0x00]),
+        ]);
+        assert_rejected("two type sections", &bytes, &["duplicate", "1"]);
+    }
+
+    /// Order carries meaning — a code section preceding its function section
+    /// describes a different module than the same sections in sequence.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sections_out_of_order_are_rejected() {
+        // memory (id 5) before table (id 4)
+        let bytes = module(&[
+            section(5, &[0x01, 0x00, 0x01]),
+            section(4, &[0x01, 0x70, 0x00, 0x01]),
+        ]);
+        assert_rejected("memory before table", &bytes, &["out of order"]);
+    }
+
+    /// The data count section is a claim about the data section.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_data_count_disagreeing_with_the_data_section_is_rejected() {
+        let bytes = module(&[
+            section(5, &[0x01, 0x00, 0x01]),
+            section(12, &[0x03]),
+            section(11, &[0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x78]),
+        ]);
+        assert_rejected("data count 3 vs 1 segment", &bytes, &["data count", "3"]);
+    }
+
+    /// Every defined function's signature comes from its function-section entry.
+    /// Both directions of the mismatch are covered: the short function section
+    /// used to have its missing entries defaulted to type 0.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_function_and_code_section_of_different_lengths_are_rejected() {
+        let more_bodies = module(&[
+            section(1, &TYPE_UNIT),
+            section(3, &[0x01, 0x00]),
+            section(10, &[0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b]),
+        ]);
+        assert_rejected(
+            "one declared, two bodies",
+            &more_bodies,
+            &["function section declares"],
+        );
+
+        let more_declared = module(&[
+            section(1, &TYPE_UNIT),
+            section(3, &[0x02, 0x00, 0x00]),
+            section(10, &[0x01, 0x02, 0x00, 0x0b]),
+        ]);
+        assert_rejected(
+            "two declared, one body",
+            &more_declared,
+            &["function section declares"],
+        );
+    }
+
+    /// A body used to be emitted truncated at its first top-level `end`, with
+    /// whatever followed silently dropped.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn operators_after_the_terminating_end_are_rejected() {
+        let bytes = module(&[
+            section(1, &[0x01, 0x60, 0x00, 0x01, 0x7f]),
+            section(3, &[0x01, 0x00]),
+            section(10, &[0x01, 0x07, 0x00, 0x41, 0x01, 0x0b, 0x41, 0x02, 0x0b]),
+        ]);
+        assert_rejected(
+            "trailing operators",
+            &bytes,
+            &["operators follow the terminating"],
+        );
+    }
+
+    /// The ordering rule's positive control, and the reason it is a rank table
+    /// rather than an id comparison: the data count section carries id 12 but
+    /// belongs between element (9) and code (10). Comparing ids directly would
+    /// reject this module — every module using bulk memory — as out of order.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_with_a_data_count_section_still_translates() {
+        let bytes = wat::parse_str(
+            r#"(module (memory 1) (data $d "x")
+                 (func i32.const 0 i32.const 0 i32.const 1 (memory.init $d)))"#,
+        )
+        .expect("bulk-memory fixture assembles");
+        assert!(
+            bytes.windows(2).any(|w| w[0] == 0x0c),
+            "the fixture must actually carry a data count section",
+        );
+        let v = translate(&bytes).expect("a data-count-bearing module must still translate");
+        assert!(v.contains("BI_memory_init"), "{v}");
+    }
+
+    /// The consistency rules must not disturb an ordinary module: one of every
+    /// core section, in order, each appearing once.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_module_using_every_section_in_order_still_translates() {
+        let bytes = wat::parse_str(
+            r#"(module
+                 (import "env" "log" (func $log (param i32)))
+                 (memory 1)
+                 (table 1 funcref)
+                 (global $g (mut i32) (i32.const 3))
+                 (data (i32.const 0) "x")
+                 (elem (i32.const 0) $run)
+                 (func $run (result i32) global.get $g)
+                 (export "run" (func $run)))"#,
+        )
+        .expect("full-section fixture assembles");
+        let v = translate(&bytes).expect("an ordinary module must translate");
+        for expected in ["Mi \"env\"", "Mm ", "Mt ", "Mg ", "moddata_init", "Me \"run\""] {
+            assert!(v.contains(expected), "missing {expected}:\n{v}");
+        }
     }
 }

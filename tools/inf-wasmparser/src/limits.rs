@@ -27,6 +27,9 @@ pub const MAX_WASM_ELEMENT_SEGMENTS: usize = 100_000;
 pub const MAX_WASM_DATA_SEGMENTS: usize = 100_000;
 pub const MAX_WASM_STRING_SIZE: usize = 100_000;
 pub const MAX_WASM_FUNCTION_SIZE: usize = 128 * 1024;
+/// Maximum number of locals one function may declare. Re-exported from the
+/// crate root, so a reader-only consumer can enforce the same bound the
+/// validator does instead of restating the number.
 pub const MAX_WASM_FUNCTION_LOCALS: usize = 50000;
 pub const MAX_WASM_FUNCTION_PARAMS: usize = 1000;
 pub const MAX_WASM_FUNCTION_RETURNS: usize = 1000;

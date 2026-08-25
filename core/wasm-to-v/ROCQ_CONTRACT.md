@@ -700,7 +700,7 @@ bypasses it.
 | Site | Renumbered how |
 | --- | --- |
 | Function bodies / `mod_funcs` list | `translate_functions` skips any absolute index `remap.is_omitted` reports; the omitted function contributes no `Definition` and no `mod_funcs` entry. A retained index is not skipped — its vanilla body translates through the normal path |
-| `mod_types` (positional type indices) | **Unchanged** — kept complete. The type section itself is untouched, so a surviving function's `modfunc_type` needs no adjustment even though its own type index may now be unused by any function |
+| `mod_types` (positional type indices) | **Unchanged** — kept complete. The type section itself is untouched, so a surviving function's `modfunc_type` needs no adjustment even though its own type index may now be unused by any function. The list holds one element per *flattened* type-section entry, in section order, so a `mod_types` position is the WASM type index by construction: a recursion group defining several types contributes one element each, and an empty `(rec)` contributes none |
 | `BI_call` operands | `translate_basic_operator`'s `Operator::Call` arm, via `remap.referenced_instantiated` |
 | Export descriptors (`MED_func`) | `translate_module_export_desc`, via `remap.referenced_instantiated` |
 | Element segments (function-index items) | `translate_element`, via `remap.referenced_instantiated`, before each index is wrapped in its `BI_ref_func` initializer expression |
@@ -1234,7 +1234,11 @@ entries are matched by name, not position.
   | vector instructions | the entire SIMD proposal, relaxed-SIMD included |
   | float-naming conversions | `trunc`, `trunc_sat`, `convert`, `demote`, `promote` and every `reinterpret` — each names a float on one side, and the contract's `cvtop` declares only the two integer-to-integer constructors |
   | `f32`, `f64`, `v128` value types | every position: parameters, results, locals, globals, block result types |
-  | unmodeled proposal families | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
+  | unmodeled proposal families, at the instruction surface | GC, exception handling (modern and legacy), stack switching, tail calls, 128-bit wide arithmetic, typed function references, `memory.discard`, segment-indexed table operations |
+  | the type section | GC struct/array and `cont` composites, declared subtyping (a non-final entry or one naming a supertype), and shared composites — a family reaching the module through a type-section entry is refused there as well as at its instructions |
+  | tables | `table64`, shared tables, and a table carrying an element initializer — `module_table` holds a table type and nothing more |
+  | multi-memory | any memory index other than `0`, whether it arrives in a load/store `memarg` or as an explicit operand of `memory.init`, `memory.copy` or `memory.fill` |
+  | sections | the tag section, component-model sections, and any unrecognised section id |
 
   The **integer-to-integer** width conversions are not rejected. They
   emit `BI_cvtop`, whose four arguments are the target number type, the

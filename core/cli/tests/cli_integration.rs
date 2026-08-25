@@ -1780,6 +1780,161 @@ fn entry_spec_trailing_underscore_compiles_in_default_mode() {
     );
 }
 
+/// An entry file whose stem is one of the helper definitions the emitted Rocq
+/// preamble always occupies is rejected in proof mode, naming the file and the
+/// rename. Emission never noticed the clash before: the `.v` was written with
+/// exit 0, and the failure surfaced only when `coqc` reported `Me already
+/// exists` and elaborated nothing in the file. The module name is the one
+/// contestant with nowhere to move to — it is the `.v`'s identity and the
+/// subject of its validity theorem — so the fix is a file rename.
+#[test]
+fn module_named_as_a_rocq_preamble_helper_rejected_no_stale_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "Me.inf", "pub fn main() -> i32 { return 0; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the output module name 'Me' is one of the helper definitions",
+        ))
+        .stderr(predicate::str::contains("'Me.inf' -> 'Me_module.inf'"))
+        .stderr(predicate::str::contains("appear verbatim in your .v"));
+
+    assert!(
+        !temp.child("out").child("Me.wasm").path().exists(),
+        "a rejected entry stem must not leave a stale out/Me.wasm behind"
+    );
+    assert!(
+        !temp.child("out").child("Me.v").path().exists(),
+        "a rejected entry stem must not leave a stale out/Me.v behind"
+    );
+}
+
+/// The rejection is scoped to proof mode: default `compile` mode emits no Rocq
+/// name at all, so the same `Me.inf` compiles cleanly to `.wasm` with no `.v`.
+#[test]
+fn module_named_as_a_rocq_preamble_helper_compiles_in_default_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "Me.inf", "pub fn main() -> i32 { return 0; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("Me.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("Me.v").path().exists(),
+        "default mode must not emit a .v"
+    );
+}
+
+/// Asserts that the emitted Rocq file gives no top-level name to two
+/// constructs. That is exactly what `coqc` refuses — `<name> already exists`,
+/// reported for the whole file, so nothing in it elaborates, including the
+/// definitions that were fine.
+///
+/// Asserted as the property rather than as the disambiguated spelling: which
+/// suffix the translator picks is a cosmetic choice, and pinning it here would
+/// turn a change to it into a false regression.
+fn assert_v_has_no_duplicate_top_level_names(v_path: &std::path::Path) {
+    let v = std::fs::read_to_string(v_path).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for line in v.lines() {
+        let Some(rest) = line
+            .strip_prefix("Definition ")
+            .or_else(|| line.strip_prefix("Theorem "))
+        else {
+            continue;
+        };
+        let name = rest
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or_default();
+        assert!(
+            seen.insert(name.to_string()),
+            "`{name}` names two top-level definitions in {}, which coqc refuses:\n{v}",
+            v_path.display(),
+        );
+    }
+}
+
+/// `main.inf` whose entry function is `main` — the standard shape in every
+/// language — must build a proof. The emitted `.v` gives `main` to the module
+/// record, so the function's own definition is disambiguated off it rather than
+/// the program being rejected: `fn main` is the language entry point and is
+/// special-cased by codegen's export rule, so renaming it is not a fix
+/// available to the user.
+#[test]
+fn entry_function_named_as_the_module_record_produces_a_duplicate_free_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "pub fn main() -> i32 { return 0; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    let v = temp.child("out").child("main.v");
+    assert!(v.path().exists(), "expected out/main.v");
+    assert_v_has_no_duplicate_top_level_names(v.path());
+}
+
+/// The same disambiguation covers a function named after one of the helper
+/// definitions the emitted preamble always occupies.
+#[test]
+fn function_named_as_a_rocq_preamble_helper_produces_a_duplicate_free_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "prog.inf",
+        "fn Me(x: i32) -> i32 { return x; }\npub fn main() -> i32 { return Me(1); }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert().success();
+
+    let v = temp.child("out").child("prog.v");
+    assert!(v.path().exists(), "expected out/prog.v");
+    assert_v_has_no_duplicate_top_level_names(v.path());
+}
+
+/// And a function named after the module's validity theorem, the third
+/// top-level name the module spends before it names any function.
+#[test]
+fn function_named_as_the_module_theorem_produces_a_duplicate_free_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "prog.inf",
+        "fn valid_prog(x: i32) -> i32 { return x; }\npub fn main() -> i32 { return valid_prog(1); }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert().success();
+
+    let v = temp.child("out").child("prog.v");
+    assert!(v.path().exists(), "expected out/prog.v");
+    assert_v_has_no_duplicate_top_level_names(v.path());
+}
+
 // Stale-artifact safety: a rejected compile must never leave a runnable
 // `out/<name>.wasm` (or `.v`) on disk for `wasmtime` to execute. After a good
 // build, a later edit that fails any rejection channel (type check, analysis,

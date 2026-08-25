@@ -69,6 +69,15 @@ mod gate {
     /// and comparison operator the obligation printer can spell into a fixture
     /// `coqc` elaborates. They are split by theme rather than merged because a
     /// gate failure should name the operator family it is about (#401).
+    ///
+    /// `rocq_name_collisions.inf` is the one entry whose module name is not just
+    /// a label: it names functions after the emitted preamble's helpers, after
+    /// the module record, and after the module's validity theorem. Every other
+    /// entry pairs a fixture with a name matching its own file stem while its
+    /// entry function is `main`, so a module name and a function name never
+    /// coincide and this gate could not see a name collision at all — an emitted
+    /// `.v` naming one `Definition` twice is refused by `coqc` outright, with
+    /// nothing in the file elaborating.
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -96,6 +105,7 @@ mod gate {
             "spec_quantifier_alternation.inf",
             "spec_quantifier_alternation",
         ),
+        ("rocq_name_collisions.inf", "rocq_name_collisions"),
     ];
 
     /// Where a linked external's `.wasm` comes from.

@@ -2,6 +2,7 @@
 //! to gate module and spec names emitted into generated `.v` files.
 
 use crate::errors::{InvalidIdentifierReason, WasmToVError};
+use rustc_hash::FxHashSet;
 
 /// Names auto-imported from the Rocq standard library whose shadowing
 /// breaks downstream proofs in subtle ways. Surfaced via the dedicated
@@ -30,6 +31,22 @@ pub(crate) const REJECTED_ROCQ_STDLIB_NAMES: &[&str] = &[
     // Well-founded recursion
     "Acc", "well_founded",
 ];
+
+/// The top-level `Definition` names the emitted preamble always occupies.
+///
+/// Every generated `.v` opens with these eight helpers before a single line of
+/// module content, so a module or function emitting one of them as its own
+/// `Definition` gives the file two definitions of one name and Rocq rejects the
+/// whole file.
+///
+/// Deliberately not folded into [`REJECTED_ROCQ_KEYWORDS`] or
+/// [`REJECTED_ROCQ_STDLIB_NAMES`]: those two list names that are illegal
+/// wherever they appear, and [`sanitize_rocq_identifier`] escapes them by
+/// appending `_`. A preamble collision is instead a property of this
+/// translator's own output, and it is rejected rather than escaped so a
+/// downstream proof naming the function never silently loses its subject.
+pub(crate) const PREAMBLE_HELPER_NAMES: &[&str] =
+    &["Vi32", "Vi64", "Mt", "Mm", "Mg", "Mi", "Me", "Ma"];
 
 /// Rocq vernacular and Gallina keywords that would cause an immediate parse
 /// error if used as an identifier. Surfaced via `InvalidIdentifierReason::ReservedKeyword`.
@@ -163,6 +180,64 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
     }
 
     Ok(())
+}
+
+/// Rejects an output module name that a preamble helper already occupies.
+///
+/// The module name has nowhere to be disambiguated to: it is the `.v` file's
+/// identity, the subject of the emitted
+/// `Theorem valid_<module> : ValidModule <module>`, and the prefix of every
+/// spec-derived proof name. Renaming it silently would rename the artifact a
+/// downstream proof imports, so the name is rejected with a hint instead.
+///
+/// The preamble helpers are the only names the module name can contest. It
+/// cannot spell a spec-derived name (`<module>__<spec>_specs` and its
+/// siblings), because [`validate_rocq_identifier`] has already rejected the
+/// `__` separator every one of them carries; and `valid_<module>` is derived
+/// from it rather than competing with it.
+pub(crate) fn validate_module_name_available(name: &str) -> Result<(), WasmToVError> {
+    if PREAMBLE_HELPER_NAMES.contains(&name) {
+        return Err(WasmToVError::ModuleNameShadowsPreambleHelper {
+            name: name.to_string(),
+            fix_hint: format!("{name}_module"),
+        });
+    }
+    Ok(())
+}
+
+/// The top-level Rocq names an emitted module claims before it names a single
+/// function: the preamble helpers, the `Definition <module> : module` record,
+/// and the `Theorem valid_<module>` that judges it.
+///
+/// Seeded into the function-name disambiguator so a function `Definition` can
+/// never claim one of them. Renaming the *function* is the right resolution and
+/// renaming the module would be the wrong one: a function's emitted name is
+/// read only from `mod_funcs`, and an obligation's `T_app` resolves its callee
+/// through the raw name section to an index rather than through the Rocq name,
+/// so a disambiguated spelling reaches nothing downstream. The module name, by
+/// contrast, *is* the artifact's identity — the `.v`'s subject, the
+/// `ValidModule` argument, and the prefix of every spec-derived proof name — so
+/// a collision on it is rejected instead, by
+/// [`validate_module_name_available`].
+///
+/// The set is complete, not merely sufficient. The preamble emits exactly the
+/// eight helpers in [`PREAMBLE_HELPER_NAMES`] and nothing else, and every other
+/// top-level name an emitted module carries is one of three things: the module
+/// record, the `valid_<module>` theorem, or a spec-derived name.
+///
+/// The spec-derived names (`<module>__<spec>_specs`, `valid_<module>__<spec>`,
+/// and their reachability siblings) need no seat here: every one of them
+/// carries the `__` separator, and [`sanitize_rocq_identifier`] collapses every
+/// `__` run, so a sanitized function name can never spell one.
+#[must_use = "the reserved set is the seed for function-name disambiguation"]
+pub(crate) fn reserved_top_level_names(mod_name: &str) -> FxHashSet<String> {
+    let mut reserved: FxHashSet<String> = PREAMBLE_HELPER_NAMES
+        .iter()
+        .map(|helper| (*helper).to_string())
+        .collect();
+    reserved.insert(mod_name.to_string());
+    reserved.insert(format!("valid_{mod_name}"));
+    reserved
 }
 
 /// Validates that joining `mod_name` and `spec_name` into the emitted Rocq
