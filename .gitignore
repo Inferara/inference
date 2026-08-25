@@ -22,6 +22,21 @@ Cargo.lock
 # negation a new stub file is silently skipped by `git add` (the pre-existing
 # stub files were only ever tracked via a historical force-add).
 !/core/wasm-to-v/rocq-stub/**/*.v
+
+# Rocq build outputs. `coqc` writes them next to the source it compiles, so
+# building the vendored stub in place — or checking an emitted `.v` beside a
+# committed golden — drops them straight into a tracked directory. The forms
+# Rocq dot-prefixes (`.<module>.aux`, `.lia.cache`, and a `.coq-native/`
+# directory under native compilation) are already caught by the blanket `.*`
+# rule below; the two spellable here are named anyway so the artifact set stays
+# readable in one place and survives any narrowing of that rule.
+*.vo
+*.vok
+*.vos
+*.glob
+*.aux
+.lia.cache
+
 out
 test_data/**/*.json
 

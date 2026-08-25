@@ -287,6 +287,12 @@ pub fn main() -> i32 {
 /// by extension while keeping the directory (and any hand-authored files)
 /// tracked — rather than ignoring all of `/proofs/`, which would drop
 /// `.gitkeep` and any curated proof sources.
+///
+/// The Rocq patterns are deliberately unanchored where the proof patterns are
+/// anchored to `/proofs/`. A `.v` is something a person can write, so where it
+/// lives decides whether it is output; `coqc`'s own products have no
+/// hand-authored form anywhere, and it writes them beside whichever source it
+/// was handed rather than into an output directory.
 fn gitignore_content() -> String {
     String::from(
         r"# Build outputs
@@ -297,6 +303,15 @@ fn gitignore_content() -> String {
 # Keep proofs/ and curated sources tracked; ignore only generated files.
 /proofs/*.wasm
 /proofs/*.v
+
+# Rocq build outputs, written beside the `.v` that `coqc` is handed.
+*.vo
+*.vok
+*.vos
+*.glob
+*.aux
+.lia.cache
+.coq-native/
 
 # IDE and editor files
 .idea/
@@ -526,6 +541,78 @@ mod tests {
         assert!(
             !content.contains("/proofs/\n") && !content.contains("/proofs/ "),
             "must not ignore the whole proofs/ directory (would drop .gitkeep)"
+        );
+    }
+
+    /// The scaffolded ignore rules must hide what `coqc` writes, not only what
+    /// `infs` emits. Checking a generated proof by hand leaves a `.vo`, a
+    /// `.glob` and a dot-prefixed `.<module>.aux` beside every `.v` compiled,
+    /// which is three files per module dropped into the project.
+    ///
+    /// This runs `git status` against a real scaffolded repository instead of
+    /// matching the template text, because the failure mode is a pattern that
+    /// reads correctly and matches nothing: Rocq names its auxiliary file
+    /// `.main.aux`, not `main.aux`, and anchoring the rules under `/proofs/`
+    /// would miss a proof compiled anywhere else. Listing `src/main.inf` is
+    /// what keeps the assertion honest — without it a `git status` that
+    /// reported nothing at all would pass.
+    #[test]
+    fn test_gitignore_hides_rocq_build_artifacts() {
+        let parent = temp_dir();
+        let project = create_project("rocq_artifacts", Some(parent.path()), true)
+            .expect("scaffold a git-enabled project");
+        assert!(
+            project.join(".git").exists(),
+            "this test needs a real repository, and `git init` produced none \
+             (is `git` on PATH?)"
+        );
+
+        // One full set of `coqc` products under the default output directory,
+        // plus a proof compiled outside it, plus the two artifacts a solver
+        // cache and native compilation add at the project root.
+        let artifacts = [
+            "proofs/main.vo",
+            "proofs/main.vok",
+            "proofs/main.vos",
+            "proofs/main.glob",
+            "proofs/.main.aux",
+            "src/hand_written.vo",
+            "src/hand_written.glob",
+            ".lia.cache",
+            ".coq-native/Nmain.cmi",
+        ];
+        for rel in artifacts {
+            let path = project.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap_or_else(|e| panic!("write {rel}: {e}"));
+        }
+
+        let output = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(&project)
+            .output()
+            .expect("run git status in the scaffolded project");
+        assert!(output.status.success(), "git status failed in {project:?}");
+        let status = String::from_utf8_lossy(&output.stdout);
+
+        // Porcelain v1 is `XY <path>`; compare whole paths so a leaked
+        // `main.vok` is not reported against `main.vo`, which is its prefix.
+        let reported: Vec<&str> = status
+            .lines()
+            .filter_map(|line| line.get(3..))
+            .map(str::trim)
+            .collect();
+
+        for rel in artifacts {
+            assert!(
+                !reported.contains(&rel),
+                "`{rel}` is a coqc build artifact and must not reach git status:\n{status}"
+            );
+        }
+        assert!(
+            reported.contains(&"src/main.inf"),
+            "git status reported no scaffolded source, so the assertions above \
+             proved nothing:\n{status}"
         );
     }
 
