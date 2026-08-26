@@ -1037,3 +1037,62 @@ fn the_narrow_fixtures_carry_every_row_of_the_domain_table() {
         "spec_narrow_abi.inf no longer bounds an `i8` at the declaration boundary"
     );
 }
+
+/// A non-constant array index inside an `exists`/`unique` body fails the whole
+/// proof-mode build (`P016`), and its constant-index counterpart does not.
+///
+/// The unit tests read the diagnostic list the translation pass returns; this
+/// reads what a user gets. It pins the two halves the pass alone cannot show:
+/// that the diagnostic is *fatal* rather than collected and dropped, and that
+/// the accepted shape really does reach the translator through real code
+/// generation — an acceptance the reachability pre-scan or body lowering
+/// rejected first would prove nothing about `P016`'s scope.
+#[test]
+fn a_non_constant_index_in_a_reachability_body_fails_the_proof_build() {
+    let program = |index: &str| {
+        format!(
+            "fn main() -> i32 {{ return 0; }}
+             spec S {{
+               fn f(i: i32) exists {{
+                 let a: [i32; 2] = [1, 2];
+                 let n: i32 = @;
+                 assert(a[{index}] == n);
+               }}
+             }}"
+        )
+    };
+    let error =
+        codegen_with_target_mode_no_analysis(&program("i"), Target::Wasm32, CompilationMode::Proof)
+            .expect_err("a non-constant index in an `exists` body must fail the proof-mode build");
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("error[P016]"), "{rendered}");
+    assert!(
+        rendered.contains("has no place in an `exists`-quantified spec function"),
+        "{rendered}"
+    );
+
+    let accepted = proof_hspecs(&program("0"));
+    assert_eq!(sole_obligation(&accepted, "S"), teq(i32c(1), local(1)));
+}
+
+/// `P016` is a proof-mode diagnostic. Compile mode derives no obligations at
+/// all, so the same program still builds — the rejection costs the deployed
+/// artifact nothing.
+#[test]
+fn a_non_constant_index_in_a_reachability_body_still_compiles_in_compile_mode() {
+    let source = "fn main() -> i32 { return 0; }
+         spec S {
+           fn f(i: i32) exists {
+             let a: [i32; 2] = [1, 2];
+             let n: i32 = @;
+             assert(a[i] == n);
+           }
+         }";
+    let output =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Compile)
+            .expect("compile mode derives no obligations, so `P016` cannot reject it");
+    assert!(
+        output.hspecs().is_empty(),
+        "compile mode must derive no obligations at all"
+    );
+}

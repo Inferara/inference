@@ -409,13 +409,11 @@ pub(crate) struct Compiler {
     /// render to the same string into one slot.
     frame_sizes: FxHashMap<FnKey, u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
-    /// bounds-check guard (`index >= length → unreachable`). Derived in
-    /// Set by [`crate::codegen`] for every Compile-mode build (the deployed
-    /// artifact is always checked); left `false` in Proof mode and at
-    /// `Compiler::new` call sites so those paths stay unguarded.
+    /// bounds-check guard (`index >= length → unreachable`). Default `false`;
+    /// see [`Self::set_emit_bounds_checks`] for who enables it and why.
     emit_bounds_checks: bool,
     /// WASM local index of the scratch i32 used to single-evaluate a dynamic
-    /// array index for the bounds-check guard (AD-3). Reserved per-function in
+    /// array index for the bounds-check guard. Reserved per-function in
     /// [`Self::visit_function_definition`] only when `emit_bounds_checks` is set
     /// and the body actually contains a dynamic array index (the only case that
     /// emits a guard); `None` otherwise — including for constant-index-only and
@@ -428,8 +426,10 @@ pub(crate) struct Compiler {
     /// body actually contains a narrow signed division (the only case that emits
     /// the guard), so functions without one stay byte-identical; `None`
     /// otherwise. A dedicated local — not shared with the bounds-check scratch —
-    /// preserves each guard's single-owner invariant. Unlike the bounds scratch
-    /// it is not mode-gated: the guard emits in both Compile and Proof modes.
+    /// preserves each guard's single-owner invariant. Reservation differs from
+    /// the bounds scratch in one way only: this one asks nothing but the body,
+    /// while that one is additionally gated on `emit_bounds_checks`. Neither
+    /// guard is mode-gated — both emit in Compile and Proof modes alike.
     /// Reset per function alongside the rest of the per-function state.
     narrow_div_scratch_local: Option<u32>,
     /// Names of the compound (array or struct) parameters of the function
@@ -700,10 +700,32 @@ impl Compiler {
 
     /// Enables or disables runtime array bounds-check emission.
     ///
-    /// [`crate::codegen`] enables it for every Compile-mode build (so the
-    /// deployed artifact always traps on a dynamic out-of-range access) and
-    /// leaves it `false` in Proof mode. Test call sites of [`Self::new`] keep
-    /// the default `false`, so their emitted bytes stay unguarded.
+    /// [`crate::codegen`] enables it for every build it drives — Compile and
+    /// Proof, Debug and Release, Wasm32 and Soroban. A dynamic out-of-range
+    /// access therefore traps cleanly instead of corrupting adjacent frame
+    /// slots, and the artifact a proof is written about is byte-for-byte the
+    /// artifact that ships.
+    ///
+    /// Proof mode used to be the one unguarded build, which made its `.v` weaker
+    /// than the deployed module on exactly the property the language exists to
+    /// establish: a dynamic `arr[i]` lowered to a bare load or store carrying no
+    /// side condition, leaving the emitted `.v` nothing to be *about*. The guard
+    /// supplies that trap site, and the obligation forcing `index <u length` is
+    /// one the contract already carries — the `HA_app_ok` / `T_app` realization
+    /// claim, whose meaning runs through `interp_realized` to `fun_computes`, a
+    /// total-correctness judgment no trapping reduction satisfies. The narrow
+    /// signed-division overflow guard has always been emitted in both modes; a
+    /// bounds guard was the outlier.
+    ///
+    /// The parameter survives rather than being folded away, but not because a
+    /// later elision would flip it. #215's elision is decided per *access*,
+    /// inside [`Self::emit_index_offset`], which stays the single seam every
+    /// guarded access passes through; a whole-compilation boolean cannot
+    /// express that, and would still be `true` for every module under it. What
+    /// keeps the parameter is that [`Compiler`] is a library type whose
+    /// in-crate tests exercise both settings — test call sites of
+    /// [`Self::new`] keep the default `false`, so their emitted bytes stay
+    /// unguarded.
     pub(crate) fn set_emit_bounds_checks(&mut self, enabled: bool) {
         self.emit_bounds_checks = enabled;
     }
@@ -1588,15 +1610,15 @@ impl Compiler {
         }
 
         // Reserve an i32 scratch local for the bounds-check guard so a dynamic
-        // array index can be single-evaluated via `local.tee` (AD-3). It is
-        // reserved iff the function actually contains a dynamic index (the only
-        // case that emits a guard), independent of whether a frame exists: an
+        // array index can be single-evaluated via `local.tee`. It is reserved
+        // iff the function actually contains a dynamic index (the only case
+        // that emits a guard), independent of whether a frame exists: an
         // immutable-`self` method like `self.arr[idx]` needs no frame slot yet
         // still emits the guard. Tying the reservation to guard emission keeps
         // constant-index-only functions byte-identical to an unchecked build.
         // The scratch sits at the next free local after the named locals and the
         // optional frame-pointer temp, so its index and its push order agree.
-        if self.emit_bounds_checks && Self::body_has_dynamic_array_index(arena, body_id) {
+        if self.emit_bounds_checks && self.body_has_dynamic_array_index(arena, body_id, ctx) {
             local_declarations.push((1, ValType::I32));
             self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
@@ -1611,8 +1633,9 @@ impl Compiler {
         // invariant. The scratch sits at the next free local after the named
         // locals, the optional frame-pointer temp, and the optional bounds
         // scratch, so its index and its push order agree. Unlike the bounds
-        // scratch this is not gated on `emit_bounds_checks`: division overflow
-        // must trap in both Compile and Proof modes.
+        // scratch this is not gated on `emit_bounds_checks`, the switch a module
+        // whose bounds are discharged statically may one day flip: division
+        // overflow must trap in every build, and no static argument retires it.
         if Self::body_has_narrow_signed_div(arena, body_id, ctx) {
             local_declarations.push((1, ValType::I32));
             self.narrow_div_scratch_local = Some(
@@ -2100,23 +2123,47 @@ impl Compiler {
         }
     }
 
-    /// Returns `true` if the function body contains at least one *dynamic* array
-    /// index — an `Expr::ArrayIndexAccess` whose index is not a numeric literal.
+    /// Returns `true` if the function body contains at least one array index
+    /// that [`Self::emit_index_offset`] lowers *dynamically* — exactly the set
+    /// of accesses that emit a bounds-check guard.
     ///
-    /// A non-`NumberLiteral` index is exactly the case that takes the dynamic
-    /// branch of [`Self::emit_index_offset`] and therefore emits a bounds-check
-    /// guard. The bounds-check scratch local is reserved iff this returns `true`
-    /// (and `emit_bounds_checks` is set), so functions that only index by
-    /// constants reserve no scratch and stay byte-identical to an unchecked
-    /// build, while a dynamic index — even through an immutable-`self` method
-    /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
-    fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
+    /// The bounds-check scratch local is reserved iff this returns `true` (and
+    /// `emit_bounds_checks` is set), so functions that only index by constants
+    /// reserve no scratch and stay byte-identical to an unchecked build, while a
+    /// dynamic index — even through an immutable-`self` method like
+    /// `self.arr[idx]` that needs no frame slot — still gets its scratch.
+    ///
+    /// What counts as dynamic is not restated here: the scan asks
+    /// [`try_const_index_byte_offset`], the function emission itself branches
+    /// on, against the element size emission itself uses. Paraphrasing it as
+    /// "the index is not a number literal" is subtly wrong, and wrong in the
+    /// direction that aborts code generation — a literal that does not parse as
+    /// `i32`, or whose byte offset overflows one, folds to nothing and takes the
+    /// dynamic branch, so a body holding only such an index would reserve no
+    /// scratch and then hit the guard's `expect`. Analysis rule A037 rejects
+    /// those indices, but it is a separate pass that codegen entry points can
+    /// skip, so the two decisions have to agree on their own.
+    ///
+    /// An access whose element size is unavailable answers `false`: every way
+    /// the size can go missing is one emission resolves with an `expect` that
+    /// fires *before* the guard, so no unreserved guard can follow from it.
+    fn body_has_dynamic_array_index(
+        &self,
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+    ) -> bool {
         Self::body_has_expr(arena, block_id, &mut |arena, expr_id| {
-            matches!(
-                &arena[expr_id].kind,
-                Expr::ArrayIndexAccess { index, .. }
-                    if !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
-            )
+            let Expr::ArrayIndexAccess { index, .. } = &arena[expr_id].kind else {
+                return false;
+            };
+            let Some(elem_type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) else {
+                return false;
+            };
+            let Ok(elem_sz) = self.array_index_elem_size(&elem_type_info.kind, ctx) else {
+                return false;
+            };
+            try_const_index_byte_offset(arena, *index, elem_sz).is_none()
         })
     }
 
@@ -4650,11 +4697,11 @@ impl Compiler {
         );
 
         let array_len = Self::array_length(array_expr_id, ctx);
+        let elem_sz = self
+            .array_index_elem_size(&elem_type_info.kind, ctx)
+            .expect("array index write: element size unavailable for a typed access node");
 
         if is_compound_element {
-            let elem_sz = type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
-                .expect("array index write: type_byte_size failed for compound element");
-
             // dest: array_base + index * struct_size
             self.lower_expression(arena, array_expr_id, ctx, None);
             self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
@@ -4662,7 +4709,6 @@ impl Compiler {
             self.lower_expression(arena, right_expr_id, ctx, None);
             self.emit_memory_copy(elem_sz);
         } else {
-            let elem_sz = memory::element_size(&elem_type_info.kind);
             let store_instr = memory::store_instruction(&elem_type_info.kind);
 
             self.lower_expression(arena, array_expr_id, ctx, None);
@@ -4816,12 +4862,9 @@ impl Compiler {
             TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
-        let elem_sz = if is_compound_element {
-            type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
-                .expect("array index access: type_byte_size failed for compound element")
-        } else {
-            memory::element_size(&elem_type_info.kind)
-        };
+        let elem_sz = self
+            .array_index_elem_size(&elem_type_info.kind, ctx)
+            .expect("array index access: element size unavailable for a typed access node");
 
         let array_len = Self::array_length(array_expr_id, ctx);
 
@@ -4834,13 +4877,55 @@ impl Compiler {
         }
     }
 
+    /// Returns the byte size an array index into an element of `elem_kind` is
+    /// scaled by — the size [`Self::emit_index_offset`] multiplies a dynamic
+    /// index by and folds a constant index against.
+    ///
+    /// Compound elements (a struct, a nested array) are sized by their computed
+    /// layout, scalars by their storage width. The two differ, and a constant
+    /// fold overflows at a different index for each, so anything that has to
+    /// agree with emission about whether an index folds must ask this rather
+    /// than assume a width.
+    ///
+    /// Returns `Err` only for a compound element whose layout cannot be
+    /// computed — a cycle, or a struct the type context does not hold. That is a
+    /// compiler bug, and the error is typed so the emission sites can name which
+    /// one; a caller merely *predicting* whether a guard will be emitted may
+    /// read it as "no guard", since emission aborts on it first either way.
+    ///
+    /// A *scalar* element outside the widths [`memory::element_size`] knows
+    /// panics there rather than returning here — its `_` arm is a `todo!`. The
+    /// type checker admits only those widths as array elements, so no source
+    /// reaches it, but the panic is now also reachable from
+    /// [`Self::body_has_dynamic_array_index`], which asks this question for
+    /// every indexed access in every body code generation drives. That moves the
+    /// panic earlier in a build that would have hit it at emission anyway, and
+    /// only in a build with the guard enabled — the scan is short-circuited
+    /// behind `emit_bounds_checks`.
+    fn array_index_elem_size(
+        &self,
+        elem_kind: &TypeInfoKind,
+        ctx: &TypedContext,
+    ) -> Result<u32, CodegenError> {
+        if matches!(
+            elem_kind,
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+        ) {
+            type_byte_size(elem_kind, ctx, &self.current_module_path)
+        } else {
+            Ok(memory::element_size(elem_kind))
+        }
+    }
+
     /// Returns the length of the array that `array_expr_id` evaluates to, when
     /// the type checker stamped an `Array(_, length)` type on that sub-expression.
     ///
     /// The element-type info on the `ArrayIndexAccess` node discards the length;
     /// the array sub-expression retains it. Returns `None` for any other type
-    /// (e.g. an unresolved expression), in which case the bounds-check guard is
-    /// skipped rather than panicking.
+    /// (e.g. an unresolved expression), in which case
+    /// [`Self::emit_bounds_check_guard`] skips the guard rather than panicking —
+    /// under a `debug_assert`, because a skipped guard is a silently unchecked
+    /// access.
     fn array_length(array_expr_id: ExprId, ctx: &TypedContext) -> Option<u32> {
         match ctx.get_node_typeinfo(NodeId::Expr(array_expr_id)) {
             Some(TypeInfo {
@@ -4853,12 +4938,26 @@ impl Compiler {
 
     /// Emits the byte-offset computation for an array index expression.
     ///
-    /// On entry the array base address is already on the WASM stack. For a
-    /// constant index the offset folds to an `i32.const` add (no runtime guard —
-    /// constant indices are validated statically by analysis rule A037, AD-5).
-    /// For a dynamic index the runtime index is lowered, then — when
-    /// `emit_bounds_checks` is set and `array_len` is known — a bounds-check
-    /// guard traps before the offset multiply (AD-3, AD-4).
+    /// On entry the array base address is already on the WASM stack. An index
+    /// that folds to a static byte offset is added as an `i32.const` and carries
+    /// no runtime guard: analysis rule A037 validates a constant index
+    /// statically, and a guard over a statically-known index would have nothing
+    /// left to decide. Every other index is lowered at runtime, guarded by
+    /// [`Self::emit_bounds_check_guard`] when `emit_bounds_checks` is set and
+    /// `array_len` is known, and only then scaled and added.
+    ///
+    /// [`try_const_index_byte_offset`] is the single place that fold is decided.
+    /// [`Self::body_has_dynamic_array_index`], which reserves the guard's
+    /// scratch local, asks that same function against the same element size, so
+    /// no index this function lowers dynamically can find the scratch missing.
+    ///
+    /// The two are not equivalent, only ordered. Emission additionally requires
+    /// a known `array_len`, so a body may reserve a scratch for an index whose
+    /// guard is then skipped — an unused local, and byte drift against an
+    /// unchecked build, but nothing that reads a stack slot that was never
+    /// written. [`Self::emit_bounds_check_guard`] carries the `debug_assert`
+    /// that watches for that direction; the direction that would matter, a guard
+    /// with no scratch, is what the shared fold decision rules out.
     fn emit_index_offset(
         &mut self,
         arena: &AstArena,
@@ -4900,18 +4999,42 @@ impl Compiler {
     /// ```
     ///
     /// The empty-result `if` leaves `base` and `index` untouched on the stack,
-    /// so the caller's offset multiply proceeds unchanged. No guard is emitted
-    /// when `emit_bounds_checks` is unset or `array_len` is unknown (the offset
-    /// computation stays valid either way).
+    /// so the caller's offset multiply proceeds unchanged. Nothing is emitted
+    /// when `emit_bounds_checks` is unset; the offset computation stays valid.
+    ///
+    /// The guard is emitted in Proof mode as well as Compile mode. In an emitted
+    /// `.v` it is the trap site that a realization obligation over the enclosing
+    /// function — a total-correctness claim, which no trapping reduction
+    /// satisfies — turns into the side condition `index <u length`. Suppressing
+    /// it there would prove a different program than the one that ships.
+    ///
+    /// A requested guard whose `array_len` is unknown is the one way this
+    /// emission can silently fall short of what the caller asked for: the access
+    /// lowers to a bare load or store carrying no side condition, which in Proof
+    /// mode is precisely the gap the guard exists to close, and no diagnostic
+    /// names it. No source is known to produce it — the length comes from the
+    /// same type info that made the access an array access — so it is a
+    /// `debug_assert` rather than a diagnostic, and the next source that does
+    /// produce it fails a test instead of shipping unguarded bytes.
     fn emit_bounds_check_guard(&mut self, array_len: Option<u32>) {
-        let Some(length) = array_len.filter(|_| self.emit_bounds_checks) else {
+        if !self.emit_bounds_checks {
+            return;
+        }
+        debug_assert!(
+            array_len.is_some(),
+            "a dynamic array index was lowered with no known array length, so no bounds guard \
+             could be emitted for it: the access reaches memory with no side condition, which in \
+             Proof mode is the very gap the guard exists to close"
+        );
+        let Some(length) = array_len else {
             return;
         };
         cov_mark::hit!(wasm_codegen_emit_bounds_check);
 
         let scratch = self.bounds_check_scratch_local.expect(
-            "bounds-check scratch local must be reserved: a dynamic array index implies a frame \
-             layout, which reserves the scratch under emit_bounds_checks",
+            "bounds-check scratch local must be reserved: the reservation scan and this guard \
+             classify an index through the same try_const_index_byte_offset call, so a guarded \
+             access implies a reserved scratch",
         );
 
         #[allow(clippy::cast_possible_wrap)]
@@ -7003,12 +7126,71 @@ mod tests {
         let mut compiler = Compiler::new("test");
         assert!(
             !compiler.emit_bounds_checks,
-            "bounds checks must default off so Proof mode / Compiler::new output stays unguarded"
+            "bounds checks must default off so bare `Compiler::new` output stays unguarded"
         );
         compiler.set_emit_bounds_checks(true);
         assert!(compiler.emit_bounds_checks);
         compiler.set_emit_bounds_checks(false);
         assert!(!compiler.emit_bounds_checks);
+    }
+
+    /// The typed context and body block of the free function `f` in `source`.
+    fn typed_body_of_f(source: &str) -> (TypedContext, BlockId) {
+        let parsed = inference_parser::parse(source);
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}\nsource:\n{source}",
+            parsed.errors
+        );
+        let ctx = inference_type_checker::TypeCheckerBuilder::build_typed_context(parsed.arena)
+            .expect("type checking should succeed")
+            .typed_context();
+        let body_id = {
+            let arena = ctx.arena();
+            arena
+                .source_files()
+                .flat_map(|file| file.defs.iter().copied())
+                .find_map(|def_id| match &arena[def_id].kind {
+                    Def::Function { name, body, .. } if arena[*name].name == "f" => Some(*body),
+                    _ => None,
+                })
+                .expect("function `f` must be present")
+        };
+        (ctx, body_id)
+    }
+
+    /// The scratch-local reservation and the offset fold have to classify an
+    /// index identically: emission guards exactly the accesses whose byte offset
+    /// does not fold, and a guard whose scratch was never reserved aborts code
+    /// generation.
+    ///
+    /// Three of the rows below are the ones a "the index is a number literal,
+    /// therefore constant" paraphrase gets wrong. `2147483648` does not parse as
+    /// `i32` at all. `536870912` folds against a 2-byte element and overflows
+    /// the `i32` byte offset against a 4-byte one, so the answer depends on the
+    /// element size and not on the literal alone. Analysis rule A037 rejects all
+    /// three, but it is a separate pass that codegen entry points can skip.
+    #[test]
+    fn reservation_scan_matches_the_offset_fold_on_literal_indices() {
+        for (index, elem_ty, expected_dynamic) in [
+            ("0", "i32", false),
+            ("3", "i32", false),
+            ("i", "i32", true),
+            ("2147483648", "i32", true),
+            ("536870912", "i16", false),
+            ("536870912", "i32", true),
+        ] {
+            let source = format!(
+                "pub fn f(i: u32) -> {elem_ty} {{\n    let arr: [{elem_ty}; 4] = [1, 2, 3, 4];\n    return arr[{index}];\n}}\n"
+            );
+            let (ctx, body_id) = typed_body_of_f(&source);
+            let compiler = Compiler::new("test");
+            assert_eq!(
+                compiler.body_has_dynamic_array_index(ctx.arena(), body_id, &ctx),
+                expected_dynamic,
+                "arr[{index}] on [{elem_ty}; 4]"
+            );
+        }
     }
 
     fn has_memory_section(wasm: &[u8]) -> bool {

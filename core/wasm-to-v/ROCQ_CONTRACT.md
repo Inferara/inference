@@ -437,7 +437,10 @@ Notes on the shape, in emission order:
   `spec { }`) emits `(@nil hassert)` instead — explicitly typed so the
   `Definition` type-checks regardless of the consumer's `Require` order.
 - **`Section Host` block**: always opens with the 1-ary `ValidModule`
-  theorem (emitted for every module, spec-bearing or not), then one
+  theorem (emitted for every module, spec-bearing or not — it is
+  structural typing and asserts nothing operational, least of all
+  trap-freedom; see
+  [Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot)), then one
   `ValidSpec` theorem per spec, each named `valid_<mod>__<Spec>` and
   consuming that spec's `_specs` definition. Every theorem carries an
   unfilled `(* TODO: fill the proof *)` body terminated by `Qed.` — the
@@ -1039,6 +1042,268 @@ whose obligations apply no symbols translates without any name section,
 but a stripped or rewritten name section turns a reachability-bearing
 module into a clean `HspecInconsistent` error.
 
+## Trap-freedom: what carries it, and what cannot
+
+An emitted `.v` carries no module-wide "this program never traps" claim,
+and no such claim could be added. `BI_unreachable` is emitted for six
+different reasons, three of which are traps the program is *supposed* to
+be able to take; the roles cannot be told apart by looking at the
+instruction. What does force trap-freedom is the application channel —
+`HA_app_ok` and `T_app` — per (function, argument vector), and only
+where a specification claimed it.
+
+### `BI_unreachable` is overloaded
+
+`core/wasm-codegen/src/compiler.rs` emits it from five sites carrying six
+roles (the `assert` lowering serves two, one executable and one
+specificational):
+
+| Emitter | Role | When it is reached |
+| --- | --- | --- |
+| `visit_function_definition_body`, tail of a value-returning function | Dead tail: every path already exited through its own epilogue, and `unreachable` is stack-polymorphic, so the implicit `end` still validates | Never, given analysis rule A007 — which an entry point that skips analysis does not run |
+| `lower_assert_statement` in an executable function | An ordinary `assert(c)`. Trapping when `c` is false is the statement's entire purpose | Whenever the program asserts something false |
+| `lower_assert_statement` inside a retained `exists`/`unique` body | A reachability filter: the body's `assert`s and those of its `assume` blocks compile to trap-on-false, and the judgment counts only choice vectors that reduce normally | On exactly the choice vectors the specification filters out — the mechanism its obligation is built on |
+| `emit_bounds_check_guard` | `index >=u length`, before a dynamic array element's offset multiply. Emitted in **both** modes | Only on an out-of-range index |
+| `emit_narrow_div_overflow_guard` | Signed `i8`/`i16` division at the one quotient the narrow width cannot hold. Emitted in **both** modes, and never was mode-gated | Only at `MIN / -1` |
+| `emit_entry_enum_tag_guard` | An exported entry's `enum` parameter carrying a tag outside the declared variant range — a host may pass any `i32` | Only on an out-of-range host argument; on *every* call for a variantless enum, which is uninhabited |
+
+A blanket "no reachable `BI_unreachable`" component on a module-level
+judgment would therefore be **false by construction** for programs the
+language intends to accept. It would make `assert` — the language's own
+way of stating a runtime precondition — unusable in proof mode, and it
+would falsify every reachability obligation at once, since a retained
+body traps on precisely the vectors its filters reject.
+
+The last three rows are the opposite case: a *conditional* trap whose
+condition is a property worth proving. Those are what an obligation can
+usefully range over — but only an obligation that reduces the body, and
+only at the arguments some specification actually named.
+
+### `ValidModule` neither asserts nor can assert it
+
+Downstream:
+
+```coq
+Definition ValidModule (m : module) : Prop :=
+  exists impts expts, module_typing m impts expts.
+```
+
+WasmCert's structural typing judgment and nothing more: it reduces no
+instruction, so no property of any *execution* is expressible in it. Two
+consequences a reader of an emitted file should hold on to:
+
+- it is emitted for **every** module, spec-bearing or not; and
+- for a module with no `spec` block it is the *only* theorem in the
+  `Section Host` block. Such a file states that the module type-checks.
+  It states nothing about what the module does.
+
+### `ValidSpec` cannot carry it in its payload either
+
+`ValidSpec` is denotational: it reduces nothing, and the spec function's
+compiled body plays no part in it (see
+[Two judgments](#two-judgments-validspec-versus-the-reachability-predicates)).
+Its valuation quantifier is also why the trap-freedom channel is the one
+it is:
+
+```coq
+Definition ValidSpec_universal (m : module) (hspecs : seq hassert) : Prop :=
+  forall aheap,
+  exists FI : fun_interp,
+    interp_realized_universal m FI /\
+    forall V, val_fun V = FI ->
+      Forall (fun hspec => hassert_denote V (ktrue hspec) aheap) hspecs.
+```
+
+The valuation's *local* readouts (`val_loc`) are unconstrained, which is
+why every slot readout must carry its own `HA_has_type` guard. Its
+*function interpretation* (`val_fun`) is not: it is pinned to an `FI`
+the same statement requires to be realized. Everything operational a
+`ValidSpec` obligation can say therefore travels through the application
+channel, and nowhere else.
+
+#### Which realization branch a frame-bearing body must take
+
+`ValidSpec_universal` is one half of the public predicate, and it is the
+half a compiled body usually cannot use:
+
+```coq
+Definition ValidSpec (m : module) (hspecs : seq hassert) : Prop :=
+  ValidSpec_universal m hspecs \/
+  exists rt : module_runtime m, ValidSpec_at rt hspecs.
+```
+
+`ValidSpec_at` is the same statement with `interp_realized_at rt FI` in
+place of `interp_realized_universal m FI`, and `interp_realized` is the
+matching disjunction one level down. The difference is what a
+realization claim is checked against. `interp_realized_universal`
+demands `fun_computes`, which reduces the body under `sem_mx (triv_ctx
+m)` — a context carrying no assumptions and no module instance, so the
+claim has to hold in *every* store. `interp_realized_at` demands
+`fun_computes_at rt`, which reduces it in the frame WebAssembly actually
+creates, under the one instance that resolves calls and owns globals and
+memory. Verifier.v says as much on `fun_computes` itself: bodies whose
+result depends on globals, memory, or `BI_call` use `fun_computes_at`
+instead.
+
+A function that owns a frame is in that class, and code generation gives
+one to every function needing memory — an array, a struct, a written
+compound parameter. Such a body opens with the shadow-stack prologue
+(`BI_global_get 0`, subtract the frame size, `BI_global_set 0`) and then
+stores through the pointer that produces. Nothing on the frame-universal
+branch pins global 0, so the store with global 0 = 0 sends the prologue
+to a negative frame pointer and traps on the first write: the left
+disjunct is refutable for any frame-bearing body. A theorem about one
+has to take the right disjunct, the way wasm-verifier's own
+`theories/examples/E2ECallSpec.v` does:
+
+```coq
+Theorem valid_e2e_call__CallSpec :
+  ValidSpec e2e_call e2e_call__CallSpec_specs.
+Proof.
+  right. exists e2e_call_runtime.
+  ...
+```
+
+`tests/test_data/rocq/spec_bounds_realization.v` is in that class — both
+`lookup` and `copy_slot` carry the prologue and build their arrays in the
+frame — so its `ValidSpec` theorem closes only through `ValidSpec_at`.
+That is a fact about which branch the proof lives on, not a weakening:
+`interp_realized_at` reduces the whole body, guard included, so the
+trap-freedom the next section describes is carried identically on either
+branch.
+
+### `HA_app_ok` and `T_app` are the carriers
+
+`HA_app_ok f τs` denotes, at a valuation whose arguments denote to `vs`,
+exactly `val_fun V f vs <> None` — the interpretation is defined at that
+application, at any result arity including zero. `T_app f τs` is the
+single-result term form, which denotes only when `f`'s realization is a
+one-element list.
+
+`interp_realized` is what turns a defined interpretation into a claim
+about the compiled body — its `interp_realized_universal` branch reading:
+
+```coq
+FI i args = Some rs -> fun_computes m i args rs
+```
+
+(and its `interp_realized_at` branch the same, with `fun_computes_at rt`
+against one fixed runtime; see [Which realization
+branch](#which-realization-branch-a-frame-bearing-body-must-take)). `fun_computes` is in turn defined through `sem_mx`, a
+**total-correctness** judgment whose conclusion demands a `reduce_trans`
+of `modfunc_body fdef` reaching a *value stack* — or one of the
+`return`/`br 0` shapes carrying one. A trapped run reduces to `AI_trap`,
+from which no such reduction exists.
+
+A realization claim therefore **is** a trap-freedom claim, for one
+function applied to one argument vector. Three properties of that shape
+matter when reading a goal that will not close:
+
+- **It is per-call, not per-module.** Nothing is claimed about a
+  function no specification applies.
+- **It is prover-triggered.** `interp_realized` is implication-shaped,
+  so an `FI` silent at a symbol (`None` there) can never certify
+  anything; it only loses completeness, since `HA_app_ok` then fails to
+  hold. A proof cannot escape a trap-freedom obligation by leaving the
+  symbol uninterpreted — it can only fail to discharge the payload.
+- **It reaches the whole body.** `sem_mx` is about `modfunc_body`, so
+  every trap site the call reaches, in a callee as much as in the callee
+  itself, is inside the claim.
+
+A **bare call statement** in a specification body emits `HA_app_ok`; a
+call in *term* position emits `T_app` and requires a single scalar
+result (`P005` otherwise). The bare-call form is what to write when the
+property wanted is "this call is total on this envelope", since it
+carries every result arity, void included.
+
+### The bounds guard is now among the trap sites they range over
+
+A dynamic `arr[i]` used to lower to a bare `BI_load`/`BI_store` in proof
+mode, with no side condition anywhere in the emitted file — the `.v` was
+strictly weaker than the deployed artifact on exactly the property the
+language exists to establish. It now lowers to the same guard a
+Compile-mode build emits:
+
+```coq
+BI_local_tee <scratch> ::
+BI_local_get <scratch> ::
+BI_const_num (Vi32 <length>) ::
+BI_relop T_i32 (Relop_i (ROI_ge SX_U)) ::
+BI_if (BT_valtype None) (
+  BI_unreachable ::
+  nil) (
+  nil) ::
+```
+
+So an `HA_app_ok` (or `T_app`) over a function containing one forces
+`index <u length` at that access, at every argument vector the
+specification's envelope admits.
+
+The comparison is a **single unsigned** one: a negative index arrives as
+a huge `u32` and fails it, so no lower bound is missing rather than
+merely omitted. A *signed* index still needs `0 <= i` in the envelope,
+because that is what rules out the values the guard sees as huge.
+`tests/test_data/inf/spec_bounds_realization.inf` and its committed
+golden `tests/test_data/rocq/spec_bounds_realization.v` are the worked
+example: a read and a write, two `forall` spec functions that declare
+the envelope with `assume` and then bare-call them, and the guards
+visible inside the called functions' `modfunc_body`.
+
+Two boundaries. The first is what "constant" means to code generation,
+which is narrower than it sounds: `try_const_index_byte_offset` folds a
+**direct number literal** and nothing else, so `a[3]` is guarded in no
+mode, while `a[K]` for a `const K` and `a[1 + 1]` both take the dynamic
+branch and are guarded in both. The obligation's reach follows that
+boundary rather than the source's idea of a constant, and the emitted
+`.v` shows it: `a[K] + a[1 + 1] + a[3]` over an `[i32; 4]` prints two
+guards, the third access having folded to `BI_const_num (Vi32 12)`.
+
+The static story differs on the same boundary. A037 matches only a
+literal directly under the access, and `P014` — which folds named and
+computed constants — runs on specification bodies. So in an *executable*
+function `const K: i32 = 5; a[K]` over an `[i32; 3]` has no static story
+at all, and the runtime guard is what now catches it: not merely an
+unchanged case, but a hole the flip closes.
+
+The same gap reaches inside an `exists`/`unique` body, where a live trap
+would be fatal (see [Why a reachability body refuses a dynamic
+index](#why-a-reachability-body-refuses-a-dynamic-index)). `P016` fires
+on what the *translator* cannot fold, so `a[K]` there passes it and is
+then guarded anyway. That guard is dead rather than live: `P014` has
+already checked the folded index against the array's declared length,
+and the guard compares against that same length, so no entry can trip
+it. The two rules agree by construction, not by luck — which is why the
+`P016` row of the diagnostic registry can call a constant index
+untouched while this section says `a[K]` is guarded. Each is true of its
+own pass.
+
+The second boundary is the symbolic range bound a *specification-body*
+index carries — `nz (i <u N)`, the first conjunct of the element witness
+in the [translation scheme](#translation-scheme-summary). That is a
+different mechanism, not this one: it is a definedness rule about a term
+the obligation constructs, it applies in bodies that are never compiled
+at all, and it would be emitted identically if no guard existed. The two
+state the same inequality about different objects.
+
+### Why a reachability body refuses a dynamic index
+
+`P016` rejects a non-constant array index inside an `exists`/`unique`
+body, and the reason is its interaction with entry totality rather than
+anything about bounds. Per
+[Entry parameters are universally quantified](#entry-parameters-are-universally-quantified--filters-cannot-carve-out-entries),
+the reachability predicates fix an arbitrary typed entry vector before
+letting the choices range, so a trap the index reaches at some entry
+empties that entry's observation set and makes the theorem **false**
+rather than narrowing it to the entries the guard admits — the same
+failure an `assume` over an entry parameter produces.
+
+Suppressing the guard in retained bodies was the alternative, and it was
+rejected: the body the judgment reduces would then differ from the body
+that ships, which is the exact failure `verified = deployed` exists to
+prevent. Rejecting at code generation is also the only place the shape
+can be caught, since the `coqc` gate rewrites every `Qed.` to
+`Admitted.` and so establishes type-checking, never truth.
+
 ## Custom WASM sections
 
 Two custom sections carry proof-mode metadata through codegen → linker →
@@ -1173,7 +1438,7 @@ entries are matched by name, not position.
   declaration. The check is purely lexical (mode-independent) and fires
   in both compile and proof modes, so no Inference-compiled program can
   reach the codegen stage with non-det syntax outside a spec.
-- **P001–P015** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
+- **P001–P016** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
   specification function that cannot be encoded as an obligation — or
   whose obligation says nothing — aborts code generation
   (`CodegenError::UntranslatableSpec`) rather than silently emitting an
@@ -1197,6 +1462,7 @@ entries are matched by name, not position.
   | P013 | An aggregate introduction — a compound `@`, a compound parameter, or an array/struct literal — whose scalar leaves would push the specification function past `SPEC_FN_MAX_QUANTIFIED_LEAVES` (64). A quantified leaf brings a binder and a hypothesis: universally that is one assertion-tree level whatever the leaf's declared type, since a narrow leaf's bound is grouped into its hypothesis level rather than added beside it, while existentially a narrow leaf costs two — the binder plus the conjunct its bound rides in, where a full-width one's absorbed ⊤ leaves the binder alone. A literal's leaves still nest one level apiece through a leafwise comparison; the levels accumulate across every introduction in the function, so the budget is a per-function running total rather than a per-introduction cap, and it is checked from the declared type before any leaf is materialized |
   | P014 | A constant-*folded* array index that is out of bounds — `const K: i32 = 5; a[K]`, or `a[1 + 4]`, on `[i32; 3]`. States the same fact analysis rule A037 states for a direct-literal index; A037's pattern requires the literal directly under the access, so a named or computed constant reaches the translator even with analysis on, and the codegen paths that skip analysis make this the only guard for any of the spellings |
   | P015 | A quantified introduction — a parameter, a `let … = @`, an anonymous call-argument `@`, or a leaf of an aggregate one — at an `enum` declared with no variants, in every mode including the reachability mode. The declared type admits no value, so there is nothing for the claim to range over: `HA_false` would discharge every claim over it for the wrong reason and any inhabited bound would be a lie. Analysis rule A009 only *warns* about the declaration, so such an enum compiles and a `@` over it really does reach the translator, where executable code generation's three treatments of it disagree with one another (a draw is left unconstrained since `rem_u 0` would trap; an exported entry's tag guard traps on every call; a memory round-trip constrains nothing) — there is no consistent behaviour for an antecedent to mirror |
+  | P016 | A non-constant array index inside the body of an `exists`/`unique`-quantified spec function. Such a body is the one specification body the judgment *reduces*, and code generation guards every non-constant index with a trap. Because `exists_spec_holds_at`/`unique_spec_holds_at` fix an arbitrary typed entry vector before letting the choices range, a trap the index reaches at some entry empties that entry's observation set and makes the theorem **false** rather than narrowing it to the entries the guard admits — the same failure an `assume` over an entry parameter produces. Untouched: a constant index anywhere, and a non-constant index in a `forall`/plain body, whose function is omitted from `mod_funcs`, is never reduced, and keeps the symbolic range bound its element definition already states. See [Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot) for why the guard exists in proof mode at all and which obligation it answers to |
 
 - **The reachability pre-scan's no-return rule** (fatal,
   `core/wasm-codegen/src/hassert/reach.rs`): an `exists`/`unique` body

@@ -234,8 +234,15 @@ This is deliberate. The alternative — treating an out-of-range access as vacuo
 — would hand you a proof that says nothing about most values of `i`, and Inference already
 rejects an obligation that says nothing (**P010**).
 
-Nothing in proof mode emits a bounds check, so this is a definedness rule rather than a
-mirror of any runtime trap.
+This stays a definedness rule rather than a mirror of any runtime trap — but not because
+proof mode is unguarded. Proof mode *does* emit the runtime guard now (#214), on the same
+terms Compile mode does, so an executable function's dynamic `arr[i]` carries a trap in
+the emitted `.v`. The reason is that the bodies this bound is emitted for are not compiled
+ones. A `forall`/plain spec function is left out of `mod_funcs` entirely, and the one kind
+of body that *is* compiled — a retained `exists`/`unique` body — refuses the non-constant
+index that would produce the bound (**P016**). So the bound is a claim about a term this
+translation constructs, reached by a different pass, and it would be emitted identically
+if the guard did not exist.
 
 ### A Signed Index Needs Both Bounds
 
@@ -358,7 +365,8 @@ function.
   So the worst case is existential and narrow, at 192 of 256, leaving 64 levels for the
   claim. The executable unrolling's own cap is far larger; the two measure different things
   (instruction count versus obligation nesting depth).
-- **One non-constant index per access chain** (**P002**).
+- **One non-constant index per access chain** (**P002**), and **none at all in an**
+  **`exists`/`unique` body** (**P016**), whose compiled index guard would trap.
 - **`MAX_TREE_DEPTH` = 256 assertion-tree levels** overall, all of them usable — the gate
   refuses a tree *deeper* than the maximum, so one exactly at it passes. The depth counts
   assertion nodes only: a term is checked on a counter of its own, so it never extends the
@@ -385,6 +393,7 @@ function.
 | P008 | an out-of-surface compound `@` in **any** body; any compound `@` in an `exists`/`unique` body | out of surface, there is no leaf tree to build; in a reachability body a choice arrives as one scalar parameter of the run |
 | P014 | a constant-folded out-of-bounds index | the same fact analysis rule A037 states, at the spelling A037 cannot see |
 | P015 | a parameter, a `@`, or an aggregate leaf at an `enum` declared with no variants | an uninhabited type has no value for the claim to range over, so the obligation would either say nothing or be unprovable for a reason unrelated to the program; A009 only *warns* about the declaration, so such an enum really does reach here |
+| P016 | a non-constant array index inside an `exists`/`unique` body | code generation guards the access with a trap, and a reachability judgment fixes the entry vector before the choices range — an entry whose index trips the guard leaves no successful run, making the claim false rather than narrowing it |
 
 Memory-content assertions — addresses, points-to, iterated heaps — are out of scope entirely.
 The surface language cannot express them, and the properties this encoding *can* state are
@@ -394,7 +403,7 @@ scalar leaves express exactly.
 ## Related Documents
 
 - [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../wasm-to-v/ROCQ_CONTRACT.md) — the emitted `.v`
-  contract, including the full `P001`–`P015` registry
+  contract, including the full `P001`–`P016` registry
 - [`docs/arrays-and-memory.md`](arrays-and-memory.md) — the executable lowering of the same
   aggregates, including `compute_struct_field_layout`, whose order the leaf enumeration
   shares

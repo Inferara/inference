@@ -1,10 +1,10 @@
-// Runtime array bounds-check tests (Issue 164, Phases 2-3).
+// Runtime array bounds-check tests.
 //
-// In Compile mode (Debug and Release, Wasm32 and Soroban) every dynamic-index
-// array load and store is preceded by a guard `index >= length -> unreachable`:
-// the deployed artifact is always checked. Constant indices are validated
-// statically by analysis rule A037 and get no runtime guard. Proof mode is left
-// unguarded pending the proof-obligation path (#212).
+// Every build precedes a dynamic-index array load or store with the guard
+// `index >= length -> unreachable`: Compile and Proof mode, Debug and Release,
+// Wasm32 and Soroban. The deployed artifact is always checked, and the artifact
+// a proof is written about is the artifact that ships. Constant indices are
+// validated statically by analysis rule A037 and get no runtime guard.
 //
 // The single choke point `emit_index_offset` is shared by reads and writes, so
 // a source exercising both proves both paths are guarded.
@@ -16,7 +16,10 @@
 //   - A multi-dimensional dynamic access `m[i][j]` lowers as an outer compound
 //     element access (`m[i]`, 1 guard) feeding an inner scalar access (`[j]`,
 //     1 guard) -> 2 guards.
-//   - Constant-only functions and Proof-mode builds contribute 0.
+//   - Constant-only functions contribute 0.
+//   - The compilation mode contributes nothing: a Proof-mode build of a source
+//     counts exactly what a Compile-mode build of it counts, so every count
+//     below is a property of the source alone.
 //
 // Known codegen limitation exercised below: a *literal*-initialised
 // multi-dimensional array (`[[i32;3];2] = [[..],[..]]`) panics in codegen today
@@ -45,7 +48,9 @@ pub fn write_at(j: u32, v: i32) -> i32 {
 #[cfg(test)]
 mod bounds_check_tests {
     use super::READ_WRITE_SOURCE;
-    use crate::utils::{codegen_output, codegen_with_full_config};
+    use crate::utils::{
+        assert_wasms_modules_equivalence, codegen_output, codegen_with_full_config,
+    };
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
     /// Compiles `source` under the Debug profile (`O0`). The guard is emitted in
@@ -95,11 +100,18 @@ mod bounds_check_tests {
     }
 
     #[test]
-    fn proof_mode_emits_no_guard() {
-        // Proof mode is the one remaining unguarded path (#212): dynamic bounds
-        // become Rocq proof obligations, not runtime traps. The guard cov_mark
-        // must never fire and the WAT must carry no bounds comparison.
-        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+    fn proof_mode_emits_the_same_guard_as_compile_mode() {
+        // Proof mode is guarded too. Without the guard a dynamic `arr[i]` lowers
+        // to a bare load or store carrying no side condition, so the emitted
+        // `.v` has nothing to be about on the property the proof exists to
+        // establish; with it, the realization obligation over the enclosing
+        // function -- a total-correctness claim no trapping reduction satisfies
+        // -- forces `index <u length`.
+        //
+        // Both dynamic accesses in the source are guarded here exactly as they
+        // are under Compile mode, so the count matches
+        // `debug_profile_emits_guard_for_dynamic_read_and_write`.
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 2);
         let out = codegen_with_full_config(
             READ_WRITE_SOURCE,
             Target::Wasm32,
@@ -109,9 +121,38 @@ mod bounds_check_tests {
         .expect("proof-mode codegen failed");
         let wat = wasmprinter::print_bytes(out.wasm()).expect("failed to print WAT");
         assert!(
-            !wat.contains("i32.ge_u"),
-            "Proof-mode WAT must not contain a bounds-check comparison:\n{wat}"
+            wat.contains("i32.ge_u"),
+            "Proof-mode WAT must contain the bounds-check comparison:\n{wat}"
         );
+        assert!(
+            wat.contains("unreachable"),
+            "Proof-mode WAT must contain the trap on out-of-bounds:\n{wat}"
+        );
+    }
+
+    #[test]
+    fn proof_and_compile_builds_of_a_dynamic_index_are_byte_identical() {
+        // `verified = deployed`, stated as bytes. A spec-free source has no
+        // proof-mode-only construct to account for the difference, so the two
+        // builds may differ only where the mode itself changes lowering -- and
+        // after the bounds guard became unconditional, nowhere does. This is the
+        // property the whole change exists to create: a proof about the emitted
+        // `.v` is a proof about the module that ships.
+        let compile = codegen_with_full_config(
+            READ_WRITE_SOURCE,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::O3,
+        )
+        .expect("compile-mode codegen failed");
+        let proof = codegen_with_full_config(
+            READ_WRITE_SOURCE,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+        )
+        .expect("proof-mode codegen failed");
+        assert_wasms_modules_equivalence(compile.wasm(), proof.wasm());
     }
 
     #[test]
@@ -375,6 +416,50 @@ pub fn f(i: u32) -> i32 {
         assert_eq!(f.call(&mut store, 3).expect("call failed"), 50);
         // Dynamic index out of bounds traps; the constant access never does.
         assert_unreachable_trap(&f.call(&mut store, 4).expect_err("OOB must trap"));
+    }
+
+    // --- Literal indices that do not fold to a static offset -----------------
+
+    /// A literal index whose byte offset overflows `i32` folds to nothing, so
+    /// emission lowers it at runtime and guards it. The scratch-local
+    /// reservation has to reach the same conclusion, or code generation aborts
+    /// at the guard with "bounds-check scratch local must be reserved".
+    ///
+    /// `1073741824` scaled by an 8-byte element overflows the `i32` byte offset.
+    /// Analysis rule A037 rejects the index, which is exactly why this runs
+    /// through the analysis-skipping entry point: A037 is a separate pass, and
+    /// the reservation and the guard have to agree without it.
+    ///
+    /// Both modes are exercised because until the guard became unconditional
+    /// only Proof mode survived this source, and only by accident -- it returned
+    /// from the guard before touching the unreserved scratch. Removing that
+    /// shelter is what makes the agreement load-bearing in both modes.
+    ///
+    /// A literal index that does not parse as `i32` at all (`arr[2147483648]`)
+    /// is the other non-folding shape, and it cannot be exercised from source:
+    /// lowering the index expression aborts first, identically in both modes, in
+    /// `lower_number_literal`. That shape is pinned where it is reachable, by
+    /// `inference-wasm-codegen`'s in-crate
+    /// `reservation_scan_matches_the_offset_fold_on_literal_indices`.
+    #[test]
+    fn overflowing_literal_byte_offset_is_guarded_in_both_modes() {
+        let source = r#"
+pub fn at() -> i64 {
+    let arr: [i64; 4] = [10, 20, 30, 40];
+    return arr[1073741824];
+}
+"#;
+        for mode in [CompilationMode::Compile, CompilationMode::Proof] {
+            let out =
+                codegen_with_full_config_no_analysis(source, Target::Wasm32, mode, OptLevel::O0)
+                    .unwrap_or_else(|e| panic!("{mode:?} codegen failed: {e}"));
+            inf_wasmparser::validate(out.wasm())
+                .unwrap_or_else(|e| panic!("{mode:?} module must validate: {e}"));
+            assert!(
+                wat(out.wasm()).contains("i32.ge_u"),
+                "{mode:?}: a literal index that does not fold must be guarded"
+            );
+        }
     }
 
     // --- Dynamic index inside a `const` initializer --------------------------
@@ -916,6 +1001,192 @@ pub fn sum(n: i32) -> i32 {
             let wasm = debug_wasm(source);
             inf_wasmparser::validate(&wasm)
                 .unwrap_or_else(|e| panic!("guarded module '{label}' must validate: {e}"));
+        }
+    }
+
+    // --- Constant-folded indices in a reachability body ----------------------
+    //
+    // Two passes decide independently whether an array index is constant, and
+    // they do not fold the same set. The obligation translator folds named
+    // constants, parenthesised expressions and constant arithmetic; code
+    // generation's `try_const_index_byte_offset` folds a bare number literal and
+    // nothing else. An index in the gap between them -- `a[K]`, `a[1 + 0]` --
+    // therefore passes the specification-side rules P016 (no non-constant index
+    // in a reachability body) and P014 (no out-of-range constant index) and is
+    // then lowered *dynamically*, scratch local and trap included, inside the
+    // one specification body the downstream judgment reduces.
+    //
+    // That trap is dead, and the tests below pin both halves of why: P014 has
+    // already checked the folded index against the array's declared length, and
+    // the guard compares against that same length. The pair matters because
+    // neither half is stated where the other is decided.
+
+    /// The proof-mode `.v` for `source` -- the artifact the reachability
+    /// judgment reduces, and so the only place a claim about "what lands in the
+    /// retained body" can be checked. WAT is not an option: a reachability body
+    /// binds `@` choices, and `wasmprinter` rejects the custom opcodes.
+    fn reachability_v(source: &str) -> String {
+        let output = crate::utils::codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O0,
+        )
+        .unwrap_or_else(|e| panic!("proof-mode codegen failed:{e}\nsource:\n{source}"));
+        let v = inference::wasm_to_v(
+            "reach",
+            output.wasm(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap_or_else(|e| panic!("translation failed: {e}\nsource:\n{source}"));
+        v.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The guard needle for an array of `length`, opened at the length so it
+    /// cannot be satisfied by the element-size constant the offset arithmetic
+    /// multiplies by, and closed at the trap so it pins that the comparison is
+    /// what reaches it.
+    fn guard_needle(length: i32) -> String {
+        format!(
+            "BI_const_num (Vi32 {length}) :: BI_relop T_i32 (Relop_i (ROI_ge SX_U)) :: \
+             BI_if (BT_valtype None) ( BI_unreachable :: nil) ( nil) ::"
+        )
+    }
+
+    /// An index named through a `const` is folded by the obligation translator
+    /// and *not* by code generation, so the retained `exists` body carries a
+    /// runtime guard over a value that is constant in the source.
+    ///
+    /// The guard's index operand is the `K` local, whose only assignment is the
+    /// constant P014 checked, and the guard compares against that same array's
+    /// declared length -- which is what makes the trap unreachable rather than a
+    /// live trap sitting in a body the judgment must reduce to a value stack.
+    #[test]
+    fn proof_mode_guards_a_const_named_index_in_a_reachability_body() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
+        let body = reachability_v(
+            r#"
+spec Reach {
+  fn f() exists {
+    let a: [i32; 2] = [1, 2];
+    const K: i32 = 1;
+    let n: i32 = @;
+    assert(a[K] == n);
+  }
+}
+"#,
+        );
+        assert!(
+            body.contains(&guard_needle(2)),
+            "the retained body must carry a guard against the array length 2:\n{body}"
+        );
+        assert!(
+            body.contains("BI_const_num (Vi32 1) :: BI_local_set 2%N (*K*)"),
+            "`K` must be the constant P014 folded, assigned once from an `i32.const`:\n{body}"
+        );
+        assert!(
+            body.contains("BI_local_get 2%N (*K*) :: BI_local_tee"),
+            "the value the guard tees into its scratch must be that same `K`:\n{body}"
+        );
+    }
+
+    /// Constant *arithmetic* is the second spelling in the gap: the translator
+    /// folds `1 + 0`, code generation lowers both operands and the `i32.add`,
+    /// and the guard tees the result.
+    #[test]
+    fn proof_mode_guards_a_const_arithmetic_index_in_a_reachability_body() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
+        let body = reachability_v(
+            r#"
+spec Reach {
+  fn f() exists {
+    let a: [i32; 2] = [1, 2];
+    let n: i32 = @;
+    assert(a[1 + 0] == n);
+  }
+}
+"#,
+        );
+        assert!(
+            body.contains(&guard_needle(2)),
+            "the retained body must carry a guard against the array length 2:\n{body}"
+        );
+        assert!(
+            body.contains(
+                "BI_const_num (Vi32 1) :: BI_const_num (Vi32 0) :: \
+                 BI_binop T_i32 (Binop_i BOI_add) :: BI_local_tee"
+            ),
+            "the guarded index must be the constant arithmetic itself, computed and teed:\n{body}"
+        );
+    }
+
+    /// The contrast that makes the two tests above a *gap* rather than the rule:
+    /// the same access written with a bare literal folds in code generation too,
+    /// and no guard is emitted at all.
+    #[test]
+    fn proof_mode_leaves_a_literal_index_in_a_reachability_body_unguarded() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+        let body = reachability_v(
+            r#"
+spec Reach {
+  fn f() exists {
+    let a: [i32; 2] = [1, 2];
+    let n: i32 = @;
+    assert(a[1] == n);
+  }
+}
+"#,
+        );
+        assert!(
+            !body.contains("ROI_ge SX_U"),
+            "a literal index folds in code generation and needs no guard:\n{body}"
+        );
+    }
+
+    /// Why the guard the two folded spellings emit is dead: P014 has already
+    /// rejected every out-of-range spelling of the same index, against the same
+    /// declared length the guard compares.
+    ///
+    /// Without this the guard would be a live trap in a body the reachability
+    /// judgment reduces to a value stack -- exactly the failure P016 rejects a
+    /// non-constant index to avoid -- so the deadness is a property worth
+    /// pinning beside the guard rather than only where P014 is defined.
+    /// Analysis rule A037 does not cover it: its pattern wants the literal
+    /// directly under the access, which neither spelling has.
+    #[test]
+    fn an_out_of_range_folded_index_never_reaches_the_guard() {
+        for (label, index) in [("named const", "K"), ("const arithmetic", "1 + 4")] {
+            let source = format!(
+                r#"
+spec Reach {{
+  fn f() exists {{
+    let a: [i32; 2] = [1, 2];
+    const K: i32 = 5;
+    let n: i32 = @;
+    assert(a[{index}] == n);
+  }}
+}}
+"#
+            );
+            let error = crate::utils::codegen_with_full_config(
+                &source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+                OptLevel::O0,
+            )
+            .expect_err(&format!("{label}: an out-of-range index must be rejected"))
+            .to_string();
+            assert!(
+                error.contains("error[P014]"),
+                "{label}: rejection must come from P014, the only rule that sees a folded \
+                 index: {error}"
+            );
+            assert!(
+                error.contains("out of bounds for array of length 2"),
+                "{label}: P014 must state the same length the emitted guard compares \
+                 against, or the two agree only by luck: {error}"
+            );
         }
     }
 }

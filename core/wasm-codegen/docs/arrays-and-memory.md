@@ -705,11 +705,17 @@ The same three-case specialization applies to array index writes (`arr[i] = x`):
 
 ## Runtime Bounds Checking
 
-A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. In **Compile mode** the codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead. Constant indices are *not* guarded here — they are rejected at compile time by analysis rule `A037` (see `core/analysis`), so the static and dynamic halves together cover every index.
+A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. Codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead.
 
-The guard is emitted for **all Compile-mode builds** (Debug and Release, Wasm32 and Soroban): the `codegen()` entry point sets the `Compiler::emit_bounds_checks` flag whenever `mode == CompilationMode::Compile`, so the executed/deployed artifact is always checked. `OptLevel` no longer influences bounds checks. **Proof** mode is left unguarded pending the proof-obligation path (#212), which will discharge dynamic bounds as Rocq obligations rather than runtime traps; the `emit_index_offset` choke point is the seam where that path hooks in.
+"Constant" here means exactly what `try_const_index_byte_offset` folds: a **direct number literal**, and nothing else. `arr[3]` folds to a static offset and is not guarded; `arr[K]` for a `const K`, and `arr[1 + 1]`, do not fold and take the guarded dynamic path. The static half — analysis rule `A037` (see `core/analysis`) — matches the same narrow shape, a literal directly under the access, so the two halves cover every index between them, but a named or computed constant lands in the *dynamic* half rather than the static one.
 
-For Case 3 (`arr[i]`) in Compile mode, the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local via `local.tee`, so an index expression with side effects runs exactly once. The scratch is reserved per function **iff the body actually contains a dynamic array index** (`body_has_dynamic_array_index` — a non-`NumberLiteral` index, the only case that emits a guard), independent of whether the function has a frame. This keeps constant-index-only functions byte-identical to an unchecked build, and reserves the scratch even for an immutable-`self` method like `self.arr[idx]` that needs no frame slot. The scratch sits at the next free local after the named locals and the optional frame-pointer temp:
+The guard is emitted for **every build**: Compile and Proof mode, Debug and Release, Wasm32 and Soroban. The `codegen()` entry point sets `Compiler::emit_bounds_checks` unconditionally, so the deployed artifact is always checked and the artifact a proof is written about is byte-for-byte the artifact that ships. `OptLevel` does not influence bounds checks.
+
+Proof mode was the one unguarded path until the obligation side of it existed. A guard is what gives the emitted `.v` a trap site to be *about*: an `HA_app_ok`/`T_app` realization claim over a function containing one forces `index <u length` there, because realization runs through `interp_realized` to `fun_computes`, a total-correctness judgment no trapping reduction satisfies (`core/wasm-to-v/ROCQ_CONTRACT.md`, "Trap-freedom"). Emitting the guard in one mode and not the other would have meant proving a program that is not the one that ships.
+
+The `emit_bounds_checks` flag survives the flip rather than being folded away, though not as a hook for #215: that elision is decided per *access*, inside `emit_index_offset`, and leaves the flag `true` for every module. `emit_index_offset` is the seam it would hook into — one place every guarded access passes through. What keeps the flag is that `Compiler` is a library type whose in-crate tests exercise both settings.
+
+For Case 3 (`arr[i]`) the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local via `local.tee`, so an index expression with side effects runs exactly once. The scratch is reserved per function **iff the body actually contains a dynamic array index** (`body_has_dynamic_array_index`), independent of whether the function has a frame. That predicate and the emission site classify an index through one shared call to `try_const_index_byte_offset`: an index is dynamic exactly when its byte offset does not fold, so a guard can never be emitted into a function that reserved no scratch. Restating the condition — "the index is not a `NumberLiteral`" — is what the two used to do, and they disagreed on a literal whose `index * elem_size` overflows. This keeps constant-index-only functions byte-identical to an unchecked build, and reserves the scratch even for an immutable-`self` method like `self.arr[idx]` that needs no frame slot. The scratch sits at the next free local after the named locals and the optional frame-pointer temp:
 
 ```wasm
 <lower array expr>      ;; push base pointer
@@ -727,7 +733,7 @@ i32.add                 ;; address = base + index * elem_size
 i32.load / i64.load / ...
 ```
 
-The empty-result `if` consumes only the comparison result and leaves `base` and `index` on the stack, so the offset computation proceeds unchanged. The `unreachable` trap reuses the `assert` lowering idiom and maps to `BI_unreachable` in the Rocq translator, so guarded code remains translatable. Both the read path (`lower_array_index_access`) and the write path (`lower_array_index_write`) share the single `emit_index_offset` choke point, so reads and writes are guarded identically. Treating dynamic bounds as discharged Rocq proof obligations (rather than runtime traps) is reserved future work; this seam is where such a Proof-mode path would hook in.
+The empty-result `if` consumes only the comparison result and leaves `base` and `index` on the stack, so the offset computation proceeds unchanged. The `unreachable` trap reuses the `assert` lowering idiom and maps to `BI_unreachable` in the Rocq translator, so guarded code remains translatable. Both the read path (`lower_array_index_access`) and the write path (`lower_array_index_write`) share the single `emit_index_offset` choke point, so reads and writes are guarded identically.
 
 ## Zero-Store Elision During Initialization
 
@@ -1185,7 +1191,7 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter that was given a frame slot copied into it |
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
-| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (all Compile-mode builds) |
+| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (every build, Compile and Proof) |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
 | `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter that was given a frame slot copied into it |

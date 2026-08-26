@@ -177,14 +177,9 @@ pub fn codegen(
     compiler.set_emit_features(features);
     compiler.set_memory_layout(layout);
 
-    // Runtime array bounds checks are emitted for every Compile-mode build
-    // (Debug and Release, Wasm32 and Soroban): the executed/deployed artifact is
-    // always checked so a dynamic out-of-range access traps cleanly instead of
-    // corrupting adjacent frame slots. `OptLevel` no longer influences this.
-    // Proof mode is left unguarded pending the proof-obligation path (#212),
-    // which discharges dynamic bounds as Rocq obligations rather than runtime
-    // traps; the `emit_index_offset` choke point is the seam where it hooks in.
-    compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
+    // Every build this function drives is bounds-checked, whatever its mode,
+    // profile, or target. `Compiler::set_emit_bounds_checks` carries why.
+    compiler.set_emit_bounds_checks(true);
 
     // Reachability pre-scan (proof mode only): plan the hidden trailing choice
     // parameters of every `exists`/`unique`-bodied specification free function

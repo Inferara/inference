@@ -70,6 +70,19 @@ mod gate {
     /// `coqc` elaborates. They are split by theme rather than merged because a
     /// gate failure should name the operator family it is about (#401).
     ///
+    /// `spec_bounds_realization.inf` is the only entry whose *executable*
+    /// bodies carry a bounds guard, and the only fixture producing the
+    /// `HA_app_ok` atom that makes one a proof obligation. Proof mode emits the
+    /// same `index >=u length -> unreachable` guard a deployed build does, so
+    /// the trap is present in the body the emitted `.v` describes, and a bare
+    /// statement call in a `spec` body claims that application is *realized* —
+    /// a total-correctness claim, hence a claim that the body does not trap.
+    /// The two halves only mean anything together: an assertion on the atom
+    /// alone holds just as well with the guard absent, which is the state the
+    /// emission change exists to leave behind. Both are checked by
+    /// [`spec_bounds_realization_matches_committed_v_golden`], which also holds
+    /// this entry to staying in this list.
+    ///
     /// `rocq_name_collisions.inf` is the one entry whose module name is not just
     /// a label: it names functions after the emitted preamble's helpers, after
     /// the module record, and after the module's validity theorem. Every other
@@ -101,6 +114,7 @@ mod gate {
         ("spec_mixed_kinds.inf", "spec_mixed_kinds"),
         ("spec_aggregate_values.inf", "spec_aggregate_values"),
         ("spec_bounded_iteration.inf", "spec_bounded_iteration"),
+        ("spec_bounds_realization.inf", "spec_bounds_realization"),
         (
             "spec_quantifier_alternation.inf",
             "spec_quantifier_alternation",
@@ -777,6 +791,25 @@ mod gate {
             .collect()
     }
 
+    /// The obligation term of every `hassert` definition in an emitted `.v`, in
+    /// order.
+    ///
+    /// The emitter prints one obligation per `Definition … : hassert :=`, and
+    /// its whole term is the single line following that header. Reading the
+    /// terms back this way lets an assertion be about an obligation's *root* —
+    /// whether the claim is stated under an envelope or made bare — which a
+    /// needle matched against the whole file cannot distinguish. The partition
+    /// list is `: list hassert :=` and so is not one of these.
+    fn obligation_terms(v: &str) -> Vec<&str> {
+        let lines: Vec<&str> = v.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.ends_with(" : hassert :="))
+            .filter_map(|(at, _)| lines.get(at + 1).map(|term| term.trim()))
+            .collect()
+    }
+
     /// One `module_func` definition of an emitted `.v`, from its `Definition`
     /// line to the `|}.` closing it.
     ///
@@ -794,6 +827,18 @@ mod gate {
             .find("|}.")
             .unwrap_or_else(|| panic!("the definition of `{name}` is unterminated in:\n{v}"));
         &body[..end]
+    }
+
+    /// A stretch of emitted `.v` as a single line, every run of whitespace
+    /// collapsed to one space.
+    ///
+    /// An instruction list prints one instruction per line, indented by nesting
+    /// depth, so a needle spanning more than one instruction cannot be written
+    /// as a literal — and baking the indentation into it would pin the
+    /// printer's layout rather than the instruction sequence the needle is
+    /// about.
+    fn one_line(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// The floor under [`LINKED_CORPUS`]: every entry must actually reach the
@@ -1837,8 +1882,9 @@ mod gate {
     }
 
     /// Translates a bare one-function module under an explicit obligation map
-    /// carrying the four `hassert` arms the corpus cannot put in front of
-    /// `coqc`.
+    /// carrying the three `hassert` arms the corpus cannot put in front of
+    /// `coqc`, plus `HA_app_ok` — which it now can, and which stays here for the
+    /// shapes around it that a fixture cannot reach.
     ///
     /// The applied symbol resolves through the WASM name section against the raw
     /// unsanitized function name, which is why the fixture names its function
@@ -1884,22 +1930,31 @@ mod gate {
             .unwrap_or_else(|e| panic!("wasm_to_v failed for the obligation probe: {e}"))
     }
 
-    /// A hand-built obligation map carrying the four `hassert` arms the corpus
-    /// cannot put in front of `coqc`.
+    /// A hand-built obligation map carrying the `hassert` arms the corpus
+    /// cannot put in front of `coqc`, and the shape discipline around one it
+    /// now can.
     ///
-    /// `HA_true`, `HA_false`, `HA_defined` and `HA_app_ok` are live arms of
+    /// `HA_true`, `HA_false` and `HA_defined` are live arms of
     /// `core/wasm-to-v/src/hassert_print.rs` that no corpus fixture elaborates,
-    /// for three different reasons. `HA_false` and `HA_defined` have no upstream
+    /// for two different reasons. `HA_false` and `HA_defined` have no upstream
     /// producer at all: the codegen pass that lowers a `spec` body into the
-    /// `hassert` IR has no path that builds either. `HA_app_ok` does have one —
-    /// a bare statement call in a spec body lowers to it — but no fixture writes
-    /// that shape. And `HA_true` is unreachable by construction now that a
-    /// specification function whose obligation collapses to ⊤ is rejected
-    /// instead of emitted: the ⊤-absorbing smart constructors keep ⊤ out of
-    /// every proper subterm, and the vacuity check keeps it out of the root.
-    /// All four arms were unelaborated (#401). Handing `wasm_to_v` an explicit
-    /// [`inference::HSpecMap`] reaches the printer directly, without a source
-    /// program.
+    /// `hassert` IR has no path that builds either. And `HA_true` is
+    /// unreachable by construction now that a specification function whose
+    /// obligation collapses to ⊤ is rejected instead of emitted: the
+    /// ⊤-absorbing smart constructors keep ⊤ out of every proper subterm, and
+    /// the vacuity check keeps it out of the root. Handing `wasm_to_v` an
+    /// explicit [`inference::HSpecMap`] reaches the printer directly, without a
+    /// source program.
+    ///
+    /// `HA_app_ok` is the fourth arm this probe was built for, and the one that
+    /// no longer needs it for coverage: `spec_bounds_realization.inf` writes the
+    /// bare statement call that lowers to it, so the corpus elaborates the arm
+    /// through the real pipeline. It stays here for what a fixture cannot state.
+    /// Its argument is a binder's `T_lvar` rather than a function-local slot,
+    /// and the negative needles below pin the two ways the printer could confuse
+    /// this arm with `HA_defined` — emitting the unresolved symbol in place of
+    /// the index it resolves to, and swapping which of the pair takes an index
+    /// and which takes a term. All four arms were unelaborated (#401).
     ///
     /// Two constraints make that possible. The module must come from WAT rather
     /// than codegen, because a `.wasm` carrying its own `inference.hspecs`
@@ -3225,6 +3280,219 @@ Definition a_definition (x : nat) : nat := x.
         );
     }
 
+    /// Committed `.v` golden for the bounds-realization fixture. Regenerate
+    /// with the `#[ignore]`d [`regenerate::regenerate_bounds_realization_v`]
+    /// after an intentional emitter change.
+    fn bounds_realization_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_bounds_realization.v")
+    }
+
+    /// The proof-mode `.v` for the bounds-realization fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry both halves of
+    /// the property this entry exists for: the bounds guard inside an
+    /// executable body, and the obligation that reaches it.
+    ///
+    /// Neither half is worth asserting alone. `HA_app_ok` comes from any bare
+    /// statement call and does not depend on the guard existing at all, so a
+    /// test satisfied by the atom is satisfied just as well by an unguarded
+    /// body — which is exactly the state this emission change exists to leave
+    /// behind, a verified artifact weaker than the deployed one on the property
+    /// the language is for. And a guard no obligation reaches is an
+    /// instruction: `ValidModule` is the structural typing judgment and says
+    /// nothing about which traps are reachable, so the claim that this one is
+    /// not comes from the realization atom or from nowhere.
+    ///
+    /// The envelope is pinned as well. The guard compares *unsigned*, so the
+    /// signed `0 <= i` half of the `assume` is what rules out the negative
+    /// indices that reach it as huge unsigned values; drop either half and an
+    /// admitted index traps, which makes the obligation false rather than
+    /// merely weaker. Nothing downstream would say so — the gate below rewrites
+    /// `Qed.` to `Admitted.`, so it type-checks a false obligation as readily
+    /// as a true one.
+    ///
+    /// Record indices are read off the module record rather than written down,
+    /// so a reordering fails as a missing definition instead of as a needle
+    /// quietly matching the wrong body.
+    #[test]
+    fn spec_bounds_realization_matches_committed_v_golden() {
+        const FIXTURE: &str = "spec_bounds_realization.inf";
+        const MODULE: &str = "spec_bounds_realization";
+
+        // Membership is what puts the module in front of `coqc`; the byte
+        // compare and the shape assertions below would all still pass with the
+        // entry deleted from the corpus, and nothing else in the suite is about
+        // this fixture.
+        assert!(
+            CORPUS.contains(&(FIXTURE, MODULE)),
+            "{FIXTURE} must stay a CORPUS entry: it is the only module this gate \
+             compiles whose executable bodies carry a bounds guard"
+        );
+
+        let generated = generate_v(FIXTURE, MODULE);
+        let golden_path = bounds_realization_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_bounds_realization_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for {FIXTURE} drifted from the committed golden {}; if the \
+             emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_bounds_realization_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder a regression into the committed
+        // file.
+        //
+        // Half one: the guard, counted inside the body of each called function.
+        // The needle opens at the array's own length, so it pins what the index
+        // is compared against — neither array is four elements long, so a guard
+        // built from the 4-byte element size the offset arithmetic multiplies by
+        // would not match — and it closes at the trap, so it pins that the
+        // comparison is what reaches it. Counting rather than merely finding is
+        // what pins the scope boundary: a constant index stays unguarded, and a
+        // rule that guarded every access would leave `lookup` with two.
+        let defined = module_func_names(&golden);
+        for (function, length, guards, why) in [
+            (
+                "lookup",
+                5,
+                1,
+                "the parameter-derived read is guarded and the constant read beside it is \
+                 not — a constant access has no trap for an obligation to be about",
+            ),
+            (
+                "copy_slot",
+                3,
+                2,
+                "a store and a load reach the offset computation through different \
+                 lowerings, so each is a trap site of its own",
+            ),
+        ] {
+            let guard = format!(
+                "BI_const_num (Vi32 {length}) :: BI_relop T_i32 (Relop_i (ROI_ge SX_U)) :: \
+                 BI_if (BT_valtype None) ( BI_unreachable :: nil) ( nil) ::"
+            );
+            let body = one_line(module_func_body(&golden, function));
+            assert_eq!(
+                body.matches(&guard).count(),
+                guards,
+                "`{function}` must carry exactly {guards} bounds guard(s) against length \
+                 {length}: {why}. Its body was:\n{body}"
+            );
+        }
+
+        // Half two: the obligation that reaches those guards. Each bare
+        // statement call claims the application is realized, under the envelope
+        // its `assume` declared — so the atom is the *consequent* of an
+        // implication, never the whole term.
+        let terms = obligation_terms(&golden);
+        assert_eq!(
+            terms.len(),
+            2,
+            "both specification functions must emit an obligation; got {terms:?}"
+        );
+        for (function, arguments, bounds, why) in [
+            (
+                "lookup",
+                "(T_local 0%N) :: nil",
+                &[
+                    "(Relop_i (ROI_le SX_S)) (T_const (Vi32 0)) (T_local 0%N)",
+                    "(Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 5))",
+                ][..],
+                "a scalar-returning callee in statement position is realized at its own \
+                 arity; the result is discarded, and the claim is about the run",
+            ),
+            (
+                "copy_slot",
+                "(T_local 0%N) :: (T_local 1%N) :: nil",
+                &[
+                    "(Relop_i (ROI_le SX_S)) (T_const (Vi32 0)) (T_local 0%N)",
+                    "(Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 3))",
+                    "(Relop_i (ROI_le SX_S)) (T_const (Vi32 0)) (T_local 1%N)",
+                    "(Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_const (Vi32 3))",
+                ][..],
+                "a void callee carries the same atom — realization is a claim about \
+                 reduction, not about a result",
+            ),
+        ] {
+            let index = defined
+                .iter()
+                .position(|candidate| *candidate == function)
+                .unwrap_or_else(|| {
+                    panic!("{FIXTURE} must define `{function}`; it defines {defined:?}")
+                });
+            let atom = format!("(HA_app_ok {index} ({arguments}))");
+            let term = terms
+                .iter()
+                .find(|term| term.contains(&atom))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no obligation applies `{function}` at record index {index} as \
+                         `{atom}` — {why}. The obligations were:\n{terms:#?}"
+                    )
+                });
+            assert!(
+                term.starts_with("Himpl ("),
+                "the realization of `{function}` must be claimed under the envelope its \
+                 `assume` declared; an atom at the root claims the call is total on every \
+                 input, which no guarded body is:\n{term}"
+            );
+            // Everything after the atom closes the implications it sits inside,
+            // which is what makes it the consequent rather than a subterm of
+            // some antecedent — an obligation whose *hypothesis* is that the
+            // call is realized claims nothing about the call at all.
+            let (_, closers) = term
+                .rsplit_once(&atom)
+                .expect("the atom was just found in this term");
+            assert!(
+                closers.chars().all(|c| c == ')' || c == '.'),
+                "the realization of `{function}` must be the obligation's consequent; it \
+                 is nested inside `{closers}`:\n{term}"
+            );
+
+            // The envelope, bound by bound, inside the term that carries this
+            // function's atom. Matched against the whole file instead, the five
+            // needles say only that every bound appears *somewhere*, which two
+            // obligations satisfy with each other's envelopes: swap them in the
+            // fixture and each obligation then admits indices its own guard
+            // traps on, while all five needles still match.
+            //
+            // The guard compares unsigned, so a signed lower bound is what rules
+            // out a negative index — the half easiest to leave out, and the one
+            // whose absence makes the obligation false rather than weaker. Each
+            // upper bound is at its own array's length, which is what makes the
+            // envelope dominate the guard it is paired with.
+            for bound in bounds {
+                assert!(
+                    term.contains(bound),
+                    "the envelope `{function}` is realized under must state `{bound}`:\n{term}"
+                );
+            }
+            // One upper bound per guarded index, counted so a merged or dropped
+            // `assume` fails here and not only in the byte compare — which a
+            // regeneration retires.
+            let uppers = bounds
+                .iter()
+                .filter(|bound| bound.contains("ROI_lt"))
+                .count();
+            assert_eq!(
+                term.matches("(Relop_i (ROI_lt SX_S))").count(),
+                uppers,
+                "`{function}` must be realized under exactly {uppers} upper bound(s), one per \
+                 guarded index in its body:\n{term}"
+            );
+        }
+    }
+
     /// Committed `.v` golden for the quantifier-alternation fixture.
     /// Regenerate with the `#[ignore]`d
     /// [`regenerate::regenerate_quantifier_alternation_v`] after an intentional
@@ -3365,9 +3633,10 @@ Definition a_definition (x : nat) : nat := x.
     #[cfg(test)]
     mod regenerate {
         use super::{
-            aggregate_values_golden_path, bounded_iteration_golden_path, exists_spec_golden_path,
-            generate_v, literal_ctx_golden_path, prime_golden_path,
-            quantifier_alternation_golden_path, unique_spec_golden_path,
+            aggregate_values_golden_path, bounded_iteration_golden_path,
+            bounds_realization_golden_path, exists_spec_golden_path, generate_v,
+            literal_ctx_golden_path, prime_golden_path, quantifier_alternation_golden_path,
+            unique_spec_golden_path,
         };
         use std::path::Path;
 
@@ -3420,6 +3689,13 @@ Definition a_definition (x : nat) : nat := x.
         fn regenerate_bounded_iteration_v() {
             let v = generate_v("spec_bounded_iteration.inf", "spec_bounded_iteration");
             write_golden(&v, &bounded_iteration_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_bounds_realization_v() {
+            let v = generate_v("spec_bounds_realization.inf", "spec_bounds_realization");
+            write_golden(&v, &bounds_realization_golden_path());
         }
 
         #[test]
