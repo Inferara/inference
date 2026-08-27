@@ -24,7 +24,7 @@ jobs:
     name: Build and test
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [self-hosted-ubuntu, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

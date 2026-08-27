@@ -18,7 +18,7 @@ permissions:
 jobs:
   miri:
     name: Miri UB Detection
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-ubuntu
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
