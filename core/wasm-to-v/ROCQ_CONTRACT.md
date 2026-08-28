@@ -736,6 +736,42 @@ omitted index moves the remap). The `coqc` gate catches shape errors (a
 mis-aritied constructor) but not a wrong index, so these exact-operand
 assertions are the load-bearing check for remap correctness.
 
+### The proof-mode artifact is standard WebAssembly
+
+Whichever way a spec function goes, its body is vanilla WebAssembly: each
+`@` arrives as a hidden trailing parameter, and no quantifier wrapper is
+emitted at any depth. A proof-mode `.wasm` built from Inference sources
+therefore loads under standard tooling, `wasm-tools validate` included,
+and the `inf-wasmparser` fork is needed only for a module that carries
+non-deterministic instructions from somewhere other than this compiler.
+
+The two kinds need it for different reasons, and only one of them is a
+proof obligation. A **retained** `exists`/`unique` body *must* be vanilla:
+its reachability judgment reduces that body under the plain WebAssembly
+semantics, where a `0xfc` wrapper has no reduction rule, so a wrapper
+would make the obligation unprovable. An **omitted** `forall`/plain body
+reaches no Rocq definition at all, so nothing downstream can observe its
+bytes either way; it is vanilla so that the artifact as a whole stays
+loadable, not because any judgment reads it.
+
+This is a property of how the artifact loads, not of what it proves. The
+quantifier is carried by the obligation, which the codegen pass builds
+from the typed AST and never from the emitted body, so lowering a body
+changes no obligation. In particular a `forall` spec function stays
+omitted: omission keys on the obligation kind recorded in
+`inference.hspecs`, never on the shape of the bytes.
+
+One consequence reaches the emitted `.v`. A universal spec function that
+draws at least one `@` now has choice parameters in its WASM type, so the
+`mod_types` entry for it differs from what a pre-choice-lowering compiler
+produced. Only the *content* of such an entry changes: local function
+types are never deduplicated, so the entry count and every entry's
+position are unchanged, and therefore no surviving function's
+`modfunc_type` moves. The entries that change are exactly the ones no
+`modfunc_type` refers to — they are the types of omitted functions — and
+they need not be contiguous, nor a tail: a module mixing kinds interleaves
+referenced and unreferenced entries freely.
+
 ## T_app resolution discipline
 
 `hassert` obligations reference callees **symbolically**, by the exact
@@ -1330,6 +1366,17 @@ repeated `count` times:
     func_idx       : varuint32
 ```
 
+The obligation kind is deliberately **not** carried here, and this
+section stays at version 1: both decoders reject any other version.
+Threading a per-index kind byte through it as a wire v2 was the
+alternative, and it was rejected. A spec block may also contain methods,
+so a kind vector aligned with this index list is not aligned with the
+obligations it would be describing; and an `exists`/`unique` obligation
+additionally needs `entry_arity` and `visible_locs`, which a one-byte
+per-index channel has no room for. The kind and its reachability metadata
+travel in `inference.hspecs` instead, keyed by function symbol rather
+than by position.
+
 ### `inference.hspecs` (wire v2)
 
 Per-spec `hassert` obligations, each tagged with its quantifier kind,
@@ -1610,6 +1657,27 @@ If a downstream proof consumed either of the earlier shapes:
   N -> Prop` must be redefined against the `list hassert` arity, or
   renamed — wasm-verifier's own index-oriented predicate is named
   `ValidSpecFI`, not `ValidSpec`.
+
+A fourth shape exists only in a draft that was never merged, and is
+recorded here because downstream still carries guards against it:
+`_specs : list assertion`, always emitted as `(@nil assertion)`, with the
+spec's WASM function indices moved into a preceding comment and the
+payloads left unwritten. No released producer emitted it, so there is
+nothing to migrate from — but it is why wasm-verifier guards against a
+generated `_specs` being rewritten to `list assertion`, and why its own
+assertion-payload predicate is named `ValidSpecFI` rather than
+`ValidSpec`. The index comment would also be wrong against the current
+emitter: a `forall`/plain spec function is omitted from the module record
+and a retained one is renumbered, so a raw `inference.spec_funcs` index
+has no referent in the emitted `.v`.
+
+That draft also carried a per-index kind byte in `inference.spec_funcs`
+and a scalar-and-aggregate `@`-to-parameter lowering. Both concerns are
+live, and both are met elsewhere: the kind travels in
+[`inference.hspecs`](#inferencehspecs-wire-v2), for the reasons recorded
+there, and the `@`-to-parameter lowering applies to every spec function
+this compiler emits (see [The proof-mode artifact is standard
+WebAssembly](#the-proof-mode-artifact-is-standard-webassembly)).
 
 ## Translation scheme summary
 
