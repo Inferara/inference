@@ -12,6 +12,7 @@ mod robustness;
 mod rocq_typecheck;
 mod spec_propagation;
 mod spec_propagation_inf;
+mod stock_validity;
 mod type_checker;
 mod utils;
 

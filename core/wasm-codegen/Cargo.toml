@@ -22,6 +22,7 @@ thiserror.workspace = true
 inf-wasmparser.workspace = true
 inference-parser.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
+wasmparser = "0.254.0"
 wasmprinter = "0.254.0"
 tempfile = "3"
 cov-mark = { workspace = true, features = ["enable"] }

@@ -1,0 +1,51 @@
+// A specification *method* whose body carries a non-deterministic block.
+//
+// Every other fixture in this corpus puts its non-determinism in a free
+// function. A method is a different lowering position: its receiver — and, when
+// it returns a compound, the caller-allocated result pointer that stands in for
+// the return value — occupy locals ahead of the declared parameters, so the
+// hidden choice suffix a `@` is supplied through does not begin at the declared
+// arity. `dup` is the shape that separates the two readings: it declares one
+// parameter position and has two locals before its choice, and all three are
+// `i32`, so a module that reads the wrong one still loads and still validates.
+// `scaled` is the same position without the result pointer, so the pair pins the
+// offset rather than one arbitrary value of it.
+//
+// A specification method carries no verification obligation, so a
+// non-deterministic block inside one must assert nothing — asserting there would
+// be a property the translation silently drops, which is refused outright. The
+// property about the same struct therefore lives in `paired`, a free function,
+// which is also what keeps the spec from being obligation-empty.
+
+pub fn main() -> i32 {
+  return 0;
+}
+
+spec MethodChoice {
+  struct Vec2 {
+    x: i32;
+    y: i32;
+
+    fn dup(self) -> [i32; 2] {
+      forall {
+        let n: i32 = @;
+        let shifted: i32 = n + self.x;
+      }
+      let pair: [i32; 2] = [self.x, self.y];
+      return pair;
+    }
+
+    fn scaled(self) -> i32 {
+      forall {
+        let k: i32 = @;
+        let bumped: i32 = k + self.y;
+      }
+      return self.x + self.x;
+    }
+  }
+
+  fn paired(a: i32) forall {
+    let b: i32 = @;
+    assert(a + b == b + a);
+  }
+}

@@ -6,6 +6,10 @@
 //! gap surfaced by the post-merge review:
 //!
 //! - `spec_method.inf` — spec containing a struct with two methods.
+//! - `spec_method_nondet.inf` — a spec method drawing a choice, one arm of it
+//!   returning a compound. Asserts the choice is read from the local index
+//!   observed at the suffix, which is the only reading a result pointer and a
+//!   receiver ahead of it do not silently break.
 //! - `spec_calls_top.inf` — spec-inner function calling a top-level helper.
 //!   Asserts the lowered `Call` operand targets the top-level WASM index.
 //! - `three_specs.inf` — three specs of mixed shapes (free fn / struct
@@ -53,6 +57,37 @@ mod helpers {
     /// Returns true if `wasm` contains the byte slice `needle`.
     pub(super) fn wasm_contains(wasm: &[u8], needle: &[u8]) -> bool {
         wasm.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Every `0xfc`-prefixed opcode this compiler can emit: the two uzumaki
+    /// draws and the four non-deterministic block wrappers.
+    const CUSTOM_OPCODES: [u8; 6] = [0x31, 0x32, 0x3a, 0x3b, 0x3c, 0x3d];
+
+    /// Asserts the module carries no Inference custom opcode and is accepted by
+    /// a stock WebAssembly decoder.
+    ///
+    /// Both halves, because neither implies the other in a useful direction: the
+    /// opcode scan names which construct leaked, and stock validation is the
+    /// property that actually matters to a consumer. The rest of this file
+    /// validates with `inf_wasmparser`, the fork that accepts the custom
+    /// opcodes and therefore structurally cannot observe stock validity.
+    pub(super) fn assert_vanilla(wasm: &[u8]) {
+        for op in CUSTOM_OPCODES {
+            assert!(
+                !wasm_contains(wasm, &[0xfc, op]),
+                "a choice-lowered module must carry no custom opcode, found 0xfc {op:#04x}"
+            );
+        }
+        wasmparser::Validator::new()
+            .validate_all(wasm)
+            .unwrap_or_else(|e| panic!("a stock decoder must accept the module: {e}"));
+    }
+
+    /// The module's WAT with all whitespace collapsed, so a signature can be
+    /// asserted without depending on the printer's indentation.
+    pub(super) fn flat_wat(wasm: &[u8]) -> String {
+        let wat = wasmprinter::print_bytes(wasm).unwrap_or_else(|e| panic!("WAT print: {e}"));
+        wat.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// Walks the WASM `code` section and returns the operand of the first
@@ -141,6 +176,93 @@ mod fixture_spec_method {
         assert!(
             v.contains("Theorem valid_specmethod__Geometry : ValidSpec specmethod specmethod__Geometry_specs."),
             "per-spec ValidSpec theorem missing:\n{v}"
+        );
+    }
+}
+
+// ============================================================================
+// Fixture 1b: spec_method_nondet.inf — a choice inside a spec method
+// ============================================================================
+#[cfg(test)]
+mod fixture_spec_method_nondet {
+    use super::helpers::{assert_vanilla, compile_inf, flat_wat};
+    use inference_wasm_codegen::CompilationMode;
+
+    /// A specification method's choice parameter is addressed from the local
+    /// index observed where the suffix is appended, not from the declared arity.
+    ///
+    /// A method's receiver, and the caller-allocated result pointer a compound
+    /// return adds, occupy locals ahead of the declared parameters. `dup` has
+    /// both: one declared parameter position and two locals before its choice.
+    /// Reading the declared arity as the suffix base would load the receiver
+    /// instead — and since the receiver, the pointer and the choice are all
+    /// `i32`, the module would still validate and still translate. Only reading
+    /// back the value distinguishes them, which is why this is asserted on the
+    /// emitted instruction rather than on the signature alone.
+    ///
+    /// `scaled` is the same position without the result pointer, where the two
+    /// readings coincide — which is what makes the pair worth having rather than
+    /// either alone. Substituting the declared arity for the observed base
+    /// leaves `scaled` correct and silently rewrites `dup` to read its receiver,
+    /// so a fixture carrying only the second shape would report the change as no
+    /// change at all.
+    #[test]
+    fn a_spec_method_reads_its_choice_from_the_observed_suffix_base() {
+        let output = compile_inf(
+            "spec_method_nondet.inf",
+            CompilationMode::Proof,
+            "specmethodnondet",
+        );
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).expect("WASM must validate");
+        assert_vanilla(wasm);
+
+        let wat = flat_wat(wasm);
+        assert!(
+            wat.contains(
+                "(func $Vec2.dup (;2;) (type 2) \
+                 (param $sret i32) (param $self i32) (param $n i32)"
+            ),
+            "a compound-returning method takes the result pointer at local 0, the receiver at \
+             local 1, and its choice at local 2:\n{wat}"
+        );
+        assert!(
+            wat.contains("(func $Vec2.scaled (;3;) (type 3) (param $self i32) (param $k i32)"),
+            "a scalar-returning method takes the receiver at local 0 and its choice at local \
+             1:\n{wat}"
+        );
+        assert!(
+            wat.contains("(param $n i32) (local $shifted i32)")
+                && wat.contains("local.get $n local.set $n local.get $n local.get $self"),
+            "`dup` must read its choice back from `$n`; the declared arity is 1, so an absolute \
+             base would have loaded the receiver:\n{wat}"
+        );
+        assert!(
+            wat.contains("local.get $k local.set $k local.get $k local.get $self"),
+            "`scaled` must read its choice back from `$k`:\n{wat}"
+        );
+    }
+
+    /// Both methods register as spec-inner functions, so the byte gate in
+    /// `stock_validity.rs` — which walks the `inference.spec_funcs` section —
+    /// reaches them. A method that stopped registering would leave that gate
+    /// green over a body it never looked at, which is the shape of the hole
+    /// this fixture exists to close.
+    #[test]
+    fn both_methods_reach_the_per_spec_index_map() {
+        let output = compile_inf(
+            "spec_method_nondet.inf",
+            CompilationMode::Proof,
+            "specmethodnondet",
+        );
+        let indices = output
+            .spec_func_indices_by_spec()
+            .get("MethodChoice")
+            .expect("spec MethodChoice must surface a per-spec entry");
+        assert_eq!(
+            indices.len(),
+            3,
+            "two methods and one free function must be indexed; got {indices:?}"
         );
     }
 }
@@ -413,42 +535,47 @@ mod fixture_with_spec_smoke {
 // ============================================================================
 #[cfg(test)]
 mod fixture_nondet_block_lowering {
-    use super::helpers::{compile_inf, wasm_contains};
+    use super::helpers::{assert_vanilla, compile_inf, flat_wat};
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
     /// The three inline non-deterministic blocks (`forall`/`exists`/`assume`
-    /// inside plain spec functions) lower to the custom `0xfc`-prefixed WASM
-    /// opcodes in the module's bytes — that lowering coverage lives at the byte
-    /// level now. In the emitted `.v`, however, spec functions are OMITTED from
-    /// the module record, so none of the `BI_forall`/`BI_exists`/`BI_assume`
-    /// constructors appear; each spec function contributes its `hassert`
-    /// obligation instead. This pins both halves: the WASM carries the opcodes,
-    /// the `.v` carries the obligations and omits the spec bodies.
+    /// inside plain spec functions) lower to ordinary WebAssembly. No block
+    /// keeps a `0xfc` wrapper and no `@` is drawn: each arrives as a hidden
+    /// trailing choice parameter, so the whole module loads in a stock decoder.
+    /// In the emitted `.v` the spec functions are OMITTED from the module
+    /// record, so none of the `BI_forall`/`BI_exists`/`BI_assume` constructors
+    /// appear; each spec function contributes its `hassert` obligation instead.
+    ///
+    /// The two halves are the point of the fixture. No obligation changed when
+    /// the wrappers went away, which is the argument that they were carrying
+    /// nothing: the quantifier is read off the typed AST by the obligation pass
+    /// and travels in `inference.hspecs`, never in the bytes. The one trace the
+    /// choice parameters leave in the `.v` is each omitted function's orphan
+    /// `mod_types` entry, which no emitted definition refers to.
     #[test]
-    fn inline_blocks_lower_to_wasm_opcodes_and_are_omitted_from_v() {
+    fn inline_blocks_lower_to_vanilla_wasm_and_are_omitted_from_v() {
         let output = compile_inf("spec_nondet_blocks.inf", CompilationMode::Proof, "nondet");
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
+        assert_vanilla(wasm);
 
-        // WASM-byte lowering coverage: forall (0xfc 0x3a), exists (0xfc 0x3b),
-        // assume (0xfc 0x3c), and the uzumaki rvalue (0xfc 0x31) each appear.
-        assert!(
-            wasm_contains(wasm, &[0xfc, 0x3a]),
-            "forall opcode must lower"
-        );
-        assert!(
-            wasm_contains(wasm, &[0xfc, 0x3b]),
-            "exists opcode must lower"
-        );
-        assert!(
-            wasm_contains(wasm, &[0xfc, 0x3c]),
-            "assume opcode must lower"
-        );
-        assert!(
-            wasm_contains(wasm, &[0xfc, 0x31]),
-            "i32.uzumaki opcode must lower"
-        );
+        // Each body's single `@` is bound by a `let`, so it keeps that name as
+        // the function's choice parameter.
+        let wat = flat_wat(wasm);
+        for (function, choice) in [("forall_fn", "x"), ("exists_fn", "y"), ("assume_fn", "z")] {
+            let header = wat
+                .split(&format!("(func ${function} "))
+                .nth(1)
+                .unwrap_or_else(|| panic!("`{function}` must be emitted:\n{wat}"));
+            // Anchor on this function's own header: a whole-module substring
+            // search would also pass if the parameter landed on a sibling.
+            let header = header.split("(func $").next().unwrap_or(header);
+            assert!(
+                header.contains(&format!("(param ${choice} i32)")),
+                "`{function}`'s `@` must arrive as its own choice parameter `${choice}`:\n{wat}"
+            );
+        }
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Ignored", wasm, &empty, &inference::HSpecMap::default())
@@ -473,19 +600,23 @@ mod fixture_nondet_block_lowering {
 // ============================================================================
 #[cfg(test)]
 mod fixture_nondet_body_modifiers {
-    use super::helpers::{compile_inf, wasm_contains};
+    use super::helpers::{assert_vanilla, compile_inf, flat_wat};
     use inference_hassert::SpecKind;
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::FxHashMap;
 
-    /// The two accepted body modifiers lower differently in proof mode: the
-    /// `forall` body keeps its `0xfc 0x3a` wrapper and `0xfc 0x31` draw, while
-    /// the `exists` body is reachability-lowered — no `0xfc 0x3b` wrapper,
-    /// exactly one draw in the whole module (the forall body's), and its
-    /// obligation travels as an exists-kind `inference.hspecs` entry whose
-    /// named choice is source-visible.
+    /// The two accepted body modifiers lower identically in proof mode: neither
+    /// keeps its `0xfc` wrapper, neither draws, and each one's `@` arrives as a
+    /// hidden trailing choice parameter carrying the name its `let` gave it.
+    ///
+    /// They stay distinguishable where the distinction is real — the obligation.
+    /// The `forall` body's is universal; the `exists` body's travels as an
+    /// exists-kind `inference.hspecs` entry whose named choice is
+    /// source-visible. That split decides omission versus retention downstream
+    /// and is read from the typed AST, so making the two bodies lower the same
+    /// way costs nothing: universality was never encoded in the bytes.
     #[test]
-    fn forall_keeps_its_wrapper_and_exists_lowers_as_a_reachability_entry() {
+    fn both_body_modifiers_lower_vanilla_and_keep_their_distinct_obligation_kinds() {
         let output = compile_inf(
             "spec_nondet_body_modifiers.inf",
             CompilationMode::Proof,
@@ -493,14 +624,13 @@ mod fixture_nondet_body_modifiers {
         );
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
+        assert_vanilla(wasm);
 
+        let wat = flat_wat(wasm);
         assert!(
-            wasm_contains(wasm, &[0xfc, 0x3a]),
-            "the forall body wrapper must survive"
-        );
-        assert!(
-            !wasm_contains(wasm, &[0xfc, 0x3b]),
-            "the exists body wrapper must be suppressed by the reachability lowering"
+            wat.contains("(func $forall_fn (;0;) (type 0) (param $x i32)")
+                && wat.contains("(func $exists_fn (;1;) (type 1) (param $y i32)"),
+            "each body's `@` must be its function's one choice parameter:\n{wat}"
         );
 
         let entries = output

@@ -56,9 +56,20 @@
 //!
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
+//!
+//! None of these opcodes appears in a **specification** function's body. Every
+//! `spec`-inner function — free function or method, whatever its quantifier —
+//! is choice-lowered (see [`crate::choice`]): its `@`s arrive as hidden trailing
+//! parameters, its non-deterministic blocks lower inline without a wrapper, and
+//! its body is therefore vanilla WebAssembly that standard tooling can load. The
+//! quantifier is carried by the function's verification obligation, which the
+//! obligation pass builds from the typed AST and never from emitted output. The
+//! opcodes above are emitted only outside a `spec` block — which analysis rule
+//! A042 rejects in any real program, and which only the analysis-free code
+//! generation test pipelines can produce.
 
+use crate::choice::{ChoiceClass, ChoiceCursor, ChoicePlan, ChoiceRun, FrameContract};
 use crate::errors::CodegenError;
-use crate::hassert::reach::{ChoiceClass, ChoicePlan};
 use crate::target::{EmitFeatures, MemoryLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -161,8 +172,8 @@ impl Drop for SpecScopeGuard<'_> {
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
 const OPCODE_PREFIX: u8 = 0xfc;
-const UZUMAKI_I32_OPCODE: u8 = 0x31;
-const UZUMAKI_I64_OPCODE: u8 = 0x32;
+pub(crate) const UZUMAKI_I32_OPCODE: u8 = 0x31;
+pub(crate) const UZUMAKI_I64_OPCODE: u8 = 0x32;
 const FORALL_OPCODE: u8 = 0x3a;
 const EXISTS_OPCODE: u8 = 0x3b;
 const ASSUME_OPCODE: u8 = 0x3c;
@@ -175,10 +186,16 @@ const END_OPCODE: u8 = 0x0b;
 /// frame pointer, compute offset, add, uzumaki, store), so 65 536
 /// elements = 327 680 instructions -- a reasonable upper bound before
 /// instruction explosion becomes a concern.
-const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
+pub(crate) const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
+
+/// WebAssembly's implementation limit on a function's parameter count. Every
+/// decoder enforces it, this compiler's own verification step included, so a
+/// choice suffix that would cross it is refused with a diagnostic naming the
+/// specification function rather than emitted as an unparseable module.
+const MAX_WASM_PARAMS: usize = 1000;
 
 /// Recurses through `Array(elem, _)` until it finds the leaf (non-array) scalar type.
-fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
+pub(crate) fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
     match kind {
         TypeInfoKind::Array(inner, _) => leaf_scalar_type(&inner.kind),
         other => other,
@@ -188,7 +205,7 @@ fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
 /// Multiplies all dimension lengths together to get the total number of leaf scalars.
 ///
 /// For `[[[i32; 2]; 3]; 4]` this returns `2 * 3 * 4 = 24`.
-fn total_leaf_count(kind: &TypeInfoKind, length: u32) -> u32 {
+pub(crate) fn total_leaf_count(kind: &TypeInfoKind, length: u32) -> u32 {
     match kind {
         TypeInfoKind::Array(inner, inner_len) => {
             let sub_count = total_leaf_count(&inner.kind, *inner_len);
@@ -371,16 +388,28 @@ pub(crate) struct Compiler {
     /// so two files defining a same-named type get distinct layouts.
     current_module_path: Vec<String>,
     // Per-function state (set in visit_function_definition, used by lowering methods)
-    /// The reachability lowering plan of the `exists`/`unique`-bodied
-    /// specification free function currently being compiled; `None` for every
-    /// other function. This is the per-function "reachability-lowered" flag:
-    /// it gates the body-wrapper suppression, the nested `exists`/`assume`
-    /// inlining, and the `@`-to-choice-parameter seam. Deliberately not
-    /// derived from `current_spec` (a `forall` spec function also has one and
-    /// must keep its `0xfc` wrappers). Set unconditionally on entry to
+    /// The choice lowering plan of the specification function currently being
+    /// compiled; `None` for every other function. This is the per-function
+    /// "choice-lowered" flag: it gates the body-wrapper suppression, the
+    /// nested-block wrapper suppression, and the `@`-to-choice-parameter seam.
+    /// Deliberately not derived from `current_spec`: the plan set is built once
+    /// ahead of code generation and is the only authority on which `@` becomes
+    /// which parameter. Set unconditionally on entry to
     /// [`Self::visit_function_definition_body`] and cleared with the rest of
     /// the per-function state.
-    current_reach: Option<ChoicePlan>,
+    current_choices: Option<ChoicePlan>,
+    /// WASM local index of the first choice parameter of the function being
+    /// compiled, observed where the suffix is appended. It already counts an
+    /// sret pointer and a method receiver, so a run's ordinal `k` names local
+    /// `choice_suffix_base + k`. Meaningless (and unread) while
+    /// `current_choices` is `None`.
+    choice_suffix_base: u32,
+    /// Non-deterministic block wrappers (`0xfc 0x3a`..`0x3d`) emitted in the
+    /// function being compiled.
+    nondet_block_opcodes: u32,
+    /// Uzumaki draws (`0xfc 0x31`/`0x32`) emitted in the function being
+    /// compiled.
+    uzumaki_draw_opcodes: u32,
     func: Option<Function>,
     locals_map: FxHashMap<String, (u32, ValType)>,
     frame_layout: Option<FrameLayout>,
@@ -659,7 +688,10 @@ impl Compiler {
             current_fn_key: None,
             current_spec: None,
             current_module_path: Vec::new(),
-            current_reach: None,
+            current_choices: None,
+            choice_suffix_base: 0,
+            nondet_block_opcodes: 0,
+            uzumaki_draw_opcodes: 0,
             func: None,
             locals_map: FxHashMap::default(),
             frame_layout: None,
@@ -1292,7 +1324,7 @@ impl Compiler {
         method_struct_name: Option<&str>,
         module_path: &[String],
         origin: &FunctionOrigin,
-        reach_plan: Option<&ChoicePlan>,
+        choice_plan: Option<&ChoicePlan>,
     ) -> Result<(), CodegenError> {
         let spec = match origin {
             FunctionOrigin::SpecInner(name) => Some(name.clone()),
@@ -1306,7 +1338,7 @@ impl Compiler {
             method_struct_name,
             module_path,
             origin,
-            reach_plan,
+            choice_plan,
         )
     }
 
@@ -1319,7 +1351,7 @@ impl Compiler {
         method_struct_name: Option<&str>,
         module_path: &[String],
         origin: &FunctionOrigin,
-        reach_plan: Option<&ChoicePlan>,
+        choice_plan: Option<&ChoicePlan>,
     ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
@@ -1333,11 +1365,15 @@ impl Compiler {
             _ => return Ok(()),
         };
 
-        // The per-function reachability flag: `Some` only for an
-        // `exists`/`unique`-bodied spec free function the pre-scan planned.
-        // Assigned unconditionally so a previous function's plan can never
-        // leak into this one.
-        self.current_reach = reach_plan.cloned();
+        // The per-function choice-lowering flag: `Some` for every
+        // specification function in proof mode. Assigned unconditionally so a
+        // previous function's plan can never leak into this one, and paired
+        // with a reset of the custom-opcode counters the end-of-body vanilla
+        // check reads.
+        self.current_choices = choice_plan.cloned();
+        self.choice_suffix_base = 0;
+        self.nondet_block_opcodes = 0;
+        self.uzumaki_draw_opcodes = 0;
 
         let raw_name = arena[fn_name_id].name.clone();
         // Record which file this function belongs to so struct/enum metadata
@@ -1470,36 +1506,47 @@ impl Compiler {
             }
         }
 
-        // Reachability lowering: append one hidden trailing choice parameter
-        // per planned scalar `@`, after the declared parameters and before
-        // `param_count` is captured, so everything downstream that derives
-        // from `local_idx` — local declarations, scratch numbering, name
-        // entries — shifts with the suffix automatically. The k-th choice
-        // lands at local index `entry_arity + k`, the exact index the
-        // pre-scan recorded in `ChoicePlan::by_expr` and the `@` lowering
-        // reads back; the assert pins that the two sides agree before any
-        // index is handed out. An anonymous choice gets a `__choice{k}`
-        // name-section entry (debuggability only); a named one takes its
-        // `let` binding's own name via `locals_map` (see
-        // [`Self::pre_scan_locals`]).
+        // Choice lowering: append one hidden trailing parameter per planned
+        // choice, after the declared parameters and before `param_count` is
+        // captured, so everything downstream that derives from `local_idx` —
+        // local declarations, scratch numbering, name entries — shifts with
+        // the suffix automatically. `local_idx` here is the suffix base: it
+        // already counts an sret pointer and a method receiver, so ordinal `k`
+        // lands at `choice_suffix_base + k`, the index the `@` lowering reads
+        // back. An anonymous choice gets a `__choice{k}` name-section entry
+        // (debuggability only); a named one takes its `let` binding's own name
+        // via `locals_map` (see [`Self::pre_scan_locals`]).
         let mut choice_name_entries: Vec<(u32, String)> = Vec::new();
-        if let Some(plan) = reach_plan {
-            assert_eq!(
-                local_idx, plan.entry_arity,
-                "reachability pre-scan and parameter registration disagree about the entry \
-                 arity of `{fn_name}`; the appended choice parameters would be misaligned \
-                 with the plan's recorded slot indices",
-            );
-            if !plan.choices.is_empty() {
-                cov_mark::hit!(wasm_codegen_reach_choice_suffix);
-            }
-            for (k, choice) in plan.choices.iter().enumerate() {
-                debug_assert_eq!(
-                    plan.by_expr.get(&choice.expr),
-                    Some(&local_idx),
-                    "the plan's positional and by-expression views disagree; both consumers \
-                     key off `by_expr`, so a skew here would misalign every choice slot",
+        if let Some(plan) = choice_plan {
+            self.choice_suffix_base = local_idx;
+            // The obligation of an `exists`/`unique` free function denotes
+            // against the real activation frame, so there — and only there —
+            // the suffix must begin exactly at the declared arity. The
+            // no-return rule is what forbids the sret pointer that would
+            // otherwise shift it.
+            if plan.contract == FrameContract::Bound {
+                assert_eq!(
+                    local_idx, plan.entry_arity,
+                    "the choice plan and parameter registration disagree about the entry \
+                     arity of `{fn_name}`; the appended choice parameters would be misaligned \
+                     with the obligation payload's recorded slot indices",
                 );
+            }
+            let total = local_idx as usize + plan.params.len();
+            if total > MAX_WASM_PARAMS {
+                cov_mark::hit!(wasm_codegen_choice_suffix_too_large);
+                return Err(CodegenError::ChoiceSuffixTooLarge {
+                    spec: self.current_spec.clone().unwrap_or_default(),
+                    function: fn_name.clone(),
+                    base: local_idx,
+                    choices: plan.params.len(),
+                    max: MAX_WASM_PARAMS,
+                });
+            }
+            if !plan.params.is_empty() {
+                cov_mark::hit!(wasm_codegen_choice_suffix);
+            }
+            for (k, choice) in plan.params.iter().enumerate() {
                 let vt = match choice.class {
                     ChoiceClass::I32 => ValType::I32,
                     ChoiceClass::I64 => ValType::I64,
@@ -1547,13 +1594,15 @@ impl Compiler {
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
 
+        let choice_suffix_base = self.choice_suffix_base;
         Self::pre_scan_locals(
             arena,
             body_id,
             ctx,
             &mut self.locals_map,
             &mut local_idx,
-            reach_plan,
+            choice_plan,
+            choice_suffix_base,
         );
 
         // The layout gate must read the very scope call lowering will read, so
@@ -1760,22 +1809,22 @@ impl Compiler {
         // (`fn f() forall { … }`) is recorded as the body block's `block_kind`
         // rather than as a nested block, so — unlike an inline `forall { … }`
         // statement, which flows through `lower_block` — it would otherwise be
-        // flattened away here. Emit the matching nondet wrapper so the
-        // quantifier survives into the WASM (and therefore the proof-mode Rocq
-        // output): a bare top-level `BI_uzumaki_num` has no opsem reduction and
-        // cannot be proven `cannot_trap`, whereas a `BI_forall`-wrapped body is
-        // discharged by the verifier's `C_forall` + `instance_elem` machinery.
+        // flattened away here.
         let block = &arena[body_id];
         let body_kind = block.block_kind;
-        // A reachability-lowered body compiles to vanilla WASM: the verifier
-        // discharges its obligation by reducing the retained body under the
-        // plain WebAssembly semantics, where a `0xfc` wrapper has no reduction
-        // rule, so the quantifier is carried by the obligation's kind instead
-        // of a body wrapper. The branch keys on the per-function reachability
-        // flag, never on `current_spec` — a `forall` spec function keeps its
-        // wrapper.
-        let body_nondet_op = if self.current_reach.is_some() {
-            cov_mark::hit!(wasm_codegen_reach_body_wrapper_suppressed);
+        // A choice-lowered body compiles to vanilla WASM. No consumer reads a
+        // specification body's bytes as a non-deterministic program: the
+        // universal judgment reads the obligation, which the obligation pass
+        // builds from the typed AST, and the reachability judgment reduces the
+        // compiled body under the plain WebAssembly semantics, where a `0xfc`
+        // wrapper has no reduction rule at all. So the wrapper would encode
+        // nothing while making the whole module unloadable by standard
+        // WebAssembly tooling. The wrapper survives only for an unplanned body
+        // — a nondet construct outside a `spec` block, which analysis rule
+        // A042 rejects in any real program and which only the analysis-free
+        // codegen test pipelines can produce.
+        let body_nondet_op = if self.current_choices.is_some() {
+            cov_mark::hit!(wasm_codegen_choice_body_wrapper_suppressed);
             None
         } else {
             match body_kind {
@@ -1824,6 +1873,27 @@ impl Compiler {
 
         self.func().instruction(&Instruction::End);
 
+        // The vanilla contract, in release builds too: a body whose every `@`
+        // the plan covers must have written no custom opcode at all. The two
+        // counters are bumped at the crate's only two `0xfc` write sites, so a
+        // planner/emitter divergence fails here rather than shipping an
+        // artifact standard tooling cannot load. A plan that deliberately left
+        // a `@` alone is exempt — that body is rejected downstream by the
+        // obligation pass and never reaches an artifact.
+        if let Some(plan) = &self.current_choices
+            && plan.covers_every_uzumaki
+        {
+            assert_eq!(
+                (self.nondet_block_opcodes, self.uzumaki_draw_opcodes),
+                (0, 0),
+                "specification function `{fn_name}` was choice-lowered but still emitted \
+                 {} non-deterministic block wrapper(s) and {} uzumaki draw(s); the plan and the \
+                 emitter disagree about which `@`s and blocks the lowering covers",
+                self.nondet_block_opcodes,
+                self.uzumaki_draw_opcodes,
+            );
+        }
+
         self.func_names.push((self.func_idx, fn_name.clone()));
         let mut local_name_entries: Vec<(u32, String)> = self
             .locals_map
@@ -1846,7 +1916,8 @@ impl Compiler {
         let completed_func = self.take_completed_function();
         self.bodies.push(completed_func);
         self.frame_layout = None;
-        self.current_reach = None;
+        self.current_choices = None;
+        self.choice_suffix_base = 0;
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
@@ -1922,19 +1993,21 @@ impl Compiler {
     /// index; the arms of an `if` do not reuse indices, so the pure enumeration
     /// of [`Self::walk_statements`] reproduces the intended numbering directly.
     ///
-    /// In a reachability-lowered body (`reach_plan` is `Some`), a
-    /// `let x: T = @;` whose `@` the plan covers binds `x` to its appended
-    /// choice *parameter* instead of a fresh local: the parameter slot IS the
-    /// binding — the initializer lowering normalizes it in place — so the
-    /// source name, the name-section entry, and the value the activation
-    /// frame holds all coincide on one index.
+    /// In a choice-lowered body (`choice_plan` is `Some`), a `let x: T = @;`
+    /// whose `@` the plan covers as a *scalar* binds `x` to its appended choice
+    /// parameter instead of a fresh local: the parameter slot IS the binding —
+    /// the initializer lowering normalizes it in place — so the source name,
+    /// the name-section entry, and the value the activation frame holds all
+    /// coincide on one index. An aggregate `@` still takes a fresh local: its
+    /// value is a pointer into the frame, not a parameter.
     fn pre_scan_locals(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         locals_map: &mut FxHashMap<String, (u32, ValType)>,
         local_idx: &mut u32,
-        reach_plan: Option<&ChoicePlan>,
+        choice_plan: Option<&ChoicePlan>,
+        choice_suffix_base: u32,
     ) {
         Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
             match &arena[stmt_id].kind {
@@ -1971,15 +2044,20 @@ impl Compiler {
                         // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                         _ => ValType::I32,
                     };
-                    // A named reachability choice aliases its appended choice
+                    // A named scalar choice aliases its appended choice
                     // parameter; no fresh local is allocated and the index
-                    // counter does not advance.
-                    if let Some(plan) = reach_plan
+                    // counter does not advance. An aggregate `@` is excluded on
+                    // its run *kind*, never on a count: its `let` binds a frame
+                    // pointer, which the `val_type` catch-all just above also
+                    // resolves to `ValType::I32`, so nothing else here would
+                    // tell a one-leaf aggregate from a scalar.
+                    if let Some(plan) = choice_plan
                         && let Some(value) = *value
                         && matches!(arena[value].kind, Expr::Uzumaki)
-                        && let Some(&choice_local) = plan.by_expr.get(&value)
+                        && let Some(ChoiceRun::Scalar(ordinal)) = plan.run(value)
                     {
-                        cov_mark::hit!(wasm_codegen_reach_named_choice_binding);
+                        cov_mark::hit!(wasm_codegen_choice_named_binding);
+                        let choice_local = choice_suffix_base + ordinal;
                         let prev = locals_map.insert(var_name.clone(), (choice_local, val_type));
                         assert!(
                             prev.is_none(),
@@ -3411,17 +3489,17 @@ impl Compiler {
             BlockKind::Regular => None,
         };
 
-        // Nested `exists`/`assume` blocks inside a reachability-lowered body
-        // lower inline: their statements already carry the semantics under the
-        // vanilla reduction (an `assert` traps on the filtered-out paths), and
-        // a `0xfc` wrapper would make the retained body irreducible. Nested
-        // `forall` and `unique` blocks keep their wrappers — they have no
-        // reachability encoding and the obligation pass rejects them
-        // (P007/P002) before any artifact is emitted.
-        if self.current_reach.is_some()
-            && matches!(block.block_kind, BlockKind::Exists | BlockKind::Assume)
-        {
-            cov_mark::hit!(wasm_codegen_reach_nested_block_inlined);
+        // Every nested non-deterministic block inside a choice-lowered body
+        // lowers inline, whatever its kind: its statements are emitted in
+        // source order and its wrapper is not. The quantifier is carried by the
+        // obligation, which the obligation pass builds from the typed AST — a
+        // nested `forall` becomes an alternation, a nested `exists` a witness,
+        // a nested `assume` the antecedent of an implication — so the wrapper
+        // encodes nothing any consumer reads. Suppressing every kind rather
+        // than a chosen pair is also what lets the end-of-body vanilla check be
+        // an equality against zero instead of an exception list.
+        if self.current_choices.is_some() {
+            cov_mark::hit!(wasm_codegen_choice_nested_block_inlined);
             opcode = None;
         }
 
@@ -3614,23 +3692,52 @@ impl Compiler {
                 let type_info = ctx
                     .get_node_typeinfo(node_id)
                     .expect("Uzumaki expression must have type info");
-                // A planned reachability choice reads its appended parameter
-                // instead of drawing through the `0xfc` opcode. The domain
-                // normalization is the exact sequence a draw performs
-                // (sub-word wrap, bool `&1`, enum `rem_u N`; a no-op for the
-                // full-width classes), so the value the body observes stays
-                // inside the declared type's value set. Compound `@`s are
-                // never planned and fall through to the aggregate arms below.
-                let reach_choice = self
-                    .current_reach
+                // A planned choice reads its parameter instead of drawing
+                // through the `0xfc` opcode. For a scalar the parameter *is*
+                // the value, so the domain normalization that follows is the
+                // exact sequence a draw performs (sub-word wrap, bool `&1`,
+                // enum `rem_u N`; a no-op for the full-width classes) and the
+                // value the body observes stays inside the declared type's
+                // value set. An aggregate keeps the whole aggregate lowering
+                // below — frame slot, per-leaf offsets, store widths, domain
+                // constraints and the trailing frame-pointer push are all
+                // unchanged — and only swaps each leaf's draw for a read,
+                // through the cursor threaded into the emitters.
+                //
+                // The two are told apart by the run's *kind*. A one-leaf
+                // aggregate (`[i32; 1]`, a single-field struct) reserves
+                // exactly one parameter, so a count test would take the scalar
+                // path, skip the frame store, and bind a raw i32 where every
+                // later access expects a pointer — in a module that still
+                // validates.
+                let mut cursor = match self
+                    .current_choices
                     .as_ref()
-                    .and_then(|plan| plan.by_expr.get(&expr_id).copied());
-                if let Some(choice_local) = reach_choice {
-                    cov_mark::hit!(wasm_codegen_reach_choice_param_load);
-                    self.func().instruction(&Instruction::LocalGet(choice_local));
-                    self.emit_uzumaki_domain_constraint(&type_info.kind, ctx);
-                    return;
-                }
+                    .and_then(|plan| plan.run(expr_id))
+                {
+                    Some(ChoiceRun::Scalar(ordinal)) => {
+                        cov_mark::hit!(wasm_codegen_choice_param_load);
+                        let choice_local = self.choice_suffix_base + ordinal;
+                        self.func()
+                            .instruction(&Instruction::LocalGet(choice_local));
+                        self.emit_uzumaki_domain_constraint(&type_info.kind, ctx);
+                        return;
+                    }
+                    Some(ChoiceRun::Leaves { first, len }) => {
+                        cov_mark::hit!(wasm_codegen_choice_leaf_cursor);
+                        let plan = self
+                            .current_choices
+                            .as_ref()
+                            .expect("the run was read from this plan");
+                        Some(ChoiceCursor::open(
+                            plan,
+                            first,
+                            len,
+                            self.choice_suffix_base,
+                        ))
+                    }
+                    None => None,
+                };
                 match &type_info.kind {
                     TypeInfoKind::Bool
                     | TypeInfoKind::Number(
@@ -3659,9 +3766,14 @@ impl Compiler {
                                 "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        if let Err(e) =
-                            self.lower_array_uzumaki(arena, &elem_type, length, var_name, ctx)
-                        {
+                        if let Err(e) = self.lower_array_uzumaki(
+                            arena,
+                            &elem_type,
+                            length,
+                            var_name,
+                            ctx,
+                            &mut cursor,
+                        ) {
                             panic!("array uzumaki lowering failed: {e}");
                         }
                     }
@@ -3673,11 +3785,15 @@ impl Compiler {
                                 "Struct uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        if let Err(e) = self.lower_struct_uzumaki(ctx, &name, var_name) {
+                        if let Err(e) = self.lower_struct_uzumaki(ctx, &name, var_name, &mut cursor)
+                        {
                             panic!("struct uzumaki lowering failed: {e}");
                         }
                     }
                     _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
+                }
+                if let Some(cursor) = cursor {
+                    cursor.finish();
                 }
             }
         }
@@ -4831,7 +4947,7 @@ impl Compiler {
         )
     }
 
-    fn is_i64_type(kind: &TypeInfoKind) -> bool {
+    pub(crate) fn is_i64_type(kind: &TypeInfoKind) -> bool {
         matches!(
             kind,
             TypeInfoKind::Number(NumberType::I64 | NumberType::U64)
@@ -5183,6 +5299,7 @@ impl Compiler {
         length: u32,
         enclosing_var_name: &str,
         ctx: &TypedContext,
+        cursor: &mut Option<ChoiceCursor>,
     ) -> Result<(), CodegenError> {
         let total = total_leaf_count(&elem_type.kind, length);
         if total > MAX_UZUMAKI_UNROLL_ELEMENTS {
@@ -5227,6 +5344,7 @@ impl Compiler {
             uzumaki_opcode,
             &store_instr,
             ctx,
+            cursor,
         );
 
         self.func()
@@ -5257,6 +5375,7 @@ impl Compiler {
         uzumaki_opcode: u8,
         store_instr: &Instruction<'_>,
         ctx: &TypedContext,
+        cursor: &mut Option<ChoiceCursor>,
     ) {
         match kind {
             TypeInfoKind::Array(inner_elem, inner_len) => {
@@ -5281,6 +5400,7 @@ impl Compiler {
                         uzumaki_opcode,
                         store_instr,
                         ctx,
+                        cursor,
                     );
                 }
             }
@@ -5298,7 +5418,7 @@ impl Compiler {
                         .instruction(&Instruction::LocalGet(frame_ptr_local));
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
-                    self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_choice_or_draw(cursor, uzumaki_opcode);
                     self.emit_compound_uzumaki_domain_constraint(kind, ctx);
                     self.func().instruction(store_instr);
                 }
@@ -5316,6 +5436,7 @@ impl Compiler {
         ctx: &TypedContext,
         struct_name: &str,
         enclosing_var_name: &str,
+        cursor: &mut Option<ChoiceCursor>,
     ) -> Result<(), CodegenError> {
         let layout = self
             .frame_layout
@@ -5343,12 +5464,18 @@ impl Compiler {
                 let (_, computed_fields) =
                     compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
                 for field in &computed_fields {
-                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
+                    self.emit_struct_field_uzumaki(
+                        frame_ptr_local,
+                        slot_offset,
+                        field,
+                        ctx,
+                        cursor,
+                    )?;
                 }
             }
         } else {
             for field in &field_slots {
-                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx)?;
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field, ctx, cursor)?;
             }
         }
 
@@ -5375,6 +5502,7 @@ impl Compiler {
         struct_base_offset: u32,
         field: &memory::StructFieldSlot,
         ctx: &TypedContext,
+        cursor: &mut Option<ChoiceCursor>,
     ) -> Result<(), CodegenError> {
         if let TypeInfoKind::Array(ref _elem, length) = field.type_kind
             && length > MAX_UZUMAKI_UNROLL_ELEMENTS
@@ -5404,7 +5532,7 @@ impl Compiler {
                     .instruction(&Instruction::LocalGet(frame_ptr_local));
                 self.func().instruction(&Instruction::I32Const(byte_offset));
                 self.func().instruction(&Instruction::I32Add);
-                self.emit_uzumaki(uzumaki_opcode);
+                self.emit_choice_or_draw(cursor, uzumaki_opcode);
                 self.emit_compound_uzumaki_domain_constraint(&field.type_kind, ctx);
                 self.func().instruction(&store_instr);
             }
@@ -5431,7 +5559,7 @@ impl Compiler {
                         .instruction(&Instruction::LocalGet(frame_ptr_local));
                     self.func().instruction(&Instruction::I32Const(byte_offset));
                     self.func().instruction(&Instruction::I32Add);
-                    self.emit_uzumaki(uzumaki_opcode);
+                    self.emit_choice_or_draw(cursor, uzumaki_opcode);
                     self.emit_compound_uzumaki_domain_constraint(elem_kind, ctx);
                     self.func().instruction(&store_instr);
                 }
@@ -6662,7 +6790,11 @@ impl Compiler {
         }
     }
 
+    /// One of the crate's exactly two `0xfc` write sites; the counter it bumps
+    /// backs the end-of-body vanilla contract in
+    /// [`Self::visit_function_definition_body`].
     fn emit_nondet_block_start(&mut self, opcode: u8) {
+        self.nondet_block_opcodes += 1;
         self.func().raw([OPCODE_PREFIX, opcode, BLOCK_TYPE_VOID]);
     }
 
@@ -6670,8 +6802,28 @@ impl Compiler {
         self.func().raw([END_OPCODE]);
     }
 
+    /// The other of the crate's exactly two `0xfc` write sites; the counter it
+    /// bumps backs the end-of-body vanilla contract in
+    /// [`Self::visit_function_definition_body`].
     fn emit_uzumaki(&mut self, opcode: u8) {
+        self.uzumaki_draw_opcodes += 1;
         self.func().raw([OPCODE_PREFIX, opcode]);
+    }
+
+    /// Supplies one scalar leaf of an aggregate `@`: a read of its planned
+    /// choice parameter, or the draw the emitter would otherwise have written.
+    ///
+    /// The class the cursor checks comes from `opcode`, which the caller
+    /// selected from the leaf's own type — so the check compares the emitter's
+    /// classification against the planner's, which is the drift this cursor
+    /// exists to catch.
+    fn emit_choice_or_draw(&mut self, cursor: &mut Option<ChoiceCursor>, opcode: u8) {
+        if let Some(cursor) = cursor.as_mut() {
+            let local = cursor.take(ChoiceClass::of_draw_opcode(opcode));
+            self.func().instruction(&Instruction::LocalGet(local));
+        } else {
+            self.emit_uzumaki(opcode);
+        }
     }
 
     /// Copies `byte_size` bytes between a destination and a source address that

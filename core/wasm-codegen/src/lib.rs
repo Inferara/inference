@@ -55,14 +55,15 @@ use rustc_hash::FxHashMap;
 use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
 
+mod choice;
+#[cfg(test)]
+mod choice_lowering_tests;
 mod compiler;
 mod errors;
 mod hassert;
 mod hspecs_section;
 mod memory;
 pub mod output;
-#[cfg(test)]
-mod reach_lowering_tests;
 mod spec_section;
 pub mod target;
 
@@ -181,22 +182,8 @@ pub fn codegen(
     // profile, or target. `Compiler::set_emit_bounds_checks` carries why.
     compiler.set_emit_bounds_checks(true);
 
-    // Reachability pre-scan (proof mode only): plan the hidden trailing choice
-    // parameters of every `exists`/`unique`-bodied specification free function
-    // before any body is compiled. The plan set feeds both consumers — the
-    // compiler (signature suffix and body lowering) and the obligation pass —
-    // by reference, so both read one `ExprId`-keyed map and can never drift
-    // apart on slot indices. The pre-scan is a pure function of the typed AST
-    // and fails here, before a single byte is emitted, when a planned function
-    // declares a return type or contains a `return` statement.
-    let reach_plans = if mode == CompilationMode::Proof {
-        hassert::reach::plan_reachability_specs(typed_context)?
-    } else {
-        hassert::reach::ReachPlans::default()
-    };
-
     let hspecs = if typed_context.source_files().next().is_some() {
-        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode, &reach_plans)?
+        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?
     } else {
         HSpecMap::default()
     };
@@ -271,7 +258,6 @@ fn traverse_t_ast_with_compiler(
     typed_context: &TypedContext,
     compiler: &mut Compiler,
     mode: CompilationMode,
-    reach_plans: &hassert::reach::ReachPlans,
 ) -> Result<HSpecMap, CodegenError> {
     let arena = typed_context.arena();
 
@@ -290,6 +276,24 @@ fn traverse_t_ast_with_compiler(
             &mut buckets,
         )?;
     }
+
+    // Plan the choice lowering of every specification function before any body
+    // is compiled: each `@` becomes one hidden trailing parameter (one per
+    // scalar leaf for an aggregate), so a specification body compiles to
+    // vanilla WebAssembly. The planner iterates the same buckets body
+    // compilation does, so its scope cannot drift from code generation's. In
+    // compile mode the spec buckets are empty, so the plan set is too.
+    //
+    // The reachability view then selects the `exists`/`unique` free functions,
+    // whose obligation payloads denote against the real activation frame, and
+    // enforces the no-return rule that keeps those frame indices valid. It
+    // fails here, before a single byte is emitted. Running both after
+    // `collect_emittable_functions` means a program carrying both a nested spec
+    // and a reachability-return fault reports the nested spec first — the more
+    // fundamental structural error, and the only interaction, since
+    // `NestedSpecsNotSupported` is that function's sole error.
+    let choice_plans = choice::plan_choice_lowering(typed_context, &buckets);
+    let reach_plans = hassert::reach::reachability_plans(typed_context, &buckets, &choice_plans)?;
 
     // Reject two specs whose file-qualified names collide under the `_` join
     // before any are recorded; the spec map is keyed by the joined name, so a
@@ -318,10 +322,9 @@ fn traverse_t_ast_with_compiler(
 
     register_function_indices(arena, compiler, typed_context, &buckets)?;
 
-    // Stage 2: Compile bodies in the same order as registration. Only a spec
-    // free function can carry a reachability plan (the pre-scan plans nothing
-    // else), so the other buckets pass `None` rather than performing a lookup
-    // that can never hit.
+    // Stage 2: Compile bodies in the same order as registration. Only a
+    // specification function carries a choice plan, so the top-level buckets
+    // pass `None` rather than performing a lookup that can never hit.
     for entry in &buckets.funcs {
         compiler.visit_function_definition(
             entry.def_id,
@@ -352,7 +355,7 @@ fn traverse_t_ast_with_compiler(
             None,
             &entry.module_path,
             &FunctionOrigin::SpecInner(entry.spec_name.clone()),
-            reach_plans.get(entry.def_id),
+            choice_plans.get(entry.def_id),
         )?;
     }
     for entry in &buckets.spec_methods {
@@ -363,7 +366,7 @@ fn traverse_t_ast_with_compiler(
             Some(&entry.struct_name),
             &entry.module_path,
             &FunctionOrigin::SpecInner(entry.spec_name.clone()),
-            None,
+            choice_plans.get(entry.def_id),
         )?;
     }
 
@@ -380,7 +383,7 @@ fn traverse_t_ast_with_compiler(
     // surfaces them all at once.
     if mode == CompilationMode::Proof {
         let (hspecs, diagnostics) =
-            hassert::translate_spec_fns(typed_context, &buckets, reach_plans);
+            hassert::translate_spec_fns(typed_context, &buckets, &reach_plans);
         if !diagnostics.is_empty() {
             let rendered = diagnostics
                 .iter()

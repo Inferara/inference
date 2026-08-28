@@ -43,11 +43,11 @@
 //! `HA_has_type` slot guard (the payload denotes against the *real* reached
 //! frame, where every slot carries its runtime type; the guard discipline
 //! below targets `ValidSpec`'s unconstrained valuations). Both the compiled
-//! body and this translator read the same pre-scan
-//! [`ChoicePlan`], keyed by `ExprId`, so a payload slot index equals the
-//! frame index of the same choice by construction rather than by parallel
-//! counting. `HA_ex` still appears in reachability payloads, but only for
-//! short-circuit witnesses, whose machinery is mode-independent.
+//! body and this translator read the same choice plan, keyed by `ExprId`, so a
+//! payload slot index equals the frame index of the same choice by
+//! construction rather than by parallel counting. `HA_ex` still appears in
+//! reachability payloads, but only for short-circuit witnesses, whose
+//! machinery is mode-independent.
 //!
 //! ## Logical variables carry levels, not indices, until the end
 //!
@@ -250,7 +250,7 @@ use rustc_hash::FxHashMap;
 
 use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
-use super::reach::ChoicePlan;
+use super::reach::ReachPlan;
 
 /// Polarity of the surrounding quantification.
 ///
@@ -313,9 +313,9 @@ impl Mode {
 /// The reachability context of the function being translated, present exactly
 /// while its `exists`/`unique` body translates in [`Mode::Reach`].
 struct ReachCtx<'a> {
-    /// The pre-scan's choice plan for this function — the same map code
-    /// generation consumed for the signature suffix and the `@` lowering.
-    plan: &'a ChoicePlan,
+    /// The reachability view of this function's choice plan — the same map
+    /// code generation consumed for the signature suffix and the `@` lowering.
+    plan: ReachPlan<'a>,
     /// Whether the body is `unique`-quantified. An anonymous call-argument
     /// `@` is rejected there ([`PCode::P012`]): it is excluded from the
     /// source-visible observation, which would silently weaken uniqueness.
@@ -707,13 +707,14 @@ impl<'a> SpecFnTranslator<'a> {
     ///
     /// A `forall`-quantified or plain (`Regular`) body is translated in
     /// universal mode; an `exists`/`unique`-quantified one in reachability
-    /// mode, reading its `@` slots from `plan` (the same pre-scan plan code
+    /// mode, reading its `@` slots from `plan` (the same choice plan code
     /// generation consumed, so payload slots and compiled frame indices agree
-    /// by construction). An `assume`-quantified body states no property —
-    /// `assume` is not a quantifier — and yields [`PCode::P001`] plus a
-    /// trivial `⊤` obligation (discarded, since any diagnostic aborts code
-    /// generation).
-    pub(super) fn translate_fn(&mut self, def_id: DefId, plan: Option<&'a ChoicePlan>) -> HAssert {
+    /// by construction). `plan` is read only on the reachability arm, so a
+    /// universal payload cannot depend on the compiled frame even in
+    /// principle. An `assume`-quantified body states no property — `assume` is
+    /// not a quantifier — and yields [`PCode::P001`] plus a trivial `⊤`
+    /// obligation (discarded, since any diagnostic aborts code generation).
+    pub(super) fn translate_fn(&mut self, def_id: DefId, plan: Option<ReachPlan<'a>>) -> HAssert {
         let (args, body) = match &self.arena[def_id].kind {
             Def::Function { args, body, .. } => (args.clone(), *body),
             _ => return HAssert::True,
@@ -725,7 +726,7 @@ impl<'a> SpecFnTranslator<'a> {
             BlockKind::Exists | BlockKind::Unique => {
                 let plan = plan.expect(
                     "an exists/unique-bodied spec free function reached translation without a \
-                     reachability plan — the pre-scan walks the same spec structure this pass \
+                     reachability plan — the view walks the same spec-function bucket this pass \
                      iterates, so a missing plan means the two walks disagree",
                 );
                 self.reach = Some(ReachCtx {
@@ -2191,11 +2192,11 @@ impl<'a> SpecFnTranslator<'a> {
                         .reach
                         .as_ref()
                         .expect("Mode::Reach requires a reachability context");
-                    (reach.plan.by_expr.get(&arg).copied(), reach.unique)
+                    (reach.plan.try_choice_slot(arg), reach.unique)
                 };
                 // Unlike the `let` seam, this position performs no scalarity
                 // pre-check of its own, so the plan lookup is the check: the
-                // pre-scan plans every scalar `@`, and an unplanned one here
+                // planner plans every scalar `@`, and an unplanned one here
                 // is at a non-scalar type.
                 let Some(slot) = planned else {
                     self.emit_unplanned_reach_argument(arg);
@@ -3532,29 +3533,21 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// The appended choice-parameter index of a scalar `@` in a reachability
-    /// body, from the shared pre-scan plan.
+    /// body, from the shared choice plan.
     ///
-    /// A miss is a compiler bug, never a program error, and there is no honest
-    /// slot to fall back on — inventing one would emit a payload slot that is
-    /// not the choice parameter, a silently wrong obligation. Three sites
-    /// classify "is this `@` scalar" today (`reach.rs`'s `plan_choice` and the
+    /// A miss is a compiler bug, never a program error. Three sites classify
+    /// "is this `@` scalar" today (`choice.rs`'s `plan_choice` and the
     /// compiler's `Expr::Uzumaki` arm from the recorded type; this
     /// translator's `type_is_scalar` from the declared type, with extra arms
     /// for enum-resolving `Custom`/`Qualified` names), so a scalar this pass
-    /// sees that the plan lacks means those classifiers diverged.
+    /// sees that the plan lacks means those classifiers diverged. The view
+    /// panics rather than inventing a slot; see [`ReachPlan::choice_slot`].
     fn choice_slot(&self, expr: ExprId) -> u32 {
-        let reach = self
-            .reach
+        self.reach
             .as_ref()
-            .expect("Mode::Reach requires a reachability context");
-        reach.plan.by_expr.get(&expr).copied().unwrap_or_else(|| {
-            panic!(
-                "scalar `@` reached reachability translation without a planned choice \
-                 parameter — the pre-scan and the translator disagree on scalar \
-                 classification, and emitting any other slot would misalign the payload \
-                 with the compiled frame"
-            )
-        })
+            .expect("Mode::Reach requires a reachability context")
+            .plan
+            .choice_slot(expr)
     }
 
     /// The bare type name of a type expression, for enum resolution fallback.

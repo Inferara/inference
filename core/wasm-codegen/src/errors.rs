@@ -29,10 +29,14 @@ pub(crate) enum CodegenError {
     ArrayTooLargeForUzumaki { total_elements: u32, max: u32 },
     /// Cycle detected in struct layout computation. The type checker should
     /// prevent recursive struct definitions, so this variant is defense-in-depth.
-    #[error("cycle detected in struct layout for '{name}' -- the struct transitively contains itself")]
+    #[error(
+        "cycle detected in struct layout for '{name}' -- the struct transitively contains itself"
+    )]
     CycleInStructLayout { name: String },
     /// A struct name referenced during layout computation was not found in the type context.
-    #[error("struct '{name}' not found in type context -- the type checker should have caught this")]
+    #[error(
+        "struct '{name}' not found in type context -- the type checker should have caught this"
+    )]
     StructNotFoundInTypeContext { name: String },
     /// A `spec` block contained another `spec` block. Nested specs have no
     /// defined Rocq emission; the codegen pipeline refuses rather than
@@ -212,6 +216,31 @@ pub(crate) enum CodegenError {
         function: String,
         kind: &'static str,
         offense: &'static str,
+    },
+
+    /// A specification function's declared parameters plus the hidden choice
+    /// parameters its `@`s lower to would exceed WebAssembly's implementation
+    /// limit on parameter count. Refusing here names the specification function
+    /// that overflowed; emitting it produces a module this compiler's own
+    /// verification step reports as a malformed binary, blaming the user for a
+    /// compiler limit.
+    #[error(
+        "specification function '{function}' in spec '{spec}' needs {base} leading parameter slot(s) \
+         plus {choices} hidden choice parameter(s), which exceeds WebAssembly's limit of {max} \
+         parameters per function — each `@` in a specification body becomes one parameter (one \
+         per scalar leaf for an array or struct `@`), so draw fewer values or split the property \
+         across several specification functions"
+    )]
+    ChoiceSuffixTooLarge {
+        spec: String,
+        function: String,
+        /// Parameter slots already registered when the choice suffix is
+        /// appended. This is the observed frame position, not the source
+        /// arity: a method's receiver and a compound return's `sret` pointer
+        /// occupy slots here without being declared parameters.
+        base: u32,
+        choices: usize,
+        max: usize,
     },
 
     /// One or more specification functions could not be translated into a

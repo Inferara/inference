@@ -67,13 +67,14 @@ fn buckets_of(ctx: &TypedContext) -> EmittableFunctions {
 }
 
 /// Translates a type-checked program, returning its obligations and the rendered
-/// diagnostics. The reachability plans are built by the same pre-scan production
-/// code generation runs, so the pass sees exactly what it would see in a real
+/// diagnostics. The plans are built by the same two passes production code
+/// generation runs, so the pass sees exactly what it would see in a real
 /// proof-mode build.
 fn translate(ctx: &TypedContext) -> (HSpecMap, Vec<String>) {
     let buckets = buckets_of(ctx);
-    let reach_plans = super::reach::plan_reachability_specs(ctx)
-        .expect("the reachability pre-scan should accept every translation-test body");
+    let choice_plans = crate::choice::plan_choice_lowering(ctx, &buckets);
+    let reach_plans = super::reach::reachability_plans(ctx, &buckets, &choice_plans)
+        .expect("the reachability view should accept every translation-test body");
     let (map, diagnostics) = super::translate_spec_fns(ctx, &buckets, &reach_plans);
     (map, diagnostics.iter().map(ToString::to_string).collect())
 }
@@ -3315,6 +3316,52 @@ spec S { fn f(p: Pt) forall { assert(p.x == p.y); } }
     assert_eq!(
         sole_obligation(&ok(source), "S"),
         imp(and(guard(0), guard(1)), nz(eqs(local(0), local(1))))
+    );
+}
+
+/// Three aggregate and scalar `@`s in one body number their slots by leaf, in
+/// declaration order, across the boundaries between them: the array's three
+/// elements, then the struct's `i32` and `i64` fields at their declared widths,
+/// then the `bool` with its narrow domain bound.
+///
+/// This is the payload half of a pair. The compiled signature for the same body
+/// is pinned by `aggregate_leaves_expand_in_layout_order` in
+/// `crate::choice_lowering_tests`, which asserts a six-parameter choice suffix
+/// in exactly this order. The two numberings agreeing here is a coincidence of
+/// this body rather than a rule — a `@` nested inside a block costs a choice
+/// parameter and binds a logical variable instead of a slot, so they diverge in
+/// general and the payload must never be renumbered to follow the frame.
+#[test]
+fn mixed_aggregate_and_scalar_uzumaki_number_their_slots_by_leaf() {
+    let prelude = "struct Pt { x: i32; y: i64; }";
+    assert_eq!(
+        obligation_of(
+            prelude,
+            "forall { let a: [i32; 3] = @; let p: Pt = @; let b: bool = @; \
+             assert(b || a[0] == 0 || p.x == 0); }"
+        ),
+        imp(
+            and(
+                guard(0),
+                and(
+                    guard(1),
+                    and(
+                        guard(2),
+                        and(
+                            guard(3),
+                            and(
+                                hastype(local(4), HNumType::I64),
+                                and(guard(5), nz(ltu(local(5), i32c(2))))
+                            )
+                        )
+                    )
+                )
+            ),
+            or(
+                or(nz(local(5)), nz(eqs(local(0), i32c(0)))),
+                nz(eqs(local(3), i32c(0)))
+            )
+        )
     );
 }
 
