@@ -5,7 +5,7 @@
 // `MixedKinds` holds a forall, an exists, and a unique spec function in ONE
 // spec block, so a single spec name carries all three grammars at once: a
 // non-empty `_specs : list hassert` under `ValidSpec`, a non-empty
-// `_ex_specs` under `ValidExistsSpec`, and a non-empty `_uq_specs` under
+// `__ex_specs` under `ValidExistsSpec`, and a non-empty `__uq_specs` under
 // `ValidUniqueSpec`. `Observed` holds a spec method (no obligation channel)
 // next to exists/unique functions, so one spec name pairs the explicitly
 // typed EMPTY universal list — `(@nil hassert)` — with both non-empty

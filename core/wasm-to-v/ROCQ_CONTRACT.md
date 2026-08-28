@@ -577,7 +577,7 @@ Definition rocq_exists_spec__ReachableDouble_specs : list hassert := (@nil hasse
 Definition rocq_exists_spec__ReachableDouble_exspec1 : reachability_spec :=
   {| reach_func := 1%N; reach_entry_arity := 1%nat;
      reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (term_eq (T_app 0 ((T_local 3%N) :: nil)) (T_const (Vi32 0))))) |}.
-Definition rocq_exists_spec__ReachableDouble_ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
+Definition rocq_exists_spec__ReachableDouble__ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
 
 Section Host.
 Context `{ho: host}.
@@ -592,7 +592,7 @@ Proof.
   (* TODO: fill the proof *)
 Qed.
 
-Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_ex_specs.
+Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble__ex_specs.
 Proof.
   (* TODO: fill the proof *)
 Qed.
@@ -625,7 +625,12 @@ Notes on what reachability adds, in emission order:
 - **Per-obligation records**: one
   `<mod>__<Spec>_exspec{k} : reachability_spec` per `exists` obligation
   in source order (1-based), then a gathering
-  `<mod>__<Spec>_ex_specs : list reachability_spec`. `reach_func` is the
+  `<mod>__<Spec>__ex_specs : list reachability_spec`. The list joins its
+  suffix with a doubled `__`, where the per-obligation records join with a
+  single `_`: a spec may not contain `__` or end in `_`, so the doubled form
+  is one no spec name can forge, and a sibling spec literally named
+  `<Spec>_ex` spells its own universal list `<mod>__<Spec>_ex_specs : list
+  hassert` without colliding with it. `reach_func` is the
   retained function's `mod_funcs` index (`%N`), `reach_entry_arity` the
   source parameter count (`%nat`), `reach_visible_locs` the ascending
   source-visible slot list (`%N`), and `reach_payload` the body's
@@ -633,11 +638,11 @@ Notes on what reachability adds, in emission order:
   compiled function, entry parameters and choice parameters alike (the
   anonymous choice's slot `3` appears inside the payload but not in
   `reach_visible_locs`). A `unique` obligation is emitted identically
-  under `_uqspec{k}`/`_uq_specs` (see the committed golden
+  under `_uqspec{k}`/`__uq_specs` (see the committed golden
   `tests/test_data/rocq/rocq_unique_spec.v`).
 - **Theorems**: the `Section Host` block gains one
   `Theorem valid_exists_<mod>__<Spec> : ValidExistsSpec <mod>
-  <mod>__<Spec>_ex_specs` per spec whose `exists` partition is
+  <mod>__<Spec>__ex_specs` per spec whose `exists` partition is
   non-empty, and one `valid_unique_<mod>__<Spec>` over `ValidUniqueSpec`
   per non-empty `unique` partition. An empty partition emits nothing —
   no empty `list reachability_spec`, no vacuous theorem — which is what

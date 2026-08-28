@@ -1,6 +1,6 @@
 // A `unique`-bodied spec function, shaped for the `coqc` gate's corpus: the
 // body is reachability-lowered exactly like an `exists` one, but its obligation
-// is gathered into a `_uq_specs : list reachability_spec` consumed by a
+// is gathered into a `__uq_specs : list reachability_spec` consumed by a
 // `ValidUniqueSpec` theorem — this fixture is the corpus producer for that
 // grammar (an `exists` fixture cannot stand in: the two kinds select different
 // predicates).

@@ -569,10 +569,10 @@ mod fixture_nondet_body_modifiers {
             "Definition nbm__NondetBodyModifiers_exspec1 : reachability_spec :=",
             "reach_func := 0%N; reach_entry_arity := 0%nat",
             "reach_visible_locs := (0%N :: nil)",
-            "Definition nbm__NondetBodyModifiers_ex_specs : list reachability_spec := \
+            "Definition nbm__NondetBodyModifiers__ex_specs : list reachability_spec := \
              (nbm__NondetBodyModifiers_exspec1 :: nil).",
             "Theorem valid_exists_nbm__NondetBodyModifiers : ValidExistsSpec nbm \
-             nbm__NondetBodyModifiers_ex_specs.",
+             nbm__NondetBodyModifiers__ex_specs.",
             // The forall sibling keeps the universal grammar.
             "Definition nbm__NondetBodyModifiers_hspec1 : hassert :=",
             "Theorem valid_nbm__NondetBodyModifiers : ValidSpec nbm \
@@ -727,21 +727,21 @@ mod fixture_mixed_kinds {
             // MixedKinds: all three partitions non-empty under one spec name.
             "Definition mixedkinds__MixedKinds_specs : list hassert := \
              (mixedkinds__MixedKinds_hspec1 :: nil).",
-            "Definition mixedkinds__MixedKinds_ex_specs : list reachability_spec := \
+            "Definition mixedkinds__MixedKinds__ex_specs : list reachability_spec := \
              (mixedkinds__MixedKinds_exspec1 :: nil).",
-            "Definition mixedkinds__MixedKinds_uq_specs : list reachability_spec := \
+            "Definition mixedkinds__MixedKinds__uq_specs : list reachability_spec := \
              (mixedkinds__MixedKinds_uqspec1 :: nil).",
             "Theorem valid_mixedkinds__MixedKinds : ValidSpec mixedkinds \
              mixedkinds__MixedKinds_specs.",
             "Theorem valid_exists_mixedkinds__MixedKinds : ValidExistsSpec mixedkinds \
-             mixedkinds__MixedKinds_ex_specs.",
+             mixedkinds__MixedKinds__ex_specs.",
             "Theorem valid_unique_mixedkinds__MixedKinds : ValidUniqueSpec mixedkinds \
-             mixedkinds__MixedKinds_uq_specs.",
+             mixedkinds__MixedKinds__uq_specs.",
             // Observed: the empty universal form next to both partitions.
             "Definition mixedkinds__Observed_specs : list hassert := (@nil hassert).",
-            "Definition mixedkinds__Observed_ex_specs : list reachability_spec := \
+            "Definition mixedkinds__Observed__ex_specs : list reachability_spec := \
              (mixedkinds__Observed_exspec1 :: nil).",
-            "Definition mixedkinds__Observed_uq_specs : list reachability_spec := \
+            "Definition mixedkinds__Observed__uq_specs : list reachability_spec := \
              (mixedkinds__Observed_uqspec1 :: nil).",
             // Retained reachability bodies; the forall body and the method
             // stay omitted (asserted below).

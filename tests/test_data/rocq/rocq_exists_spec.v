@@ -113,7 +113,7 @@ Definition rocq_exists_spec__ReachableDouble_specs : list hassert := (@nil hasse
 Definition rocq_exists_spec__ReachableDouble_exspec1 : reachability_spec :=
   {| reach_func := 1%N; reach_entry_arity := 1%nat;
      reach_visible_locs := (0%N :: 1%N :: 2%N :: nil); reach_payload := HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))) (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_ge SX_S)) (T_local 2%N) (T_const (Vi64 0))) (T_const (Vi32 0)))) (HA_and (term_eq (T_app 0 ((T_local 1%N) :: nil)) (T_binop T_i32 (Binop_i BOI_add) (T_local 1%N) (T_local 1%N))) (term_eq (T_app 0 ((T_local 3%N) :: nil)) (T_const (Vi32 0))))) |}.
-Definition rocq_exists_spec__ReachableDouble_ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
+Definition rocq_exists_spec__ReachableDouble__ex_specs : list reachability_spec := (rocq_exists_spec__ReachableDouble_exspec1 :: nil).
 
 Section Host.
 Context `{ho: host}.
@@ -128,7 +128,7 @@ Proof.
   (* TODO: fill the proof *)
 Qed.
 
-Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_ex_specs.
+Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble__ex_specs.
 Proof.
   (* TODO: fill the proof *)
 Qed.

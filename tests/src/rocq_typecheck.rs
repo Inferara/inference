@@ -49,7 +49,7 @@ mod gate {
     /// select different predicates), and `spec_mixed_kinds.inf` puts all
     /// three kinds plus a spec method behind one module so the partitioned
     /// emission — the explicitly typed empty `(@nil hassert)` universal list
-    /// next to non-empty `_ex_specs`/`_uq_specs` partitions — elaborates
+    /// next to non-empty `__ex_specs`/`__uq_specs` partitions — elaborates
     /// under `coqc`. Still deliberately absent is the nested `unique` *block*:
     /// it has no `hassert` encoding, so proof-mode codegen rejects it with a
     /// fatal `P002` (pinned by the unit tests in
@@ -91,6 +91,15 @@ mod gate {
     /// coincide and this gate could not see a name collision at all — an emitted
     /// `.v` naming one `Definition` twice is refused by `coqc` outright, with
     /// nothing in the file elaborating.
+    ///
+    /// The same fixture carries that collision class on the spec axis too. Its
+    /// `ReachEx`/`ReachEx_ex` and `ReachUq`/`ReachUq_uq` pairs each name one spec
+    /// after another spec plus the tag the emitter appends to a reachability
+    /// list, so the reachability list of the first and the universal
+    /// `list hassert` of the second are emitted under names that differ only by
+    /// the width of one underscore run. No other entry names two specs that way,
+    /// so this is the only place the gate can observe the two list families
+    /// staying apart.
     const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
@@ -1081,7 +1090,35 @@ mod gate {
             }
         }
 
-        // 5. The coqc compile is gated: real in CI, skipped locally when absent.
+        // 5. Always-on guard: Rocq definitions are not overloadable, so a module
+        //    spelling one top-level name twice is refused outright and nothing in
+        //    it elaborates. `Definition` and `Theorem` are the only binders the
+        //    emitter writes. Checked here rather than left to the compile below,
+        //    which is skipped wherever `coqc` is absent — a collision must not be
+        //    invisible on those machines. `rocq_name_collisions.inf` is what gives
+        //    this something to catch.
+        for m in &generated {
+            let mut seen = FxHashSet::default();
+            for line in m.v.lines() {
+                let Some(rest) = line
+                    .strip_prefix("Definition ")
+                    .or_else(|| line.strip_prefix("Theorem "))
+                else {
+                    continue;
+                };
+                let name = rest.split_whitespace().next().unwrap_or_default();
+                assert!(
+                    seen.insert(name),
+                    "`{}` emits the top-level name `{name}` twice, so Rocq refuses \
+                     the whole file with `already exists` and nothing in it \
+                     elaborates:\n{}",
+                    m.source,
+                    m.v
+                );
+            }
+        }
+
+        // 6. The coqc compile is gated: real in CI, skipped locally when absent.
         let Some(coqc) = find_coqc() else {
             eprintln!(
                 "skipped: coqc not found (set COQC or put coqc on PATH). \
@@ -1091,10 +1128,10 @@ mod gate {
             return;
         };
 
-        // 6. Compile the vendored stub once into a private temp dir.
+        // 7. Compile the vendored stub once into a private temp dir.
         let work = compile_stub(&coqc, "corpus");
 
-        // 7. Type-check every generated module against the compiled stub.
+        // 8. Type-check every generated module against the compiled stub.
         for m in &generated {
             let v_path = work.join(format!("{}.v", m.module));
             std::fs::write(&v_path, &m.v).unwrap_or_else(|e| panic!("write {}: {e}", m.source));
@@ -2080,17 +2117,17 @@ mod gate {
             "reach_func := 0%N; reach_entry_arity := 1%nat",
             "reach_visible_locs := (0%N :: 1%N :: nil); \
              reach_payload := term_eq (T_local 1%N) (T_local 0%N)",
-            "Definition handbuilt_reachability__Probe_ex_specs : list reachability_spec := \
+            "Definition handbuilt_reachability__Probe__ex_specs : list reachability_spec := \
              (handbuilt_reachability__Probe_exspec1 :: nil).",
             "Theorem valid_exists_handbuilt_reachability__Probe : ValidExistsSpec \
-             handbuilt_reachability handbuilt_reachability__Probe_ex_specs.",
+             handbuilt_reachability handbuilt_reachability__Probe__ex_specs.",
             "Definition handbuilt_reachability__Probe_uqspec1 : reachability_spec :=",
             "reach_func := 1%N; reach_entry_arity := 0%nat",
             "reach_visible_locs := (0%N :: nil); reach_payload := HA_defined (T_local 0%N)",
-            "Definition handbuilt_reachability__Probe_uq_specs : list reachability_spec := \
+            "Definition handbuilt_reachability__Probe__uq_specs : list reachability_spec := \
              (handbuilt_reachability__Probe_uqspec1 :: nil).",
             "Theorem valid_unique_handbuilt_reachability__Probe : ValidUniqueSpec \
-             handbuilt_reachability handbuilt_reachability__Probe_uq_specs.",
+             handbuilt_reachability handbuilt_reachability__Probe__uq_specs.",
             // The universal grammar stays, with the explicitly-typed empty
             // list: no entry here is universal.
             "Definition handbuilt_reachability__Probe_specs : list hassert := (@nil hassert).",
@@ -3137,7 +3174,7 @@ Definition a_definition (x : nat) : nat := x.
         assert!(
             golden.contains(
                 "Theorem valid_exists_rocq_exists_spec__ReachableDouble : \
-                 ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_ex_specs."
+                 ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble__ex_specs."
             ),
             "the exists partition must be consumed by a `ValidExistsSpec` \
              theorem:\n{golden}"
@@ -3568,7 +3605,7 @@ Definition a_definition (x : nat) : nat := x.
     /// The proof-mode `.v` for the `unique`-kind fixture must match a committed
     /// golden byte-for-byte, and the golden must carry the unique half of the
     /// reachability contract: the same retention and record grammar as
-    /// `exists`, gathered into `_uq_specs` under `ValidUniqueSpec`, with the
+    /// `exists`, gathered into `__uq_specs` under `ValidUniqueSpec`, with the
     /// named choice in the visible-locs list — the projection `unique`
     /// compares exit states through. Nothing else in the repository
     /// distinguishes the named-choice rule from a params-only projection at
@@ -3606,7 +3643,7 @@ Definition a_definition (x : nat) : nat := x.
         assert!(
             golden.contains(
                 "Theorem valid_unique_rocq_unique_spec__UniqueParity : \
-                 ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity_uq_specs."
+                 ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity__uq_specs."
             ),
             "the unique partition must be consumed by a `ValidUniqueSpec` \
              theorem:\n{golden}"

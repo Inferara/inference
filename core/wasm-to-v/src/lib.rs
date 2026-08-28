@@ -2170,14 +2170,14 @@ mod reachability_emission {
             "Definition Prog__Reach_exspec1 : reachability_spec :=",
             "reach_func := 1%N; reach_entry_arity := 1%nat",
             "reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_defined (T_local 1%N)",
-            "Definition Prog__Reach_ex_specs : list reachability_spec := (Prog__Reach_exspec1 :: nil).",
-            "Theorem valid_exists_Prog__Reach : ValidExistsSpec Prog Prog__Reach_ex_specs.",
+            "Definition Prog__Reach__ex_specs : list reachability_spec := (Prog__Reach_exspec1 :: nil).",
+            "Theorem valid_exists_Prog__Reach : ValidExistsSpec Prog Prog__Reach__ex_specs.",
             // The unique partition, analogous.
             "Definition Prog__Reach_uqspec1 : reachability_spec :=",
             "reach_func := 2%N; reach_entry_arity := 0%nat",
             "reach_visible_locs := (0%N :: nil); reach_payload := HA_defined (T_local 0%N)",
-            "Definition Prog__Reach_uq_specs : list reachability_spec := (Prog__Reach_uqspec1 :: nil).",
-            "Theorem valid_unique_Prog__Reach : ValidUniqueSpec Prog Prog__Reach_uq_specs.",
+            "Definition Prog__Reach__uq_specs : list reachability_spec := (Prog__Reach_uqspec1 :: nil).",
+            "Theorem valid_unique_Prog__Reach : ValidUniqueSpec Prog Prog__Reach__uq_specs.",
             // The universal grammar is unconditional; with no universal entry
             // it is the explicitly-typed empty list.
             "Definition Prog__Reach_specs : list hassert := (@nil hassert).",
@@ -2350,12 +2350,77 @@ mod reachability_emission {
         );
         assert!(
             output.contains("Definition Prog__Mix_hspec1 : hassert :=")
-                && output.contains("Definition Prog__Mix_ex_specs : list reachability_spec :=")
+                && output.contains("Definition Prog__Mix__ex_specs : list reachability_spec :=")
                 && output.contains("Theorem valid_Prog__Mix : ValidSpec Prog Prog__Mix_specs.")
                 && output.contains(
-                    "Theorem valid_exists_Prog__Mix : ValidExistsSpec Prog Prog__Mix_ex_specs."
+                    "Theorem valid_exists_Prog__Mix : ValidExistsSpec Prog Prog__Mix__ex_specs."
                 ),
             "both partitions must emit side by side; got:\n{output}",
+        );
+    }
+
+    /// The gathering list joins its suffix with the reserved `__` run, and
+    /// that separator is the whole defence against a spec name forging it.
+    /// A spec `Reach` carrying an `exists` obligation and a sibling spec
+    /// literally named `Reach_ex` both emit a gathering list into one file.
+    /// Under a single-`_` join the two are spelled `Prog__Reach_ex_specs`
+    /// alike — one `list reachability_spec`, one `list hassert` — and the
+    /// translator returns that file at exit 0, leaving `coqc` to reject the
+    /// second definition as already existing. Nothing upstream rejects the
+    /// pair: both names are legal Rocq identifiers and neither spec is
+    /// individually at fault.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_sibling_spec_cannot_forge_a_reachability_list_name() {
+        let mut spec_funcs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        spec_funcs.insert("Reach".to_string(), vec![1]);
+        spec_funcs.insert("Reach_ex".to_string(), vec![2]);
+        let mut hspecs = HSpecMap::default();
+        hspecs.insert("Reach".to_string(), vec![exists_entry("ex_fn", 0, vec![0])]);
+        hspecs.insert(
+            "Reach_ex".to_string(),
+            vec![HSpecEntry::new(
+                HFnRef("forall_fn".to_string()),
+                HAssert::Defined(HTerm::Local(0)),
+                SpecKind::Forall,
+            )],
+        );
+        let output = translate(
+            r#"
+            (module
+              (func $exec (result i32) i32.const 7)
+              (func $ex_fn (param i32))
+              (func $forall_fn (param i32)))
+            "#,
+            &spec_funcs,
+            &hspecs,
+        )
+        .expect("a spec and its `_ex`-suffixed sibling translate");
+
+        // Both lists reach the output, at their two different types.
+        for needle in [
+            "Definition Prog__Reach__ex_specs : list reachability_spec :=",
+            "Definition Prog__Reach_ex_specs : list hassert :=",
+        ] {
+            assert!(
+                output.contains(needle),
+                "the pair must emit both lists; missing `{needle}`:\n{output}",
+            );
+        }
+
+        let mut names: Vec<&str> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("Definition "))
+            .filter_map(|rest| rest.split([' ', ':']).next())
+            .filter(|name| !name.is_empty())
+            .collect();
+        let emitted = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            emitted,
+            "every emitted `Definition` name must be unique; got:\n{output}",
         );
     }
 
@@ -2925,7 +2990,7 @@ mod reachability_emission {
         let adopted = translate_bytes("Prog", &bytes, &FxHashMap::default(), &HSpecMap::default())
             .expect("embedded sections are adopted");
         assert!(
-            adopted.contains("Definition Prog__Reach_ex_specs : list reachability_spec :="),
+            adopted.contains("Definition Prog__Reach__ex_specs : list reachability_spec :="),
             "the adopted exists-kind entry must reach reachability emission:\n{adopted}",
         );
 

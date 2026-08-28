@@ -83,7 +83,7 @@ Definition rocq_unique_spec__UniqueParity_specs : list hassert := (@nil hassert)
 Definition rocq_unique_spec__UniqueParity_uqspec1 : reachability_spec :=
   {| reach_func := 0%N; reach_entry_arity := 1%nat;
      reach_visible_locs := (0%N :: 1%N :: nil); reach_payload := HA_and (term_eq (T_local 1%N) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_const (Vi32 2)))) (term_eq (T_binop T_i32 (Binop_i BOI_mul) (T_binop T_i32 (Binop_i BOI_mul) (T_local 1%N) (T_local 1%N)) (T_local 1%N)) (T_local 1%N)) |}.
-Definition rocq_unique_spec__UniqueParity_uq_specs : list reachability_spec := (rocq_unique_spec__UniqueParity_uqspec1 :: nil).
+Definition rocq_unique_spec__UniqueParity__uq_specs : list reachability_spec := (rocq_unique_spec__UniqueParity_uqspec1 :: nil).
 
 Section Host.
 Context `{ho: host}.
@@ -98,7 +98,7 @@ Proof.
   (* TODO: fill the proof *)
 Qed.
 
-Theorem valid_unique_rocq_unique_spec__UniqueParity : ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity_uq_specs.
+Theorem valid_unique_rocq_unique_spec__UniqueParity : ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity__uq_specs.
 Proof.
   (* TODO: fill the proof *)
 Qed.
