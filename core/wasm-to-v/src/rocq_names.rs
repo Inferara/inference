@@ -226,9 +226,11 @@ pub(crate) fn validate_module_name_available(name: &str) -> Result<(), WasmToVEr
 /// record, the `valid_<module>` theorem, or a spec-derived name.
 ///
 /// The spec-derived names (`<module>__<spec>_specs`, `valid_<module>__<spec>`,
-/// and their reachability siblings) need no seat here: every one of them
-/// carries the `__` separator, and [`sanitize_rocq_identifier`] collapses every
-/// `__` run, so a sanitized function name can never spell one.
+/// and their reachability siblings — whose list members double the separator
+/// again, as `<module>__<spec>__ex_specs` / `__uq_specs`) need no seat here:
+/// every one of them carries the `__` separator, and
+/// [`sanitize_rocq_identifier`] collapses every `__` run, so a sanitized
+/// function name can never spell one.
 #[must_use = "the reserved set is the seed for function-name disambiguation"]
 pub(crate) fn reserved_top_level_names(mod_name: &str) -> FxHashSet<String> {
     let mut reserved: FxHashSet<String> = PREAMBLE_HELPER_NAMES
@@ -246,7 +248,7 @@ pub(crate) fn reserved_top_level_names(mod_name: &str) -> FxHashSet<String> {
 /// The translator joins the two names into one grammar family: the obligation
 /// definitions `<mod_name>__<spec_name>_specs` (with its per-entry
 /// `_hspec{k}` members) and, for reachability partitions,
-/// `<mod_name>__<spec_name>_ex_specs` / `_uq_specs` (with `_exspec{k}` /
+/// `<mod_name>__<spec_name>__ex_specs` / `__uq_specs` (with `_exspec{k}` /
 /// `_uqspec{k}` members), plus the theorem names
 /// `valid_<mod_name>__<spec_name>`, `valid_exists_<mod_name>__<spec_name>`,
 /// and `valid_unique_<mod_name>__<spec_name>`. Every member of the family
@@ -256,10 +258,13 @@ pub(crate) fn reserved_top_level_names(mod_name: &str) -> FxHashSet<String> {
 /// hazard is a component that *ends* with `_`: the module name then abuts the
 /// `__` separator (`app_` -> `app___Foo`), and the spec name abuts a trailing
 /// `_`-led suffix (`Spec_` -> `main__Spec__specs`, and identically
-/// `main__Spec__ex_specs` or `valid_exists_main__Spec_`-adjacent forms). Both
-/// produce a `__` run inside the joined name, which the `<module>__<spec>`
-/// split reserves. The diagnostic shows the `_specs` member as the
-/// representative fabricated name.
+/// `main__Spec___ex_specs` or `valid_exists_main__Spec_`-adjacent forms). Both
+/// produce an over-long `_` run inside the joined name, which the
+/// `<module>__<spec>` split reserves. Rejecting the trailing `_` also keeps
+/// the reachability lists unambiguous from the far side: `main__Spec__ex_specs`
+/// is the legitimate list name of a spec named `Spec`, so a spec named `Spec_`
+/// must not be able to reach the neighbourhood of it. The diagnostic shows the
+/// `_specs` member as the representative fabricated name.
 ///
 /// This is the boundary the per-component validation is blind to. It applies
 /// uniformly whether the module name is the entry file stem or an imported file's

@@ -169,8 +169,8 @@ Definition spec_bounds_realization : module := {|
   mod_types :=
     Tf (T_num T_i32 :: nil) (T_num T_i32 :: nil) ::
     Tf (T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
-    Tf (nil) (nil) ::
-    Tf (nil) (nil) ::
+    Tf (T_num T_i32 :: nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
     nil;
   mod_funcs :=
     lookup ::

@@ -340,10 +340,10 @@ struct SpecPartition<'e> {
     /// Universal obligations, consumed by the `_specs : list hassert` /
     /// `ValidSpec` grammar.
     forall: Vec<&'e HSpecEntry>,
-    /// `exists`-kind obligations, consumed by the `_ex_specs : list
+    /// `exists`-kind obligations, consumed by the `__ex_specs : list
     /// reachability_spec` / `ValidExistsSpec` grammar.
     exists: Vec<(&'e HSpecEntry, &'e ReachMeta)>,
-    /// `unique`-kind obligations, consumed by the `_uq_specs : list
+    /// `unique`-kind obligations, consumed by the `__uq_specs : list
     /// reachability_spec` / `ValidUniqueSpec` grammar.
     unique: Vec<(&'e HSpecEntry, &'e ReachMeta)>,
 }
@@ -448,7 +448,7 @@ pub(crate) struct WasmParseData<'a> {
     /// drives the [`FuncRemap`] that renumbers every surviving function
     /// reference. Each spec also materializes a
     /// `<mod>__<SpecName>_specs : list hassert` definition and a `ValidSpec`
-    /// theorem, plus `_ex_specs`/`_uq_specs : list reachability_spec`
+    /// theorem, plus `__ex_specs`/`__uq_specs : list reachability_spec`
     /// definitions and `ValidExistsSpec`/`ValidUniqueSpec` theorems for its
     /// non-empty reachability partitions.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
@@ -1192,7 +1192,7 @@ impl WasmParseData<'_> {
     /// spec with only methods, an empty `spec { }`, or only reachability
     /// obligations). The `exists` and `unique` partitions each add
     /// `reachability_spec` record definitions and an
-    /// `_ex_specs`/`_uq_specs : list reachability_spec` list, but only when
+    /// `__ex_specs`/`__uq_specs : list reachability_spec` list, but only when
     /// non-empty, so a forall-only module's output is byte-identical to what
     /// it was before reachability emission existed.
     ///
@@ -1269,8 +1269,19 @@ impl WasmParseData<'_> {
     /// Appends one reachability partition's definitions: one
     /// `<mod>__<Spec>_{def_suffix}{k} : reachability_spec` record per
     /// obligation (source order, 1-based), then the gathering
-    /// `<mod>__<Spec>_{list_suffix} : list reachability_spec`. An empty
+    /// `<mod>__<Spec>__{list_suffix} : list reachability_spec`. An empty
     /// partition emits nothing.
+    ///
+    /// The list name joins its suffix with the reserved `__` run, while the
+    /// per-obligation records join with a single `_`. The doubling is what
+    /// keeps the list name unforgeable: without it, a spec named `<Spec>_ex`
+    /// would spell its own universal `<mod>__<Spec>_ex_specs : list hassert`
+    /// identically to this list, and the two definitions would collide inside
+    /// one emitted file. No spec name can reach the doubled form, because
+    /// [`crate::rocq_names::validate_rocq_identifier`] rejects any name
+    /// containing `__`, and [`crate::rocq_names::validate_spec_join_boundary`]
+    /// rejects any name ending in `_`. The records need no doubling: they end
+    /// in a decimal digit where every list name ends in `s`.
     ///
     /// `reach_func` is computed through the direct index arithmetic
     /// ([`FuncRemap::mod_funcs_index`]) rather than the reference-guarded
@@ -1316,7 +1327,7 @@ impl WasmParseData<'_> {
         let joined = def_names.join(" :: ");
         out.push_str(
             format!(
-                "Definition {module_name}__{spec_name}_{list_suffix} : list reachability_spec := ({joined} :: nil).\n"
+                "Definition {module_name}__{spec_name}__{list_suffix} : list reachability_spec := ({joined} :: nil).\n"
             )
             .as_str(),
         );
@@ -1362,7 +1373,7 @@ impl WasmParseData<'_> {
                 out.push('\n');
                 out.push_str(
                     format!(
-                        "Theorem valid_exists_{module_name}__{spec_name} : ValidExistsSpec {module_name} {module_name}__{spec_name}_ex_specs.\n"
+                        "Theorem valid_exists_{module_name}__{spec_name} : ValidExistsSpec {module_name} {module_name}__{spec_name}__ex_specs.\n"
                     )
                     .as_str(),
                 );
@@ -1374,7 +1385,7 @@ impl WasmParseData<'_> {
                 out.push('\n');
                 out.push_str(
                     format!(
-                        "Theorem valid_unique_{module_name}__{spec_name} : ValidUniqueSpec {module_name} {module_name}__{spec_name}_uq_specs.\n"
+                        "Theorem valid_unique_{module_name}__{spec_name} : ValidUniqueSpec {module_name} {module_name}__{spec_name}__uq_specs.\n"
                     )
                     .as_str(),
                 );

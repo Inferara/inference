@@ -33,3 +33,54 @@ spec CollisionSpec {
         assert(rocq_name_collisions(x) == rocq_name_collisions(x));
     }
 }
+
+// The four specs below carry the same defect class across to the SPEC axis, where
+// the colliding pair is emitted by the reachability partition rather than by the
+// preamble. A partition gathers its obligations into a list named after the spec
+// it came from, and every spec — reachability-bearing or not — also emits a
+// universal `list hassert` under its own name. Under the old single-underscore
+// join those two names could coincide: the exists list of `ReachEx` was
+// `<mod>__ReachEx_ex_specs`, spelled identically to the universal list of a
+// sibling spec literally named `ReachEx_ex`. One name, two `Definition`s, two
+// different types, written at exit 0 with no diagnostic; only `coqc` refused it.
+// `ReachUq` and `ReachUq_uq` are the same collision on the `unique` tag.
+//
+// Only a fixture written for it can reach this shape. The collision needs one
+// spec whose name is another spec's name followed by the emitter's own `_ex` or
+// `_uq` tag, and no other corpus entry names two specs that way — so no amount of
+// corpus growth in the existing shapes can produce it. The sibling's obligation is
+// `forall` on purpose: it is the universal list that does the aliasing, so the
+// sibling must be a spec the emitter treats as ordinary.
+spec ReachEx {
+    fn ex_bump(lo: i32) exists {
+        let n: i32 = @;
+        assume {
+            assert(n >= lo);
+        }
+        assert(rocq_name_collisions(n) == n + 1);
+    }
+}
+
+spec ReachEx_ex {
+    fn all_bump() forall {
+        let x: i32 = @;
+        assert(rocq_name_collisions(x) == Me(x));
+    }
+}
+
+spec ReachUq {
+    fn uq_bit(seed: i32) unique {
+        let bit: i32 = @;
+        assume {
+            assert(bit == seed % 2);
+        }
+        assert(bit * bit * bit == bit);
+    }
+}
+
+spec ReachUq_uq {
+    fn all_me() forall {
+        let y: i32 = @;
+        assert(Me(y) == y + 1);
+    }
+}

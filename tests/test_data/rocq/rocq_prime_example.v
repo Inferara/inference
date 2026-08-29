@@ -75,7 +75,7 @@ Definition is_prime : module_func := {|
 Definition rocq_prime_example : module := {|
   mod_types :=
     Tf (T_num T_i32 :: nil) (T_num T_i32 :: nil) ::
-    Tf (nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
     nil;
   mod_funcs :=
     is_prime ::

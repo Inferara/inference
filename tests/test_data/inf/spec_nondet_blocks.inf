@@ -1,12 +1,15 @@
 // Inline non-deterministic blocks (`forall`/`exists`/`assume`) inside spec
 // functions. In proof mode every spec-function body is lowered, so this fixture
-// keeps the inline-block (`lower_block`) lowering path covered:
-//   forall  -> 0xfc 0x3a
-//   exists  -> 0xfc 0x3b
-//   assume  -> 0xfc 0x3c
-//   uzumaki -> 0xfc 0x31
-// The spec bodies themselves are omitted from the `.v`, so those opcodes are
-// asserted on the WASM bytes rather than on any emitted constructor.
+// keeps the inline-block (`lower_block`) lowering path covered.
+//
+// All three lower to ordinary WebAssembly: the block contributes no instruction
+// of its own, its statements are emitted in place, and its `@` arrives as a
+// hidden trailing choice parameter. What the fixture pins is that this costs
+// nothing provable — the spec bodies stay omitted from the `.v`, and each
+// function's obligation, quantifier and all, is built from the typed AST and is
+// unchanged by the lowering. The only trace the parameter leaves in the `.v` is
+// the function's orphan `mod_types` entry, which nothing in the emitted module
+// record refers to.
 // This is the spec-wrapped, analysis-legal counterpart of the negative fixture
 // `nondet_blocks.inf`.
 //

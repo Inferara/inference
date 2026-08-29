@@ -209,17 +209,18 @@ impl CalleeIndex {
 /// going so it can collect every diagnostic in one pass, and the caller
 /// ([`crate::codegen`]) turns a non-empty diagnostic list into a hard error.
 ///
-/// `reach_plans` carries the per-function reachability choice plans the
-/// pre-scan ([`reach::plan_reachability_specs`]) built and the compiler
-/// consumed for its signature suffix and body lowering. An `exists`/`unique`
-/// body translates its payload against the same plan — both consumers read
-/// one `ExprId`-keyed map, so a payload slot index equals the compiled frame
-/// index of the same choice by construction — and its entry carries the
-/// [`SpecKind`] and [`ReachMeta`] the downstream reachability judgment needs.
-pub(crate) fn translate_spec_fns(
-    ctx: &TypedContext,
+/// `reach_plans` is the reachability view over the choice-lowering plans
+/// ([`crate::choice`]) the compiler consumed for its signature suffix and body
+/// lowering. An `exists`/`unique` body translates its payload against the same
+/// plan — both consumers read one `ExprId`-keyed map, so a payload slot index
+/// equals the compiled frame index of the same choice by construction — and its
+/// entry carries the [`SpecKind`] and [`ReachMeta`] the downstream reachability
+/// judgment needs. A universal body never reaches a plan at all, which is what
+/// makes its payload structurally independent of the compiled frame.
+pub(crate) fn translate_spec_fns<'a>(
+    ctx: &'a TypedContext,
     buckets: &EmittableFunctions,
-    reach_plans: &reach::ReachPlans,
+    reach_plans: &reach::ReachPlans<'a>,
 ) -> (HSpecMap, Vec<HassertDiagnostic>) {
     let arena = ctx.arena();
     let callee = CalleeIndex::build(arena, buckets);
@@ -281,23 +282,23 @@ pub(crate) fn translate_spec_fns(
 /// (`forall`/plain) body, the reachability kinds — carrying the entry arity
 /// and source-visible slots the downstream judgment needs — for an
 /// `exists`/`unique` body, which is planned iff `plan` is `Some`.
-fn spec_kind(arena: &AstArena, def_id: DefId, plan: Option<&reach::ChoicePlan>) -> SpecKind {
+fn spec_kind(arena: &AstArena, def_id: DefId, plan: Option<reach::ReachPlan<'_>>) -> SpecKind {
     let Some(plan) = plan else {
         return SpecKind::Forall;
     };
     let meta = ReachMeta {
-        entry_arity: plan.entry_arity,
+        entry_arity: plan.entry_arity(),
         visible_locs: plan.visible_locs(),
     };
     let Def::Function { body, .. } = &arena[def_id].kind else {
-        unreachable!("only functions are planned by the reachability pre-scan");
+        unreachable!("only functions enter the reachability view");
     };
     match arena[*body].block_kind {
         BlockKind::Exists => SpecKind::Exists(meta),
         BlockKind::Unique => SpecKind::Unique(meta),
-        other => unreachable!(
-            "the reachability pre-scan plans only exists/unique bodies, found {other:?}"
-        ),
+        other => {
+            unreachable!("the reachability view holds only exists/unique bodies, found {other:?}")
+        }
     }
 }
 

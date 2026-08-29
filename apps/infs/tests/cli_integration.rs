@@ -5083,7 +5083,7 @@ fn build_compiles_unique_block_without_v() {
 
 /// Verify a `-v` build of an `exists`-BODIED spec function succeeds end to end
 /// and the emitted `.v` carries the reachability grammar: the obligation is
-/// gathered into an `_ex_specs : list reachability_spec` partition consumed by
+/// gathered into an `__ex_specs : list reachability_spec` partition consumed by
 /// a `ValidExistsSpec` theorem (the reachability analog of the `_specs` /
 /// `valid_` universal grammar), and the spec function is retained in the
 /// module record.
@@ -5125,9 +5125,9 @@ fn build_v_emits_reachability_for_exists_bodied_spec() {
         .expect("an exists-bodied spec build must write out/nondet_exists_spec.v");
     for needle in [
         "Definition ex_witness : module_func :=",
-        "Definition nondet_exists_spec__ExDemo_ex_specs : list reachability_spec :=",
+        "Definition nondet_exists_spec__ExDemo__ex_specs : list reachability_spec :=",
         "Theorem valid_exists_nondet_exists_spec__ExDemo : ValidExistsSpec \
-         nondet_exists_spec nondet_exists_spec__ExDemo_ex_specs.",
+         nondet_exists_spec nondet_exists_spec__ExDemo__ex_specs.",
     ] {
         assert!(
             v.contains(needle),
@@ -5139,7 +5139,7 @@ fn build_v_emits_reachability_for_exists_bodied_spec() {
 /// Verify a `-v` build of a `unique`-BODIED spec function succeeds — the
 /// nested `unique` BLOCK in `build_v_rejects_unique_block_with_p002` stays a
 /// fatal P002; a unique body is the supported top-level form — and the
-/// emitted `.v` selects the `ValidUniqueSpec` theorem over a `_uq_specs`
+/// emitted `.v` selects the `ValidUniqueSpec` theorem over a `__uq_specs`
 /// partition.
 ///
 /// **Expected behavior**: Exit code 0, both artifacts written, unique-kind
@@ -5179,9 +5179,9 @@ fn build_v_emits_reachability_for_unique_bodied_spec() {
         .expect("a unique-bodied spec build must write out/nondet_unique_spec.v");
     for needle in [
         "Definition uq_witness : module_func :=",
-        "Definition nondet_unique_spec__UqDemo_uq_specs : list reachability_spec :=",
+        "Definition nondet_unique_spec__UqDemo__uq_specs : list reachability_spec :=",
         "Theorem valid_unique_nondet_unique_spec__UqDemo : ValidUniqueSpec \
-         nondet_unique_spec nondet_unique_spec__UqDemo_uq_specs.",
+         nondet_unique_spec nondet_unique_spec__UqDemo__uq_specs.",
     ] {
         assert!(
             v.contains(needle),

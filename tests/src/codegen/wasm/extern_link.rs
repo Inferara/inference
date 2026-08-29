@@ -1281,7 +1281,7 @@ fn touch_array(a: [i32; 2]) -> i32 {
         assert!(
             rocq.contains(
                 "Theorem valid_exists_exprog__MySpec : ValidExistsSpec exprog \
-                 exprog__MySpec_ex_specs."
+                 exprog__MySpec__ex_specs."
             ),
             "the exists partition must survive the link and select \
              `ValidExistsSpec`; .v was:\n{rocq}"
@@ -1350,13 +1350,13 @@ fn touch_array(a: [i32; 2]) -> i32 {
             "the unique spec function must be retained in the module record; .v was:\n{rocq}"
         );
         assert!(
-            rocq.contains("Definition uqprog__MySpec_uq_specs : list reachability_spec :="),
+            rocq.contains("Definition uqprog__MySpec__uq_specs : list reachability_spec :="),
             "the unique partition must survive the link; .v was:\n{rocq}"
         );
         assert!(
             rocq.contains(
                 "Theorem valid_unique_uqprog__MySpec : ValidUniqueSpec uqprog \
-                 uqprog__MySpec_uq_specs."
+                 uqprog__MySpec__uq_specs."
             ),
             "the unique kind must select `ValidUniqueSpec` post-link; .v was:\n{rocq}"
         );

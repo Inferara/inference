@@ -26,12 +26,12 @@ Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.
 
 Definition spec_bounded_iteration : module := {|
   mod_types :=
-    Tf (nil) (nil) ::
-    Tf (nil) (nil) ::
-    Tf (T_num T_i32 :: nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
     Tf (T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
-    Tf (nil) (nil) ::
-    Tf (nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
+    Tf (T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil) (nil) ::
     nil;
   mod_funcs :=
     nil;

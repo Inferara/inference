@@ -50,7 +50,7 @@ pub enum WasmToVError {
 
     /// Joining the output module name and a spec name into the emitted
     /// `<module>__<spec>_specs` / `valid_<module>__<spec>` grammar (and its
-    /// reachability siblings `_ex_specs` / `_uq_specs` /
+    /// reachability siblings `__ex_specs` / `__uq_specs` /
     /// `valid_exists_<module>__<spec>` / `valid_unique_<module>__<spec>`,
     /// which contain the same join) would fabricate Rocq's reserved `__`
     /// separator. Each component is individually a legal identifier (no

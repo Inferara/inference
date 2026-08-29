@@ -76,7 +76,7 @@ Definition spec_literal_ctx : module := {|
     Tf (nil) (T_num T_i64 :: nil) ::
     Tf (nil) (T_num T_i64 :: nil) ::
     Tf (nil) (nil) ::
-    Tf (nil) (nil) ::
+    Tf (T_num T_i64 :: nil) (nil) ::
     nil;
   mod_funcs :=
     scaled ::
