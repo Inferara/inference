@@ -51,6 +51,10 @@ coverage/
 cobertura.xml
 
 .*
+# `.*` excludes these directories themselves, and git cannot re-include a
+# path whose parent directory is excluded — so each directory has to be
+# un-ignored before the files inside it can be.
+!.github/
 !.github/workflows/
 !.cargo/
 !.gitattributes

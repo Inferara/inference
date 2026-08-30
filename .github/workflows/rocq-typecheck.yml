@@ -18,6 +18,15 @@ on:
       # changes exactly what the gate elaborates.
       - 'tests/test_data/wasmlib/**'
       - 'tests/src/rocq_typecheck.rs'
+      - 'tests/src/rocq_stub_drift.rs'
+      # The declaration reader both the coverage audit and the drift check
+      # measure with: a shape it stops reading is a declaration each stops
+      # holding to anything.
+      - 'tests/src/rocq_decls.rs'
+      - 'core/wasm-to-v/wasm-verifier-pin.txt'
+      # The module list itself: dropping a `mod` line here deletes a whole gate,
+      # and the filename allowlist above would not have noticed.
+      - 'tests/src/lib.rs'
       - '.github/workflows/rocq-typecheck.yml'
   pull_request:
     branches:
@@ -30,6 +39,15 @@ on:
       # changes exactly what the gate elaborates.
       - 'tests/test_data/wasmlib/**'
       - 'tests/src/rocq_typecheck.rs'
+      - 'tests/src/rocq_stub_drift.rs'
+      # The declaration reader both the coverage audit and the drift check
+      # measure with: a shape it stops reading is a declaration each stops
+      # holding to anything.
+      - 'tests/src/rocq_decls.rs'
+      - 'core/wasm-to-v/wasm-verifier-pin.txt'
+      # The module list itself: dropping a `mod` line here deletes a whole gate,
+      # and the filename allowlist above would not have noticed.
+      - 'tests/src/lib.rs'
       - '.github/workflows/rocq-typecheck.yml'
 
 jobs:
@@ -51,7 +69,46 @@ jobs:
       - name: Report Coq version
         run: coqc --version
 
+      # `cargo test <filter>` exits 0 when the filter selects nothing, printing
+      # `0 passed`. The gate below is one filtered invocation, so a renamed
+      # module, a dropped `mod` line in tests/src/lib.rs, or a one-character
+      # typo in the filter would leave this job permanently green having
+      # elaborated no Rocq at all. Counting the selection first makes each of
+      # those red. The floor is the live count, not the total: `--list` counts
+      # the `mod regenerate` helpers too, and those are ignored by design.
+      - name: Assert the gate's filter still selects its tests
+        env:
+          ROCQ_GATE_TEST_FLOOR: '31'
+        run: |
+          set -euo pipefail
+          selected=$(cargo test -p inference-tests "rocq_typecheck::" -- --list \
+            | grep -c ': test$' || true)
+          echo "selected $selected test(s); floor is $ROCQ_GATE_TEST_FLOOR"
+          if [ "$selected" -lt "$ROCQ_GATE_TEST_FLOOR" ]; then
+            echo "::error::the rocq_typecheck filter selected $selected test(s), \
+          below the floor of $ROCQ_GATE_TEST_FLOOR — a gate was renamed, removed, \
+          or is no longer reachable from tests/src/lib.rs"
+            exit 1
+          fi
+
       # `find_coqc` in the test resolves `coqc` from PATH (or the COQC override),
       # so no coqc job requires the private verifier library — only this stub.
+      #
+      # The pass floor closes what the selection floor above cannot see: a
+      # selection of 31 that runs 0 because every gate was `#[ignore]`d is still
+      # `test result: ok` and still exit 0.
       - name: Run the coqc round-trip gate
-        run: cargo test -p inference-tests --verbose "rocq_typecheck::"
+        env:
+          ROCQ_GATE_PASS_FLOOR: '23'
+        run: |
+          set -euo pipefail
+          cargo test -p inference-tests --verbose "rocq_typecheck::" 2>&1 | tee gate.log
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' gate.log \
+            | head -1)
+          passed=${passed:-0}
+          echo "passed $passed test(s); floor is $ROCQ_GATE_PASS_FLOOR"
+          if [ "$passed" -lt "$ROCQ_GATE_PASS_FLOOR" ]; then
+            echo "::error::the rocq_typecheck gate ran $passed test(s), below the \
+          floor of $ROCQ_GATE_PASS_FLOOR — gates were ignored or removed"
+            exit 1
+          fi
