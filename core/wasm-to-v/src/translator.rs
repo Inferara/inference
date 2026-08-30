@@ -150,9 +150,9 @@
 //! From Wasm Require Import bytes numerics datatypes host.
 //! From WasmVerifier Require Import Assertions Verifier.
 //! (* The proof-contract import line gains ` Exists` when the module carries a
-//!    reachability (`exists`/`unique`) obligation, and the two lines
-//!    `Open Scope byte_scope.` and `Local Delimit Scope Z_scope with Zst.`
-//!    follow when the module carries a data segment. *)
+//!    reachability (`exists`/`unique`) obligation, and the line
+//!    `Local Delimit Scope Z_scope with Zst.` follows when the module carries a
+//!    data segment. *)
 //!
 //! (* Helper definitions *)
 //! Definition Vi32 i := ...
@@ -611,20 +611,17 @@ impl WasmParseData<'_> {
         } else {
             res.push_str("From WasmVerifier Require Import Assertions Verifier.\n");
         }
-        // A data segment's bytes are mostly written in the hex notations the
-        // `Wasm.bytes` module declares in `byte_scope`, and those parse only
-        // while that scope is open; the twelve values that have no notation are
-        // written as `encode` applications instead, whose argument carries an
-        // explicit `Z` scope key. A data segment is the only thing that makes
-        // an emitted module spell that key at all (the other keys a module
-        // spells are `%N`, on indices and the other structural `N` fields, and
-        // `%nat`, on a reachability record's `reach_entry_arity`; every other
-        // numeral is unkeyed, taking its scope from the expected type). Both
-        // lines below state a requirement the module would otherwise inherit:
-        // whether an `Import` chain leaves `byte_scope` open, and which scope
-        // the `Z` delimiting key still names once that chain has been walked,
-        // are details of the libraries above this contract rather than of the
-        // contract itself.
+        // A data segment's bytes are each written as an application of the
+        // `Wasm.bytes` module's `encode`, whose argument carries an explicit
+        // `Z` scope key. A data segment is the only thing that makes an emitted
+        // module spell that key at all (the other keys a module spells are
+        // `%N`, on indices and the other structural `N` fields, and `%nat`, on
+        // a reachability record's `reach_entry_arity`; every other numeral is
+        // unkeyed, taking its scope from the expected type). The line below
+        // states a requirement the module would otherwise inherit: which scope
+        // the `Z` delimiting key still names once the `Import` chain above has
+        // been walked is a detail of the libraries above this contract rather
+        // than of the contract itself.
         //
         // The key needs restating because mathcomp's algebra library delimits
         // its own `int_scope` with `Z` (`ssrint.v`), and delimiting is
@@ -640,13 +637,11 @@ impl WasmParseData<'_> {
         // the `%N` key is handled on the consumer side instead, live in
         // ROCQ_CONTRACT.md's "mathcomp consumers" section (#416).
         //
-        // Both lines are keyed on a data segment being present rather than on
-        // the bytes inside it: an unused scope and an unused key are equally
-        // inert, while deciding per byte would make the preamble depend on
-        // segment contents. A module with no data segment names no byte and
-        // spells no `Z` key, and emits neither line.
+        // The line is keyed on a data segment being present rather than on the
+        // bytes inside it: an unused key is inert, while deciding per byte
+        // would make the preamble depend on segment contents. A module with no
+        // data segment names no byte, spells no `Z` key, and emits no line.
         if !self.data.is_empty() {
-            res.push_str("Open Scope byte_scope.\n");
             res.push_str("Local Delimit Scope Z_scope with Zst.\n");
         }
         res.push('\n');
@@ -3385,26 +3380,27 @@ fn translate_basic_operator(
 /// Spells one byte as a term of the proof backend's `byte` type.
 ///
 /// In the backend's `coq-wasm` dependency a `byte` is CompCert's
-/// `Integers.byte`, built from a `Z` by the exported `encode`, and abbreviated
-/// by two-digit uppercase hex notations in `byte_scope`. That notation block is
-/// hand-written and covers 244 of the 256 values: `#12` .. `#19` and `#1C` ..
-/// `#1F` are absent, and spelling one of those would emit syntax the backend
-/// cannot parse even though the notation looks uniform. Those twelve values are
-/// therefore written as the `encode` application the notation would have
-/// abbreviated, which elaborates for every value.
+/// `Integers.byte`, built from a `Z` by the exported `encode : Z -> byte`.
+/// Every byte is written as an application of that function, which is the one
+/// form that elaborates for all 256 values.
 ///
-/// That argument is the only place an emitted module spells the `Z` scope key,
-/// and it spells the private key the preamble claims for `Z_scope` rather than
-/// `Z` itself, which mathcomp's algebra library takes for its own `int_scope`.
+/// The dependency also abbreviates 244 of the values with two-digit uppercase
+/// hex notations in `byte_scope`, and those look like the legible spelling for
+/// a data segment, but they are not usable from here: each expands to
+/// arithmetic over the dependency's single hex-digit notations, which stand for
+/// bare numerals, and a bare numeral reads as `nat` in a module that does not
+/// have `Z_scope` open. So every value whose two-digit spelling contains a
+/// digit `A` .. `F` fails against `encode` with a `nat`-against-`Z` mismatch,
+/// leaving 92 of 256 that a module could actually write. Opening `Z_scope`
+/// instead of dropping the notations is not an option: it would decide the
+/// scope of every unkeyed numeral the module writes.
 ///
-/// The notation is preferred where it exists because it keeps a data segment
-/// legible as the hex dump it came from.
+/// The `encode` argument is the only place an emitted module spells the `Z`
+/// scope key, and it spells the private key the preamble claims for `Z_scope`
+/// rather than `Z` itself, which mathcomp's algebra library takes for its own
+/// `int_scope`.
 fn byte_literal(byte: u8) -> String {
-    if matches!(byte, 0x12..=0x19 | 0x1C..=0x1F) {
-        format!("(encode {byte}%Zst)")
-    } else {
-        format!("#{byte:02X}")
-    }
+    format!("(encode {byte}%Zst)")
 }
 
 /// Renders one data segment as a `module_data` record.
