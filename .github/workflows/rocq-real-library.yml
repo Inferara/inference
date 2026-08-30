@@ -122,49 +122,47 @@ jobs:
             echo "and a runner carrying the library is configured."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  real-library:
-    name: Real-library type-check
-    # The runner, not a checkout, is what carries the private library: a build of
-    # it, the Coq that built it, and the oracle honouring the
-    # `<exe> <file.v>` contract. `vars.WASM_VERIFIER_COQC` names that oracle, and
-    # only someone with access to such a runner can set it — which is what gates
-    # this job.
+  # Split from the job below so that approval is asked for only when there is
+  # something to approve. This half is cheap, runs on a hosted runner, touches
+  # nothing private, and decides whether an oracle is configured at all. Were the
+  # two one job, the environment's required reviewers would be paged on every
+  # push to main and every labelled pull request — including the runs that exist
+  # only to report that no oracle is configured and nothing was checked.
+  real-library-gate:
+    name: Real-library oracle check
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.oracle.outputs.present }}
     #
-    # SECURITY, and it is not optional. This repository is PUBLIC and this job
-    # runs the pull request's own code (`cargo test` builds and executes it). A
-    # runner that carries the private library must therefore never be offered to
-    # a pull request from a fork, or an outside contributor could read that
-    # library off the machine. The `if:` below refuses a fork PR, but an `if:`
-    # alone is NOT sufficient protection: for `pull_request`, GitHub runs the
-    # workflow file as it exists in the pull request, so a fork could simply
-    # delete this condition. The guard that actually holds is on the runner:
-    #   - keep the self-hosted runner in a group that does NOT allow public
-    #     repositories (this is the default, and it must stay off);
-    #   - keep "Require approval for all outside collaborators" enabled in the
+    # On a pull request this lane is OPT-IN, via the `ci:real-rocq` label, and
+    # same-repo only. `push` to main and `workflow_dispatch` are unconditional.
+    # The always-on half of the claim is the stub-drift job above, which needs
+    # neither credential nor label.
+    #
+    # The fork clause is defence in depth, NOT the protection. For
+    # `pull_request` GitHub runs the workflow file as it exists in the pull
+    # request, so a fork can delete this condition, the `environment:` below, and
+    # anything else written here. What actually holds, once a runner carrying the
+    # private library exists:
+    #   - keep that runner in a group that does NOT allow public repositories
+    #     (the default — it has to stay off);
+    #   - keep "Require approval for all outside collaborators" set in the
     #     repository's Actions settings.
-    # With `vars.WASM_VERIFIER_RUNNER` unset the job lands on a hosted runner
-    # with no oracle configured and skips, which is the safe default state.
-    # On a pull request this lane is OPT-IN, via the `ci:real-rocq` label. It is
-    # the expensive half — it wants a runner carrying a build of the private
-    # library — so it runs on demand rather than on every push to every branch.
-    # `push` to main and `workflow_dispatch` are unconditional; only the
-    # `pull_request` path asks for the label. The always-on half of the claim is
-    # the stub-drift job above, which needs no credential and no label.
+    # A label is not a security boundary either: GitHub has no per-label
+    # permission, so anyone with Triage can apply one. It keeps the lane off
+    # unrelated pull requests; the environment below is what makes running it a
+    # deliberate, reviewed act.
     if: >-
       github.event_name != 'pull_request'
       || (github.event.pull_request.head.repo.full_name == github.repository
           && contains(github.event.pull_request.labels.*.name, 'ci:real-rocq'))
-    runs-on: ${{ vars.WASM_VERIFIER_RUNNER || 'ubuntu-latest' }}
     steps:
-      # A missing oracle is checked here rather than in the job's `if:`, even
-      # though the job carries one for the fork case above. A skipped job is
-      # neither red nor annotated, so a reader scanning the run would see no
-      # trace of the lane and could reasonably conclude the private library had
-      # been consulted. For an absent oracle — a missing capability, not a
-      # failure — the job runs, says plainly that it established nothing, and
-      # stays green. The fork case is the one exception, and is the job's `if:`
-      # precisely because there safety outranks annotation: the stub-drift job
-      # still runs on a fork pull request and still reports what CI established.
+      # A missing oracle is reported here rather than by skipping the job. A
+      # skipped job is neither red nor annotated, so a reader scanning the run
+      # would see no trace of the lane and could reasonably conclude the private
+      # library had been consulted. An absent oracle is a missing capability, not
+      # a failure: the job runs, says plainly that it established nothing, and
+      # stays green.
       - name: Look for the real-library oracle
         id: oracle
         env:
@@ -189,8 +187,25 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
+  real-library:
+    name: Real-library type-check
+    needs: real-library-gate
+    if: needs.real-library-gate.outputs.present == 'true'
+    # The runner, not a checkout, is what carries the private library: a build of
+    # it, the Coq that built it, and the oracle honouring the `<exe> <file.v>`
+    # contract.
+    runs-on: ${{ vars.WASM_VERIFIER_RUNNER || 'ubuntu-latest' }}
+    # The enforceable gate. GitHub has no way to restrict a label to
+    # administrators, so the label alone cannot decide whether the private
+    # library is touched. An environment can: this job waits for one of the
+    # environment's required reviewers before it starts, so consulting the
+    # private library is an act somebody with that role approved, whoever
+    # applied the label. Configure `real-rocq`'s reviewers in the repository's
+    # environment settings; with none configured the environment imposes no
+    # protection, which is worth knowing rather than assuming.
+    environment: real-rocq
+    steps:
       - name: Checkout
-        if: steps.oracle.outputs.present == 'true'
         uses: actions/checkout@v4.1.3
 
       # The lane runs its own provenance probe before it believes a single
@@ -198,7 +213,6 @@ jobs:
       # reporting every module green. `--nocapture` is what surfaces the lane's
       # `pass=N fail=0` line, which the floor below reads.
       - name: Type-check every gated module against the real libraries
-        if: steps.oracle.outputs.present == 'true'
         env:
           INFERENCE_WASM_VERIFIER_COQC: ${{ vars.WASM_VERIFIER_COQC }}
           WASM_VERIFIER_THEORIES: ${{ vars.WASM_VERIFIER_THEORIES }}
