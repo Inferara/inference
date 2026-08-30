@@ -45,7 +45,7 @@ Two logical namespaces, mapped by `_CoqProject`:
 
 | File | Provides | Mirrors |
 | --- | --- | --- |
-| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers), and `byte_scope` with an opaque `encode` plus the same 244 two-digit uppercase hex notations over it (used by every emitted `moddata_init`) | wasm-verifier's `coq-wasm` dependency, `theories/bytes.v` — matching the twelve values its hand-written block skips (`#12` .. `#19`, `#1C` .. `#1F`), and without the module-level `Open Scope byte_scope.` it leaves open for importers, so an emitted module has to open the scope its own byte notations need |
+| `wasm/bytes.v` | `byte`, `list_byte_of_string` (used by the emitted `Mi`/`Me` helpers), and an opaque `encode : Z -> byte` (used by every byte of every emitted `moddata_init`) | wasm-verifier's `coq-wasm` dependency, `theories/bytes.v` — without its `byte_scope` and the 244 two-digit uppercase hex notations it declares there, none of which an emitted module can spell: each expands to arithmetic over the dependency's single hex-digit notations, which stand for bare numerals, so every value whose spelling carries a digit `A` .. `F` elaborates at `nat` and fails against `encode` |
 | `wasm/numerics.v` | `i32`/`i64`, `Wasm_int.int_of_Z`, `i32m`/`i64m` (used by `Vi32`/`Vi64`) | Vanilla WasmCert |
 | `wasm/datatypes.v` | Value/number/reference types, integer operator families, `memarg`, the `basic_instruction` inductive, and the module/section records | Vanilla WasmCert |
 | `wasm/host.v` | The `host` typeclass every emitted theorem is stated under (`Class host := {}`) | Vanilla WasmCert |
@@ -185,10 +185,11 @@ proofs.
 This is a hand-written mirror, not the real libraries, so it can drift:
 
 - **False green** if the emitter and this stub drift *together* (e.g.
-  someone renames a constructor in both). The mitigation is that the real
-  fix — wiring the actual wasm-verifier and vanilla WasmCert libraries
-  into CI — replaces this stub; until then, changes to emitted
-  constructors should be reviewed against `../ROCQ_CONTRACT.md`.
+  someone renames a constructor in both). This is what the drift check
+  described under [What holds this mirror to its originals](#what-holds-this-mirror-to-its-originals)
+  closes: a rename agreed between emitter and stub still has to survive a
+  comparison against the upstream sources at the pinned revisions, which
+  neither of them can move.
 - **False red** if this stub encodes an arity the real libraries don't
   share. Keep declarations faithful to `../src/translator.rs` and
   `../src/hassert_print.rs`, which are the source of truth for what is
@@ -218,7 +219,15 @@ drift out of agreement with the real library and the gate still goes
 green — precisely the [#230] failure class this stub exists to catch. So
 under [#401] the assertion layer was cut down to the names the emitter
 can actually print. Everything left in `Assertions.v` is now reachable
-from some fixture in the gate's corpus; these six were removed:
+from some fixture in the gate's corpus; these six were removed.
+
+This table records what [#401] took out of a former faithful copy. It is
+**not** the stub-versus-upstream delta, and must not be read as one: the
+real `Assertions.v` also carries names this mirror never had, and it has
+grown more of them since. That full delta is not maintained by hand at
+all — it is measured against the pinned sources and pinned as a digest in
+`../wasm-verifier-pin.txt`, so upstream growing or dropping a declaration
+is a change somebody is asked about rather than one nobody sees.
 
 | Removed declaration | Kind | Why the emitter cannot produce it |
 | --- | --- | --- |
@@ -261,30 +270,33 @@ this file itself from compiling. They are covered by the gate exactly
 like any other reachable name; they are simply reached through their
 sugar rather than by name.
 
-### Checklist for the real-library swap-in ([#359])
+### How the narrowing is pinned
 
-Whoever wires the real libraries in inherits two consequences of this
-narrowing. Neither is a blocker; both are easy to get subtly wrong.
+An earlier draft of this section proposed holding the drift check to
+"exactly these six rows, and fail on a seventh". That was wrong twice
+over, and both errors are worth recording because the second one is the
+reason this stub is still here.
 
-- **The stub-drift check must treat exactly these six rows as the
-  expected deltas, and fail on a seventh.** The point of a narrowed stub
-  is only worth having if the narrowing is itself pinned: a mechanical
-  comparison against the real `Assertions.v` should assert that the set
-  of declarations present there and absent here is *precisely* the table
-  above. A seventh missing name means either the real library grew
-  something this stub should mirror, or someone quietly deleted a
-  reachable declaration — both are failures, and neither is visible if
-  the check only asks "is the stub a subset?".
-- **Pointing `-Q` at the real `theories/` restores all six, and that
-  is a widening, not a break.** The real library declares the full
-  assertion language; compiling the same corpus against it will simply
-  have six more names in scope that nothing mentions. No emitted module
-  changes, no fixture needs touching. What is lost in the swap is the
-  narrowing's *secondary* benefit — an accidental `HA_pto` becoming an
-  unbound-constructor error locally — so if that guard is wanted after
-  the swap, it has to move somewhere that still enforces it (the emitter,
-  or the drift check above), because the real library will happily accept
-  it.
+It was wrong on the **count**. Measured against the pinned
+`Assertions.v`, the declarations upstream has and this mirror does not
+number 32, not six: eleven `term`/`hassert` constructors — the six above
+plus `T_unop`, `T_cvtop`, `T_testop`, `HA_bytes` and `HA_data` — together
+with the `assertion` layer and the `strictify` family. A hand-maintained
+table of expected deltas would have been stale on the day it was written,
+which is exactly why the narrowing is pinned as a **digest** computed
+from the pinned sources instead.
+
+It was wrong on the **remedy**. Pointing `-Q` at the real `theories/`
+widens the name space rather than breaking it, so the same corpus still
+compiles — and that is the problem, not the reassurance the draft took it
+for. The narrowing's guard, an accidental `HA_pto` becoming an
+unbound-constructor error, is *lost* by the swap. That guard is real:
+compiling a module that names `HA_pto` against this stub is
+`The reference HA_pto was not found in the current environment`, and
+against the real library it is a clean pass. So this stub is kept rather
+than replaced, and the two gates are complementary — the real-library
+lane catches what the stub is too narrow to model, and the stub catches
+what the real library is too permissive to reject.
 
 `Hall`'s return is the worked example of the reverse move, and the
 template for the next name that becomes emittable: a `Definition`
@@ -293,14 +305,28 @@ that actually emits it — because a declaration nothing produces is a
 declaration `coqc` never elaborates, which is the state this narrowing
 exists to prevent.
 
-## Follow-up: swap in the real libraries
+## What holds this mirror to its originals
 
-The authoritative targets are the real `WasmCert-Coq` (v2.2.0) and
-`wasm-verifier` repositories. Wiring them into CI needs the real sources
-available at build time (a checkout + `.vo` build, or a prebuilt image)
-and is intentionally left as a follow-up. When it lands, point the gate's
-`-Q` flags at the real libraries' `theories` directories instead of this
-one, pin the wasm-verifier commit this stub was verified against
-(`0c5d525e`; the reachability declarations in `Exists.v` against
-`cf39c4f`) so codegen and the proof target cannot drift, and delete
-this stub. The corpus and the test harness carry over unchanged.
+The authoritative targets are the real `WasmCert-Coq` (v2.2.0, commit
+`0fd83fa`) and `wasm-verifier` (commit `77f1126`) libraries, recorded in
+`../wasm-verifier-pin.txt`. Two gates hold this stub to them, and both
+read the upstream sources at the pinned revisions rather than from
+whatever a checkout happens to have on disk.
+
+`tests/src/rocq_stub_drift.rs` compares declarations. In the *fiction*
+direction every name and every constructor arity this stub declares must
+exist upstream and agree; in the *narrowing* direction the set of
+declarations upstream has and this stub does not is digested and pinned,
+so upstream growing or dropping one is a change a human is asked about.
+The WasmCert half needs no credential and runs in CI; the wasm-verifier
+half runs where a checkout exists and skips loudly elsewhere.
+
+`tests/src/rocq_typecheck.rs` compiles the emitted `.v` itself. Its
+always-available lane uses this stub; when
+`INFERENCE_WASM_VERIFIER_COQC` names an oracle, a second lane compiles
+the same modules against the real libraries, after a provenance probe
+that rejects a stand-in which merely exits zero.
+
+Deleting this stub is still the eventual goal — it exists because a
+signature mirror needs no credential — but it is no longer the only
+thing standing between codegen and the proof target.
