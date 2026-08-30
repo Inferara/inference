@@ -258,7 +258,7 @@ Record module_mem : Type := {
   modmem_type : limits
 }.
 
-Record module_glob : Type := {
+Record module_global : Type := {
   modglob_type : global_type;
   modglob_init : list basic_instruction
 }.
@@ -298,7 +298,7 @@ Record module : Type := {
   mod_funcs : list module_func;
   mod_tables : list module_table;
   mod_mems : list module_mem;
-  mod_globals : list module_glob;
+  mod_globals : list module_global;
   mod_elems : list module_element;
   mod_datas : list module_data;
   mod_start : option module_start;
