@@ -1,0 +1,226 @@
+name: Rocq real libraries (wasm-to-v)
+
+# Holds the vendored signature stub in `core/wasm-to-v/rocq-stub/` to the real
+# libraries it mirrors, and the emitted `.v` to those libraries themselves.
+#
+# `rocq-typecheck.yml` compiles proof-mode output against the stub, which is only
+# as true as the stub is. This workflow closes the two gaps that leaves:
+#
+#   * the stub-drift job compares the stub's declarations with the PUBLIC
+#     coq-wasm library at the revision `core/wasm-to-v/wasm-verifier-pin.txt`
+#     records. No credential, so it always runs and is the half of the claim CI
+#     genuinely establishes.
+#   * the real-library job type-checks every gated module against the real
+#     libraries, including the PRIVATE wasm-verifier one. That needs a runner
+#     carrying those libraries, so it skips loudly where none is configured.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    # Deliberately NO `paths:` filter. GitHub evaluates a paths filter on every
+    # activity type, `labeled` included, so a filter would make the label a dead
+    # gate on exactly the pull requests that need it: someone labelling a PR to
+    # ask for this workflow would get no run at all unless the PR happened to
+    # touch a matching path.
+  workflow_dispatch:
+
+jobs:
+  stub-drift:
+    name: Stub drift vs public coq-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.3
+
+      # Read from the pin rather than restated here. A revision written into this
+      # file would be one more place that can go stale, which is the defect the
+      # pin exists to remove.
+      - name: Read the pinned coq-wasm revision
+        id: pin
+        run: |
+          set -euo pipefail
+          pin=core/wasm-to-v/wasm-verifier-pin.txt
+          commit=$(awk '$1 == "coq-wasm-commit" { print $2 }' "$pin")
+          tag=$(awk '$1 == "coq-wasm-tag" { print $2 }' "$pin")
+          if [ -z "$commit" ] || [ -z "$tag" ]; then
+            echo "::error::$pin records no coq-wasm commit or tag"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "pinned coq-wasm $tag ($commit)"
+
+      - name: Check out the pinned public coq-wasm library
+        uses: actions/checkout@v4.1.3
+        with:
+          repository: WasmCert/WasmCert-Coq
+          ref: ${{ steps.pin.outputs.commit }}
+          path: wasmcert
+          # The drift check reads sources with `git show <pinned commit>:<path>`,
+          # so the commit has to be in the object store; a shallow checkout of a
+          # tag would not have it.
+          fetch-depth: 0
+
+      # The pin records both a tag and the commit it resolved to, because a tag
+      # can be moved and a commit cannot. This is where that pays: an upstream
+      # retag becomes a failure here instead of a silent change of what "v2.2.0"
+      # meant.
+      - name: Assert the pinned tag still names the pinned commit
+        run: |
+          set -euo pipefail
+          resolved=$(git -C wasmcert rev-list -n 1 "${{ steps.pin.outputs.tag }}")
+          if [ "$resolved" != "${{ steps.pin.outputs.commit }}" ]; then
+            echo "::error::coq-wasm ${{ steps.pin.outputs.tag }} now resolves to $resolved, \
+          not the pinned ${{ steps.pin.outputs.commit }} — the tag was moved"
+            exit 1
+          fi
+
+      # `INFERENCE_ROCQ_DRIFT_REQUIRE` names the tiers this run must establish
+      # rather than skip. Only the public one: the private wasm-verifier tier has
+      # no checkout here and is expected to skip, and requiring it would make this
+      # job permanently red for a checkout CI cannot have.
+      #
+      # The pass floor closes what the require flag cannot see: a filter that
+      # selects nothing still prints `test result: ok` and still exits 0.
+      - name: Run the stub-drift check against the public library
+        env:
+          WASM_CERT_REPO: ${{ github.workspace }}/wasmcert
+          INFERENCE_ROCQ_DRIFT_REQUIRE: Wasm
+          ROCQ_DRIFT_PASS_FLOOR: '6'
+        run: |
+          set -euo pipefail
+          cargo test -p inference-tests --verbose "rocq_stub_drift::" 2>&1 | tee drift.log
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' drift.log | head -1)
+          passed=${passed:-0}
+          echo "passed $passed test(s); floor is $ROCQ_DRIFT_PASS_FLOOR"
+          if [ "$passed" -lt "$ROCQ_DRIFT_PASS_FLOOR" ]; then
+            echo "::error::the stub-drift gate ran $passed test(s), below the floor of \
+          $ROCQ_DRIFT_PASS_FLOOR — gates were removed or are no longer reachable from \
+          tests/src/lib.rs"
+            exit 1
+          fi
+
+      # Said here because the real-library job may legitimately be absent from a
+      # run — it is label-gated on pull requests — and an absent job leaves no
+      # annotation of its own. Without this line a reader could take a green run
+      # as evidence the private library was consulted.
+      - name: State what this run did and did not establish
+        run: |
+          {
+            echo "### Stub drift vs public coq-wasm: CHECKED"
+            echo
+            echo "The vendored signature stub agrees with the public coq-wasm"
+            echo "library at the revision \`core/wasm-to-v/wasm-verifier-pin.txt\`"
+            echo "records."
+            echo
+            echo "This run did **not** consult the private wasm-verifier library."
+            echo "That is the \`Real-library type-check\` job, which on a pull"
+            echo "request runs only when the PR carries the \`ci:real-rocq\` label"
+            echo "and a runner carrying the library is configured."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  real-library:
+    name: Real-library type-check
+    # The runner, not a checkout, is what carries the private library: a build of
+    # it, the Coq that built it, and the oracle honouring the
+    # `<exe> <file.v>` contract. `vars.WASM_VERIFIER_COQC` names that oracle, and
+    # only someone with access to such a runner can set it — which is what gates
+    # this job.
+    #
+    # SECURITY, and it is not optional. This repository is PUBLIC and this job
+    # runs the pull request's own code (`cargo test` builds and executes it). A
+    # runner that carries the private library must therefore never be offered to
+    # a pull request from a fork, or an outside contributor could read that
+    # library off the machine. The `if:` below refuses a fork PR, but an `if:`
+    # alone is NOT sufficient protection: for `pull_request`, GitHub runs the
+    # workflow file as it exists in the pull request, so a fork could simply
+    # delete this condition. The guard that actually holds is on the runner:
+    #   - keep the self-hosted runner in a group that does NOT allow public
+    #     repositories (this is the default, and it must stay off);
+    #   - keep "Require approval for all outside collaborators" enabled in the
+    #     repository's Actions settings.
+    # With `vars.WASM_VERIFIER_RUNNER` unset the job lands on a hosted runner
+    # with no oracle configured and skips, which is the safe default state.
+    # On a pull request this lane is OPT-IN, via the `ci:real-rocq` label. It is
+    # the expensive half — it wants a runner carrying a build of the private
+    # library — so it runs on demand rather than on every push to every branch.
+    # `push` to main and `workflow_dispatch` are unconditional; only the
+    # `pull_request` path asks for the label. The always-on half of the claim is
+    # the stub-drift job above, which needs no credential and no label.
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.pull_request.head.repo.full_name == github.repository
+          && contains(github.event.pull_request.labels.*.name, 'ci:real-rocq'))
+    runs-on: ${{ vars.WASM_VERIFIER_RUNNER || 'ubuntu-latest' }}
+    steps:
+      # A missing oracle is checked here rather than in the job's `if:`, even
+      # though the job carries one for the fork case above. A skipped job is
+      # neither red nor annotated, so a reader scanning the run would see no
+      # trace of the lane and could reasonably conclude the private library had
+      # been consulted. For an absent oracle — a missing capability, not a
+      # failure — the job runs, says plainly that it established nothing, and
+      # stays green. The fork case is the one exception, and is the job's `if:`
+      # precisely because there safety outranks annotation: the stub-drift job
+      # still runs on a fork pull request and still reports what CI established.
+      - name: Look for the real-library oracle
+        id: oracle
+        env:
+          ORACLE: ${{ vars.WASM_VERIFIER_COQC }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ORACLE:-}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Real-library lane skipped::No WASM_VERIFIER_COQC \
+          variable is configured, so NO emitted module was type-checked against the real \
+          coq-wasm and wasm-verifier libraries in this run."
+            {
+              echo "### Real-library type-check: SKIPPED"
+              echo
+              echo "No \`WASM_VERIFIER_COQC\` variable is configured, so no emitted"
+              echo "module was type-checked against the real coq-wasm and wasm-verifier"
+              echo "libraries in this run. What CI does establish is the stub-drift job:"
+              echo "the vendored signature stub still agrees with the public coq-wasm"
+              echo "library at the pinned revision."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.oracle.outputs.present == 'true'
+        uses: actions/checkout@v4.1.3
+
+      # The lane runs its own provenance probe before it believes a single
+      # verdict, so an oracle that merely exits zero fails here rather than
+      # reporting every module green. `--nocapture` is what surfaces the lane's
+      # `pass=N fail=0` line, which the floor below reads.
+      - name: Type-check every gated module against the real libraries
+        if: steps.oracle.outputs.present == 'true'
+        env:
+          INFERENCE_WASM_VERIFIER_COQC: ${{ vars.WASM_VERIFIER_COQC }}
+          WASM_VERIFIER_THEORIES: ${{ vars.WASM_VERIFIER_THEORIES }}
+          WASM_VERIFIER_CONTAINER: ${{ vars.WASM_VERIFIER_CONTAINER }}
+          REAL_LIBRARY_MODULE_FLOOR: '32'
+        run: |
+          set -euo pipefail
+          cargo test -p inference-tests --verbose \
+            "rocq_typecheck::gate::the_real_libraries_type_check_every_gated_module" \
+            -- --nocapture 2>&1 | tee real.log
+          checked=$(sed -n 's/^real libraries: pass=\([0-9]*\) fail=0.*/\1/p' real.log | head -1)
+          checked=${checked:-0}
+          echo "type-checked $checked module(s); floor is $REAL_LIBRARY_MODULE_FLOOR"
+          if [ "$checked" -lt "$REAL_LIBRARY_MODULE_FLOOR" ]; then
+            echo "::error::the real-library lane type-checked $checked module(s), below \
+          the floor of $REAL_LIBRARY_MODULE_FLOOR — the lane skipped, or the gated module \
+          list shrank"
+            exit 1
+          fi
+          {
+            echo "### Real-library type-check: $checked module(s) OK"
+            echo
+            echo "Every gated module type-checks against the real coq-wasm and"
+            echo "wasm-verifier libraries at the pinned revisions."
+          } >> "$GITHUB_STEP_SUMMARY"
