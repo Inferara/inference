@@ -30,6 +30,7 @@ revision 77f1126d5de023d9f8464c60c0137b6321126757
 coq-wasm-tag v2.2.0
 coq-wasm-commit 0fd83fa708922721132b6d6737179568d1f1d553
 coq 8.20
+assumption-allowlist-count 10
 
 # The Coq standard library names the stub re-declares locally rather than taking
 # from upstream. Each is an exemption from the existence direction, and each
