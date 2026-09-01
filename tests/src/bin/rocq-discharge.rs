@@ -2,6 +2,11 @@ use anyhow::{Result, bail};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+const PUBLIC_ERROR_PREFIX: &str = "rocq-discharge: ";
+/// Maximum UTF-8 bytes in a public failure line, excluding the terminating newline.
+const PUBLIC_ERROR_LINE_LIMIT: usize = 1_024;
+const PUBLIC_ERROR_TRUNCATION_MARKER: &str = "...";
+
 #[derive(Debug, Eq, PartialEq)]
 enum CliCommand {
     Export(PathBuf),
@@ -47,9 +52,39 @@ fn run() -> Result<()> {
     }
 }
 
+fn format_public_error(error: &anyhow::Error) -> String {
+    let rendered = format!("{error:#}");
+    let mut line = String::with_capacity(PUBLIC_ERROR_LINE_LIMIT);
+    line.push_str(PUBLIC_ERROR_PREFIX);
+
+    for character in rendered.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if line.len() + character.len_utf8() <= PUBLIC_ERROR_LINE_LIMIT {
+            line.push(character);
+            continue;
+        }
+
+        let mut boundary = line
+            .len()
+            .min(PUBLIC_ERROR_LINE_LIMIT - PUBLIC_ERROR_TRUNCATION_MARKER.len());
+        while !line.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        line.truncate(boundary);
+        line.push_str(PUBLIC_ERROR_TRUNCATION_MARKER);
+        return line;
+    }
+
+    line
+}
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("rocq-discharge: {error:#}");
+        eprintln!("{}", format_public_error(&error));
         std::process::exit(1);
     }
 }
@@ -57,7 +92,7 @@ fn main() {
 #[cfg(test)]
 mod rocq_dischargeability {
     mod cli {
-        use super::super::{CliCommand, parse_args};
+        use super::super::{CliCommand, PUBLIC_ERROR_LINE_LIMIT, format_public_error, parse_args};
         use std::ffi::OsString;
         use std::path::PathBuf;
 
@@ -112,6 +147,56 @@ mod rocq_dischargeability {
                 accepted.is_empty(),
                 "invalid CLI arguments accepted: {accepted:?}"
             );
+        }
+
+        #[test]
+        fn public_error_formatter_bounds_and_sanitizes_the_complete_anyhow_chain() {
+            let root = anyhow::anyhow!(format!(
+                "root\n\r\t\0\u{1b}\u{7f}\u{85}{}",
+                "r".repeat(4_000)
+            ));
+            let error = root
+                .context(format!(
+                    "middle\n\r\t\0\u{1b}\u{7f}\u{85}東京{}",
+                    "m".repeat(4_000)
+                ))
+                .context("phase=export");
+
+            let line = format_public_error(&error);
+
+            assert_eq!(
+                line.len(),
+                PUBLIC_ERROR_LINE_LIMIT,
+                "oversized public errors must fill but never exceed the byte ceiling"
+            );
+            assert!(
+                line.starts_with("rocq-discharge: phase=export: middle       東京"),
+                "stable phase/context was not retained: {line}"
+            );
+            assert!(
+                line.contains("東京"),
+                "valid Unicode was not retained: {line}"
+            );
+            assert!(line.ends_with("..."), "truncation marker missing: {line}");
+            assert_eq!(line.lines().count(), 1, "public error was not one line");
+            assert!(
+                line.chars().all(|character| !character.is_control()),
+                "public error retained a control character: {line:?}"
+            );
+        }
+
+        #[test]
+        fn public_error_formatter_never_splits_a_utf8_code_point() {
+            const PREFIX: &str = "rocq-discharge: ";
+            const MARKER: &str = "...";
+            let ascii_count = PUBLIC_ERROR_LINE_LIMIT - PREFIX.len() - MARKER.len() - 1;
+            let error = anyhow::anyhow!(format!("{}界tail", "a".repeat(ascii_count)));
+
+            let line = format_public_error(&error);
+
+            assert_eq!(line, format!("{PREFIX}{}{MARKER}", "a".repeat(ascii_count)));
+            assert_eq!(line.len(), PUBLIC_ERROR_LINE_LIMIT - 1);
+            assert!(std::str::from_utf8(line.as_bytes()).is_ok());
         }
     }
 }
