@@ -1,0 +1,71 @@
+# The upstream Rocq libraries the vendored signature stub in `rocq-stub/`
+# mirrors, and the proof-mode `.v` this crate emits is type-checked against.
+#
+# Two libraries, with very different exposure:
+#
+#   coq-wasm / WasmCert-Coq -- PUBLIC (https://github.com/WasmCert/WasmCert-Coq).
+#     Both the tag and the commit it resolves to are recorded, because a tag can
+#     be moved and a commit cannot. `rocq-stub/wasm/` mirrors its
+#     `theories/{datatypes,bytes,numerics,host}.v`. Needing no credential, this
+#     half runs in CI.
+#
+#   wasm-verifier -- PRIVATE. `rocq-stub/wasm_verifier/` mirrors its
+#     `theories/{Assertions,Verifier,Exists}.v`. This half runs only where a
+#     checkout exists, which in practice means a developer machine.
+#
+# `tests/src/rocq_stub_drift.rs` reads the sources AT THE REVISIONS BELOW with
+# `git show`, so a checkout parked on another commit cannot change the verdict.
+#
+# WHY THIS FILE CARRIES DIGESTS AND NOT CONTENT
+# ---------------------------------------------
+# wasm-verifier's reciprocal pin (`book/inference-pin.txt` there) commits the
+# cited Inference source lines verbatim. That is safe in the direction it runs:
+# a public repository's text recorded inside a private one. The reverse would
+# publish private library source from a public repository, so the narrowing
+# direction commits SHA-256 digests instead. A drift shows up as a digest that
+# no longer matches, and the differing names are printed at failure time from
+# the developer's own checkout -- never written here.
+
+revision 77f1126d5de023d9f8464c60c0137b6321126757
+coq-wasm-tag v2.2.0
+coq-wasm-commit 0fd83fa708922721132b6d6737179568d1f1d553
+coq 8.20
+
+# The Coq standard library names the stub re-declares locally rather than taking
+# from upstream. Each is an exemption from the existence direction, and each
+# claims something checkable: that the name is bound by Coq's own standard
+# library, so the pinned upstream library has no obligation to declare it.
+#
+# `list_byte_of_string` is `Stdlib.Strings.Byte.list_byte_of_string`. WasmCert
+# uses it (`String.list_byte_of_string` in its `operations.v` and its binary
+# format parser) without re-exporting it, and the stub must declare it because
+# it declares its own opaque `byte` for the emitted `Mi`/`Me` helpers to build
+# import and export names with.
+#
+# An exemption that stops being needed is itself a failure: the drift check
+# rejects a name listed here that upstream does declare, so this list cannot
+# quietly grow into a blanket.
+stdlib-name list_byte_of_string
+
+# One line per logical module: the SHA-256 of the REAL-ONLY declaration set --
+# the names the upstream module binds and the stub does not -- followed by that
+# set's size. The digest is taken over the sorted names joined by "\n". The
+# names themselves are never written here.
+#
+# This is the narrowing direction. The stub is a deliberate narrowing of two much
+# larger libraries, and the fiction direction alone cannot see that: it only asks
+# whether what the stub says is true, never whether upstream grew a declaration
+# the stub should have mirrored or dropped one it was narrowing away from. A
+# changed digest means the narrowing itself moved and wants a human to look.
+#
+# Regenerate after a deliberate pin bump:
+#
+#   INFERENCE_ROCQ_DRIFT_UPDATE=1 cargo test -p inference-tests rocq_stub_drift::
+#
+absent-digest Wasm.datatypes 2b05508a72104eb04542c4e6c56af0cd67b2b88974373dd9751e13b79d76c88f 220
+absent-digest Wasm.bytes 4f98749b5f29f64356cb8778865c82e7c84c4f8171997317704391056f696f7d 15
+absent-digest Wasm.numerics cb6fdd29961eda88aa844bbf03c42d55996a19b17f48cb2d1faa655caf9ade1d 298
+absent-digest Wasm.host c49680a92c5127fde445587f4cb3c5b9d19459dd6083aabf45b8a62dc87a96e3 9
+absent-digest WasmVerifier.Assertions f691a001ff77aeeec985a2ac0ef30d3bf882b07c8f2d1df6d046d5ee2293043e 32
+absent-digest WasmVerifier.Verifier b44de348cf4f64cead82664559fd97615b79220feacf84a618f00965ed38a6b4 46
+absent-digest WasmVerifier.Exists 0c6505d8290a034cf583ed3e4bb9e92148e82f83f145008fd4b7cb93fb712495 34
