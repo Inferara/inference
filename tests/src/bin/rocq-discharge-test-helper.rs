@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn required_env(name: &str) -> OsString {
@@ -8,7 +9,7 @@ fn required_env(name: &str) -> OsString {
     })
 }
 
-fn parse_args() -> (String, PathBuf) {
+fn parse_args() -> (String, String, PathBuf) {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments.len() != 7
         || arguments[0] != OsStr::new("--protocol")
@@ -40,7 +41,11 @@ fn parse_args() -> (String, PathBuf) {
         eprintln!("unsafe case ID");
         std::process::exit(74);
     }
-    (case_id.to_string(), PathBuf::from(&arguments[6]))
+    (
+        revision.into_owned(),
+        case_id.to_string(),
+        PathBuf::from(&arguments[6]),
+    )
 }
 
 fn write_receipt(case_id: &str, receipt_dir: &Path, templates: &Path) {
@@ -54,13 +59,39 @@ fn write_receipt(case_id: &str, receipt_dir: &Path, templates: &Path) {
     });
 }
 
+fn flood_output() -> ! {
+    const CHUNK: &[u8; 8192] = &[b'x'; 8192];
+    let mut stdout = std::io::stdout().lock();
+    for _ in 0..256 {
+        stdout.write_all(CHUNK).expect("write large stdout");
+    }
+    stdout.flush().expect("flush large stdout");
+    drop(stdout);
+
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(b"flood diagnostic begins: ")
+        .expect("write diagnostic prefix");
+    for _ in 0..256 {
+        stderr.write_all(CHUNK).expect("write large stderr");
+    }
+    stderr.write_all(b"\n").expect("finish large stderr");
+    stderr.flush().expect("flush large stderr");
+    std::process::exit(7)
+}
+
 fn main() {
     let behavior = required_env("INFERENCE_TEST_DISCHARGER_BEHAVIOR");
     if behavior == OsStr::new("noop") {
         return;
     }
 
-    let (case_id, raw_file) = parse_args();
+    let (revision, case_id, raw_file) = parse_args();
+    let expected_revision = required_env("INFERENCE_TEST_EXPECTED_WASM_VERIFIER_REVISION");
+    if expected_revision != OsStr::new(&revision) {
+        eprintln!("verifier revision mismatch");
+        std::process::exit(91);
+    }
     let expected_raw_dir = PathBuf::from(required_env("INFERENCE_TEST_EXPECTED_RAW_DIR"));
     let receipt_dir = PathBuf::from(required_env("INFERENCE_WASM_VERIFIER_RECEIPT_DIR"));
     let templates = PathBuf::from(required_env("INFERENCE_TEST_RECEIPT_TEMPLATE_DIR"));
@@ -87,6 +118,7 @@ fn main() {
 
     match behavior.to_str() {
         Some("nonzero") => std::process::exit(7),
+        Some("flood") => flood_output(),
         Some("no-receipt") => {}
         Some("malformed") => {
             std::fs::write(receipt_dir.join(format!("{case_id}.json")), b"{")

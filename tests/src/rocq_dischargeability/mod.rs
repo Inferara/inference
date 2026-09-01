@@ -33,10 +33,9 @@ fn export_with_generator<F>(exchange: &Path, mut generate: F) -> Result<protocol
 where
     F: FnMut(&cases::CaseSpec) -> Result<Vec<u8>>,
 {
-    require_empty_exchange(exchange)?;
-    let raw_dir = exchange.join("raw");
-    std::fs::create_dir(&raw_dir)
-        .with_context(|| format!("create raw directory {}", raw_dir.display()))?;
+    let exchange = require_empty_exchange(exchange)?;
+    let mut transaction = ExportTransaction::new(exchange);
+    let raw_dir = transaction.create_raw_dir()?;
     let repository = repository_root();
     let mut raw_cases = Vec::with_capacity(cases::CASES.len());
 
@@ -55,11 +54,7 @@ where
         }
 
         let raw_path = raw_dir.join(case.raw_basename());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&raw_path)
-            .with_context(|| format!("create raw artifact {}", raw_path.display()))?;
+        let mut file = transaction.create_raw_file(&raw_path)?;
         file.write_all(&generated)
             .with_context(|| format!("write raw artifact {}", raw_path.display()))?;
         file.sync_all()
@@ -74,7 +69,8 @@ where
     }
 
     let request = protocol::Request::from_raw(&pin::Pin::read()?, raw_cases);
-    publish_request(exchange, &protocol::serialize_request(&request)?)?;
+    transaction.publish_request(&protocol::serialize_request(&request)?)?;
+    transaction.commit();
     Ok(request)
 }
 
@@ -90,7 +86,7 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn require_empty_exchange(exchange: &Path) -> Result<()> {
+fn require_empty_exchange(exchange: &Path) -> Result<PathBuf> {
     if !exchange.is_absolute() {
         bail!("exchange path must be absolute");
     }
@@ -102,7 +98,9 @@ fn require_empty_exchange(exchange: &Path) -> Result<()> {
             exchange.display()
         );
     }
-    let mut entries = std::fs::read_dir(exchange)
+    let exchange = std::fs::canonicalize(exchange)
+        .with_context(|| format!("canonicalize exchange directory {}", exchange.display()))?;
+    let mut entries = std::fs::read_dir(&exchange)
         .with_context(|| format!("read exchange directory {}", exchange.display()))?;
     if entries
         .next()
@@ -115,29 +113,91 @@ fn require_empty_exchange(exchange: &Path) -> Result<()> {
             exchange.display()
         );
     }
-    Ok(())
+    Ok(exchange)
 }
 
-fn publish_request(exchange: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = exchange.join(".request.json.tmp");
-    let final_path = exchange.join("request.json");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .with_context(|| format!("create temporary request {}", temporary.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write temporary request {}", temporary.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync temporary request {}", temporary.display()))?;
-    drop(file);
-    std::fs::rename(&temporary, &final_path).with_context(|| {
-        format!(
-            "atomically publish request {} as {}",
-            temporary.display(),
-            final_path.display()
-        )
-    })
+struct ExportTransaction {
+    exchange: PathBuf,
+    raw_dir: Option<PathBuf>,
+    raw_files: Vec<PathBuf>,
+    request_temporary: Option<PathBuf>,
+    committed: bool,
+}
+
+impl ExportTransaction {
+    fn new(exchange: PathBuf) -> Self {
+        Self {
+            exchange,
+            raw_dir: None,
+            raw_files: Vec::new(),
+            request_temporary: None,
+            committed: false,
+        }
+    }
+
+    fn create_raw_dir(&mut self) -> Result<PathBuf> {
+        let raw_dir = self.exchange.join("raw");
+        std::fs::create_dir(&raw_dir)
+            .with_context(|| format!("create raw directory {}", raw_dir.display()))?;
+        self.raw_dir = Some(raw_dir.clone());
+        Ok(raw_dir)
+    }
+
+    fn create_raw_file(&mut self, path: &Path) -> Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("create raw artifact {}", path.display()))?;
+        self.raw_files.push(path.to_path_buf());
+        Ok(file)
+    }
+
+    fn publish_request(&mut self, bytes: &[u8]) -> Result<()> {
+        let temporary = self.exchange.join(".request.json.tmp");
+        let final_path = self.exchange.join("request.json");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("create temporary request {}", temporary.display()))?;
+        self.request_temporary = Some(temporary.clone());
+        file.write_all(bytes)
+            .with_context(|| format!("write temporary request {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary request {}", temporary.display()))?;
+        drop(file);
+        std::fs::rename(&temporary, &final_path).with_context(|| {
+            format!(
+                "atomically publish request {} as {}",
+                temporary.display(),
+                final_path.display()
+            )
+        })?;
+        self.request_temporary = None;
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ExportTransaction {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(temporary) = self.request_temporary.take() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        for raw_file in self.raw_files.drain(..).rev() {
+            let _ = std::fs::remove_file(raw_file);
+        }
+        if let Some(raw_dir) = self.raw_dir.take() {
+            let _ = std::fs::remove_dir(raw_dir);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +213,19 @@ mod tests {
             .expect("tests crate has a repository parent")
     }
 
+    fn exchange_names(exchange: &Path) -> BTreeSet<String> {
+        std::fs::read_dir(exchange)
+            .expect("read exchange")
+            .map(|entry| {
+                entry
+                    .expect("read exchange entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 exchange entry")
+            })
+            .collect()
+    }
+
     #[test]
     fn export_fresh_generates_golden_equal_raw_and_hashes_exact_written_bytes() {
         let exchange = tempfile::tempdir().expect("create exchange");
@@ -165,16 +238,7 @@ mod tests {
             "2889e852f5e99df59f58cd72d6242f2252f3de586e14b80bf6ce46b78906b978",
         ];
 
-        let entries: BTreeSet<_> = std::fs::read_dir(exchange.path())
-            .expect("read exchange")
-            .map(|entry| {
-                entry
-                    .expect("read exchange entry")
-                    .file_name()
-                    .into_string()
-                    .expect("UTF-8 entry")
-            })
-            .collect();
+        let entries = exchange_names(exchange.path());
         assert_eq!(
             entries,
             BTreeSet::from(["raw".to_string(), "request.json".to_string()])
@@ -233,6 +297,60 @@ mod tests {
             !exchange.path().join("request.json").exists(),
             "request must be published last"
         );
+        assert_eq!(
+            exchange_names(exchange.path()),
+            BTreeSet::new(),
+            "failed export left owned artifacts behind"
+        );
+    }
+
+    #[test]
+    fn failed_mid_matrix_generation_restores_the_empty_exchange() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let error = export_with_generator(exchange.path(), |case| {
+            if case.id() == "unique" {
+                anyhow::bail!("injected mid-matrix generation failure");
+            }
+            Ok(std::fs::read(repository_root().join(case.golden_path()))?)
+        })
+        .expect_err("mid-matrix generation failure must fail export");
+
+        assert!(
+            format!("{error:#}").contains("injected mid-matrix"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            exchange_names(exchange.path()),
+            BTreeSet::new(),
+            "failed export left partial raw artifacts behind"
+        );
+    }
+
+    #[test]
+    fn failed_request_publication_removes_owned_staging_but_preserves_foreign_entries() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let injected_request = exchange.path().join("request.json");
+        let error = export_with_generator(exchange.path(), |case| {
+            if case.id() == "false-spec" {
+                std::fs::create_dir(&injected_request).expect("inject foreign request directory");
+                std::fs::write(injected_request.join("sentinel"), b"foreign")
+                    .expect("write foreign sentinel");
+            }
+            Ok(std::fs::read(repository_root().join(case.golden_path()))?)
+        })
+        .expect_err("injected request publication failure must fail export");
+
+        assert!(
+            format!("{error:#}").contains("atomically publish request"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!exchange.path().join("raw").exists());
+        assert!(!exchange.path().join(".request.json.tmp").exists());
+        assert_eq!(
+            std::fs::read(injected_request.join("sentinel")).expect("read foreign sentinel"),
+            b"foreign",
+            "rollback removed or changed a foreign entry"
+        );
     }
 
     #[test]
@@ -279,5 +397,47 @@ mod tests {
             .expect_err("symlink exchange must fail")
             .to_string();
         assert!(error.contains("nonsymlink"), "unexpected error: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stabilized_exchange_root_keeps_export_inside_original_target() {
+        let parent = tempfile::tempdir().expect("create exchange parent");
+        let original_parent = parent.path().join("original-parent");
+        let injected_parent = parent.path().join("injected-parent");
+        let ancestor = parent.path().join("ancestor");
+        let original_exchange = original_parent.join("exchange");
+        let injected_exchange = injected_parent.join("exchange");
+        std::fs::create_dir_all(&original_exchange).expect("create original exchange");
+        std::fs::create_dir_all(&injected_exchange).expect("create injected exchange");
+        std::os::unix::fs::symlink(&original_parent, &ancestor).expect("create ancestor symlink");
+        let caller_exchange = ancestor.join("exchange");
+        let mut retargeted = false;
+
+        export_with_generator(&caller_exchange, |case| {
+            if !retargeted {
+                std::fs::remove_file(&ancestor).expect("remove original ancestor symlink");
+                std::os::unix::fs::symlink(&injected_parent, &ancestor)
+                    .expect("retarget ancestor symlink");
+                retargeted = true;
+            }
+            Ok(std::fs::read(repository_root().join(case.golden_path()))?)
+        })
+        .expect("export through a stabilized exchange root");
+
+        assert!(original_exchange.join("request.json").is_file());
+        assert_eq!(
+            std::fs::read_dir(&original_exchange)
+                .expect("read original exchange")
+                .count(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_dir(&injected_exchange)
+                .expect("read injected exchange")
+                .count(),
+            0,
+            "retargeted ancestor received export entries"
+        );
     }
 }
