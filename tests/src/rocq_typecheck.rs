@@ -109,8 +109,13 @@ mod gate {
         ("spec_method.inf", "spec_method"),
         ("mixed_compile_proof.inf", "mixed_compile_proof"),
         ("rocq_control_flow.inf", "rocq_control_flow"),
+        ("rocq_false_certificate.inf", "rocq_false_certificate"),
         ("rocq_spec_shapes.inf", "rocq_spec_shapes"),
         ("rocq_prime_example.inf", "rocq_prime_example"),
+        (
+            "rocq_prime_bounded_example.inf",
+            "rocq_prime_bounded_example",
+        ),
         ("spec_narrow_uzumaki.inf", "spec_narrow_uzumaki"),
         ("spec_short_circuit.inf", "spec_short_circuit"),
         ("spec_narrow_abi.inf", "spec_narrow_abi"),
@@ -604,6 +609,24 @@ mod gate {
             .collect()
     }
 
+    #[test]
+    fn selected_producer_sources_occur_exactly_once_in_corpus() {
+        for source in [
+            "rocq_prime_bounded_example.inf",
+            "rocq_false_certificate.inf",
+            "spec_narrow_discharge.inf",
+        ] {
+            assert_eq!(
+                CORPUS
+                    .iter()
+                    .filter(|(candidate, _)| *candidate == source)
+                    .count(),
+                1,
+                "selected producer `{source}` must occur exactly once in CORPUS"
+            );
+        }
+    }
+
     /// The stub gate must hand `coqc` the translator's raw proof skeleton, not
     /// a test-side rewrite. `with_spec.inf` is the first corpus producer and
     /// has both the unconditional module theorem and its per-spec theorem, so
@@ -817,6 +840,17 @@ mod gate {
     /// about.
     fn one_line(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The theorem names in an emitted `.v`, in declaration order.
+    fn theorem_names(v: &str) -> Vec<&str> {
+        v.lines()
+            .filter_map(|line| {
+                line.strip_prefix("Theorem ")?
+                    .split_once(" :")
+                    .map(|(name, _)| name)
+            })
+            .collect()
     }
 
     /// The floor under [`LINKED_CORPUS`]: every entry must actually reach the
@@ -2803,6 +2837,131 @@ End Host.
             .join("rocq_prime_example.v")
     }
 
+    fn bounded_prime_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("rocq_prime_bounded_example.v")
+    }
+
+    fn false_certificate_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("rocq_false_certificate.v")
+    }
+
+    fn narrow_discharge_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_narrow_discharge.v")
+    }
+
+    #[test]
+    fn producer_golden_bounded_prime_matches_committed_v() {
+        let generated = generate_v(
+            "rocq_prime_bounded_example.inf",
+            "rocq_prime_bounded_example",
+        );
+        let golden_path = bounded_prime_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with `cargo test -p inference-tests \
+                 regenerate_bounded_prime_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for rocq_prime_bounded_example.inf drifted from {}",
+            golden_path.display()
+        );
+
+        let payloads = obligation_terms(&golden);
+        assert_eq!(
+            payloads.len(),
+            1,
+            "expected one bounded-prime payload:\n{golden}"
+        );
+        assert_eq!(
+            payloads[0],
+            "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2000000000))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0)))))))).",
+            "the lookup guard, signed bound, `n > 1` antecedent, and primality obligations must remain nested in that order"
+        );
+        assert_eq!(
+            theorem_names(&golden).len(),
+            2,
+            "the bounded fixture must emit module and spec theorems:\n{golden}"
+        );
+    }
+
+    #[test]
+    fn producer_golden_false_certificate_matches_committed_v() {
+        let generated = generate_v("rocq_false_certificate.inf", "rocq_false_certificate");
+        let golden_path = false_certificate_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with `cargo test -p inference-tests \
+                 regenerate_false_certificate_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for rocq_false_certificate.inf drifted from {}",
+            golden_path.display()
+        );
+        assert_eq!(
+            obligation_terms(&golden),
+            ["HA_not (term_eq (T_const (Vi32 0)) (T_const (Vi32 0)))."],
+            "the false certificate must contain exactly its contradictory singleton payload"
+        );
+    }
+
+    #[test]
+    fn producer_golden_narrow_discharge_matches_committed_v() {
+        let generated = generate_v("spec_narrow_discharge.inf", "spec_narrow_discharge");
+        let golden_path = narrow_discharge_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with `cargo test -p inference-tests \
+                 regenerate_narrow_discharge_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for spec_narrow_discharge.inf drifted from {}",
+            golden_path.display()
+        );
+
+        let payloads = obligation_terms(&golden);
+        assert_eq!(
+            payloads.len(),
+            2,
+            "expected exactly two narrow payloads:\n{golden}"
+        );
+        assert!(
+            payloads[0].contains("(ROI_le SX_U)") && payloads[0].contains("(T_const (Vi32 255))"),
+            "the first payload must carry the unsigned u8 domain:\n{}",
+            payloads[0]
+        );
+        assert!(
+            payloads[1].contains("(ROI_ge SX_S)")
+                && payloads[1].contains("(T_const (Vi32 (-128)))")
+                && payloads[1].contains("(ROI_le SX_S)")
+                && payloads[1].contains("(T_const (Vi32 127))"),
+            "the second payload must carry both signed i8 bounds:\n{}",
+            payloads[1]
+        );
+        assert_eq!(
+            theorem_names(&golden).len(),
+            2,
+            "the narrow fixture must emit module and spec theorems:\n{golden}"
+        );
+    }
+
     /// The proof-mode `.v` for the PrimeExample fixture must match a committed
     /// golden byte-for-byte, and that golden must carry the wasm-verifier contract
     /// shape: the module record omits the spec function (only `is_prime` survives),
@@ -3521,19 +3680,27 @@ End Host.
     #[cfg(test)]
     mod regenerate {
         use super::{
-            aggregate_values_golden_path, bounded_iteration_golden_path,
-            bounds_realization_golden_path, exists_spec_golden_path, generate_v,
-            literal_ctx_golden_path, prime_golden_path, quantifier_alternation_golden_path,
-            unique_spec_golden_path,
+            aggregate_values_golden_path, bounded_iteration_golden_path, bounded_prime_golden_path,
+            bounds_realization_golden_path, exists_spec_golden_path, false_certificate_golden_path,
+            generate_v, literal_ctx_golden_path, narrow_discharge_golden_path, prime_golden_path,
+            quantifier_alternation_golden_path, unique_spec_golden_path,
         };
-        use std::path::Path;
+        use std::path::{Path, PathBuf};
+
+        fn output_path(path: &Path) -> PathBuf {
+            let Ok(directory) = std::env::var("INFERENCE_ROCQ_GOLDEN_DIR") else {
+                return path.to_path_buf();
+            };
+            PathBuf::from(directory).join(path.file_name().expect("golden path has a file name"))
+        }
 
         fn write_golden(v: &str, path: &Path) {
+            let path = output_path(path);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
             }
-            std::fs::write(path, v).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            std::fs::write(&path, v).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
             println!("Regenerated: {} ({} bytes)", path.display(), v.len());
         }
 
@@ -3542,6 +3709,30 @@ End Host.
         fn regenerate_prime_example_v() {
             let v = generate_v("rocq_prime_example.inf", "rocq_prime_example");
             write_golden(&v, &prime_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_bounded_prime_v() {
+            let v = generate_v(
+                "rocq_prime_bounded_example.inf",
+                "rocq_prime_bounded_example",
+            );
+            write_golden(&v, &bounded_prime_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_false_certificate_v() {
+            let v = generate_v("rocq_false_certificate.inf", "rocq_false_certificate");
+            write_golden(&v, &false_certificate_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_narrow_discharge_v() {
+            let v = generate_v("spec_narrow_discharge.inf", "spec_narrow_discharge");
+            write_golden(&v, &narrow_discharge_golden_path());
         }
 
         #[test]

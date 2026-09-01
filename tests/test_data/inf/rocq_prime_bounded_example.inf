@@ -1,0 +1,34 @@
+// The canonical PrimeExample with the source-visible signed bound needed by
+// the dischargeability gate. Keep the executable body and the remainder of the
+// specification logically identical to rocq_prime_example.inf.
+fn is_prime(n: i32) -> bool {
+    if n < 2 {
+        return false;
+    }
+    let mut result: bool = true;
+    let mut i: i32 = 2;
+    loop i * i <= n {
+        if (n % i) == 0 {
+            result = false;
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+spec prime_properties_bounded {
+    fn prime_spec() forall {
+        let n: i32 = @;
+        assume { assert(n <= 2000000000); }
+        assume { assert(n > 1); }
+        if is_prime(n) {
+            let m: i32 = @;
+            assume { assert(m > 1 && m < n); }
+            assert(n % m > 0);
+        } else exists {
+            let k: i32 = @;
+            assume { assert(k > 1 && k < n); }
+            assert(n % k == 0);
+        }
+    }
+}
