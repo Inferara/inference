@@ -39,8 +39,8 @@
 //!   which is exactly the property this file asserts about it. The *merged*
 //!   artifact is gated by the linked corpus in `rocq_typecheck.rs`.
 //!
-//! So the table's split is 31 valid and 9 rejected, where `infc --mode proof`
-//! run over the same directory reaches 29 modules and refuses 11: the two
+//! So the table's split is 33 valid and 9 rejected, where `infc --mode proof`
+//! run over the same directory reaches 31 modules and refuses 11: the two
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -164,6 +164,11 @@ mod gate {
             why: "a `forall` body drawing one scalar around structured control flow",
         },
         Fixture {
+            stem: "rocq_false_certificate",
+            expected: StockValid(NothingToLower),
+            why: "the false-certificate producer: a universal assertion with no value draws",
+        },
+        Fixture {
             stem: "rocq_exists_spec",
             expected: StockValid(AlreadyChoiceLowered),
             why: "the corpus producer of the `ValidExistsSpec` grammar; its only \
@@ -174,6 +179,11 @@ mod gate {
             expected: StockValid(ScalarChoice),
             why: "names functions and specs after emitted-`.v` symbols; its universal specs draw \
                   scalars alongside the reachability pair",
+        },
+        Fixture {
+            stem: "rocq_prime_bounded_example",
+            expected: StockValid(ScalarChoice),
+            why: "the worked primality example with a source-visible signed discharge bound",
         },
         Fixture {
             stem: "rocq_prime_example",
@@ -430,6 +440,17 @@ mod gate {
         let on_disk = corpus_directory_stems();
         let mut listed: Vec<String> = CORPUS.iter().map(|f| f.stem.to_string()).collect();
         listed.sort();
+        for stem in [
+            "rocq_prime_bounded_example",
+            "rocq_false_certificate",
+            "spec_narrow_discharge",
+        ] {
+            assert_eq!(
+                CORPUS.iter().filter(|fixture| fixture.stem == stem).count(),
+                1,
+                "selected producer `{stem}` must occur exactly once in the stock-validity table"
+            );
+        }
         let unlisted: Vec<&String> = on_disk.iter().filter(|s| !listed.contains(s)).collect();
         let missing: Vec<&String> = listed.iter().filter(|s| !on_disk.contains(s)).collect();
         assert!(
