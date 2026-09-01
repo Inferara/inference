@@ -11,6 +11,7 @@ mod parser_literal_diagnostics;
 mod robustness;
 mod rocq_decls;
 mod rocq_stub_drift;
+mod rocq_test_support;
 mod rocq_typecheck;
 mod spec_propagation;
 mod spec_propagation_inf;
