@@ -511,9 +511,10 @@ mod tests {
         // `br_table 0` carries a default and nothing else. The passive data
         // segment reaches `memory.init`/`data.drop`, and the active element
         // segment's function index reaches its `ref.func` initializer. Its two
-        // bytes straddle the byte spellings: `0x78` has a notation in the
-        // contract's `byte_scope`, `0x12` is one of the twelve values that has
-        // none.
+        // bytes straddle the range the contract's own hex notations cover:
+        // `0x78` is one the notation block declares, `0x12` is one of the
+        // twelve it skips. Neither spelling is emitted — the point of the pair
+        // is that the uniform `encode` form does not vary with that split.
         let bytes = wat::parse_str(
             r#"
             (module
@@ -601,29 +602,32 @@ mod tests {
             );
         }
 
-        // A data byte is spelled with one of `byte_scope`'s two-digit uppercase
-        // hex notations where the contract declares one, and as the `encode`
-        // application that notation abbreviates for the twelve values it does
-        // not. The scope is opened by the preamble of any module carrying a
-        // data segment — the notation does not parse otherwise — and the
-        // application's argument carries the private key that same preamble
-        // claims, since `Z` itself may be pointing at mathcomp's `int_scope`
-        // by the time the module is read.
+        // Every data byte is spelled as an `encode` application, whatever the
+        // contract's own hex notations cover: those notations expand to
+        // arithmetic over bare numerals that read as `nat` wherever `Z_scope`
+        // is not open, so the backend rejects the ones carrying a hex digit
+        // `A` .. `F`. The application's argument carries the private key the
+        // preamble claims, since `Z` itself may be pointing at mathcomp's
+        // `int_scope` by the time the module is read.
         assert!(
-            output.contains("#78 :: (encode 18%Zst) :: nil"),
-            "a data byte must reach the `.v` in its `byte_scope` notation, or \
-             as an `encode` application where the contract declares none; \
+            output.contains("(encode 120%Zst) :: (encode 18%Zst) :: nil"),
+            "a data byte must reach the `.v` as an `encode` application, \
+             whether or not the contract declares a notation for it; \
              got:\n{output}",
         );
+        for value in 0..=u8::MAX {
+            let notation = format!("#{value:02X}");
+            assert!(
+                !output.contains(&notation),
+                "`{notation}` is a hex byte notation, and none of them \
+                 elaborate against the contract's `encode` from a module that \
+                 leaves `Z_scope` closed; got:\n{output}",
+            );
+        }
         assert!(
-            !output.contains("#12"),
-            "`#12` is a notation the proof contract does not declare, so the \
-             uniform hex spelling must not be used for it; got:\n{output}",
-        );
-        assert!(
-            output.contains("Open Scope byte_scope.\n"),
-            "a module carrying a data segment must open the scope its byte \
-             literals are written in; got:\n{output}",
+            !output.contains("Open Scope byte_scope.\n"),
+            "no emitted term is written in `byte_scope`, so the preamble must \
+             not open it; got:\n{output}",
         );
         assert!(
             output.contains("Local Delimit Scope Z_scope with Zst.\n"),

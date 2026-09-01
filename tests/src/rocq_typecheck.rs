@@ -28,6 +28,9 @@
 
 #[cfg(test)]
 mod gate {
+    use crate::rocq_decls::{
+        Tok, declared_names, ident_at, is_punct, strip_rocq_comments, tokenize,
+    };
     use crate::utils::{build_ast, get_test_data_path};
     use inference_type_checker::TypeCheckerBuilder;
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
@@ -1034,25 +1037,20 @@ mod gate {
             }
         }
 
-        // 4. Both data-segment preamble lines are conditional on a data segment,
+        // 4. The data-segment preamble line is conditional on a data segment,
         //    and Inference codegen emits none, so no corpus module carries one.
-        //    Pinning their absence keeps the preamble free of anything a module
+        //    Pinning its absence keeps the preamble free of anything a module
         //    does not use, and keeps every committed `.v` byte-identical to the
-        //    output it had before byte literals gained a scope requirement and a
-        //    private delimiting key.
+        //    output it had before byte literals gained a private delimiting key.
         for m in &generated {
-            for line in [
-                "Open Scope byte_scope.",
-                "Local Delimit Scope Z_scope with Zst.",
-            ] {
-                assert!(
-                    !m.v.contains(line),
-                    "`{}` carries no data segment, so its preamble must not \
-                     carry `{line}`; got:\n{}",
-                    m.source,
-                    m.v
-                );
-            }
+            let line = "Local Delimit Scope Z_scope with Zst.";
+            assert!(
+                !m.v.contains(line),
+                "`{}` carries no data segment, so its preamble must not \
+                 carry `{line}`; got:\n{}",
+                m.source,
+                m.v
+            );
         }
 
         // 5. Always-on guard: Rocq definitions are not overloadable, so a module
@@ -1120,10 +1118,12 @@ mod gate {
     /// indexes and `ref.func` initializer expressions), and active and passive
     /// data segments.
     ///
-    /// The passive segment spans both byte spellings and the whole byte range:
-    /// the two extremes, so a spelling that only works for the printable middle
-    /// fails here, and `0x12`/`0x1f` from the twelve-value gap the contract
-    /// declares no hex notation for, so a uniform hex spelling fails here too.
+    /// The passive segment spans the whole byte range and both halves of the
+    /// contract's own hex notation block: the two extremes, so a spelling that
+    /// only works for the printable middle fails here, and `0x12`/`0x1f`, which
+    /// straddle the twelve-value gap that block leaves — `0x12` inside it,
+    /// `0x1f` outside. The bytes are all written the same way, and the fixture
+    /// is what proves that split makes no difference to the spelling.
     const FOREIGN_SEGMENTS_WAT: &str = r#"
         (module
           (type (;0;) (func (param i32) (result i32)))
@@ -1157,14 +1157,15 @@ mod gate {
     /// and `br_table` reach the translator only from foreign or statically-linked
     /// `.wasm`, so no `.inf` fixture can drive them into the corpus gate above.
     /// That is how three terms the proof contract has no constructor for stayed
-    /// emitted, and how the `byte_scope` notations a data byte is written with
-    /// stayed unmodelled on the *stub* side (#346). Byte spelling is the one
-    /// place where the stub can fail in both directions — declaring too few
-    /// notations rejects a module the backend accepts, declaring too many
-    /// accepts one it rejects — so this fixture's data bytes cover the gap in
-    /// the contract's own notation block as well as the range extremes. This
-    /// gate assembles the constructs directly as WASM and runs the same public
-    /// `wasm_to_v` entry the corpus uses.
+    /// emitted, and how data-byte spelling stayed unmodelled on the *stub* side
+    /// (#346). A byte is now written one way for every value, as the `encode`
+    /// application the contract's hex notations abbreviate, because those
+    /// notations expand to arithmetic over bare numerals that read as `nat`
+    /// wherever `Z_scope` is closed. This fixture's data bytes cover the range
+    /// extremes and both halves of that notation block, so a spelling that
+    /// varied with either would fail here. This gate assembles the constructs
+    /// directly as WASM and runs the same public `wasm_to_v` entry the corpus
+    /// uses.
     ///
     /// `br_table`'s default label deserves its own arm: it is a separate
     /// immediate that the explicit-target list never contains, and a table whose
@@ -1183,14 +1184,11 @@ mod gate {
             "ME_passive",
             "(BI_ref_func 0%N :: nil)",
             "(BI_ref_func 1%N :: nil)",
-            "moddata_init := #68 :: #69 :: nil",
-            "moddata_init := #00 :: (encode 18%Zst) :: (encode 31%Zst) :: #FF :: nil",
+            "moddata_init := (encode 104%Zst) :: (encode 105%Zst) :: nil",
+            "moddata_init := (encode 0%Zst) :: (encode 18%Zst) :: (encode 31%Zst) \
+             :: (encode 255%Zst) :: nil",
             "MD_active 0%N",
             "MD_passive",
-            // The byte notations parse only inside `byte_scope`, so a module
-            // carrying data segments opens it; `coqc` below is what proves the
-            // line is load-bearing rather than decorative.
-            "Open Scope byte_scope.\n",
             // The `encode` applications above spell their argument with a
             // private key, because mathcomp's algebra library delimits its own
             // `int_scope` with `Z`. `coqc` below proves the claim and the
@@ -1205,23 +1203,36 @@ mod gate {
         }
 
         // Spellings the contract cannot elaborate: an element mode written into
-        // the field that holds initializer expressions, `BI_br_table` applied
-        // to fewer arguments than it takes, and the two hex byte notations from
-        // the gap in the contract's notation block. The gap notations are the
-        // regression this fixture's `\12`/`\1f` bytes exist for: they look like
-        // every other byte spelling and parse nowhere.
-        for retired in [
-            "ME_functions",
-            "ME_declared",
-            "BI_br_table ::",
-            "#12",
-            "#1F",
-        ] {
+        // the field that holds initializer expressions, and `BI_br_table`
+        // applied to fewer arguments than it takes.
+        for retired in ["ME_functions", "ME_declared", "BI_br_table ::"] {
             assert!(
                 !v.contains(retired),
                 "`{retired}` is not a term the proof contract accepts; got:\n{v}"
             );
         }
+
+        // No byte reaches the `.v` in a hex notation, and no preamble opens the
+        // scope those notations live in. The contract declares 244 of them, and
+        // every one whose spelling carries a digit `A` .. `F` expands to
+        // arithmetic that reads as `nat` from a module leaving `Z_scope`
+        // closed, so the backend refuses it while this stub — whose own
+        // `encode` is opaque — would not. Ruling out all 256 spellings rather
+        // than the ones this fixture's bytes happen to have keeps the gate
+        // independent of which bytes the segments carry.
+        for value in 0..=u8::MAX {
+            let notation = format!("#{value:02X}");
+            assert!(
+                !v.contains(&notation),
+                "`{notation}` is a hex byte notation, and none of them \
+                 elaborate against the contract's `encode`; got:\n{v}"
+            );
+        }
+        assert!(
+            !v.contains("Open Scope byte_scope."),
+            "no emitted term is written in `byte_scope`, so the preamble must \
+             not open it; got:\n{v}"
+        );
 
         type_check_with_coqc(
             &module,
@@ -1278,6 +1289,171 @@ mod gate {
                 work.display()
             );
         }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // -------------------------------------------------- the real-library lane
+
+    /// Names an executable invoked as `<exe> <file.v>`, exiting zero when that
+    /// file type-checks against the REAL coq-wasm and wasm-verifier libraries.
+    ///
+    /// The indirection is deliberate. Where those libraries are checked out, how
+    /// they were built, which Coq built them and whether a container hop is
+    /// involved all stay outside this repository, so none of it is recorded here
+    /// or in a log this repository could publish. `ci/real-library-coqc.sh` is a
+    /// reference implementation of the contract.
+    const REAL_LIBRARY_ORACLE: &str = "INFERENCE_WASM_VERIFIER_COQC";
+
+    /// How much of an oracle failure reaches the log.
+    ///
+    /// A real `coqc` rejection quotes the library it checked against: the term it
+    /// refused, and that term's type read out of the private library's own
+    /// source. The whole output is written to a file beside the rejected `.v`;
+    /// one bounded line reaches the log, which says which module broke and
+    /// roughly how without republishing the library that rejected it.
+    const ORACLE_ERROR_WIDTH: usize = 160;
+
+    fn real_library_oracle() -> Option<String> {
+        std::env::var(REAL_LIBRARY_ORACLE)
+            .ok()
+            .filter(|oracle| !oracle.is_empty())
+    }
+
+    /// Runs the oracle on one file, returning its combined output on rejection.
+    fn run_oracle(oracle: &str, file: &Path) -> Result<(), String> {
+        let output = Command::new(oracle)
+            .arg(file)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn {REAL_LIBRARY_ORACLE}=`{oracle}`: {e}"));
+        if output.status.success() {
+            return Ok(());
+        }
+        let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
+        log.push_str(&String::from_utf8_lossy(&output.stderr));
+        Err(log)
+    }
+
+    /// Files a rejection: the whole output to `<work>/<label>.log`, and a bounded
+    /// one-line summary back to the caller.
+    fn file_rejection(log: &str, work: &Path, label: &str) -> String {
+        let path = work.join(format!("{label}.log"));
+        let written = std::fs::write(&path, log).is_ok();
+        let first_error = log
+            .lines()
+            .find(|line| line.trim_start().starts_with("Error:"))
+            .unwrap_or("(the oracle failed without an `Error:` line)")
+            .trim();
+        let clipped: String = first_error.chars().take(ORACLE_ERROR_WIDTH).collect();
+        let ellipsis = if first_error.chars().count() > ORACLE_ERROR_WIDTH {
+            " ..."
+        } else {
+            ""
+        };
+        let where_full = if written {
+            path.display().to_string()
+        } else {
+            "(the full output could not be written)".to_string()
+        };
+        format!("{label}: {clipped}{ellipsis} [full output: {where_full}]")
+    }
+
+    /// Establishes that the oracle is the real library, before a single verdict
+    /// from it is believed.
+    ///
+    /// Without this, `INFERENCE_WASM_VERIFIER_COQC=/usr/bin/true` reports every
+    /// module green and the lane certifies nothing at all. The positive control
+    /// names `HA_pto` and `ktrue`: both exist in the real
+    /// `WasmVerifier.Assertions`, and neither is declared by the vendored stub,
+    /// so an oracle that accepts it is not quietly the stub either. The negative
+    /// control names a constructor no library declares, so an oracle that accepts
+    /// everything fails here.
+    fn probe_real_library_oracle(oracle: &str, work: &Path) {
+        const POSITIVE: &str = "From WasmVerifier Require Import Assertions.\n\
+                                Check HA_pto.\n\
+                                Check ktrue.\n";
+        const NEGATIVE: &str = "From WasmVerifier Require Import Assertions.\n\
+                                Check HA_definitely_not_a_real_constructor.\n";
+        let positive = work.join("provenance_positive.v");
+        std::fs::write(&positive, POSITIVE).expect("write the positive provenance control");
+        if let Err(log) = run_oracle(oracle, &positive) {
+            panic!(
+                "{REAL_LIBRARY_ORACLE}=`{oracle}` rejected the positive provenance control, \
+                 so it is not the real wasm-verifier library and this lane would have \
+                 certified nothing. {}",
+                file_rejection(&log, work, "provenance_positive")
+            );
+        }
+        let negative = work.join("provenance_negative.v");
+        std::fs::write(&negative, NEGATIVE).expect("write the negative provenance control");
+        assert!(
+            run_oracle(oracle, &negative).is_err(),
+            "{REAL_LIBRARY_ORACLE}=`{oracle}` accepted a module naming a constructor no \
+             library declares, so it is a stand-in that passes everything rather than an \
+             oracle; every verdict it gave would be meaningless"
+        );
+    }
+
+    /// Type-checks every gated module against the real libraries.
+    ///
+    /// This is the lane the vendored stub stands in for. The stub encodes the
+    /// contract as the emitter writes it, and `rocq_stub_drift` holds that
+    /// encoding to the real declarations, but only compiling the emitted `.v`
+    /// against the libraries themselves closes the gap between "the stub accepts
+    /// this" and "the prover will".
+    ///
+    /// It compiles the same [`gated_modules`] list the stub lane does, and
+    /// asserts element-wise that it compiled every one: a lane that quietly
+    /// filtered the list would report a green run over a smaller set, which is
+    /// the shape of false green this suite exists to remove.
+    #[test]
+    fn the_real_libraries_type_check_every_gated_module() {
+        let Some(oracle) = real_library_oracle() else {
+            eprintln!(
+                "skipped: {REAL_LIBRARY_ORACLE} is unset. NOT established by this run: that \
+                 any emitted module type-checks against the real coq-wasm and wasm-verifier \
+                 libraries. Every other gate in this suite consulted only the vendored \
+                 signature stub in core/wasm-to-v/rocq-stub/."
+            );
+            return;
+        };
+        let work =
+            std::env::temp_dir().join(format!("inference_real_library_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).expect("create the real-library work directory");
+        probe_real_library_oracle(&oracle, &work);
+
+        let modules = gated_modules();
+        let expected: Vec<&str> = modules.iter().map(|module| module.module).collect();
+        let mut compiled: Vec<&str> = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
+        for module in &modules {
+            let path = work.join(format!("{}.v", module.module));
+            std::fs::write(&path, &module.v)
+                .unwrap_or_else(|e| panic!("write {}.v: {e}", module.module));
+            if let Err(log) = run_oracle(&oracle, &path) {
+                rejected.push(file_rejection(&log, &work, module.module));
+            }
+            compiled.push(module.module);
+        }
+
+        assert_eq!(
+            compiled, expected,
+            "the real-library lane compiled a different set of modules than it was given"
+        );
+        assert!(
+            rejected.is_empty(),
+            "the real libraries rejected {} of {} gated module(s):\n  - {}\n\
+             work dir kept for inspection: {}",
+            rejected.len(),
+            expected.len(),
+            rejected.join("\n  - "),
+            work.display()
+        );
+        eprintln!(
+            "real libraries: pass={} fail=0 ({} module(s) type-checked at the pin)",
+            compiled.len(),
+            expected.len()
+        );
         let _ = std::fs::remove_dir_all(&work);
     }
 
@@ -2126,10 +2302,10 @@ mod gate {
     const DECLARATIONS_WITHOUT_A_PRODUCER: &[(&str, &str)] = &[
         (
             "byte",
-            "an opaque type Parameter. An emitted module names byte *values* — \
-             the `#NN` notations and `encode` — never the type they inhabit, \
-             and elaborating any one of them forces it. The stub's own \
-             `moddata_init`/`imp_name` field types spell it.",
+            "an opaque type Parameter. An emitted module names byte *values*, \
+             through `encode`, never the type they inhabit, and elaborating \
+             one forces it. The stub's own `moddata_init`/`imp_name` field \
+             types spell it.",
         ),
         (
             "i32",
@@ -2154,13 +2330,6 @@ mod gate {
             "pred_eq",
             "the distinguished predicate index `term_eq` is defined from; \
              reached exactly as `HA_pred` is, and never printed by name.",
-        ),
-        (
-            "seq",
-            "a `Notation` for `list`, kept so the stub's inductive fields read \
-             like the real library's `seq term`/`seq hassert`. The emitter \
-             imports no mathcomp and writes `list hassert`, so the notation is \
-             elaborated only where the stub itself uses it.",
         ),
     ];
 
@@ -2453,7 +2622,7 @@ mod gate {
         let source = r#"
 Require Import List.
 From Wasm Require Import datatypes.
-Open Scope byte_scope.
+Local Delimit Scope Z_scope with Zst.
 
 Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}|}.
 
@@ -2486,291 +2655,6 @@ End Host.
                 "m__S_specs",
                 "ho",
                 "valid_m",
-            ]
-        );
-    }
-
-    /// A Rocq token, at the resolution the declaration parser needs.
-    ///
-    /// Identifiers are what both halves of the audit are about; a string
-    /// literal is distinguished only because it is all the *name* of a
-    /// `Notation "#00" := …` is, and those 244 byte notations must not be read
-    /// as identifier declarations. Everything else — numbers, `%`, `->` — comes
-    /// through one character at a time as [`Tok::Punct`], which is enough for
-    /// the `|`, `:=` and `{ … ; … }` landmarks the parser steers by.
-    enum Tok<'a> {
-        Ident(&'a str),
-        Str,
-        Punct(char),
-    }
-
-    fn tokenize(source: &str) -> Vec<Tok<'_>> {
-        let mut tokens = Vec::new();
-        let mut chars = source.char_indices().peekable();
-        while let Some((start, c)) = chars.next() {
-            if c.is_whitespace() {
-                continue;
-            }
-            if c == '"' {
-                // Rocq escapes a quote inside a string literal by doubling it,
-                // and pairing quotes off in order handles that without a special
-                // case: a literal `"c0""c1""c2"` is read as three adjacent
-                // literals covering exactly the same span, because each escape
-                // contributes two quotes and leaves no characters between the
-                // pair it splits. Nothing inside a literal can therefore reach
-                // the token stream as source, which is all this tokenizer needs.
-                for (_, c) in chars.by_ref() {
-                    if c == '"' {
-                        break;
-                    }
-                }
-                tokens.push(Tok::Str);
-                continue;
-            }
-            if c.is_ascii_alphabetic() || c == '_' {
-                let mut end = start + c.len_utf8();
-                while let Some(&(at, c)) = chars.peek() {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '\'' {
-                        end = at + c.len_utf8();
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                tokens.push(Tok::Ident(&source[start..end]));
-                continue;
-            }
-            tokens.push(Tok::Punct(c));
-        }
-        tokens
-    }
-
-    fn ident_at<'a>(tokens: &[Tok<'a>], at: usize) -> Option<&'a str> {
-        match tokens.get(at) {
-            Some(Tok::Ident(name)) => Some(name),
-            _ => None,
-        }
-    }
-
-    fn is_punct(tokens: &[Tok<'_>], at: usize, c: char) -> bool {
-        matches!(tokens.get(at), Some(Tok::Punct(got)) if *got == c)
-    }
-
-    /// Rocq comments nest — `(* a (* b *) c *)` is one comment, and a parser
-    /// that stops at the first `*)` would read the tail as source. Newlines are
-    /// preserved so a stripped file keeps its line structure, and a string
-    /// literal is copied through untouched so a `(*` inside one cannot open a
-    /// comment. Rocq's escaped quote `""` needs no special case here for the
-    /// reason it needs none in [`tokenize`]: the pair puts no characters
-    /// between the literal it closes and the one it reopens, so the stripper is
-    /// never outside a literal at a position that holds anything.
-    ///
-    /// One divergence from Rocq's own lexer, deliberately not modelled: Rocq
-    /// recognises a string literal *inside* a comment, so `(* "*)" *)` is one
-    /// comment, while this ends it at the inner `*)` and reads the rest as an
-    /// unterminated literal that swallows the file. Nothing writes such a
-    /// comment — the stub's are prose, the emitter's are `(*name*)`
-    /// annotations from the WASM name section — and a name that could produce
-    /// one would already be emitting `.v` that `coqc` rejects.
-    fn strip_rocq_comments(source: &str) -> String {
-        let mut out = String::with_capacity(source.len());
-        let mut chars = source.chars().peekable();
-        let mut depth = 0usize;
-        let mut in_string = false;
-        while let Some(c) = chars.next() {
-            if in_string {
-                out.push(c);
-                in_string = c != '"';
-            } else if depth == 0 && c == '"' {
-                out.push(c);
-                in_string = true;
-            } else if c == '(' && chars.peek() == Some(&'*') {
-                chars.next();
-                depth += 1;
-            } else if depth > 0 && c == '*' && chars.peek() == Some(&')') {
-                chars.next();
-                depth -= 1;
-            } else if depth == 0 || c == '\n' {
-                // Inside a comment only the newlines survive, so a stripped
-                // file keeps the line numbering of the original.
-                out.push(c);
-            }
-        }
-        out
-    }
-
-    /// Every name a stub `.v` file declares, in source order.
-    ///
-    /// The four shapes that matter are inductive constructors, record field
-    /// names, and the top-level `Definition`/`Parameter`/`Axiom` and
-    /// identifier-named `Notation` bindings. Inductive and record *type* names
-    /// are deliberately not collected — see
-    /// [`every_stub_declaration_has_a_producer`] — and neither are the scope
-    /// declarations (`Declare Scope`, `Delimit Scope`) or the `host` `Class`,
-    /// none of which name a term an emitted module could apply.
-    fn declared_names(source: &str) -> Vec<String> {
-        let source = strip_rocq_comments(source);
-        let tokens = tokenize(&source);
-        let mut names = Vec::new();
-        let mut at = 0;
-        while at < tokens.len() {
-            let Some(keyword) = ident_at(&tokens, at) else {
-                // A constructor, in the leading-`|` form every inductive in the
-                // stub is written with.
-                if is_punct(&tokens, at, '|')
-                    && is_punct(&tokens, at + 2, ':')
-                    && let Some(name) = ident_at(&tokens, at + 1)
-                {
-                    names.push(name.to_string());
-                }
-                at += 1;
-                continue;
-            };
-            match keyword {
-                "Inductive" | "Variant" => {
-                    // Rocq lets the *first* constructor omit its leading `|`, so
-                    // it is read here, off the `:=`; the `|` arm above picks up
-                    // the rest either way.
-                    while at + 1 < tokens.len()
-                        && !(is_punct(&tokens, at, ':') && is_punct(&tokens, at + 1, '='))
-                    {
-                        at += 1;
-                    }
-                    at += 2;
-                    if is_punct(&tokens, at + 1, ':')
-                        && let Some(name) = ident_at(&tokens, at)
-                    {
-                        names.push(name.to_string());
-                    }
-                }
-                "Record" => at = push_record_fields(&tokens, at, &mut names),
-                "Definition" => {
-                    if let Some(name) = ident_at(&tokens, at + 1) {
-                        names.push(name.to_string());
-                    }
-                    at += 1;
-                }
-                // `Parameter a b : T.` binds every name before the colon.
-                "Parameter" | "Axiom" => {
-                    at += 1;
-                    while let Some(name) = ident_at(&tokens, at) {
-                        names.push(name.to_string());
-                        at += 1;
-                    }
-                }
-                // A string-named notation binds no identifier.
-                "Notation" => {
-                    if let Some(name) = ident_at(&tokens, at + 1) {
-                        names.push(name.to_string());
-                    }
-                    at += 1;
-                }
-                _ => at += 1,
-            }
-        }
-        names
-    }
-
-    /// Pushes the field names of the `Record` whose keyword sits at `at`,
-    /// returning the index just past its closing brace. A field is the
-    /// identifier that opens each `;`-separated chunk of the brace block, which
-    /// makes the scan independent of how the record is laid out across lines.
-    fn push_record_fields(tokens: &[Tok<'_>], at: usize, names: &mut Vec<String>) -> usize {
-        let mut at = at + 1;
-        while at < tokens.len() && !is_punct(tokens, at, '{') {
-            at += 1;
-        }
-        at += 1;
-        let mut depth = 1usize;
-        let mut at_field = true;
-        while at < tokens.len() && depth > 0 {
-            if is_punct(tokens, at, '{') {
-                depth += 1;
-                at_field = false;
-            } else if is_punct(tokens, at, '}') {
-                depth -= 1;
-                at_field = false;
-            } else if depth == 1 && is_punct(tokens, at, ';') {
-                at_field = true;
-            } else {
-                if at_field
-                    && depth == 1
-                    && is_punct(tokens, at + 1, ':')
-                    && let Some(name) = ident_at(tokens, at)
-                {
-                    names.push(name.to_string());
-                }
-                at_field = false;
-            }
-            at += 1;
-        }
-        at
-    }
-
-    /// The declaration parser is the audit's measuring instrument: a shape it
-    /// silently misses is a declaration exempted from needing a producer, which
-    /// is the failure the audit exists to prevent. This pins every shape the
-    /// stub uses, plus the three traps — a nested comment (a parser that closed
-    /// on the first `*)` would declare `commented_out`), a string-named
-    /// notation (which must not be read as an identifier binding), and a
-    /// `Module` wrapper (whose contents are declarations all the same).
-    ///
-    /// The escaped-quote line is not a fourth trap, and is not claimed as one:
-    /// pairing quotes off in order already reads it correctly, for the reason
-    /// [`tokenize`] gives. It is pinned rather than argued so that a later
-    /// hand-written `""` case cannot get it wrong — `phantom` is what a parser
-    /// that ended the literal at the first half of the pair would declare.
-    ///
-    /// What is *not* pinned, because it is not handled: a string literal
-    /// inside a comment, which Rocq recognises and [`strip_rocq_comments`]
-    /// does not. That limit is stated there rather than covered here.
-    #[test]
-    fn declared_names_reads_every_stub_declaration_shape() {
-        // A `##` delimiter: the byte-notation line below contains `"#`, which
-        // would close a plain `r#"…"#` raw string.
-        let source = r##"
-(* A comment (* nested (* twice *) *) hiding Parameter commented_out : Type. *)
-Require Import BinNat.
-Declare Scope fake_scope.
-Delimit Scope fake_scope with fake.
-Class a_class : Type := { }.
-Parameter opaque_type : Type.
-Parameter first second : nat.
-Axiom an_axiom : nat.
-Notation "#00" := (encode 0%Z) : fake_scope.
-Notation "escaped ""Parameter phantom"" tail" := (list) : fake_scope.
-Notation an_alias := list.
-Unset Elimination Schemes.
-Inductive piped : Type :=
-| Ctor_a : piped
-| Ctor_b : nat -> piped.
-Set Elimination Schemes.
-Inductive unpiped : Type := Ctor_c : unpiped | Ctor_d : unpiped.
-Record a_record : Type := {
-  field_one : nat;
-  field_two : option nat
-}.
-Module A_module.
-  Parameter inner : nat.
-End A_module.
-Definition a_definition (x : nat) : nat := x.
-"##;
-        assert_eq!(
-            declared_names(source),
-            [
-                "opaque_type",
-                "first",
-                "second",
-                "an_axiom",
-                "an_alias",
-                "Ctor_a",
-                "Ctor_b",
-                "Ctor_c",
-                "Ctor_d",
-                "field_one",
-                "field_two",
-                "inner",
-                "a_definition",
             ]
         );
     }

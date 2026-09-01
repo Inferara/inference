@@ -9,16 +9,15 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `0c5d525e`, the reachability
-additions in its `theories/Exists.v` against `cf39c4f` — and the
-vendored signature stub in `rocq-stub/` type-checks the emittable subset
-of it locally), built on **vanilla WasmCert-Coq v2.2.0** — not the
-`WasmCert-Coq-Essence` fork this crate previously targeted. The fork's
-non-deterministic constructors (`BI_forall`, `BI_exists`, `BI_assume`,
-`BI_unique`, `BI_uzumaki_num`) do not exist in vanilla WasmCert, so a
-`spec` function's logical content can no longer be represented as
-non-deterministic WASM instructions in the emitted module. What replaces
-them depends on the function's quantifier kind:
+verified against wasm-verifier commit `77f1126`, and the vendored
+signature stub in `rocq-stub/` type-checks the emittable subset of it
+locally), built on **vanilla WasmCert-Coq v2.2.0** at commit `0fd83fa`
+— not the `WasmCert-Coq-Essence` fork this crate previously targeted.
+The fork's non-deterministic constructors (`BI_forall`, `BI_exists`,
+`BI_assume`, `BI_unique`, `BI_uzumaki_num`) do not exist in vanilla
+WasmCert, so a `spec` function's logical content can no longer be
+represented as non-deterministic WASM instructions in the emitted
+module. What replaces them depends on the function's quantifier kind:
 
 - a `forall`-quantified (or plain) `spec` function is translated into a
   value of wasm-verifier's `hassert` assertion type and the function
@@ -37,6 +36,12 @@ them depends on the function's quantifier kind:
 This document covers all three: the (unchanged) executable module
 translation, the universal `hassert` obligation translation, and the
 reachability retention and emission.
+
+Both revisions above are restatements of `wasm-verifier-pin.txt`, which
+is the single place they are recorded. `tests/src/rocq_stub_drift.rs`
+reads every revision this document names and fails when one stops
+agreeing with the pin, so the prose cannot go stale in silence — which
+is exactly what the two commits it used to name had done.
 
 This contract supersedes two earlier states, neither of which is emitted
 any more:
@@ -79,27 +84,24 @@ a forall-only module names nothing from it. (Coq's standard `List` also
 exports an inductive named `Exists`; the two occupy separate namespaces
 — one is a module, the other a term — and no emitted term spells bare
 `Exists`, so the combination is unambiguous.) And a module carrying at
-least one data segment also emits both of
+least one data segment also emits
 
 ```coq
-Open Scope byte_scope.
 Local Delimit Scope Z_scope with Zst.
 ```
 
-because most data bytes are spelled with a `byte_scope` notation (see
-below) and those parse only while that scope is open, while the rest are
-spelled as `encode` applications whose argument carries an explicit `Z`
-scope key — the only place an emitted module spells that key at all.
-(The full key inventory of an emitted module is three: `%N` on indices
-and the other structural `N` fields, `%nat` on a reachability record's
-`reach_entry_arity`, and this `%Zst`; every other numeral is unkeyed,
-taking its scope from the expected type.) Whether an `Import` chain
-leaves `byte_scope` open, and which scope the `Z` delimiting key still
-names once that chain has been walked, are details of the libraries
-rather than of this contract, so a module that can spell either states
-the requirement itself.
+because every data byte is spelled as an `encode` application (see
+below) whose argument carries an explicit `Z` scope key — the only place
+an emitted module spells that key at all. (The full key inventory of an
+emitted module is three: `%N` on indices and the other structural `N`
+fields, `%nat` on a reachability record's `reach_entry_arity`, and this
+`%Zst`; every other numeral is unkeyed, taking its scope from the
+expected type.) Which scope the `Z` delimiting key still names once an
+`Import` chain has been walked is a detail of the libraries rather than
+of this contract, so a module that spells it states the requirement
+itself.
 
-The second line exists because mathcomp's algebra library delimits its
+The line exists because mathcomp's algebra library delimits its
 own `int_scope` with the `Z` key (`ssrint.v`, alongside a `Number
 Notation` on its `int`), so in any file whose `Import`/`Export` chain
 applies that `Delimit` — the rebinding takes effect at import time, and
@@ -118,10 +120,9 @@ claims `%num` for `BinNat`'s scope after taking `%N` for its own (see
 file: a file-global `Delimit` would leak the key to every consumer that
 imports the module.
 
-Both lines are keyed on a data segment being present rather than on the
-bytes inside it: a scope nothing uses and a key nothing spells are
-equally inert. A module with no data segment names no byte and spells no
-`Z` key, and emits neither line.
+The line is keyed on a data segment being present rather than on the
+bytes inside it: a key nothing spells is inert. A module with no data
+segment names no byte, spells no `Z` key, and emits no line.
 
 Within that context, the translator depends on:
 
@@ -141,16 +142,21 @@ Within that context, the translator depends on:
   WASM specification defines it, one `BI_ref_func i` expression per
   index. `module_data`'s `moddata_init` is a `list byte`, where `byte` is
   CompCert's `Integers.byte` built from a `Z` by the exported
-  `encode : Z -> byte`. That library abbreviates `encode` with two-digit
-  **uppercase** hex notations in `byte_scope`, but its notation block is
-  hand-written and covers 244 of the 256 values — `#12` .. `#19` and
-  `#1C` .. `#1F` have no notation. A byte is emitted in its notation
-  where one exists, and as the `encode` application that notation would
-  have abbreviated (`(encode 18%Zst)`) for the twelve that have none.
-  The notations parse only while `byte_scope` is open, and `Zst` is the
-  private key the emitted module claims for the standard `Z_scope` its
-  argument lives in — both supplied by the conditional preamble lines
-  above, and neither one inherited from an import chain.
+  `encode : Z -> byte`. Every byte is emitted as an application of that
+  function — `(encode 18%Zst)` — where `Zst` is the private key the
+  emitted module claims for the standard `Z_scope` its argument lives
+  in, supplied by the conditional preamble line above rather than
+  inherited from an import chain. That library also abbreviates `encode`
+  with two-digit **uppercase** hex notations in a `byte_scope` it opens
+  at module level, and covers 244 of the 256 values with them (`#12` ..
+  `#19` and `#1C` .. `#1F` have none), but an emitted module spells no
+  such notation and does not open the scope. The notations are unusable
+  from here: each expands to arithmetic over the library's single
+  hex-digit notations, which stand for bare numerals, so every value
+  whose spelling carries a digit `A` .. `F` elaborates at `nat` and
+  fails against `encode`. Opening `Z_scope` to repair that is not an
+  option — it would decide the scope of every unkeyed numeral in the
+  module.
 - `BI_br_table : list N -> N -> basic_instruction` — the explicit label
   vector **and** the default label. The default is a separate immediate
   in the binary format and never appears in the vector, and a table whose
@@ -273,8 +279,8 @@ algebra, and a consumer that imports it and restates emitted data bytes
 in its own text.
 
 The emitter answers both by spelling its `Z`-keyed literals — the
-`encode` arguments of the twelve notation-less data bytes, and nothing
-else — with the private `%Zst` key it claims in the preamble (see
+`encode` arguments of its data bytes, and nothing else — with the
+private `%Zst` key it claims in the preamble (see
 "Required Rocq context" above). The two keys get different treatment out
 of cost, not mechanism: emitted `%N` literals are everywhere — every
 index, every payload a consumer restates, every committed golden and

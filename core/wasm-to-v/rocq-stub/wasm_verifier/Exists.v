@@ -28,7 +28,7 @@ Require Import WasmVerifier.Assertions.
 Record reachability_spec : Type := {
   reach_func : N;
   reach_entry_arity : nat;
-  reach_visible_locs : seq N;
+  reach_visible_locs : list N;
   reach_payload : hassert
 }.
 
