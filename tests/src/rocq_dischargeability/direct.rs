@@ -8,7 +8,14 @@ use std::process::{Command, Stdio};
 
 const DISCHARGER_ENV: &str = "INFERENCE_WASM_VERIFIER_DISCHARGER";
 const REQUIRED_ENV: &str = "INFERENCE_ROCQ_DISCHARGE_REQUIRED";
+const DIAGNOSTIC_TRUNCATION_MARKER: &str = "...";
+/// Maximum UTF-8 bytes in the complete sanitized child-stderr fragment, including its marker.
 const CHILD_DIAGNOSTIC_LIMIT: usize = 240;
+/// Leading raw bytes retained while the child pipe continues draining to EOF.
+const CHILD_DIAGNOSTIC_CAPTURE_LIMIT: usize = CHILD_DIAGNOSTIC_LIMIT * 4;
+const CONFIGURED_GATE_FAILURE_PREFIX: &str = "configured Rocq dischargeability gate failed: ";
+/// Maximum UTF-8 bytes in the complete application payload, excluding panic-hook framing.
+const CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT: usize = 1_024;
 
 struct Invocation<'a> {
     executable: &'a Path,
@@ -67,7 +74,7 @@ impl Runner for ProcessRunner {
             .stderr
             .take()
             .context("configured discharger has no stderr pipe")?;
-        let stderr_reader = std::thread::spawn(move || drain_bounded_first_line(stderr));
+        let stderr_reader = std::thread::spawn(move || drain_bounded_diagnostic(stderr));
         let status = child.wait();
         let stderr = stderr_reader
             .join()
@@ -299,33 +306,66 @@ fn single_receipt(directory: &Path, case_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn drain_bounded_first_line(mut stderr: impl Read) -> std::io::Result<String> {
-    let mut captured = Vec::with_capacity(CHILD_DIAGNOSTIC_LIMIT);
+fn bounded_sanitized_diagnostic(prefix: &str, rendered: &str, limit: usize) -> String {
+    assert!(prefix.len() + DIAGNOSTIC_TRUNCATION_MARKER.len() <= limit);
+    assert!(prefix.chars().all(|character| !character.is_control()));
+
+    let mut diagnostic = String::with_capacity(limit);
+    diagnostic.push_str(prefix);
+    for character in rendered.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if diagnostic.len() + character.len_utf8() <= limit {
+            diagnostic.push(character);
+            continue;
+        }
+
+        let content_limit = limit - DIAGNOSTIC_TRUNCATION_MARKER.len();
+        while diagnostic.len() > content_limit {
+            diagnostic.pop();
+        }
+        diagnostic.push_str(DIAGNOSTIC_TRUNCATION_MARKER);
+        return diagnostic;
+    }
+    diagnostic
+}
+
+fn configured_gate_panic_payload(error: &anyhow::Error) -> String {
+    bounded_sanitized_diagnostic(
+        CONFIGURED_GATE_FAILURE_PREFIX,
+        &format!("{error:#}"),
+        CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT,
+    )
+}
+
+fn panic_configured_gate(error: &anyhow::Error) -> ! {
+    panic!("{}", configured_gate_panic_payload(error));
+}
+
+fn drain_bounded_diagnostic(mut stderr: impl Read) -> std::io::Result<String> {
+    let mut captured = Vec::with_capacity(CHILD_DIAGNOSTIC_CAPTURE_LIMIT);
     let mut buffer = [0_u8; 8192];
-    let mut retain = true;
     loop {
         let count = stderr.read(&mut buffer)?;
         if count == 0 {
             break;
         }
-        if retain {
-            for byte in &buffer[..count] {
-                if *byte == b'\n' || *byte == b'\r' {
-                    retain = false;
-                    break;
-                }
-                if captured.len() == CHILD_DIAGNOSTIC_LIMIT {
-                    retain = false;
-                    break;
-                }
-                captured.push(*byte);
-            }
+        let remaining = CHILD_DIAGNOSTIC_CAPTURE_LIMIT.saturating_sub(captured.len());
+        if remaining > 0 {
+            captured.extend_from_slice(&buffer[..count.min(remaining)]);
         }
     }
     if captured.is_empty() {
         Ok("no diagnostic".to_string())
     } else {
-        Ok(String::from_utf8_lossy(&captured).into_owned())
+        Ok(bounded_sanitized_diagnostic(
+            "",
+            &String::from_utf8_lossy(&captured),
+            CHILD_DIAGNOSTIC_LIMIT,
+        ))
     }
 }
 
@@ -333,8 +373,10 @@ fn drain_bounded_first_line(mut stderr: impl Read) -> std::io::Result<String> {
 fn configured_dischargeability_gate() {
     let configured = std::env::var_os(DISCHARGER_ENV);
     let required = std::env::var_os(REQUIRED_ENV).is_some();
-    run_from_configuration(configured, required, &mut std::io::stdout().lock())
-        .unwrap_or_else(|error| panic!("configured Rocq dischargeability gate failed: {error:#}"));
+    if let Err(error) = run_from_configuration(configured, required, &mut std::io::stdout().lock())
+    {
+        panic_configured_gate(&error);
+    }
 }
 
 #[cfg(test)]
@@ -342,7 +384,11 @@ mod tests {
     use super::super::cases::CASES;
     use super::super::pin::Pin;
     use super::super::protocol::RawHash;
-    use super::{DISCHARGER_ENV, Invocation, ProcessRunner, RunOutput, Runner, SUCCESS_LINE};
+    use super::{
+        CHILD_DIAGNOSTIC_LIMIT, CONFIGURED_GATE_FAILURE_PREFIX,
+        CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT, DISCHARGER_ENV, Invocation, ProcessRunner, RunOutput,
+        Runner, SUCCESS_LINE, configured_gate_panic_payload, panic_configured_gate,
+    };
     use super::{run_from_configuration, run_gate_with};
     use anyhow::{Context, Result};
     use serde_json::json;
@@ -538,6 +584,193 @@ mod tests {
             !error.contains(SUCCESS_LINE),
             "large-output failure emitted the success marker: {error}"
         );
+    }
+
+    struct ObservedProcessRunner {
+        inner: ProcessRunner,
+        diagnostics: Vec<String>,
+        receipt_counts: Vec<usize>,
+    }
+
+    impl Runner for ObservedProcessRunner {
+        fn run(&mut self, invocation: &Invocation<'_>) -> Result<RunOutput> {
+            let output = self.inner.run(invocation)?;
+            self.diagnostics.push(output.stderr.clone());
+            self.receipt_counts.push(
+                std::fs::read_dir(invocation.receipt_dir)
+                    .context("inspect fake discharger receipt directory")?
+                    .count(),
+            );
+            Ok(output)
+        }
+    }
+
+    #[test]
+    fn control_flood_child_failure_is_sanitized_bounded_and_fully_drained() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let mut runner = ObservedProcessRunner {
+            inner: fake_runner("control-flood", &templates),
+            diagnostics: Vec::new(),
+            receipt_counts: Vec::new(),
+        };
+
+        let error = run_gate_with(&helper.path, &mut runner)
+            .expect_err("control-flood discharger must not produce a trusted result");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("discharger case `prime-bounded` exited Some(92)"),
+            "case and phase context were not retained: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("control diagnostic begins"),
+            "leading child context was not retained: {rendered:?}"
+        );
+        assert!(
+            rendered.chars().all(|character| !character.is_control()),
+            "child control characters reached the application error: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(SUCCESS_LINE),
+            "control-flood failure emitted the success marker: {rendered:?}"
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic_configured_gate(&error)
+        }))
+        .expect_err("configured gate must panic on a real child failure");
+        let payload = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("configured gate panic payload is text");
+        assert!(payload.starts_with(CONFIGURED_GATE_FAILURE_PREFIX));
+        assert!(payload.len() <= CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT);
+        assert_eq!(payload.lines().count(), 1);
+        assert!(payload.chars().all(|character| !character.is_control()));
+        assert!(payload.contains("discharger case `prime-bounded` exited Some(92)"));
+        assert_eq!(payload.matches("control diagnostic begins").count(), 1);
+        assert!(
+            !payload.contains("oooo"),
+            "discarded child stdout reached the panic payload: {payload:?}"
+        );
+        assert!(!payload.contains(SUCCESS_LINE));
+
+        let child_diagnostic = runner
+            .diagnostics
+            .last()
+            .expect("real failing invocation retained a diagnostic");
+        assert_eq!(
+            child_diagnostic.len(),
+            CHILD_DIAGNOSTIC_LIMIT,
+            "large child diagnostic did not use the exact fragment ceiling"
+        );
+        assert!(
+            child_diagnostic.starts_with(
+                "control diagnostic begins: NUL=  BEL=  ESC=  DEL=  C1=  unicode=東京 second line "
+            ),
+            "controls were not deterministically replaced with spaces: {child_diagnostic:?}"
+        );
+        assert!(
+            child_diagnostic
+                .chars()
+                .all(|character| !character.is_control()),
+            "unsafe child diagnostic was retained: {child_diagnostic:?}"
+        );
+        assert!(
+            child_diagnostic.ends_with("..."),
+            "bounded child diagnostic omitted the truncation marker: {child_diagnostic:?}"
+        );
+        assert_eq!(
+            runner.receipt_counts,
+            [0, 0],
+            "failed helper published a receipt: {:?}",
+            runner.receipt_counts
+        );
+    }
+
+    #[test]
+    fn configured_gate_payload_sanitizes_and_exactly_bounds_nested_errors() {
+        let error = anyhow::anyhow!(
+            "leaf\n\r\t\0\u{7}\u{1b}\u{7f}\u{85}\u{9f}{}{}",
+            "東京".repeat(4),
+            "x".repeat(4_000)
+        )
+        .context("middle\nphase")
+        .context("outer\tescape=\u{1b}[31m");
+
+        let payload = configured_gate_panic_payload(&error);
+
+        assert_eq!(
+            payload.len(),
+            CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT,
+            "complete application-controlled panic payload must meet its exact ceiling"
+        );
+        assert!(
+            payload.starts_with(&format!(
+                "{CONFIGURED_GATE_FAILURE_PREFIX}outer escape= [31m"
+            )),
+            "stable prefix and outer error context were not retained: {payload:?}"
+        );
+        assert!(
+            payload.chars().all(|character| !character.is_control()),
+            "configured-gate payload retained a control character: {payload:?}"
+        );
+        assert!(
+            payload.ends_with("..."),
+            "bounded configured-gate payload omitted the truncation marker"
+        );
+        assert!(
+            payload.contains("東京"),
+            "valid Unicode was not retained: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn configured_gate_payload_never_splits_a_utf8_code_point() {
+        const CONTEXT: &str = "phase=verify: ";
+        const MARKER: &str = "...";
+        let ascii_count = CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT
+            - CONFIGURED_GATE_FAILURE_PREFIX.len()
+            - CONTEXT.len()
+            - MARKER.len()
+            - 1;
+        let error =
+            anyhow::anyhow!(format!("{}界tail", "a".repeat(ascii_count))).context("phase=verify");
+
+        let payload = configured_gate_panic_payload(&error);
+
+        assert_eq!(
+            payload,
+            format!(
+                "{CONFIGURED_GATE_FAILURE_PREFIX}{CONTEXT}{}{MARKER}",
+                "a".repeat(ascii_count)
+            )
+        );
+        assert_eq!(payload.len(), CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT - 1);
+        assert!(std::str::from_utf8(payload.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn configured_gate_panics_with_only_the_bounded_application_payload() {
+        let error = anyhow::anyhow!("leaf\n{}{}", "界".repeat(4), "x".repeat(2_000))
+            .context("verification\tphase");
+        let expected = configured_gate_panic_payload(&error);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic_configured_gate(&error)
+        }))
+        .expect_err("configured gate failure must panic");
+        let payload = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("configured gate panic payload is text");
+
+        assert_eq!(payload, expected);
+        assert_eq!(payload.len(), CONFIGURED_GATE_PANIC_PAYLOAD_LIMIT);
+        assert!(payload.starts_with(CONFIGURED_GATE_FAILURE_PREFIX));
+        assert!(payload.chars().all(|character| !character.is_control()));
     }
 
     #[test]

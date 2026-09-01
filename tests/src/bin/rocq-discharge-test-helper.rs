@@ -80,6 +80,31 @@ fn flood_output() -> ! {
     std::process::exit(7)
 }
 
+fn control_flood_output() -> ! {
+    const STDOUT_CHUNK: &[u8; 8192] = &[b'o'; 8192];
+    const STDERR_CHUNK: &[u8; 8192] = &[b'x'; 8192];
+    let mut stdout = std::io::stdout().lock();
+    for _ in 0..256 {
+        stdout.write_all(STDOUT_CHUNK).expect("write large stdout");
+    }
+    stdout.flush().expect("flush large stdout");
+    drop(stdout);
+
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(b"control diagnostic begins:\tNUL=\0 BEL=\x07 ESC=\x1b DEL=\x7f C1=")
+        .expect("write controlled diagnostic prefix");
+    stderr
+        .write_all("\u{85} unicode=東京\nsecond\rline ".as_bytes())
+        .expect("write Unicode controlled diagnostic prefix");
+    for _ in 0..256 {
+        stderr.write_all(STDERR_CHUNK).expect("write large stderr");
+    }
+    stderr.write_all(b"\n").expect("finish large stderr");
+    stderr.flush().expect("flush large stderr");
+    std::process::exit(92)
+}
+
 fn main() {
     let behavior = required_env("INFERENCE_TEST_DISCHARGER_BEHAVIOR");
     if behavior == OsStr::new("noop") {
@@ -119,6 +144,7 @@ fn main() {
     match behavior.to_str() {
         Some("nonzero") => std::process::exit(7),
         Some("flood") => flood_output(),
+        Some("control-flood") => control_flood_output(),
         Some("no-receipt") => {}
         Some("malformed") => {
             std::fs::write(receipt_dir.join(format!("{case_id}.json")), b"{")
