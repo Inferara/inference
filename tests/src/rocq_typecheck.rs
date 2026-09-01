@@ -332,10 +332,11 @@ mod gate {
         // obligation covers.
         //
         // `spec_narrow_discharge.inf` is the third, and is here for a reason
-        // this gate cannot itself deliver: it type-checks, but it rewrites
-        // `Qed.` to `Admitted.` first, so it can no more tell a correct bound
-        // from a false one than it can tell a proof from a stub. That fixture's
-        // two obligations are discharged for real against wasm-verifier
+        // this gate cannot itself deliver: generated proof skeletons already
+        // end in `Admitted.`, so it establishes type-checking but can no more
+        // tell a correct bound from a false one than establish a proof's truth
+        // or closure. That fixture's two obligations are discharged for real
+        // against wasm-verifier
         // (`theories/examples/Issue357NarrowDomainExample.v`), where the proof
         // stops closing if either bound is dropped or loosened by one. Its
         // presence here keeps the emitted text and the discharged text from
@@ -3309,9 +3310,10 @@ Definition a_definition (x : nat) : nat := x.
     /// signed `0 <= i` half of the `assume` is what rules out the negative
     /// indices that reach it as huge unsigned values; drop either half and an
     /// admitted index traps, which makes the obligation false rather than
-    /// merely weaker. Nothing downstream would say so — the gate below rewrites
-    /// `Qed.` to `Admitted.`, so it type-checks a false obligation as readily
-    /// as a true one.
+    /// merely weaker. Nothing downstream would say so — generated proof
+    /// skeletons already end in `Admitted.`, so the gate establishes
+    /// type-checking but accepts a false obligation as readily as a true one
+    /// and cannot establish its truth or proof closure.
     ///
     /// Record indices are read off the module record rather than written down,
     /// so a reordering fails as a missing definition instead of as a needle
