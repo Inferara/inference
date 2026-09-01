@@ -2,12 +2,13 @@ use super::SUCCESS_LINE;
 use super::protocol::{RawHash, Request, RequestCase};
 use anyhow::{Context, Result, bail};
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const DISCHARGER_ENV: &str = "INFERENCE_WASM_VERIFIER_DISCHARGER";
 const REQUIRED_ENV: &str = "INFERENCE_ROCQ_DISCHARGE_REQUIRED";
+const CHILD_DIAGNOSTIC_LIMIT: usize = 240;
 
 struct Invocation<'a> {
     executable: &'a Path,
@@ -39,7 +40,7 @@ impl ProcessRunner {
 
 impl Runner for ProcessRunner {
     fn run(&mut self, invocation: &Invocation<'_>) -> Result<RunOutput> {
-        let output = Command::new(invocation.executable)
+        let mut child = Command::new(invocation.executable)
             .arg("--protocol")
             .arg("1")
             .arg("--wasm-verifier-revision")
@@ -52,17 +53,36 @@ impl Runner for ProcessRunner {
                 invocation.receipt_dir,
             )
             .envs(self.environment.iter().cloned())
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| {
                 format!(
                     "execute configured discharger for case `{}`",
                     invocation.case_id
                 )
             })?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("configured discharger has no stderr pipe")?;
+        let stderr_reader = std::thread::spawn(move || drain_bounded_first_line(stderr));
+        let status = child.wait();
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("configured discharger stderr reader panicked"))?
+            .context("read configured discharger stderr")?;
+        let status = status.with_context(|| {
+            format!(
+                "wait for configured discharger case `{}`",
+                invocation.case_id
+            )
+        })?;
         Ok(RunOutput {
-            success: output.status.success(),
-            code: output.status.code(),
-            stderr: bounded_first_line(&output.stderr),
+            success: status.success(),
+            code: status.code(),
+            stderr,
         })
     }
 }
@@ -279,14 +299,34 @@ fn single_receipt(directory: &Path, case_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn bounded_first_line(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .lines()
-        .next()
-        .unwrap_or("no diagnostic")
-        .chars()
-        .take(240)
-        .collect()
+fn drain_bounded_first_line(mut stderr: impl Read) -> std::io::Result<String> {
+    let mut captured = Vec::with_capacity(CHILD_DIAGNOSTIC_LIMIT);
+    let mut buffer = [0_u8; 8192];
+    let mut retain = true;
+    loop {
+        let count = stderr.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if retain {
+            for byte in &buffer[..count] {
+                if *byte == b'\n' || *byte == b'\r' {
+                    retain = false;
+                    break;
+                }
+                if captured.len() == CHILD_DIAGNOSTIC_LIMIT {
+                    retain = false;
+                    break;
+                }
+                captured.push(*byte);
+            }
+        }
+    }
+    if captured.is_empty() {
+        Ok("no diagnostic".to_string())
+    } else {
+        Ok(String::from_utf8_lossy(&captured).into_owned())
+    }
 }
 
 #[test]
@@ -310,6 +350,8 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    const EXPECTED_TEST_VERIFIER_REVISION: &str = "77f1126d5de023d9f8464c60c0137b6321126757";
 
     struct HelperBinary {
         _directory: tempfile::TempDir,
@@ -423,6 +465,10 @@ mod tests {
                 OsString::from("INFERENCE_TEST_RECEIPT_TEMPLATE_DIR"),
                 templates.path.clone().into_os_string(),
             ),
+            (
+                OsString::from("INFERENCE_TEST_EXPECTED_WASM_VERIFIER_REVISION"),
+                OsString::from(EXPECTED_TEST_VERIFIER_REVISION),
+            ),
         ])
     }
 
@@ -467,6 +513,64 @@ mod tests {
         assert!(
             unexpected.is_empty(),
             "fake failure modes produced wrong errors: {unexpected:?}"
+        );
+    }
+
+    #[test]
+    fn large_child_output_completes_with_a_bounded_public_diagnostic() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let mut runner = fake_runner("flood", &templates);
+
+        let error = run_gate_with(&helper.path, &mut runner)
+            .expect_err("large-output discharger must not produce a trusted result");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("flood diagnostic begins"),
+            "first child diagnostic was not retained: {error}"
+        );
+        assert!(
+            error.len() <= 512,
+            "public error retained an unbounded child diagnostic: {} bytes",
+            error.len()
+        );
+        assert!(
+            !error.contains(SUCCESS_LINE),
+            "large-output failure emitted the success marker: {error}"
+        );
+    }
+
+    #[test]
+    fn fake_discharger_rejects_a_wrong_but_canonical_verifier_revision() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let mut runner = fake_runner("valid", &templates);
+        let receipt_dir = tempfile::tempdir().expect("create receipt directory");
+        let case = &CASES[0];
+        let raw_file = repository_root().join(case.golden_path());
+        let invocation = Invocation {
+            executable: &helper.path,
+            verifier_revision: "0000000000000000000000000000000000000000",
+            case_id: case.id(),
+            raw_file: &raw_file,
+            receipt_dir: receipt_dir.path(),
+        };
+
+        let output = runner
+            .run(&invocation)
+            .expect("run fake with wrong canonical revision");
+        assert!(!output.success, "fake accepted the wrong revision");
+        assert!(
+            output.stderr.contains("verifier revision mismatch"),
+            "unexpected diagnostic: {}",
+            output.stderr
+        );
+        assert_eq!(
+            std::fs::read_dir(receipt_dir.path())
+                .expect("read receipt directory")
+                .count(),
+            0,
+            "wrong revision produced a receipt"
         );
     }
 

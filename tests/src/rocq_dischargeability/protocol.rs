@@ -195,12 +195,26 @@ pub(super) fn read_request(exchange: &Path) -> Result<Request> {
 }
 
 pub(super) fn verify_exchange(exchange: &Path) -> Result<()> {
-    require_exchange_root(exchange)?;
+    let exchange = require_exchange_root(exchange)?;
+    verify_exchange_after_root_check(&exchange)
+}
+
+fn verify_exchange_after_root_check(exchange: &Path) -> Result<()> {
     require_exact_top_level(exchange)?;
     let pin = Pin::read()?;
     let request = read_request(exchange)?;
     validate_raw(exchange, &request)?;
     validate_receipts(exchange, &request, &pin)
+}
+
+#[cfg(test)]
+fn verify_exchange_with_hook<F>(exchange: &Path, after_root_check: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let exchange = require_exchange_root(exchange)?;
+    after_root_check()?;
+    verify_exchange_after_root_check(&exchange)
 }
 
 fn validate_request(request: &Request, pin: &Pin) -> Result<()> {
@@ -389,13 +403,54 @@ fn validate_receipt(
 }
 
 fn coq_version_matches_series(version: &str, series: &str) -> bool {
-    let Some(remainder) = version.strip_prefix(series) else {
-        return false;
-    };
-    remainder
-        .bytes()
-        .next()
-        .is_none_or(|byte| !byte.is_ascii_digit())
+    parse_coq_version(version)
+        .is_some_and(|actual| parse_coq_version(series).is_some_and(|expected| actual == expected))
+}
+
+fn parse_coq_version(version: &str) -> Option<(u64, u64)> {
+    let bytes = version.as_bytes();
+    let mut index = 0;
+    let major = parse_decimal(bytes, &mut index)?;
+    if bytes.get(index) != Some(&b'.') {
+        return None;
+    }
+    index += 1;
+    let minor = parse_decimal(bytes, &mut index)?;
+    match bytes.get(index) {
+        None => Some((major, minor)),
+        Some(b'.') => {
+            index += 1;
+            parse_decimal(bytes, &mut index)?;
+            (index == bytes.len()).then_some((major, minor))
+        }
+        Some(b'+') => {
+            index += 1;
+            valid_version_suffix(&bytes[index..]).then_some((major, minor))
+        }
+        _ => None,
+    }
+}
+
+fn parse_decimal(bytes: &[u8], index: &mut usize) -> Option<u64> {
+    let start = *index;
+    let mut value = 0_u64;
+    while let Some(byte) = bytes.get(*index)
+        && byte.is_ascii_digit()
+    {
+        value = value
+            .checked_mul(10)?
+            .checked_add(u64::from(*byte - b'0'))?;
+        *index += 1;
+    }
+    (*index > start).then_some(value)
+}
+
+fn valid_version_suffix(suffix: &[u8]) -> bool {
+    suffix.first().is_some_and(u8::is_ascii_alphanumeric)
+        && suffix.last().is_some_and(u8::is_ascii_alphanumeric)
+        && suffix
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-'))
 }
 
 fn parse_strict<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T> {
@@ -490,11 +545,13 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
     }
 }
 
-fn require_exchange_root(exchange: &Path) -> Result<()> {
+fn require_exchange_root(exchange: &Path) -> Result<std::path::PathBuf> {
     if !exchange.is_absolute() {
         bail!("exchange path must be absolute");
     }
-    require_directory(exchange, "exchange")
+    require_directory(exchange, "exchange")?;
+    std::fs::canonicalize(exchange)
+        .with_context(|| format!("canonicalize exchange directory {}", exchange.display()))
 }
 
 fn require_exact_top_level(exchange: &Path) -> Result<()> {
@@ -554,6 +611,7 @@ mod tests {
     use super::super::cases::CASES;
     use super::super::pin::Pin;
     use super::super::{SUCCESS_LINE, verify};
+    use super::verify_exchange_with_hook;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -908,15 +966,41 @@ mod tests {
     }
 
     #[test]
-    fn receipt_coq_version_may_include_a_patch_or_suffix_in_the_pinned_series() {
-        for version in ["8.20.1", "8.20+release"] {
+    fn receipt_coq_version_uses_a_whole_string_grammar_for_the_pinned_series() {
+        for version in ["8.20", "8.20.0", "8.20.123", "8.20+release", "8.20+rc-1"] {
             let fixture = ExchangeFixture::valid();
             fixture.mutate_receipt(0, |receipt| receipt["coq_version"] = json!(version));
             assert_eq!(
-                verify(fixture.path()).expect("accept Coq patch or suffix in pinned series"),
+                verify(fixture.path()).expect("accept valid Coq version in pinned series"),
                 SUCCESS_LINE
             );
         }
+
+        let invalid = [
+            "8.20.",
+            "8.20+",
+            "8.20\n",
+            "8.20 trailing",
+            "8.200",
+            "8.20release",
+            "8.20.one",
+            "8.20.-1",
+            "8.20.1+release",
+            "8.x",
+            "version-8.20",
+        ];
+        let mut accepted = Vec::new();
+        for version in invalid {
+            let fixture = ExchangeFixture::valid();
+            fixture.mutate_receipt(0, |receipt| receipt["coq_version"] = json!(version));
+            if verify(fixture.path()).is_ok() {
+                accepted.push(version);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "malformed Coq versions were accepted: {accepted:?}"
+        );
     }
 
     #[test]
@@ -966,5 +1050,30 @@ mod tests {
             .expect_err("relative verify exchange must fail")
             .to_string();
         assert!(error.contains("absolute"), "unexpected error: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stabilized_exchange_root_keeps_verify_inside_original_target() {
+        let fixture = ExchangeFixture::valid();
+        let parent = tempfile::tempdir().expect("create symlink parent");
+        let ancestor = parent.path().join("ancestor");
+        let original_parent = fixture.path().parent().expect("fixture has parent");
+        let exchange_name = fixture.path().file_name().expect("fixture has basename");
+        let injected_parent = parent.path().join("injected-parent");
+        let injected_exchange = injected_parent.join(exchange_name);
+        std::fs::create_dir_all(&injected_exchange).expect("create injected exchange");
+        std::fs::write(injected_exchange.join("injected"), b"untrusted")
+            .expect("write injected entry");
+        std::os::unix::fs::symlink(original_parent, &ancestor).expect("create ancestor symlink");
+        let caller_exchange = ancestor.join(exchange_name);
+
+        verify_exchange_with_hook(&caller_exchange, || {
+            std::fs::remove_file(&ancestor).expect("remove original ancestor symlink");
+            std::os::unix::fs::symlink(&injected_parent, &ancestor)
+                .expect("retarget ancestor symlink");
+            Ok(())
+        })
+        .expect("verify through a stabilized exchange root");
     }
 }
