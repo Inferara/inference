@@ -853,6 +853,136 @@ mod gate {
             .collect()
     }
 
+    fn validate_producer_contract(
+        v: &str,
+        expected_payloads: &[&str],
+        expected_theorems: &[&str],
+    ) -> Result<(), String> {
+        let actual_payloads = obligation_terms(v);
+        if actual_payloads != expected_payloads {
+            return Err(format!(
+                "payloads differ:\nexpected: {expected_payloads:#?}\nactual: {actual_payloads:#?}"
+            ));
+        }
+
+        let actual_theorems = theorem_names(v);
+        if actual_theorems != expected_theorems {
+            return Err(format!(
+                "theorems differ:\nexpected: {expected_theorems:#?}\nactual: {actual_theorems:#?}"
+            ));
+        }
+        Ok(())
+    }
+
+    const BOUNDED_PRIME_PAYLOADS: [&str; 1] = [
+        "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2000000000))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0)))))))).",
+    ];
+
+    const BOUNDED_PRIME_THEOREMS: [&str; 2] = [
+        "valid_rocq_prime_bounded_example",
+        "valid_rocq_prime_bounded_example__prime_properties_bounded",
+    ];
+
+    const FALSE_CERTIFICATE_PAYLOADS: [&str; 1] =
+        ["HA_not (term_eq (T_const (Vi32 0)) (T_const (Vi32 0)))."];
+
+    const FALSE_CERTIFICATE_THEOREMS: [&str; 2] = [
+        "valid_rocq_false_certificate",
+        "valid_rocq_false_certificate__FalseCertificate",
+    ];
+
+    const NARROW_DISCHARGE_PAYLOADS: [&str; 2] = [
+        "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_U)) (T_local 0%N) (T_const (Vi32 256))) (T_const (Vi32 0))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_U)) (T_local 0%N) (T_const (Vi32 255))) (T_const (Vi32 0)))).",
+        "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_const (Vi32 (-128))) (T_local 0%N)) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))) (T_const (Vi32 0)))))) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 0%N) (T_const (Vi32 (-128)))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 127))) (T_const (Vi32 0))))).",
+    ];
+
+    const NARROW_DISCHARGE_THEOREMS: [&str; 2] = [
+        "valid_spec_narrow_discharge",
+        "valid_spec_narrow_discharge__NarrowDischarge",
+    ];
+
+    #[test]
+    fn producer_contract_validator_rejects_narrow_domain_guard_mutations() {
+        let golden = std::fs::read_to_string(narrow_discharge_golden_path())
+            .expect("read narrow-discharge golden");
+        assert!(
+            validate_producer_contract(
+                &golden,
+                &NARROW_DISCHARGE_PAYLOADS,
+                &NARROW_DISCHARGE_THEOREMS,
+            )
+            .is_ok(),
+            "the unmodified narrow golden must satisfy its independently derived contract"
+        );
+
+        let mutations = [
+            (
+                "remove the u8 domain guard",
+                golden.replacen(
+                    "(HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_U)) (T_local 0%N) (T_const (Vi32 256))) (T_const (Vi32 0)))))",
+                    "(HA_has_type (T_local 0%N) T_i32)",
+                    1,
+                ),
+            ),
+            (
+                "change the u8 domain guard into the consequent",
+                golden.replacen(
+                    "(ROI_lt SX_U)) (T_local 0%N) (T_const (Vi32 256))",
+                    "(ROI_le SX_U)) (T_local 0%N) (T_const (Vi32 255))",
+                    1,
+                ),
+            ),
+            (
+                "misnest the u8 domain guard outside the root implication antecedent",
+                golden.replacen(
+                    NARROW_DISCHARGE_PAYLOADS[0],
+                    "HA_and (HA_has_type (T_local 0%N) T_i32) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_U)) (T_local 0%N) (T_const (Vi32 256))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_U)) (T_local 0%N) (T_const (Vi32 255))) (T_const (Vi32 0))))).",
+                    1,
+                ),
+            ),
+            (
+                "remove the i8 lower domain guard",
+                golden.replacen(
+                    "(HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_const (Vi32 (-128))) (T_local 0%N)) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))) (T_const (Vi32 0))))))",
+                    "(HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))) (T_const (Vi32 0))))",
+                    1,
+                ),
+            ),
+            (
+                "change the i8 upper domain guard into the consequent",
+                golden.replacen(
+                    "(ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))",
+                    "(ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 127))",
+                    1,
+                ),
+            ),
+            (
+                "misnest the i8 domain pair outside the root implication antecedent",
+                golden.replacen(
+                    NARROW_DISCHARGE_PAYLOADS[1],
+                    "HA_and (HA_has_type (T_local 0%N) T_i32) (Himpl (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_const (Vi32 (-128))) (T_local 0%N)) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))) (T_const (Vi32 0))))) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_ge SX_S)) (T_local 0%N) (T_const (Vi32 (-128)))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 127))) (T_const (Vi32 0))))).",
+                    1,
+                ),
+            ),
+        ];
+
+        for (description, mutation) in mutations {
+            assert_ne!(
+                mutation, golden,
+                "mutation did not alter the golden: {description}"
+            );
+            assert!(
+                validate_producer_contract(
+                    &mutation,
+                    &NARROW_DISCHARGE_PAYLOADS,
+                    &NARROW_DISCHARGE_THEOREMS,
+                )
+                .is_err(),
+                "validator accepted mutation: {description}"
+            );
+        }
+    }
+
     /// The floor under [`LINKED_CORPUS`]: every entry must actually reach the
     /// linker and come back with a merged body its obligation applies.
     ///
@@ -2876,22 +3006,13 @@ End Host.
             golden_path.display()
         );
 
-        let payloads = obligation_terms(&golden);
-        assert_eq!(
-            payloads.len(),
-            1,
-            "expected one bounded-prime payload:\n{golden}"
-        );
-        assert_eq!(
-            payloads[0],
-            "Himpl (HA_and (HA_has_type (T_local 0%N) T_i32) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi32 2000000000))) (T_const (Vi32 0))))) (Himpl (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 0%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_and (Himpl (HA_not (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0)))) (Himpl (HA_and (HA_has_type (T_local 1%N) T_i32) (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_local 1%N) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_local 1%N) (T_local 0%N)) (T_const (Vi32 0)))))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_local 1%N)) (T_const (Vi32 0))) (T_const (Vi32 0)))))) (Himpl (term_eq (T_app 0 ((T_local 0%N) :: nil)) (T_const (Vi32 0))) (HA_ex (HA_and (HA_and (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_gt SX_S)) (T_lvar 0) (T_const (Vi32 1))) (T_const (Vi32 0)))) (HA_not (term_eq (T_relop T_i32 (Relop_i (ROI_lt SX_S)) (T_lvar 0) (T_local 0%N)) (T_const (Vi32 0))))) (term_eq (T_binop T_i32 (Binop_i (BOI_rem SX_S)) (T_local 0%N) (T_lvar 0)) (T_const (Vi32 0)))))))).",
-            "the lookup guard, signed bound, `n > 1` antecedent, and primality obligations must remain nested in that order"
-        );
-        assert_eq!(
-            theorem_names(&golden).len(),
-            2,
-            "the bounded fixture must emit module and spec theorems:\n{golden}"
-        );
+        if let Err(error) =
+            validate_producer_contract(&golden, &BOUNDED_PRIME_PAYLOADS, &BOUNDED_PRIME_THEOREMS)
+        {
+            panic!(
+                "the lookup guard, signed bound, `n > 1` antecedent, primality obligations, and exact ordered theorems drifted:\n{error}\n{golden}"
+            );
+        }
     }
 
     #[test]
@@ -2911,11 +3032,15 @@ End Host.
             "proof-mode `.v` for rocq_false_certificate.inf drifted from {}",
             golden_path.display()
         );
-        assert_eq!(
-            obligation_terms(&golden),
-            ["HA_not (term_eq (T_const (Vi32 0)) (T_const (Vi32 0)))."],
-            "the false certificate must contain exactly its contradictory singleton payload"
-        );
+        if let Err(error) = validate_producer_contract(
+            &golden,
+            &FALSE_CERTIFICATE_PAYLOADS,
+            &FALSE_CERTIFICATE_THEOREMS,
+        ) {
+            panic!(
+                "the false certificate's singleton contradictory payload or exact ordered theorems drifted:\n{error}\n{golden}"
+            );
+        }
     }
 
     #[test]
@@ -2936,30 +3061,15 @@ End Host.
             golden_path.display()
         );
 
-        let payloads = obligation_terms(&golden);
-        assert_eq!(
-            payloads.len(),
-            2,
-            "expected exactly two narrow payloads:\n{golden}"
-        );
-        assert!(
-            payloads[0].contains("(ROI_le SX_U)") && payloads[0].contains("(T_const (Vi32 255))"),
-            "the first payload must carry the unsigned u8 domain:\n{}",
-            payloads[0]
-        );
-        assert!(
-            payloads[1].contains("(ROI_ge SX_S)")
-                && payloads[1].contains("(T_const (Vi32 (-128)))")
-                && payloads[1].contains("(ROI_le SX_S)")
-                && payloads[1].contains("(T_const (Vi32 127))"),
-            "the second payload must carry both signed i8 bounds:\n{}",
-            payloads[1]
-        );
-        assert_eq!(
-            theorem_names(&golden).len(),
-            2,
-            "the narrow fixture must emit module and spec theorems:\n{golden}"
-        );
+        if let Err(error) = validate_producer_contract(
+            &golden,
+            &NARROW_DISCHARGE_PAYLOADS,
+            &NARROW_DISCHARGE_THEOREMS,
+        ) {
+            panic!(
+                "the complete narrow Himpl roots, domain antecedents, consequents, or exact ordered theorems drifted:\n{error}\n{golden}"
+            );
+        }
     }
 
     /// The proof-mode `.v` for the PrimeExample fixture must match a committed
