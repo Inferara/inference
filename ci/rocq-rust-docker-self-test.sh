@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Exercises the Docker boundary of rocq-rust-docker.sh without a Docker daemon.
+# Exercises rocq-rust-docker.sh against a stateful, argv-aware Docker fake.
 set -eu
 
 repo_root=$(
@@ -7,235 +7,98 @@ repo_root=$(
     export CDPATH
     cd -- "$(dirname -- "$0")/.." && pwd
 )
-runner=$repo_root/ci/rocq-rust-docker.sh
+runner_source=$repo_root/ci/rocq-rust-docker.sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/rocq-rust-docker-self-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-fake_bin=$work/bin
-log=$work/docker.log
-state=$work/docker-state
-mkdir -p "$fake_bin"
+fixture=$work/repo
+state=$work/state
+fake_bin=$work/'fake docker bin'
+fake_docker=$fake_bin/'docker tool'
+mkdir -p "$fixture/ci" "$fixture/.git" "$fixture/target" "$state/volumes" "$state/calls" "$fake_bin"
+cp "$runner_source" "$fixture/ci/rocq-rust-docker.sh"
+chmod +x "$fixture/ci/rocq-rust-docker.sh"
+printf 'lane lock\n' >"$fixture/ci/rocq-discharge.cargo-lock"
+printf 'ignored host lock\n' >"$fixture/Cargo.lock"
+printf 'source payload\n' >"$fixture/source.txt"
+printf 'excluded git\n' >"$fixture/.git/HEAD"
+printf 'excluded target\n' >"$fixture/target/artifact"
 
-cat >"$fake_bin/docker" <<'FAKE_DOCKER'
+cat >"$fake_docker" <<'FAKE_DOCKER'
 #!/usr/bin/env sh
 set -eu
-
-log=${FAKE_DOCKER_LOG:?}
 state=${FAKE_DOCKER_STATE:?}
-docker_args=$*
-printf '%s\n' "$*" >>"$log"
-
-case " $* " in
-    *' docker.sock '*|*'/docker.sock'*)
-        echo "fake docker: Docker socket mounts are forbidden" >&2
-        exit 97
-        ;;
-esac
-
-require_run_option() {
-    case " $docker_args " in
-        *" $1 "*) ;;
-        *)
-            echo "fake docker: missing required run option $1" >&2
-            exit 98
-            ;;
-    esac
-}
-
-require_network() {
-    case " $docker_args " in
-        *" --network $1 "*) ;;
-        *)
-            echo "fake docker: expected network $1" >&2
-            exit 105
-            ;;
-    esac
-}
+fixture=${FAKE_DOCKER_FIXTURE:?}
+counter=$(cat "$state/counter" 2>/dev/null || echo 0)
+counter=$((counter + 1)); printf '%s\n' "$counter" >"$state/counter"
+call=$state/calls/$counter; mkdir "$call"
+for argument in "$@"; do printf '%s\n' "$argument" >>"$call/argv"; done
+last_arg() { for value in "$@"; do :; done; printf '%s\n' "$value"; }
+arg_after() { wanted=$1; shift; previous=; for value in "$@"; do if [ "$previous" = "$wanted" ]; then printf '%s\n' "$value"; return 0; fi; previous=$value; done; return 1; }
+mount_volume() { destination=$1; shift; previous=; for value in "$@"; do if [ "$previous" = --mount ]; then case "$value" in *"dst=$destination"*) source=${value#*src=}; source=${source%%,*}; printf '%s\n' "$source"; return 0;; esac; fi; previous=$value; done; return 1; }
+volume_dir() { printf '%s/volumes/%s\n' "$state" "$1"; }
+label_of() { cat "$(volume_dir "$1")/.label" 2>/dev/null || true; }
 
 if [ "$1" = volume ] && [ "$2" = create ]; then
-    label=
-    previous=
-    for argument in "$@"; do
-        if [ "$previous" = --label ]; then
-            label=$argument
-            break
-        fi
-        previous=$argument
-    done
-    printf '%s\n' "$label" >"$state.volume"
-    exit 0
-fi
-
-if [ "$1" = volume ] && [ "$2" = inspect ]; then
-    cut -d= -f2- "$state.volume"
-    exit 0
-fi
-
-if [ "$1" = volume ] && [ "$2" = rm ]; then
-    case "$3" in
-        inference-rocq-rust-source-*) exit 0 ;;
-        *)
-            echo "fake docker: unexpected volume cleanup target $3" >&2
-            exit 99
-            ;;
-    esac
-fi
-
-if [ "$1" = container ] && [ "$2" = create ]; then
-    require_run_option --read-only
-    require_run_option --network
-    require_run_option --cap-drop
-    require_run_option --security-opt
-    require_run_option --tmpfs
-    require_network none
-    label=
-    previous=
-    for argument in "$@"; do
-        if [ "$previous" = --label ]; then
-            label=$argument
-            break
-        fi
-        previous=$argument
-    done
-    printf '%s\n' "$label" >"$state"
-    exit 0
-fi
-
-if [ "$1" = container ] && [ "$2" = start ]; then
-    if [ "${FAKE_DOCKER_LOCK_START_FAIL:-0}" = 1 ]; then
-        exit 44
+    label=$(arg_after --label "$@" || true); name=$(last_arg "$@")
+    if [ -n "$label" ]; then
+        if [ "$name" != "$label" ]; then echo 'fake docker: source volume must be Docker-generated' >&2; exit 70; fi
+        name=generated-source-$counter
     fi
-    exit 0
+    directory=$(volume_dir "$name"); mkdir -p "$directory"; printf '%s\n' "${label#*=}" >"$directory/.label"
+    case "${FAKE_DOCKER_SOURCE_MODE:-clean}" in foreign) printf '%s\n' foreign-owner >"$directory/.label";; stale) printf stale >"$directory/stale-file";; esac
+    printf '%s\n' "$name"; exit 0
 fi
-
-if [ "$1" = container ] && [ "$2" = inspect ]; then
-    case " $* " in
-        *'.State.Running'*) printf '%s\n' true ;;
-        *) cut -d= -f2- "$state" ;;
-    esac
-    exit 0
-fi
-
-if [ "$1" = container ] && [ "$2" = rm ]; then
-    [ "$4" = inference-cargo-target-rust-1.98-lock ]
-    exit 0
-fi
-
+if [ "$1" = volume ] && [ "$2" = inspect ]; then label_of "$(last_arg "$@")"; exit 0; fi
+if [ "$1" = volume ] && [ "$2" = rm ]; then name=$3; cp -R "$(volume_dir "$name")" "$state/removed-$name" 2>/dev/null || true; rm -rf "$(volume_dir "$name")"; exit 0; fi
+if [ "$1" = container ] && [ "$2" = create ]; then label=$(arg_after --label "$@" || true); printf '%s\n' "${label#*=}" >"$state/lock-label"; exit 0; fi
+if [ "$1" = container ] && [ "$2" = start ]; then printf true; exit 0; fi
+if [ "$1" = container ] && [ "$2" = inspect ]; then case "$(arg_after --format "$@" || true)" in *State.Running*) printf true;; *) cat "$state/lock-label";; esac; exit 0; fi
+if [ "$1" = container ] && [ "$2" = rm ]; then exit 0; fi
 if [ "$1" = run ]; then
-    require_run_option --read-only
-    require_run_option --cap-drop
-    require_run_option --security-opt
-    require_run_option --tmpfs
-
-    case " $* " in
-        *' cargo fetch --locked --manifest-path /workspace/Cargo.toml'*)
-            case " $* " in
-                *'rustc --version'*'rustc 1.98.0 '*) ;;
-                *)
-                    echo "fake docker: fetch must assert rustc 1.98.0" >&2
-                    exit 104
-                    ;;
-            esac
-            require_network bridge
-            ;;
-        *'exec cargo "$@"'*'sh test --locked --offline --manifest-path /workspace/Cargo.toml'*)
-            require_network none
-            ;;
-        *'ci/rocq-discharge.cargo-lock'*'/snapshot/Cargo.lock'*'cmp -s'*)
-            require_network none
-            if [ "${FAKE_DOCKER_LANE_LOCK_MISMATCH:-0}" = 1 ]; then
-                exit 45
-            fi
-            ;;
-        *)
-            echo "fake docker: unrecognised run command: $*" >&2
-            exit 102
-            ;;
-    esac
+    script=$(arg_after -c "$@" || true); snapshot=$(mount_volume /snapshot "$@" || true)
+    if [ -n "$snapshot" ] && case "$script" in *'find /snapshot'*) true;; *) false;; esac; then
+        directory=$(volume_dir "$snapshot"); if find "$directory" -mindepth 1 -maxdepth 1 ! -name .label -print -quit | grep . >/dev/null; then exit 46; fi; exit 0
+    fi
+    if [ -n "$snapshot" ] && case "$script" in *'Cargo.lock'*) true;; *) false;; esac; then
+        case "$script" in *'| tar'*) echo 'fake docker: snapshot must not use a tar pipeline' >&2; exit 71;; esac
+        directory=$(volume_dir "$snapshot")
+        for entry in "$fixture"/* "$fixture"/.[!.]*; do [ -e "$entry" ] || continue; base=$(basename "$entry"); case "$base" in .git|target|Cargo.lock) continue;; esac; cp -R "$entry" "$directory/"; done
+        cp "$fixture/ci/rocq-discharge.cargo-lock" "$directory/Cargo.lock"
+        if [ "${FAKE_DOCKER_CORRUPT_LANE_LOCK:-0}" = 1 ]; then printf corrupt >"$directory/Cargo.lock"; fi
+        cmp -s "$fixture/ci/rocq-discharge.cargo-lock" "$directory/Cargo.lock" || exit 45
+        rm -rf "$state/observed-snapshot"; cp -R "$directory" "$state/observed-snapshot"; exit 0
+    fi
     exit 0
 fi
-
-echo "fake docker: unexpected invocation: $*" >&2
-exit 103
+echo "fake docker: unexpected command $1 $2" >&2; exit 72
 FAKE_DOCKER
-chmod +x "$fake_bin/docker"
-
-assert_contains() {
-    expected=$1
-    if ! grep -F -- "$expected" "$log" >/dev/null; then
-        echo "self-test: expected Docker invocation to contain: $expected" >&2
-        exit 1
-    fi
-}
-
-assert_absent() {
-    unexpected=$1
-    if grep -F -- "$unexpected" "$log" >/dev/null; then
-        echo "self-test: unexpected Docker invocation contained: $unexpected" >&2
-        exit 1
-    fi
-}
+chmod +x "$fake_docker"
 
 run_runner() {
-    PATH="$fake_bin:$PATH" \
-        FAKE_DOCKER_LOG=$log \
-        FAKE_DOCKER_STATE=$state \
-        "$runner" cargo test -p inference-tests \
-        'rocq_typecheck::gate::generated_output_type_checks' -- --exact
+    mode=${1:-clean}; shift || true
+    : >"$state/counter"; rm -rf "$state/calls" "$state/observed-snapshot" "$state/volumes"; mkdir -p "$state/calls" "$state/volumes"
+    FAKE_DOCKER_STATE=$state FAKE_DOCKER_FIXTURE=$fixture FAKE_DOCKER_SOURCE_MODE=$mode DOCKER="$fake_docker" "$fixture/ci/rocq-rust-docker.sh" "$@"
 }
+expect_failure() { label=$1; shift; if "$@" >"$work/$label.out" 2>"$work/$label.err"; then echo "self-test: $label unexpectedly succeeded" >&2; exit 1; fi; }
 
-: >"$log"
-run_runner
+run_runner clean cargo test -p inference-tests rocq_typecheck:: -- --exact
+test -f "$state/observed-snapshot/source.txt"
+test ! -e "$state/observed-snapshot/.git"
+test ! -e "$state/observed-snapshot/target"
+cmp -s "$fixture/ci/rocq-discharge.cargo-lock" "$state/observed-snapshot/Cargo.lock"
 
-assert_contains 'rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922'
-assert_contains 'busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
-expected_toolchain='RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu'
-assert_contains "$expected_toolchain"
-assert_contains 'CARGO_HOME=/cargo-home'
-assert_contains 'CARGO_TARGET_DIR=/cargo-target'
-assert_contains 'ci/rocq-discharge.cargo-lock'
-assert_contains '/snapshot/Cargo.lock'
-assert_contains 'cmp -s'
-assert_contains '--exclude=./Cargo.lock'
-assert_contains '--exclude=Cargo.lock'
-assert_contains 'inference-cargo-home-rust-1.98'
-assert_contains 'inference-cargo-target-rust-1.98'
-assert_contains 'inference-cargo-target-rust-1.98-lock'
-assert_contains 'cargo fetch --locked --manifest-path /workspace/Cargo.toml'
-assert_contains 'exec cargo "$@"'
-assert_contains 'sh test --locked --offline --manifest-path /workspace/Cargo.toml'
-assert_contains 'volume rm inference-rocq-rust-source-'
-assert_contains 'container rm -f inference-cargo-target-rust-1.98-lock'
-assert_absent 'volume rm inference-cargo-home-rust-1.98'
-assert_absent 'volume rm inference-cargo-target-rust-1.98'
+expect_failure corrupt env FAKE_DOCKER_CORRUPT_LANE_LOCK=1 FAKE_DOCKER_STATE="$state" FAKE_DOCKER_FIXTURE="$fixture" DOCKER="$fake_docker" "$fixture/ci/rocq-rust-docker.sh" cargo test
+grep -F 'snapshot lane lock mismatch' "$work/corrupt.err" >/dev/null
+expect_failure foreign run_runner foreign cargo test
+grep -F 'source volume owner label did not validate' "$work/foreign.err" >/dev/null
+expect_failure stale run_runner stale cargo test
+grep -F 'source volume is not empty' "$work/stale.err" >/dev/null
+expect_failure toolchain run_runner clean cargo +nightly test
+grep -F 'Cargo toolchain override is not allowed' "$work/toolchain.err" >/dev/null
 
-: >"$log"
-if PATH="$fake_bin:$PATH" \
-    FAKE_DOCKER_LOG=$log \
-    FAKE_DOCKER_STATE=$state \
-    FAKE_DOCKER_LANE_LOCK_MISMATCH=1 \
-    "$runner" cargo test -p inference-tests \
-    'rocq_typecheck::gate::generated_output_type_checks' -- --exact \
-    >"$work/mismatch.stdout" 2>"$work/mismatch.stderr"; then
-    echo 'self-test: lane-lock mismatch unexpectedly succeeded' >&2
-    exit 1
-fi
-if ! grep -F 'snapshot lane lock mismatch' "$work/mismatch.stderr" >/dev/null; then
-    echo 'self-test: lane-lock mismatch did not report the expected failure' >&2
-    exit 1
-fi
-
-: >"$log"
-if PATH="$fake_bin:$PATH" \
-    FAKE_DOCKER_LOG=$log \
-    FAKE_DOCKER_STATE=$state \
-    FAKE_DOCKER_LOCK_START_FAIL=1 \
-    "$runner" cargo test -p inference-tests \
-    'rocq_typecheck::gate::generated_output_type_checks' -- --exact \
-    >"$work/lock.stdout" 2>"$work/lock.stderr"; then
-    echo 'self-test: failed target-lock start unexpectedly succeeded' >&2
-    exit 1
-fi
-assert_contains 'container rm -f inference-cargo-target-rust-1.98-lock'
-
+unsafe=$work/'repo,unsafe'; mkdir -p "$unsafe/ci"; cp "$runner_source" "$unsafe/ci/rocq-rust-docker.sh"; cp "$fixture/ci/rocq-discharge.cargo-lock" "$unsafe/ci/"
+expect_failure unsafe env FAKE_DOCKER_STATE="$state" FAKE_DOCKER_FIXTURE="$fixture" DOCKER="$fake_docker" "$unsafe/ci/rocq-rust-docker.sh" cargo test
+grep -F 'unsafe Docker mount path' "$work/unsafe.err" >/dev/null
+test ! -e "$state/calls/1"
 echo 'rocq-rust-docker self-test: PASS'
