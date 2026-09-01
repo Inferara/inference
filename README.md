@@ -154,6 +154,41 @@ The workspace is configured for efficient development:
 - **`cargo test`** - Runs tests for `core/` crates and the `tests/` integration suite
 - **`cargo test-full`** - Runs tests for all workspace members, including tools
 
+### Docker-only Rocq discharge development gate
+
+The local emitted-Rocq discharge gate is orchestrated by Docker; it does not use a host Rust or Rocq toolchain. Its public interface is:
+
+```bash
+./ci/rocq-discharge-docker.sh \
+  --wasm-verifier /absolute/path/to/wasm-verifier \
+  --container wasm-verifier-coq \
+  [--adapter batch|single|both] \
+  [--full]
+```
+
+`--adapter` defaults to `both`. `batch` sends one immutable exchange volume to the verifier bridge. `single` makes the five ordered per-case bridge calls with a new empty `0700` receipt directory for each call. `both` verifies the batch receipts, removes only the validated receipt set, runs the five single calls, and verifies the replacement receipts. Inference fingerprints `request.json` and all five ordered raw Rocq inputs before and after every bridge call; it never parses verifier-private proof logs.
+
+The wrapper composes [`ci/rocq-rust-docker.sh`](ci/rocq-rust-docker.sh), preserving that lane's target lock, source snapshot, persistent Cargo registry/target volumes, pinned Rust image and explicit Rust `1.98.0` toolchain. [`ci/rocq-discharge.cargo-lock`](ci/rocq-discharge.cargo-lock) is the authoritative tracked lock for this lane. The ignored root `Cargo.lock` is excluded from the snapshot and is never an input to the gate. Fetch is the only networked Rust step; all compilation and execution after fetch are locked, offline, socket-free, and run with a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a private `/tmp`.
+
+`--full` first runs the focused dischargeability tests, then the adapter flow, then the complete `inference-tests` crate (not the whole workspace). The clean Docker floor is exactly five Cargo `test result:` lines with at least 3,075 passed tests in aggregate and zero failed or filtered tests. Empty, single-binary, malformed, filtered, and under-floor logs fail closed.
+
+The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the revision in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). The supplied running container must implement the future verifier-side bridge contract: its strict `ci/discharge/container-pin.json` records protocol 1, the image reference and ID, `coq` user, repository mount destination, and exact supported Coq 8.20 patch version. Live inspection must also show that the canonical checkout is the mount source, `coq` has nonzero uid/gid, and the verifier revision plus observed `coq-wasm` tag/revision match Inference's pin.
+
+Phase A intentionally ships before those verifier-side bridge scripts, container inspection script, and `container-pin.json` exist. A normal invocation therefore fails closed with a bounded missing-prerequisite diagnostic; this phase does **not** claim real end-to-end discharge success. The deterministic fake self-test freezes the future contract and can be run without mounting `docker.sock`:
+
+```bash
+docker run --rm --read-only --network none --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,mode=1777 --tmpfs /work:rw,exec,mode=1777 \
+  --user 65532:65532 -e TMPDIR=/work \
+  --mount type=bind,src="$PWD",dst=/workspace,readonly \
+  --workdir /workspace \
+  busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
+  sh ci/rocq-discharge-docker-self-test.sh
+```
+
+Every bridge inherits `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`, the one wrapper-created host `0700` evidence directory. A future bridge must write `verifier.log` there before returning nonzero and must keep its public output bounded. The wrapper captures bridge stdout/stderr privately, validates the directory and regular `0600` log, removes transient staging and owned volumes, and prints exactly one sanitized evidence-directory locator. On success it deletes that evidence directory. Inference retains no raw private proof source or receipt contents.
+
 ## Roadmap
 
 Check out open [issues](https://github.com/Inferara/inference/issues).
