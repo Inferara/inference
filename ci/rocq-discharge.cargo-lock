@@ -1940,6 +1940,7 @@ dependencies = [
  "inference-wasm-codegen",
  "inference-wasm-to-v-translator",
  "rustc-hash",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
