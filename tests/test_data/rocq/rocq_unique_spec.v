@@ -91,16 +91,16 @@ Context `{ho: host}.
 Theorem valid_rocq_unique_spec : ValidModule rocq_unique_spec.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_rocq_unique_spec__UniqueParity : ValidSpec rocq_unique_spec rocq_unique_spec__UniqueParity_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_unique_rocq_unique_spec__UniqueParity : ValidUniqueSpec rocq_unique_spec rocq_unique_spec__UniqueParity__uq_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.

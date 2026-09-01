@@ -107,11 +107,11 @@ Context `{ho: host}.
 Theorem valid_rocq_prime_example : ValidModule rocq_prime_example.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_rocq_prime_example__prime_properties : ValidSpec rocq_prime_example rocq_prime_example__prime_properties_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.

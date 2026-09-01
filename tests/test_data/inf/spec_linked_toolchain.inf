@@ -32,8 +32,8 @@
 //
 // Both obligations were chosen to be true of the merged bodies — adding zero
 // saturates nowhere, and a zero-length walk reads nothing — but nothing here
-// establishes that. The `coqc` gate rewrites every `Qed.` to `Admitted.` before
-// compiling, so it checks that the obligations are well-typed and says nothing
+// establishes that. The `coqc` gate compiles the generated direct `Admitted.`
+// stubs, so it checks that the obligations are well-typed and says nothing
 // about whether they hold; a false one would pass it just as quietly. Closing
 // that needs a discharge against the real verifier, as the reachability and
 // aggregate fixtures got.

@@ -14,12 +14,10 @@
 //! The stub encodes the contract *as the emitter writes it* (see the stub
 //! README). It provides signatures only — no semantics, no proofs — so this gate
 //! asserts **type-checking**, not that proofs close. The emitted per-spec
-//! theorems carry an unfilled `(* TODO *)` proof terminated by `Qed.`, which
-//! `coqc` rejects as incomplete; [`admit_open_proofs`] rewrites those `Qed.`
-//! terminators to `Admitted.` so `coqc` still fully elaborates every `Definition`
-//! (the module record and all instruction terms, where arity bugs live) and
-//! every theorem *statement* (where a `ValidModule` drift would surface) without
-//! demanding a closed proof.
+//! theorems carry an unfilled `(* TODO *)` proof terminated by `Admitted.`, so
+//! `coqc` still fully elaborates every `Definition` (the module record and all
+//! instruction terms, where arity bugs live) and every theorem *statement*
+//! (where a `ValidModule` drift would surface) without demanding a closed proof.
 //!
 //! `coqc` gating: the compile step runs only when `coqc` is available (via the
 //! `COQC` environment variable, else `coqc` on `PATH`). When it is absent the
@@ -337,10 +335,11 @@ mod gate {
         // obligation covers.
         //
         // `spec_narrow_discharge.inf` is the third, and is here for a reason
-        // this gate cannot itself deliver: it type-checks, but it rewrites
-        // `Qed.` to `Admitted.` first, so it can no more tell a correct bound
-        // from a false one than it can tell a proof from a stub. That fixture's
-        // two obligations are discharged for real against wasm-verifier
+        // this gate cannot itself deliver: generated proof skeletons already
+        // end in `Admitted.`, so it establishes type-checking but can no more
+        // tell a correct bound from a false one than establish a proof's truth
+        // or closure. That fixture's two obligations are discharged for real
+        // against wasm-verifier
         // (`theories/examples/Issue357NarrowDomainExample.v`), where the proof
         // stops closing if either bound is dropped or loosened by one. Its
         // presence here keeps the emitted text and the discharged text from
@@ -533,40 +532,6 @@ mod gate {
             .unwrap_or_else(|e| panic!("wasm_to_v failed for {file}: {e}"))
     }
 
-    /// Rewrites each `Qed.`-only line to `Admitted.` so `coqc` type-checks the
-    /// statements and definitions without requiring the emitted `(* TODO *)`
-    /// proofs to close. The match is whitespace-tolerant: a line is rewritten
-    /// when its content is exactly `Qed.` after trimming surrounding whitespace,
-    /// preserving the line's original leading indentation and newline bytes. A
-    /// stricter column-0 match would be silently skipped if a future emitter
-    /// indented the terminator, and the skip would surface as a misleading
-    /// `coqc` "incomplete proof" error rather than the type error this gate
-    /// exists to catch. The emitter only ever writes `Qed.` for these unfilled
-    /// per-spec theorem stubs, so this never downgrades a genuinely closed proof.
-    fn admit_open_proofs(v: &str) -> String {
-        let mut out = String::with_capacity(v.len());
-        for line in v.split_inclusive('\n') {
-            let content = line.trim_end_matches(['\r', '\n']);
-            if content.trim() == "Qed." {
-                let newline = &line[content.len()..];
-                let indent = &content[..content.len() - content.trim_start().len()];
-                out.push_str(indent);
-                out.push_str("Admitted.");
-                out.push_str(newline);
-            } else {
-                out.push_str(line);
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn admit_open_proofs_rewrites_qed_variants() {
-        let input = "Qed.\n  Qed.\r\n(* not a terminator: Qed. *)\nQed.";
-        let expected = "Admitted.\n  Admitted.\r\n(* not a terminator: Qed. *)\nAdmitted.";
-        assert_eq!(admit_open_proofs(input), expected);
-    }
-
     /// One generated module this suite hands to `coqc`.
     struct GatedModule {
         /// The fixture file for a corpus entry, the module name for a
@@ -575,8 +540,8 @@ mod gate {
         /// The name the translator was given; also the `.v` basename written
         /// into the work directory.
         module: &'static str,
-        /// Exactly the text `coqc` is handed — `Qed.` terminators already
-        /// rewritten by [`admit_open_proofs`].
+        /// Exactly the translator output handed to `coqc`, including direct
+        /// admissions for unfinished generated proofs.
         v: String,
     }
 
@@ -638,7 +603,7 @@ mod gate {
             GatedModule {
                 source: module,
                 module,
-                v: admit_open_proofs(&v),
+                v,
             }
         }
     }
@@ -651,7 +616,7 @@ mod gate {
             .map(|&(source, module)| GatedModule {
                 source,
                 module,
-                v: admit_open_proofs(&generate_v(source, module)),
+                v: generate_v(source, module),
             })
             .chain(
                 LINKED_CORPUS
@@ -659,10 +624,37 @@ mod gate {
                     .map(|&(source, module, externals)| GatedModule {
                         source,
                         module,
-                        v: admit_open_proofs(&generate_linked_v(source, module, externals)),
+                        v: generate_linked_v(source, module, externals),
                     }),
             )
             .collect()
+    }
+
+    /// The stub gate must hand `coqc` the translator's raw proof skeleton, not
+    /// a test-side rewrite. `with_spec.inf` is the first corpus producer and
+    /// has both the unconditional module theorem and its per-spec theorem, so
+    /// one direct comparison covers each ordinary generated proof family.
+    #[test]
+    fn corpus_gate_hands_coqc_raw_direct_admission_output() {
+        let gated = corpus_modules()
+            .into_iter()
+            .find(|module| module.source == "with_spec.inf")
+            .expect("with_spec.inf is a Rocq corpus fixture");
+        let raw = generate_v("with_spec.inf", "with_spec");
+
+        assert_eq!(
+            gated.v, raw,
+            "the coqc gate must receive raw translator output, without a test-side proof rewrite",
+        );
+        const OPEN_PROOF_SKELETON: &str = "Proof.\n  (* TODO: fill the proof *)\nAdmitted.\n";
+        assert!(
+            raw.contains(OPEN_PROOF_SKELETON),
+            "the raw translator output must carry a direct-admission skeleton:\n{raw}",
+        );
+        assert!(
+            !raw.lines().any(|line| line.trim() == "Qed."),
+            "the raw translator output must not close an unfinished proof with `Qed.`:\n{raw}",
+        );
     }
 
     /// Every module this suite compiles with `coqc`: the whole corpus plus every
@@ -3229,9 +3221,10 @@ End Host.
     /// signed `0 <= i` half of the `assume` is what rules out the negative
     /// indices that reach it as huge unsigned values; drop either half and an
     /// admitted index traps, which makes the obligation false rather than
-    /// merely weaker. Nothing downstream would say so — the gate below rewrites
-    /// `Qed.` to `Admitted.`, so it type-checks a false obligation as readily
-    /// as a true one.
+    /// merely weaker. Nothing downstream would say so — generated proof
+    /// skeletons already end in `Admitted.`, so the gate establishes
+    /// type-checking but accepts a false obligation as readily as a true one
+    /// and cannot establish its truth or proof closure.
     ///
     /// Record indices are read off the module record rather than written down,
     /// so a reordering fails as a missing definition instead of as a needle

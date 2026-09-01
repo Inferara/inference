@@ -411,12 +411,12 @@ Context `{ho: host}.
 Theorem valid_rocq_spec_shapes : ValidModule rocq_spec_shapes.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_rocq_spec_shapes__Shapes : ValidSpec rocq_spec_shapes rocq_spec_shapes__Shapes_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.
 ```
@@ -449,10 +449,12 @@ Notes on the shape, in emission order:
   [Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot)), then one
   `ValidSpec` theorem per spec, each named `valid_<mod>__<Spec>` and
   consuming that spec's `_specs` definition. Every theorem carries an
-  unfilled `(* TODO: fill the proof *)` body terminated by `Qed.` — the
-  prover worker is what fills these; the `coqc` type-check gate
-  (`tests/src/rocq_typecheck.rs`) rewrites `Qed.` to `Admitted.` before
-  compiling so it can assert *type-checking*, not proof closure.
+  unfilled `(* TODO: fill the proof *)` body terminated by `Admitted.`.
+  Freshly generated `.v` files therefore type-check unchanged in the
+  `coqc` gate (`tests/src/rocq_typecheck.rs`), but their admitted
+  skeletons remain unproved assumptions. The prover worker completes a
+  theorem by replacing `Admitted.` with a real proof ending in `Qed.`;
+  proof closure requires a downstream admission/assumption audit.
 
 ### Reachability additions to the anatomy
 
@@ -591,17 +593,17 @@ Context `{ho: host}.
 Theorem valid_rocq_exists_spec : ValidModule rocq_exists_spec.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_rocq_exists_spec__ReachableDouble : ValidSpec rocq_exists_spec rocq_exists_spec__ReachableDouble_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_exists_rocq_exists_spec__ReachableDouble : ValidExistsSpec rocq_exists_spec rocq_exists_spec__ReachableDouble__ex_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.
 ```
@@ -1348,8 +1350,8 @@ Suppressing the guard in retained bodies was the alternative, and it was
 rejected: the body the judgment reduces would then differ from the body
 that ships, which is the exact failure `verified = deployed` exists to
 prevent. Rejecting at code generation is also the only place the shape
-can be caught, since the `coqc` gate rewrites every `Qed.` to
-`Admitted.` and so establishes type-checking, never truth.
+can be caught, since the `coqc` gate type-checks admitted skeletons and
+therefore establishes type-checking, never truth.
 
 ## Custom WASM sections
 
@@ -1684,6 +1686,13 @@ live, and both are met elsewhere: the kind travels in
 there, and the `@`-to-parameter lowering applies to every spec function
 this compiler emits (see [The proof-mode artifact is standard
 WebAssembly](#the-proof-mode-artifact-is-standard-webassembly)).
+
+Current generated proof skeletons end in `Admitted.`. Consumers that
+previously matched or rewrote `Qed.` must instead accept the emitted
+admission unchanged, and must run an admission/assumption audit before
+claiming proof closure. A completed downstream proof replaces
+`Admitted.` with proof tactics ending in `Qed.`; type-checking the
+generated skeleton alone does not establish that closure.
 
 ## Translation scheme summary
 

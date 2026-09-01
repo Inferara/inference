@@ -202,6 +202,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Rocq Translation
 
+- Generated proof skeletons now end in `Admitted.` directly, so the
+  `coqc` gate type-checks its raw generated input without rewriting
+  `Qed.` terminators. The admission is deliberately a proof hole:
+  downstream completion replaces it with proof tactics ending in `Qed.`,
+  and an admission/assumption audit remains required before claiming
+  proof closure. No theorem statements, obligations, WASM output,
+  compile mode, or CLI behavior changed. Migration: consumers that
+  matched or rewrote generated `Qed.` must accept `Admitted.` and add the
+  closure audit ([#358])
+
 - A data segment's bytes are now spelled `(encode N%Zst)` for every value, and a module carrying one no longer emits `Open Scope byte_scope.`. The previous emission used coq-wasm's two-digit hex notations where they exist, which **did not type-check against the real library** for any byte containing a hex digit `A`-`F`: upstream declares `Notation "#FF" := (encode (#F * 16 + #F))` over `Notation "#F" := 15`, a `nat` literal, while `encode : Z -> byte` — so an emitted module opening `byte_scope` but not `Z_scope` was rejected with `The term "15" has type "nat" while it is expected to have type "Z"`. Only bytes whose two hex digits are both `0`-`9`, minus the twelve values upstream's block skips, survived: **92 of 256**. The vendored signature stub hid this completely, because its own hand-written notation block is declared over its own opaque `encode`, so every gate was green while the artifact the prover consumes was unparseable. Measured after the change: all 32 modules the gate builds type-check against the real coq-wasm v2.2.0 + wasm-verifier libraries, including the two carrying data segments. No committed golden moves — no `.inf` corpus fixture produces a data segment, so the shape was reachable only through a hand-assembled module ([#359], refs [#346])
 
 - A spec carrying an `exists` obligation no longer aliases a sibling spec's universal list. The gathering list was emitted as `<mod>__<Spec>_ex_specs : list reachability_spec`, which is spelled identically to the universal `<mod>__<Spec>_ex_specs : list hassert` of a sibling spec literally named `<Spec>_ex` — **one name, two `Definition`s, two different types, in one file**, written at exit 0 with no diagnostic and refused only by `coqc` with `Error: <name> already exists.`; `unique` aliased a `<Spec>_uq` sibling the same way. The two list suffixes now join with the reserved `__` run, so the aliasing is impossible by construction rather than rejected after the fact: a spec name may neither contain `__` nor end in `_`, so `<Spec>__ex_specs` is a string no sibling can forge. An exhaustive tail-suffix analysis over the whole emitted-name surface found exactly two collidable pairs — `_specs` against `_ex_specs` and against `_uq_specs` — and both witnesses become inadmissible under the doubled join, so only those two suffixes move; the per-obligation `_exspec{k}`/`_uqspec{k}` records keep their single `_` because they end in a decimal digit where a list ends in `s`, and all three theorem names are provably collision-free. The name is spelled in two independent places, the definition site (which builds it from a suffix binding and so is invisible to a grep for `_ex_specs`) and the theorem body, so a partial edit would emit a theorem naming a list that does not exist. `rocq_name_collisions.inf` grows both colliding pairs; no corpus entry could reach the shape before, because it needs one spec whose name is another spec's name followed by the emitter's own tag. Migration: a downstream proof naming a reachability list renames it to the doubled form ([#364])
@@ -650,6 +660,7 @@ Initial tagged release.
 [#413]: https://github.com/Inferara/inference/issues/413
 [#416]: https://github.com/Inferara/inference/issues/416
 [#355]: https://github.com/Inferara/inference/issues/355
+[#358]: https://github.com/Inferara/inference/issues/358
 [#420]: https://github.com/Inferara/inference/issues/420
 [#423]: https://github.com/Inferara/inference/issues/423
 [#364]: https://github.com/Inferara/inference/issues/364

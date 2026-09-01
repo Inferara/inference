@@ -114,11 +114,11 @@ Context `{ho: host}.
 Theorem valid_spec_literal_ctx : ValidModule spec_literal_ctx.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_spec_literal_ctx__LiteralPositions : ValidSpec spec_literal_ctx spec_literal_ctx__LiteralPositions_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.
