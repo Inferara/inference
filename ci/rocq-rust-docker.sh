@@ -27,6 +27,30 @@ case "$cargo_subcommand" in
         ;;
 esac
 
+locked_count=0
+offline_count=0
+after_separator=0
+for cargo_argument in "$@"; do
+    if [ "$cargo_argument" = -- ]; then
+        after_separator=1
+    elif [ "$after_separator" -eq 0 ]; then
+        case "$cargo_argument" in
+            --locked) locked_count=$((locked_count + 1)) ;;
+            --offline) offline_count=$((offline_count + 1)) ;;
+        esac
+    fi
+done
+if [ "$locked_count" -gt 1 ] || [ "$offline_count" -gt 1 ]; then
+    echo "$0: duplicate Cargo lock or offline option" >&2
+    exit 2
+fi
+if [ "$locked_count" -eq 0 ]; then
+    set -- --locked "$@"
+fi
+if [ "$offline_count" -eq 0 ]; then
+    set -- --offline "$@"
+fi
+
 repo_root=$(
     CDPATH=
     export CDPATH
@@ -197,4 +221,4 @@ fi
         export RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu
         cargo_path=$(rustup which cargo)
         exec "$cargo_path" "$@"
-    ' sh "$cargo_subcommand" --locked --offline --manifest-path /workspace/Cargo.toml "$@"
+    ' sh "$cargo_subcommand" --manifest-path /workspace/Cargo.toml "$@"

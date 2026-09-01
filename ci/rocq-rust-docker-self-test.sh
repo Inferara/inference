@@ -42,6 +42,16 @@ has_arg() { wanted=$1; shift; for value in "$@"; do [ "$value" = "$wanted" ] && 
 has_pair() { wanted=$1; expected=$2; shift 2; previous=; for value in "$@"; do [ "$previous" = "$wanted" ] && [ "$value" = "$expected" ] && return 0; previous=$value; done; return 1; }
 require_arg() { has_arg "$1" "$@" || { echo "fake docker: missing argv $1" >&2; exit 73; }; }
 require_pair() { has_pair "$1" "$2" "$@" || { echo "fake docker: missing argv pair $1 $2" >&2; exit 74; }; }
+count_before_separator() {
+    wanted=$1
+    shift
+    count=0
+    for value in "$@"; do
+        [ "$value" = -- ] && break
+        [ "$value" = "$wanted" ] && count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
 require_hardened() {
     require_arg --read-only "$@"; require_pair --cap-drop ALL "$@"; require_pair --security-opt no-new-privileges "$@"; require_pair --tmpfs /tmp "$@"
     for value in "$@"; do case "$value" in *docker.sock*) echo 'fake docker: Docker socket mount is forbidden' >&2; exit 75;; esac; done
@@ -89,6 +99,8 @@ if [ "$1" = run ]; then
             require_arg 'rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922' "$@"
             require_pair --network none "$@"; require_hardened "$@"; require_pair -e CARGO_HOME=/cargo-home "$@"; require_pair -e CARGO_TARGET_DIR=/cargo-target "$@"
             require_arg test "$@"; require_arg --locked "$@"; require_arg --offline "$@"; require_pair --manifest-path /workspace/Cargo.toml "$@"
+            [ "$(count_before_separator --locked "$@")" = 1 ] || { echo 'fake docker: expected one --locked before Cargo separator' >&2; exit 78; }
+            [ "$(count_before_separator --offline "$@")" = 1 ] || { echo 'fake docker: expected one --offline before Cargo separator' >&2; exit 79; }
             case "$script" in *'RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu'*'cargo_path=$(rustup which cargo)'*'exec "$cargo_path" "$@"'*) ;; *) echo 'fake docker: execution must use rustup-resolved Cargo' >&2; exit 77;; esac
             touch "$state/offline-contract"
             ;;
@@ -118,6 +130,8 @@ source_name=$(cat "$state/source-name")
 test ! -d "$(volume_dir "$source_name")"
 test -d "$(volume_dir inference-cargo-home-rust-1.98)"
 test -d "$(volume_dir inference-cargo-target-rust-1.98)"
+
+run_runner clean cargo test --locked --offline -p inference-tests rocq_typecheck:: -- --exact
 
 expect_failure corrupt env FAKE_DOCKER_CORRUPT_LANE_LOCK=1 FAKE_DOCKER_STATE="$state" FAKE_DOCKER_FIXTURE="$fixture" DOCKER="$fake_docker" "$fixture/ci/rocq-rust-docker.sh" cargo test
 grep -F 'snapshot lane lock mismatch' "$work/corrupt.err" >/dev/null
