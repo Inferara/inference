@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod cases;
 #[cfg(test)]
@@ -33,45 +34,77 @@ fn export_with_generator<F>(exchange: &Path, mut generate: F) -> Result<protocol
 where
     F: FnMut(&cases::CaseSpec) -> Result<Vec<u8>>,
 {
+    export_with_generator_and_hook(exchange, &mut generate, |_| Ok(()))
+}
+
+enum ExportEvent<'a> {
+    RawDirectoryCreated(&'a Path),
+    RawArtifactWritten(&'a Path),
+    RequestTemporaryWritten(&'a Path),
+}
+
+fn export_with_generator_and_hook<F, H>(
+    exchange: &Path,
+    mut generate: F,
+    mut hook: H,
+) -> Result<protocol::Request>
+where
+    F: FnMut(&cases::CaseSpec) -> Result<Vec<u8>>,
+    H: for<'a> FnMut(ExportEvent<'a>) -> Result<()>,
+{
     let exchange = require_empty_exchange(exchange)?;
-    let mut transaction = ExportTransaction::new(exchange);
-    let raw_dir = transaction.create_raw_dir()?;
-    let repository = repository_root();
-    let mut raw_cases = Vec::with_capacity(cases::CASES.len());
+    let mut transaction = ExportTransaction::new(exchange)?;
+    let result = (|| {
+        let raw_dir = transaction.create_raw_dir()?;
+        hook(ExportEvent::RawDirectoryCreated(&raw_dir))?;
+        let repository = repository_root();
+        let mut raw_cases = Vec::with_capacity(cases::CASES.len());
 
-    for case in cases::CASES {
-        let generated = generate(case)
-            .with_context(|| format!("fresh-generate Rocq artifact for `{}`", case.id()))?;
-        let golden_path = repository.join(case.golden_path());
-        let golden = std::fs::read(&golden_path)
-            .with_context(|| format!("read committed golden {}", golden_path.display()))?;
-        if generated != golden {
-            bail!(
-                "fresh Rocq artifact for `{}` differs from committed golden {}",
-                case.id(),
-                golden_path.display()
-            );
+        for case in cases::CASES {
+            let generated = generate(case)
+                .with_context(|| format!("fresh-generate Rocq artifact for `{}`", case.id()))?;
+            let golden_path = repository.join(case.golden_path());
+            let golden = std::fs::read(&golden_path)
+                .with_context(|| format!("read committed golden {}", golden_path.display()))?;
+            if generated != golden {
+                bail!(
+                    "fresh Rocq artifact for `{}` differs from committed golden {}",
+                    case.id(),
+                    golden_path.display()
+                );
+            }
+
+            let raw_path = raw_dir.join(case.raw_basename());
+            let mut file = transaction.create_raw_file(&raw_path)?;
+            file.write_all(&generated)
+                .with_context(|| format!("write raw artifact {}", raw_path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync raw artifact {}", raw_path.display()))?;
+            drop(file);
+            let written = std::fs::read(&raw_path)
+                .with_context(|| format!("read written raw artifact {}", raw_path.display()))?;
+            if written != generated {
+                bail!("raw integrity failure while exporting `{}`", case.id());
+            }
+            hook(ExportEvent::RawArtifactWritten(&raw_path))?;
+            raw_cases.push((case, protocol::RawHash::of(&written)));
         }
 
-        let raw_path = raw_dir.join(case.raw_basename());
-        let mut file = transaction.create_raw_file(&raw_path)?;
-        file.write_all(&generated)
-            .with_context(|| format!("write raw artifact {}", raw_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync raw artifact {}", raw_path.display()))?;
-        drop(file);
-        let written = std::fs::read(&raw_path)
-            .with_context(|| format!("read written raw artifact {}", raw_path.display()))?;
-        if written != generated {
-            bail!("raw integrity failure while exporting `{}`", case.id());
-        }
-        raw_cases.push((case, protocol::RawHash::of(&written)));
+        let request = protocol::Request::from_raw(&pin::Pin::read()?, raw_cases);
+        transaction.publish_request(&protocol::serialize_request(&request)?, &mut hook)?;
+        transaction.commit();
+        Ok(request)
+    })();
+
+    match result {
+        Ok(request) => Ok(request),
+        Err(error) => match transaction.rollback() {
+            Ok(()) => Err(error),
+            Err(rollback) => {
+                Err(error.context(format!("export rollback incomplete: {rollback:#}")))
+            }
+        },
     }
-
-    let request = protocol::Request::from_raw(&pin::Pin::read()?, raw_cases);
-    transaction.publish_request(&protocol::serialize_request(&request)?)?;
-    transaction.commit();
-    Ok(request)
 }
 
 fn verify(_exchange: &Path) -> Result<&'static str> {
@@ -116,30 +149,126 @@ fn require_empty_exchange(exchange: &Path) -> Result<PathBuf> {
     Ok(exchange)
 }
 
+static NEXT_EXPORT_TRANSACTION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnedKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug)]
+struct OwnedEntry {
+    path: PathBuf,
+    identity: same_file::Handle,
+    kind: OwnedKind,
+    staging: bool,
+}
+
+impl OwnedEntry {
+    fn capture(path: PathBuf, kind: OwnedKind, staging: bool) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect newly created export entry {}", path.display()))?;
+        if !kind.matches(&metadata) {
+            bail!(
+                "newly created export entry has unexpected type: {}",
+                path.display()
+            );
+        }
+        Ok(Self {
+            identity: same_file::Handle::from_path(&path).with_context(|| {
+                format!("open identity handle for export entry {}", path.display())
+            })?,
+            path,
+            kind,
+            staging,
+        })
+    }
+
+    fn from_file(path: PathBuf, file: &std::fs::File, staging: bool) -> Result<Self> {
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspect newly created export file {}", path.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "newly created export file has unexpected type: {}",
+                path.display()
+            );
+        }
+        Ok(Self {
+            identity: same_file::Handle::from_file(file.try_clone().with_context(|| {
+                format!("clone identity handle for export file {}", path.display())
+            })?)
+            .with_context(|| format!("read identity for export file {}", path.display()))?,
+            path,
+            kind: OwnedKind::File,
+            staging,
+        })
+    }
+
+    fn matches(&self, path: &Path, metadata: &std::fs::Metadata) -> Result<bool> {
+        if !self.kind.matches(metadata) {
+            return Ok(false);
+        }
+        let candidate = match same_file::Handle::from_path(path) {
+            Ok(candidate) => candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("open identity handle for {}", path.display()));
+            }
+        };
+        Ok(self.identity == candidate)
+    }
+}
+
+impl OwnedKind {
+    fn matches(self, metadata: &std::fs::Metadata) -> bool {
+        let file_type = metadata.file_type();
+        !file_type.is_symlink()
+            && match self {
+                Self::File => file_type.is_file(),
+                Self::Directory => file_type.is_dir(),
+            }
+    }
+}
+
 struct ExportTransaction {
     exchange: PathBuf,
-    raw_dir: Option<PathBuf>,
-    raw_files: Vec<PathBuf>,
-    request_temporary: Option<PathBuf>,
-    committed: bool,
+    staging: PathBuf,
+    staging_raw_files: Vec<PathBuf>,
+    owned: Vec<OwnedEntry>,
+    finished: bool,
 }
 
 impl ExportTransaction {
-    fn new(exchange: PathBuf) -> Self {
-        Self {
+    fn new(exchange: PathBuf) -> Result<Self> {
+        let sequence = NEXT_EXPORT_TRANSACTION.fetch_add(1, Ordering::Relaxed);
+        let staging = exchange.join(format!(
+            ".rocq-discharge-export-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&staging)
+            .with_context(|| format!("create unique export staging {}", staging.display()))?;
+        let staging_owner = OwnedEntry::capture(staging.clone(), OwnedKind::Directory, true)?;
+        Ok(Self {
             exchange,
-            raw_dir: None,
-            raw_files: Vec::new(),
-            request_temporary: None,
-            committed: false,
-        }
+            staging,
+            staging_raw_files: Vec::new(),
+            owned: vec![staging_owner],
+            finished: false,
+        })
     }
 
     fn create_raw_dir(&mut self) -> Result<PathBuf> {
-        let raw_dir = self.exchange.join("raw");
+        let raw_dir = self.staging.join("raw");
         std::fs::create_dir(&raw_dir)
             .with_context(|| format!("create raw directory {}", raw_dir.display()))?;
-        self.raw_dir = Some(raw_dir.clone());
+        self.owned.push(OwnedEntry::capture(
+            raw_dir.clone(),
+            OwnedKind::Directory,
+            true,
+        )?);
         Ok(raw_dir)
     }
 
@@ -149,61 +278,196 @@ impl ExportTransaction {
             .create_new(true)
             .open(path)
             .with_context(|| format!("create raw artifact {}", path.display()))?;
-        self.raw_files.push(path.to_path_buf());
+        self.owned
+            .push(OwnedEntry::from_file(path.to_path_buf(), &file, true)?);
+        self.staging_raw_files.push(path.to_path_buf());
         Ok(file)
     }
 
-    fn publish_request(&mut self, bytes: &[u8]) -> Result<()> {
-        let temporary = self.exchange.join(".request.json.tmp");
+    fn publish_request<H>(&mut self, bytes: &[u8], hook: &mut H) -> Result<()>
+    where
+        H: for<'a> FnMut(ExportEvent<'a>) -> Result<()>,
+    {
+        let temporary = self.staging.join("request.json.tmp");
         let final_path = self.exchange.join("request.json");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
             .with_context(|| format!("create temporary request {}", temporary.display()))?;
-        self.request_temporary = Some(temporary.clone());
+        self.owned
+            .push(OwnedEntry::from_file(temporary.clone(), &file, true)?);
         file.write_all(bytes)
             .with_context(|| format!("write temporary request {}", temporary.display()))?;
         file.sync_all()
             .with_context(|| format!("sync temporary request {}", temporary.display()))?;
         drop(file);
-        std::fs::rename(&temporary, &final_path).with_context(|| {
+        hook(ExportEvent::RequestTemporaryWritten(&temporary))?;
+
+        let final_raw = self.exchange.join("raw");
+        std::fs::create_dir(&final_raw)
+            .with_context(|| format!("create published raw directory {}", final_raw.display()))?;
+        self.owned.push(OwnedEntry::capture(
+            final_raw.clone(),
+            OwnedKind::Directory,
+            false,
+        )?);
+        for staging_path in &self.staging_raw_files {
+            let basename = staging_path
+                .file_name()
+                .context("staged raw artifact has no basename")?;
+            let published_path = final_raw.join(basename);
+            std::fs::hard_link(staging_path, &published_path).with_context(|| {
+                format!(
+                    "publish raw artifact {} as {}",
+                    staging_path.display(),
+                    published_path.display()
+                )
+            })?;
+            self.owned
+                .push(OwnedEntry::capture(published_path, OwnedKind::File, false)?);
+        }
+
+        std::fs::hard_link(&temporary, &final_path).with_context(|| {
             format!(
-                "atomically publish request {} as {}",
+                "atomically publish request without clobbering {} as {}",
                 temporary.display(),
                 final_path.display()
             )
         })?;
-        self.request_temporary = None;
+        self.owned
+            .push(OwnedEntry::capture(final_path, OwnedKind::File, false)?);
+        self.remove_staging_entries()?;
         Ok(())
     }
 
-    fn commit(mut self) {
-        self.committed = true;
+    fn remove_staging_entries(&mut self) -> Result<()> {
+        for entry in self.owned.iter().filter(|entry| entry.staging).rev() {
+            remove_exact_owned(entry)?;
+        }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let mut observed = Vec::new();
+        collect_exchange_entries(&self.exchange, &mut observed)?;
+        let mut failures = Vec::new();
+        for (path, metadata) in observed {
+            let owner = match self.matching_owner(&path, &metadata) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    failures.push(format!("{}: {error:#}", path.display()));
+                    continue;
+                }
+            };
+            if let Some(owner) = owner
+                && let Err(error) = remove_if_still_owned(&path, owner)
+            {
+                failures.push(format!("{}: {error:#}", path.display()));
+            }
+        }
+        if failures.is_empty() {
+            self.finished = true;
+            Ok(())
+        } else {
+            bail!("{}", failures.join("; "))
+        }
+    }
+
+    fn matching_owner(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<Option<&OwnedEntry>> {
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let candidate = same_file::Handle::from_path(path)
+            .with_context(|| format!("open rollback identity handle for {}", path.display()))?;
+        Ok(self
+            .owned
+            .iter()
+            .find(|owner| owner.kind.matches(metadata) && owner.identity == candidate))
+    }
+
+    fn commit(&mut self) {
+        self.finished = true;
     }
 }
 
 impl Drop for ExportTransaction {
     fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        if let Some(temporary) = self.request_temporary.take() {
-            let _ = std::fs::remove_file(temporary);
-        }
-        for raw_file in self.raw_files.drain(..).rev() {
-            let _ = std::fs::remove_file(raw_file);
-        }
-        if let Some(raw_dir) = self.raw_dir.take() {
-            let _ = std::fs::remove_dir(raw_dir);
-        }
+        let _ = self.rollback();
     }
+}
+
+fn collect_exchange_entries(
+    directory: &Path,
+    entries: &mut Vec<(PathBuf, std::fs::Metadata)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory)
+        .with_context(|| format!("scan export entry directory {}", directory.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("read export entry in {}", directory.display()))?
+            .path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect export rollback candidate {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_exchange_entries(&path, entries)?;
+        }
+        entries.push((path, metadata));
+    }
+    Ok(())
+}
+
+fn remove_exact_owned(entry: &OwnedEntry) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(&entry.path)
+        .with_context(|| format!("inspect owned staging entry {}", entry.path.display()))?;
+    if !entry.matches(&entry.path, &metadata)? {
+        bail!(
+            "owned staging entry was replaced; refusing to remove {}",
+            entry.path.display()
+        );
+    }
+    remove_owned_path(&entry.path, entry.kind)
+}
+
+fn remove_if_still_owned(path: &Path, owner: &OwnedEntry) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reinspect rollback entry {}", path.display()));
+        }
+    };
+    if !owner.matches(path, &metadata)? {
+        return Ok(());
+    }
+    remove_owned_path(path, owner.kind)
+}
+
+fn remove_owned_path(path: &Path, kind: OwnedKind) -> Result<()> {
+    match kind {
+        OwnedKind::File => std::fs::remove_file(path),
+        OwnedKind::Directory => std::fs::remove_dir(path),
+    }
+    .with_context(|| format!("remove owned export entry {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::cases::CASES;
-    use super::{export, export_cli, export_with_generator};
+    use super::{
+        ExportEvent, export, export_cli, export_with_generator, export_with_generator_and_hook,
+    };
     use std::collections::BTreeSet;
     use std::path::Path;
 
@@ -324,6 +588,7 @@ mod tests {
             BTreeSet::new(),
             "failed export left partial raw artifacts behind"
         );
+        export(exchange.path()).expect("empty rollback result must be immediately retryable");
     }
 
     #[test]
@@ -350,6 +615,273 @@ mod tests {
             std::fs::read(injected_request.join("sentinel")).expect("read foreign sentinel"),
             b"foreign",
             "rollback removed or changed a foreign entry"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_a_foreign_raw_directory_replacement() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let moved_owned = outside.path().join("moved-owned-raw");
+        let outside_sentinel = outside.path().join("sentinel");
+        std::fs::write(&outside_sentinel, b"outside").expect("write outside sentinel");
+        let mut replacement = None;
+
+        let error = export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RawDirectoryCreated(path) = event {
+                    std::fs::rename(path, &moved_owned).expect("move owned raw outside exchange");
+                    std::fs::create_dir(path).expect("install foreign raw directory");
+                    replacement = Some(path.to_path_buf());
+                    anyhow::bail!("injected raw-directory substitution");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("raw-directory substitution must fail export");
+
+        assert!(
+            format!("{error:#}").contains("injected raw-directory substitution"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            replacement.expect("record replacement path").is_dir(),
+            "rollback deleted a foreign raw-directory replacement"
+        );
+        assert!(
+            moved_owned.is_dir(),
+            "rollback must not discover and delete an owned object moved outside the exchange"
+        );
+        assert_eq!(
+            std::fs::read(&outside_sentinel).expect("read outside sentinel"),
+            b"outside",
+            "rollback changed data outside the exchange"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_preserves_foreign_raw_file_and_symlink_replacements() {
+        for replacement_kind in ["file", "symlink"] {
+            let exchange = tempfile::tempdir().expect("create exchange");
+            let outside = tempfile::tempdir().expect("create outside directory");
+            let moved_owned = outside.path().join("moved-owned-raw");
+            let outside_sentinel = outside.path().join("sentinel");
+            std::fs::write(&outside_sentinel, b"outside").expect("write outside sentinel");
+            let mut replacement = None;
+
+            export_with_generator_and_hook(
+                exchange.path(),
+                |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+                |event| {
+                    if let ExportEvent::RawDirectoryCreated(path) = event {
+                        std::fs::rename(path, &moved_owned)
+                            .expect("move owned raw outside exchange");
+                        match replacement_kind {
+                            "file" => {
+                                std::fs::write(path, b"foreign raw replacement")
+                                    .expect("install foreign raw file");
+                            }
+                            "symlink" => {
+                                std::os::unix::fs::symlink(&outside_sentinel, path)
+                                    .expect("install foreign raw symlink");
+                            }
+                            _ => unreachable!(),
+                        }
+                        replacement = Some(path.to_path_buf());
+                        anyhow::bail!("injected raw substitution");
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("raw substitution must fail export");
+
+            let replacement = replacement.expect("record replacement path");
+            let metadata =
+                std::fs::symlink_metadata(&replacement).expect("inspect foreign raw replacement");
+            assert_eq!(
+                (metadata.is_file(), metadata.file_type().is_symlink()),
+                (replacement_kind == "file", replacement_kind == "symlink"),
+                "rollback deleted a foreign {replacement_kind} raw replacement"
+            );
+            assert_eq!(
+                std::fs::read(&outside_sentinel).expect("read outside sentinel"),
+                b"outside",
+                "rollback followed a foreign raw symlink outside the exchange"
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_finds_owned_raw_renamed_inside_exchange_without_deleting_replacement() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let moved_owned = exchange.path().join("moved-owned-raw");
+        let mut replacement = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RawDirectoryCreated(path) = event {
+                    std::fs::rename(path, &moved_owned).expect("rename owned raw inside exchange");
+                    std::fs::create_dir(path).expect("install foreign raw directory");
+                    replacement = Some(path.to_path_buf());
+                    anyhow::bail!("injected in-exchange raw-directory substitution");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("raw-directory substitution must fail export");
+
+        assert!(
+            replacement.expect("record replacement path").is_dir(),
+            "rollback deleted a foreign raw-directory replacement"
+        );
+        assert!(
+            !moved_owned.exists(),
+            "rollback leaked a still-reachable owned raw directory"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_a_foreign_request_temporary_file_replacement() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let moved_owned = outside.path().join("moved-owned-request-temp");
+        let mut replacement = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RequestTemporaryWritten(path) = event {
+                    std::fs::rename(path, &moved_owned)
+                        .expect("move owned request temporary outside exchange");
+                    std::fs::write(path, b"foreign temporary")
+                        .expect("install foreign request temporary");
+                    replacement = Some(path.to_path_buf());
+                    anyhow::bail!("injected request-temporary substitution");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("request-temporary substitution must fail export");
+
+        let replacement = replacement.expect("record replacement path");
+        assert_eq!(
+            std::fs::read(replacement).expect("read foreign request temporary"),
+            b"foreign temporary",
+            "rollback deleted or changed a foreign request-temporary replacement"
+        );
+        assert!(
+            moved_owned.is_file(),
+            "rollback must not delete an owned object moved outside the exchange"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_a_foreign_request_temporary_directory_replacement() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let moved_owned = outside.path().join("moved-owned-request-temp");
+        let mut replacement = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RequestTemporaryWritten(path) = event {
+                    std::fs::rename(path, &moved_owned)
+                        .expect("move owned request temporary outside exchange");
+                    std::fs::create_dir(path).expect("install foreign request-temporary directory");
+                    replacement = Some(path.to_path_buf());
+                    anyhow::bail!("injected request-temporary directory substitution");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("request-temporary directory substitution must fail export");
+
+        assert!(
+            replacement.expect("record replacement path").is_dir(),
+            "rollback deleted a foreign request-temporary directory"
+        );
+        assert!(
+            moved_owned.is_file(),
+            "rollback must not delete an owned object moved outside the exchange"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_never_follows_or_deletes_a_foreign_request_temporary_symlink() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let moved_owned = outside.path().join("moved-owned-request-temp");
+        let outside_sentinel = outside.path().join("sentinel");
+        std::fs::write(&outside_sentinel, b"outside").expect("write outside sentinel");
+        let mut replacement = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RequestTemporaryWritten(path) = event {
+                    std::fs::rename(path, &moved_owned)
+                        .expect("move owned request temporary outside exchange");
+                    std::os::unix::fs::symlink(&outside_sentinel, path)
+                        .expect("install foreign request-temporary symlink");
+                    replacement = Some(path.to_path_buf());
+                    anyhow::bail!("injected request-temporary symlink substitution");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("request-temporary symlink substitution must fail export");
+
+        assert!(
+            std::fs::symlink_metadata(replacement.expect("record replacement path"))
+                .expect("inspect foreign request-temporary symlink")
+                .file_type()
+                .is_symlink(),
+            "rollback deleted a foreign request-temporary symlink"
+        );
+        assert_eq!(
+            std::fs::read(&outside_sentinel).expect("read outside sentinel"),
+            b"outside",
+            "rollback followed a foreign symlink outside the exchange"
+        );
+    }
+
+    #[test]
+    fn request_publication_never_overwrites_a_foreign_regular_file() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let foreign_request = exchange.path().join("request.json");
+
+        export_with_generator(exchange.path(), |case| {
+            if case.id() == "false-spec" {
+                std::fs::write(&foreign_request, b"foreign request")
+                    .expect("inject foreign regular request");
+            }
+            Ok(std::fs::read(repository_root().join(case.golden_path()))?)
+        })
+        .expect_err("foreign regular request must prevent publication");
+
+        assert_eq!(
+            std::fs::read(&foreign_request).expect("read foreign request"),
+            b"foreign request",
+            "request publication overwrote a foreign regular file"
+        );
+        assert!(
+            !exchange.path().join("raw").exists(),
+            "failed no-clobber publication left owned raw artifacts"
+        );
+        assert_eq!(
+            exchange_names(exchange.path()),
+            BTreeSet::from(["request.json".to_string()]),
+            "failed no-clobber publication removed or added foreign entries"
         );
     }
 
