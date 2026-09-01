@@ -71,10 +71,17 @@ if [ -n "${WASM_VERIFIER_CONTAINER:-}" ]; then
     docker cp "$file" "$WASM_VERIFIER_CONTAINER:$work/" >/dev/null
     docker exec -u root "$WASM_VERIFIER_CONTAINER" \
         chown -R "$user" "$work" >/dev/null
+    # A LOGIN shell, and `opam exec`, so the switch is resolved by opam rather
+    # than by a path written down here. A hardcoded `~/.opam/<switch>/bin` ties
+    # this script to one image's switch name and fails as an unexplained exit
+    # 127 ("coqc: not found") on any other. `WASM_VERIFIER_CONTAINER_PATH` stays
+    # as an override for an image that sets neither up.
     status=0
-    docker exec -u "$user" "$WASM_VERIFIER_CONTAINER" sh -c \
-        "PATH=${WASM_VERIFIER_CONTAINER_PATH:-/home/coq/.opam/4.13.1+flambda/bin}:\$PATH \
-         cd '$work' && coqc -R '$WASM_VERIFIER_THEORIES' WasmVerifier '$(basename "$file")'" \
+    docker exec -u "$user" "$WASM_VERIFIER_CONTAINER" bash -lc \
+        "${WASM_VERIFIER_CONTAINER_PATH:+PATH='$WASM_VERIFIER_CONTAINER_PATH':\$PATH; } \
+         cd '$work' && { command -v opam >/dev/null && exec opam exec -- \
+             coqc -R '$WASM_VERIFIER_THEORIES' WasmVerifier '$(basename "$file")'; } || \
+         exec coqc -R '$WASM_VERIFIER_THEORIES' WasmVerifier '$(basename "$file")'" \
         >&2 || status=$?
     docker exec -u root "$WASM_VERIFIER_CONTAINER" rm -rf "$work" >/dev/null || true
     exit "$status"
