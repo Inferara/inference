@@ -630,6 +630,33 @@ mod gate {
             .collect()
     }
 
+    /// The stub gate must hand `coqc` the translator's raw proof skeleton, not
+    /// a test-side rewrite. `with_spec.inf` is the first corpus producer and
+    /// has both the unconditional module theorem and its per-spec theorem, so
+    /// one direct comparison covers each ordinary generated proof family.
+    #[test]
+    fn corpus_gate_hands_coqc_raw_direct_admission_output() {
+        let gated = corpus_modules()
+            .into_iter()
+            .find(|module| module.source == "with_spec.inf")
+            .expect("with_spec.inf is a Rocq corpus fixture");
+        let raw = generate_v("with_spec.inf", "with_spec");
+
+        assert_eq!(
+            gated.v, raw,
+            "the coqc gate must receive raw translator output, without a test-side proof rewrite",
+        );
+        const OPEN_PROOF_SKELETON: &str = "Proof.\n  (* TODO: fill the proof *)\nAdmitted.\n";
+        assert!(
+            raw.contains(OPEN_PROOF_SKELETON),
+            "the raw translator output must carry a direct-admission skeleton:\n{raw}",
+        );
+        assert!(
+            !raw.lines().any(|line| line.trim() == "Qed."),
+            "the raw translator output must not close an unfinished proof with `Qed.`:\n{raw}",
+        );
+    }
+
     /// Every module this suite compiles with `coqc`: the whole corpus plus every
     /// hand-assembled module.
     ///
