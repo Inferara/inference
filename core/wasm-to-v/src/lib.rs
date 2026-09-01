@@ -2200,6 +2200,18 @@ mod reachability_emission {
             !output.contains("_hspec1"),
             "no universal obligation exists, so no `_hspec` definition may be emitted:\n{output}",
         );
+
+        const OPEN_PROOF_SKELETON: &str = "Proof.\n  (* TODO: fill the proof *)\nAdmitted.\n";
+        assert_eq!(
+            output.matches(OPEN_PROOF_SKELETON).count(),
+            4,
+            "the ValidModule, ValidSpec, ValidExistsSpec, and ValidUniqueSpec \
+             theorems must each carry the exact direct-admission skeleton:\n{output}",
+        );
+        assert!(
+            !output.lines().any(|line| line.trim() == "Qed."),
+            "generated unfinished proofs must use `Admitted.`, never `Qed.`:\n{output}",
+        );
     }
 
     /// A forall-only module keeps its pre-reachability output: the preamble

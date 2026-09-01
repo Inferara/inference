@@ -210,11 +210,11 @@ Context `{ho: host}.
 Theorem valid_spec_bounds_realization : ValidModule spec_bounds_realization.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_spec_bounds_realization__BoundsRealization : ValidSpec spec_bounds_realization spec_bounds_realization__BoundsRealization_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.

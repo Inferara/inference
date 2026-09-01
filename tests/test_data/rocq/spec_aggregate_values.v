@@ -94,11 +94,11 @@ Context `{ho: host}.
 Theorem valid_spec_aggregate_values : ValidModule spec_aggregate_values.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_spec_aggregate_values__AggregateValues : ValidSpec spec_aggregate_values spec_aggregate_values__AggregateValues_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.

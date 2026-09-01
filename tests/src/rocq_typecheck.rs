@@ -14,12 +14,10 @@
 //! The stub encodes the contract *as the emitter writes it* (see the stub
 //! README). It provides signatures only — no semantics, no proofs — so this gate
 //! asserts **type-checking**, not that proofs close. The emitted per-spec
-//! theorems carry an unfilled `(* TODO *)` proof terminated by `Qed.`, which
-//! `coqc` rejects as incomplete; [`admit_open_proofs`] rewrites those `Qed.`
-//! terminators to `Admitted.` so `coqc` still fully elaborates every `Definition`
-//! (the module record and all instruction terms, where arity bugs live) and
-//! every theorem *statement* (where a `ValidModule` drift would surface) without
-//! demanding a closed proof.
+//! theorems carry an unfilled `(* TODO *)` proof terminated by `Admitted.`, so
+//! `coqc` still fully elaborates every `Definition` (the module record and all
+//! instruction terms, where arity bugs live) and every theorem *statement*
+//! (where a `ValidModule` drift would surface) without demanding a closed proof.
 //!
 //! `coqc` gating: the compile step runs only when `coqc` is available (via the
 //! `COQC` environment variable, else `coqc` on `PATH`). When it is absent the
@@ -530,40 +528,6 @@ mod gate {
             .unwrap_or_else(|e| panic!("wasm_to_v failed for {file}: {e}"))
     }
 
-    /// Rewrites each `Qed.`-only line to `Admitted.` so `coqc` type-checks the
-    /// statements and definitions without requiring the emitted `(* TODO *)`
-    /// proofs to close. The match is whitespace-tolerant: a line is rewritten
-    /// when its content is exactly `Qed.` after trimming surrounding whitespace,
-    /// preserving the line's original leading indentation and newline bytes. A
-    /// stricter column-0 match would be silently skipped if a future emitter
-    /// indented the terminator, and the skip would surface as a misleading
-    /// `coqc` "incomplete proof" error rather than the type error this gate
-    /// exists to catch. The emitter only ever writes `Qed.` for these unfilled
-    /// per-spec theorem stubs, so this never downgrades a genuinely closed proof.
-    fn admit_open_proofs(v: &str) -> String {
-        let mut out = String::with_capacity(v.len());
-        for line in v.split_inclusive('\n') {
-            let content = line.trim_end_matches(['\r', '\n']);
-            if content.trim() == "Qed." {
-                let newline = &line[content.len()..];
-                let indent = &content[..content.len() - content.trim_start().len()];
-                out.push_str(indent);
-                out.push_str("Admitted.");
-                out.push_str(newline);
-            } else {
-                out.push_str(line);
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn admit_open_proofs_rewrites_qed_variants() {
-        let input = "Qed.\n  Qed.\r\n(* not a terminator: Qed. *)\nQed.";
-        let expected = "Admitted.\n  Admitted.\r\n(* not a terminator: Qed. *)\nAdmitted.";
-        assert_eq!(admit_open_proofs(input), expected);
-    }
-
     /// One generated module this suite hands to `coqc`.
     struct GatedModule {
         /// The fixture file for a corpus entry, the module name for a
@@ -572,8 +536,8 @@ mod gate {
         /// The name the translator was given; also the `.v` basename written
         /// into the work directory.
         module: &'static str,
-        /// Exactly the text `coqc` is handed — `Qed.` terminators already
-        /// rewritten by [`admit_open_proofs`].
+        /// Exactly the translator output handed to `coqc`, including direct
+        /// admissions for unfinished generated proofs.
         v: String,
     }
 
@@ -635,7 +599,7 @@ mod gate {
             GatedModule {
                 source: module,
                 module,
-                v: admit_open_proofs(&v),
+                v,
             }
         }
     }
@@ -648,7 +612,7 @@ mod gate {
             .map(|&(source, module)| GatedModule {
                 source,
                 module,
-                v: admit_open_proofs(&generate_v(source, module)),
+                v: generate_v(source, module),
             })
             .chain(
                 LINKED_CORPUS
@@ -656,7 +620,7 @@ mod gate {
                     .map(|&(source, module, externals)| GatedModule {
                         source,
                         module,
-                        v: admit_open_proofs(&generate_linked_v(source, module, externals)),
+                        v: generate_linked_v(source, module, externals),
                     }),
             )
             .collect()

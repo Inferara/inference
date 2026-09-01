@@ -1352,7 +1352,7 @@ impl WasmParseData<'_> {
         );
         out.push_str("Proof.\n");
         out.push_str("  (* TODO: fill the proof *)\n");
-        out.push_str("Qed.\n");
+        out.push_str("Admitted.\n");
         for spec_name in self.sorted_spec_names() {
             out.push('\n');
             out.push_str(
@@ -1363,7 +1363,7 @@ impl WasmParseData<'_> {
             );
             out.push_str("Proof.\n");
             out.push_str("  (* TODO: fill the proof *)\n");
-            out.push_str("Qed.\n");
+            out.push_str("Admitted.\n");
             let entries = self
                 .hspecs_by_spec
                 .get(spec_name)
@@ -1379,7 +1379,7 @@ impl WasmParseData<'_> {
                 );
                 out.push_str("Proof.\n");
                 out.push_str("  (* TODO: fill the proof *)\n");
-                out.push_str("Qed.\n");
+                out.push_str("Admitted.\n");
             }
             if !partition.unique.is_empty() {
                 out.push('\n');
@@ -1391,7 +1391,7 @@ impl WasmParseData<'_> {
                 );
                 out.push_str("Proof.\n");
                 out.push_str("  (* TODO: fill the proof *)\n");
-                out.push_str("Qed.\n");
+                out.push_str("Admitted.\n");
             }
         }
         out.push('\n');

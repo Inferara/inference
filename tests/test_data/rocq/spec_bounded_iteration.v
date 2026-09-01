@@ -77,11 +77,11 @@ Context `{ho: host}.
 Theorem valid_spec_bounded_iteration : ValidModule spec_bounded_iteration.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_spec_bounded_iteration__BoundedIteration : ValidSpec spec_bounded_iteration spec_bounded_iteration__BoundedIteration_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.

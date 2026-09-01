@@ -105,11 +105,11 @@ Context `{ho: host}.
 Theorem valid_spec_quantifier_alternation : ValidModule spec_quantifier_alternation.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 Theorem valid_spec_quantifier_alternation__QuantifierAlternation : ValidSpec spec_quantifier_alternation spec_quantifier_alternation__QuantifierAlternation_specs.
 Proof.
   (* TODO: fill the proof *)
-Qed.
+Admitted.
 
 End Host.
