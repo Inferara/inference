@@ -83,6 +83,17 @@ canonical_executable() {
     printf '%s\n' "$executable"
 }
 
+exact_volume_presence() {
+    volume_docker=$1
+    volume_name=$2
+    if listed_volumes=$("$volume_docker" volume ls --quiet --filter "name=^$volume_name\$" 2>/dev/null); then :; else return $?; fi
+    case "$listed_volumes" in
+        '') printf 'absent\n' ;;
+        "$volume_name") printf 'present\n' ;;
+        *) return 2 ;;
+    esac
+}
+
 proxy_read_source_owner() {
     [ -f "$owner_file" ] && [ ! -L "$owner_file" ] || return 1
     [ "$(stat -c '%a' "$owner_file" 2>/dev/null || stat -f '%Lp' "$owner_file" 2>/dev/null)" = 600 ] || return 1
@@ -127,7 +138,11 @@ docker_proxy() {
         if [ -e "$owner_file" ] || [ -L "$owner_file" ]; then
             proxy_read_source_owner >/dev/null || proxy_die
         fi
-        if "$real_docker" volume inspect "$source_volume" >/dev/null 2>&1; then
+        if proxy_source_presence=$(exact_volume_presence "$real_docker" "$source_volume"); then :; else
+            echo 'rocq-discharge-docker: could not determine exact source-volume presence' >&2
+            exit 1
+        fi
+        if [ "$proxy_source_presence" = present ]; then
             echo 'rocq-discharge-docker: unique source volume already exists' >&2
             exit 1
         fi
@@ -301,6 +316,10 @@ path_identity() {
     stat -c '%u:%d:%i:%a' "$1" 2>/dev/null || stat -f '%u:%d:%i:%Lp' "$1" 2>/dev/null
 }
 
+file_identity() {
+    stat -c '%u:%d:%i:%a:%h' "$1" 2>/dev/null || stat -f '%u:%d:%i:%Lp:%l' "$1" 2>/dev/null
+}
+
 identity_owner() {
     printf '%s\n' "${1%%:*}"
 }
@@ -320,10 +339,12 @@ validate_owned_file() {
     file=$1
     expected_identity=$2
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
-    actual_identity=$(path_identity "$file") || return 1
+    actual_identity=$(file_identity "$file") || return 1
     [ "$actual_identity" = "$expected_identity" ] || return 1
     [ "$(identity_owner "$actual_identity")" = "$current_uid" ] || return 1
-    [ "${actual_identity##*:}" = 600 ] || return 1
+    identity_without_nlink=${actual_identity%:*}
+    [ "${identity_without_nlink##*:}" = 600 ] || return 1
+    [ "${actual_identity##*:}" = 1 ] || return 1
 }
 
 validate_tmp_root() {
@@ -384,11 +405,13 @@ container_pin=$resolved_verifier/ci/discharge/container-pin.json
 batch_bridge=$resolved_verifier/ci/discharge/run-docker-batch.sh
 case_bridge=$resolved_verifier/ci/discharge/run-docker-case.sh
 container_inspector=ci/discharge/inspect-container.sh
+bridge_helper=$resolved_verifier/ci/discharge/docker-bridge.sh
 docker_requested=${DOCKER:-docker}
 git_bin=${GIT:-git}
 [ -x "$rust_runner" ] || fail configuration 'missing Task-0 Rust Docker helper'
 [ -f "$inference_pin" ] && [ ! -L "$inference_pin" ] || fail configuration 'missing Inference verifier pin'
 [ -f "$container_pin" ] && [ ! -L "$container_pin" ] || fail configuration 'missing verifier container-pin.json prerequisite (Phase A has no bridge contract yet)'
+[ -f "$bridge_helper" ] && [ ! -L "$bridge_helper" ] && [ -x "$bridge_helper" ] || fail configuration 'missing verifier shared Docker bridge prerequisite (Phase A has no bridge yet)'
 [ -f "$resolved_verifier/$container_inspector" ] && [ ! -L "$resolved_verifier/$container_inspector" ] && [ -x "$resolved_verifier/$container_inspector" ] || fail configuration 'missing verifier container inspection prerequisite (Phase A has no bridge contract yet)'
 case "$adapter" in batch|both) [ -f "$batch_bridge" ] && [ ! -L "$batch_bridge" ] && [ -x "$batch_bridge" ] || fail configuration 'missing verifier batch bridge prerequisite (Phase A has no bridge yet)';; esac
 case "$adapter" in single|both) [ -f "$case_bridge" ] && [ ! -L "$case_bridge" ] && [ -x "$case_bridge" ] || fail configuration 'missing verifier single bridge prerequisite (Phase A has no bridge yet)';; esac
@@ -449,36 +472,45 @@ case "$pinned_image_id" in sha256:*) :;; *) fail pin 'invalid image ID';; esac
 safe_absolute_path "$pinned_repository_mount" || fail pin 'unsafe repository mount in container pin'
 [ "$pinned_coq_version" = 8.20.1 ] || fail pin 'container pin must require exact Coq 8.20.1'
 
+validate_contract_file() {
+    file=$1
+    expected_identity=$2
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    actual_identity=$(file_identity "$file") || return 1
+    [ "$actual_identity" = "$expected_identity" ] || return 1
+    [ "${actual_identity##*:}" = 1 ] || return 1
+}
+
 assert_git_clean() {
     if observed_revision=$("$git_bin" -C "$resolved_verifier" rev-parse HEAD 2>/dev/null); then :; else fail pin 'wasm-verifier revision inspection failed'; fi
     [ "$observed_revision" = "$verifier_revision" ] || fail pin 'wasm-verifier checkout revision mismatch'
     if observed_dirty=$("$git_bin" -C "$resolved_verifier" status --porcelain --untracked-files=all 2>/dev/null); then :; else fail pin 'wasm-verifier cleanliness inspection failed'; fi
     [ -z "$observed_dirty" ] || fail pin 'wasm-verifier checkout is not clean'
-    set -- "$container_inspector" ci/discharge/container-pin.json
+    set -- "$container_inspector" ci/discharge/container-pin.json ci/discharge/docker-bridge.sh
     case "$adapter" in batch|both) set -- "$@" ci/discharge/run-docker-batch.sh;; esac
     case "$adapter" in single|both) set -- "$@" ci/discharge/run-docker-case.sh;; esac
     "$git_bin" -C "$resolved_verifier" diff --quiet HEAD -- "$@" 2>/dev/null || fail pin 'verifier bridge contract differs from clean Git content'
 }
 
 assert_git_clean
-inspector_identity=$(path_identity "$resolved_verifier/$container_inspector") || fail pin 'could not record verifier inspector identity'
-container_pin_identity=$(path_identity "$container_pin") || fail pin 'could not record container pin identity'
+inspector_identity=$(file_identity "$resolved_verifier/$container_inspector") || fail pin 'could not record verifier inspector identity'
+container_pin_identity=$(file_identity "$container_pin") || fail pin 'could not record container pin identity'
+bridge_helper_identity=$(file_identity "$bridge_helper") || fail pin 'could not record shared bridge helper identity'
 batch_bridge_identity=
 case_bridge_identity=
-case "$adapter" in batch|both) batch_bridge_identity=$(path_identity "$batch_bridge") || fail pin 'could not record batch bridge identity';; esac
-case "$adapter" in single|both) case_bridge_identity=$(path_identity "$case_bridge") || fail pin 'could not record single bridge identity';; esac
-
-validate_contract_file() {
-    file=$1
-    expected_identity=$2
-    [ -f "$file" ] && [ ! -L "$file" ] || return 1
-    [ "$(path_identity "$file")" = "$expected_identity" ] || return 1
-}
+case "$adapter" in batch|both) batch_bridge_identity=$(file_identity "$batch_bridge") || fail pin 'could not record batch bridge identity';; esac
+case "$adapter" in single|both) case_bridge_identity=$(file_identity "$case_bridge") || fail pin 'could not record single bridge identity';; esac
+validate_contract_file "$resolved_verifier/$container_inspector" "$inspector_identity" && [ -x "$resolved_verifier/$container_inspector" ] || fail pin 'verifier inspector was unsafe at identity capture'
+validate_contract_file "$container_pin" "$container_pin_identity" || fail pin 'container pin was unsafe at identity capture'
+validate_contract_file "$bridge_helper" "$bridge_helper_identity" && [ -x "$bridge_helper" ] || fail pin 'shared bridge helper was unsafe at identity capture'
+case "$adapter" in batch|both) validate_contract_file "$batch_bridge" "$batch_bridge_identity" && [ -x "$batch_bridge" ] || fail pin 'batch bridge was unsafe at identity capture';; esac
+case "$adapter" in single|both) validate_contract_file "$case_bridge" "$case_bridge_identity" && [ -x "$case_bridge" ] || fail pin 'single bridge was unsafe at identity capture';; esac
 
 assert_verifier_checkout() {
     assert_git_clean
     validate_contract_file "$resolved_verifier/$container_inspector" "$inspector_identity" && [ -x "$resolved_verifier/$container_inspector" ] || fail pin 'verifier inspector identity changed'
     validate_contract_file "$container_pin" "$container_pin_identity" || fail pin 'container pin identity changed'
+    validate_contract_file "$bridge_helper" "$bridge_helper_identity" && [ -x "$bridge_helper" ] || fail pin 'shared bridge helper identity changed'
     case "$adapter" in batch|both) validate_contract_file "$batch_bridge" "$batch_bridge_identity" && [ -x "$batch_bridge" ] || fail pin 'batch bridge identity changed';; esac
     case "$adapter" in single|both) validate_contract_file "$case_bridge" "$case_bridge_identity" && [ -x "$case_bridge" ] || fail pin 'single bridge identity changed';; esac
 }
@@ -502,21 +534,9 @@ assert_live_container() {
     [ "$actual_image_id" = "$pinned_image_id" ] || fail container 'running container image ID mismatch'
     actual_user=$(inspect_container_value '{{.Config.User}}')
     [ "$actual_user" = "$pinned_user" ] || fail container 'running container configured user mismatch'
-    mounts=$(inspect_container_value '{{range .Mounts}}{{printf "%s\t%s\n" .Destination .Source}}{{end}}')
-    mount_count=0
-    mount_tab=$(printf '\t')
-    while IFS="$mount_tab" read -r destination source; do
-        [ -n "$destination" ] || continue
-        safe_absolute_path "$destination" && safe_absolute_path "$source" || fail container 'unsafe running-container mount inspection'
-        case "$destination:$source" in *docker.sock*) fail container 'running container exposes a Docker socket mount';; esac
-        if [ "$destination" = "$pinned_repository_mount" ]; then
-            [ "$source" = "$resolved_verifier" ] || fail container 'repository mount source is not the canonical verifier checkout'
-            mount_count=$((mount_count + 1))
-        fi
-    done <<MOUNTS
-$mounts
-MOUNTS
-    [ "$mount_count" -eq 1 ] || fail container 'running container repository mount destination mismatch'
+    mounts=$(inspect_container_value '{{range .Mounts}}{{printf "%s\t%s\t%s\n" .Type .Destination .Source}}{{end}}')
+    expected_mount=$(printf 'bind\t%s\t%s' "$pinned_repository_mount" "$resolved_verifier")
+    [ "$mounts" = "$expected_mount" ] || fail container 'running container must expose exactly the canonical verifier bind mount'
 
     provenance_sentinel=__INFERENCE_PROVENANCE_END__
     if provenance=$(
@@ -577,6 +597,10 @@ volume_owner() {
     printf '%s\n' "$inspected_owner"
 }
 
+volume_presence() {
+    exact_volume_presence "$docker_bin" "$1"
+}
+
 cleanup() {
     status=$?
     trap - EXIT
@@ -628,16 +652,19 @@ if [ "$full" -eq 1 ]; then
     chmod 600 "$full_log"
     if exec 4>"$full_log" 5<"$full_log"; then :; else fail full-log-identity 'could not open retained full-test log descriptors'; fi
     full_log_fd_open=1
-    full_log_identity=$(path_identity "$full_log") || fail full-log-identity 'could not record full-test log identity'
+    full_log_identity=$(file_identity "$full_log") || fail full-log-identity 'could not record full-test log identity'
     validate_owned_file "$full_log" "$full_log_identity" || fail full-log-identity 'full-test log identity or mode was unsafe at creation'
 fi
 
-if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1 || "$docker_bin" volume inspect "$exchange_volume" >/dev/null 2>&1; then
-    fail cleanup 'unique transient volume name collision'
-fi
+if source_presence=$(volume_presence "$source_volume"); then :; else fail cleanup 'could not determine exact source-volume presence'; fi
+if exchange_presence=$(volume_presence "$exchange_volume"); then :; else fail cleanup 'could not determine exact exchange-volume presence'; fi
+[ "$source_presence" = absent ] && [ "$exchange_presence" = absent ] || fail cleanup 'unique transient volume name collision'
 "$docker_bin" volume create --label "$owner_label=$run_owner" "$exchange_volume" >/dev/null
 exchange_created=1
-[ "$(volume_owner "$exchange_volume")" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate'
+if exchange_presence=$(volume_presence "$exchange_volume"); then :; else fail cleanup 'could not confirm exchange-volume creation'; fi
+[ "$exchange_presence" = present ] || fail cleanup 'exchange volume was absent after creation'
+if exchange_owner=$(volume_owner "$exchange_volume"); then :; else fail cleanup 'exchange volume owner-label inspection failed'; fi
+[ "$exchange_owner" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate'
 
 run_rust() (
     exec 3>&- 4>&- 5>&-
@@ -736,7 +763,7 @@ prepare_evidence() {
     capture_fd_open=1
     umask "$old_umask"
     chmod 600 "$capture_file"
-    capture_identity=$(path_identity "$capture_file") || fail evidence-contract 'could not record bridge capture identity'
+    capture_identity=$(file_identity "$capture_file") || fail evidence-contract 'could not record bridge capture identity'
     validate_owned_file "$capture_file" "$capture_identity" || fail evidence-contract 'bridge capture identity or mode was unsafe at creation'
 }
 
@@ -762,7 +789,7 @@ require_full_log_identity() {
 validate_failure_evidence() {
     validate_evidence_directory || return 1
     [ -f "$evidence_dir/verifier.log" ] && [ ! -L "$evidence_dir/verifier.log" ] || return 1
-    verifier_log_identity=$(path_identity "$evidence_dir/verifier.log") || return 1
+    verifier_log_identity=$(file_identity "$evidence_dir/verifier.log") || return 1
     validate_owned_file "$evidence_dir/verifier.log" "$verifier_log_identity" || return 1
     [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 2 ] || return 1
     [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 2 ] || return 1
@@ -822,6 +849,7 @@ run_bridge() {
             fail evidence-contract 'bridge changed private evidence directory or capture identity'
         fi
         if ! validate_failure_evidence; then
+            evidence_suspect=1
             fail evidence-contract 'bridge failed without one safe private verifier log'
         fi
         evidence_retained=1
@@ -987,7 +1015,7 @@ run_single() {
         bridge_raw_basename=
         bridge_receipt_dir=
         validate_single_receipt_layout "$case_id" "$receipt_dir" "$receipt_identity"
-        receipt_file_identity=$(path_identity "$receipt_dir/$case_id.json") || fail single 'could not record single-case receipt file identity'
+        receipt_file_identity=$(file_identity "$receipt_dir/$case_id.json") || fail single 'could not record single-case receipt file identity'
         validate_single_receipt "$case_id" "$receipt_dir" "$receipt_identity" "$receipt_file_identity"
         case "$case_id" in
             prime-bounded) prime_bounded_receipt_dir_identity=$receipt_identity; prime_bounded_receipt_file_identity=$receipt_file_identity ;;
@@ -1068,17 +1096,24 @@ verified_success_cleanup() {
         [ ! -e "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || fail cleanup 'private evidence directory survived cleanup'
         evidence_dir=
     fi
-    if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1; then
+    if source_presence=$(volume_presence "$source_volume"); then :; else fail cleanup 'could not determine exact source-volume presence at success cleanup'; fi
+    if [ "$source_presence" = present ]; then
         [ -f "$source_owner_file" ] && [ ! -L "$source_owner_file" ] || fail cleanup 'source volume survived without a safe owner record'
         source_owner=$(sed -n '1p' "$source_owner_file")
-        digits_only "$source_owner" && [ "$(volume_owner "$source_volume")" = "$source_owner" ] || fail cleanup 'source volume owner label did not validate at success cleanup'
+        if source_label=$(volume_owner "$source_volume"); then :; else fail cleanup 'source volume owner-label inspection failed at success cleanup'; fi
+        digits_only "$source_owner" && [ "$source_label" = "$source_owner" ] || fail cleanup 'source volume owner label did not validate at success cleanup'
         "$docker_bin" volume rm "$source_volume" >/dev/null 2>&1 || fail cleanup 'could not remove owned source volume'
-        if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1; then fail cleanup 'owned source volume survived cleanup'; fi
+        if source_presence=$(volume_presence "$source_volume"); then :; else fail cleanup 'could not confirm source-volume removal'; fi
+        [ "$source_presence" = absent ] || fail cleanup 'owned source volume survived cleanup'
     fi
-    [ "$(volume_owner "$exchange_volume")" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate at success cleanup'
+    if exchange_presence=$(volume_presence "$exchange_volume"); then :; else fail cleanup 'could not determine exact exchange-volume presence at success cleanup'; fi
+    [ "$exchange_presence" = present ] || fail cleanup 'owned exchange volume disappeared before cleanup'
+    if exchange_owner=$(volume_owner "$exchange_volume"); then :; else fail cleanup 'exchange volume owner-label inspection failed at success cleanup'; fi
+    [ "$exchange_owner" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate at success cleanup'
     "$docker_bin" volume rm "$exchange_volume" >/dev/null 2>&1 || fail cleanup 'could not remove owned exchange volume'
+    if exchange_presence=$(volume_presence "$exchange_volume"); then :; else fail cleanup 'could not confirm exchange-volume removal'; fi
+    [ "$exchange_presence" = absent ] || fail cleanup 'owned exchange volume survived cleanup'
     exchange_created=0
-    if "$docker_bin" volume inspect "$exchange_volume" >/dev/null 2>&1; then fail cleanup 'owned exchange volume survived cleanup'; fi
     assert_staging_identity
     require_full_log_identity 'full-test log identity changed at staging cleanup boundary'
     case "$staging" in "$tmp_root"/inference-rocq-discharge.*) :;; *) fail cleanup 'unsafe staging cleanup target';; esac
