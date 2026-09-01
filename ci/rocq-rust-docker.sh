@@ -20,6 +20,12 @@ fi
 shift
 cargo_subcommand=$1
 shift
+case "$cargo_subcommand" in
+    +*)
+        echo "$0: Cargo toolchain override is not allowed" >&2
+        exit 2
+        ;;
+esac
 
 repo_root=$(
     CDPATH=
@@ -32,23 +38,30 @@ if [ ! -f "$lane_lock" ]; then
     exit 2
 fi
 
+newline='
+'
+carriage=$(printf '\r')
+case "$repo_root" in
+    *','*|*"$newline"*|*"$carriage"*)
+        echo "$0: unsafe Docker mount path" >&2
+        exit 2
+        ;;
+esac
+
 docker_bin=${DOCKER:-docker}
 run_id=$$
-source_volume=inference-rocq-rust-source-$run_id
+source_volume=
 source_created=0
 target_lock_created=0
 
 valid_source_volume() {
-    case "$source_volume" in
-        inference-rocq-rust-source-[0-9]*) ;;
-        *) return 1 ;;
-    esac
-    owner=$($docker_bin volume inspect --format "{{ index .Labels \"$owner_label\" }}" "$source_volume" 2>/dev/null || true)
+    [ -n "$source_volume" ] || return 1
+    owner=$("$docker_bin" volume inspect --format "{{ index .Labels \"$owner_label\" }}" "$source_volume" 2>/dev/null || true)
     [ "$owner" = "$run_id" ]
 }
 
 valid_target_lock() {
-    owner=$($docker_bin container inspect --format "{{ index .Config.Labels \"$owner_label\" }}" "$target_lock_container" 2>/dev/null || true)
+    owner=$("$docker_bin" container inspect --format "{{ index .Config.Labels \"$owner_label\" }}" "$target_lock_container" 2>/dev/null || true)
     [ "$owner" = "$run_id" ]
 }
 
@@ -57,21 +70,44 @@ cleanup() {
     trap - EXIT HUP INT TERM
 
     if [ "$target_lock_created" -eq 1 ] && valid_target_lock; then
-        $docker_bin container rm -f "$target_lock_container" >/dev/null || true
+        "$docker_bin" container rm -f "$target_lock_container" >/dev/null || true
     fi
     if [ "$source_created" -eq 1 ] && valid_source_volume; then
-        $docker_bin volume rm "$source_volume" >/dev/null || true
+        "$docker_bin" volume rm "$source_volume" >/dev/null || true
     fi
     exit "$status"
 }
 trap cleanup EXIT HUP INT TERM
 
-$docker_bin volume create "$registry_volume" >/dev/null
-$docker_bin volume create "$target_volume" >/dev/null
-$docker_bin volume create --label "$owner_label=$run_id" "$source_volume" >/dev/null
+"$docker_bin" volume create "$registry_volume" >/dev/null
+"$docker_bin" volume create "$target_volume" >/dev/null
+source_volume=$("$docker_bin" volume create --label "$owner_label=$run_id")
 source_created=1
+if ! valid_source_volume; then
+    echo "$0: source volume owner label did not validate" >&2
+    exit 1
+fi
 
-if ! $docker_bin container create --name "$target_lock_container" \
+source_state=0
+"$docker_bin" run --rm \
+    --read-only \
+    --network none \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --tmpfs /tmp \
+    --mount "type=volume,src=$source_volume,dst=/snapshot" \
+    "$busybox_image" sh -c '
+        set -eu
+        if find /snapshot -mindepth 1 -maxdepth 1 -print -quit | grep . >/dev/null; then
+            exit 46
+        fi
+    ' || source_state=$?
+if [ "$source_state" -ne 0 ]; then
+    echo "$0: source volume is not empty" >&2
+    exit "$source_state"
+fi
+
+if ! "$docker_bin" container create --name "$target_lock_container" \
     --label "$owner_label=$run_id" \
     --read-only \
     --network none \
@@ -83,14 +119,14 @@ if ! $docker_bin container create --name "$target_lock_container" \
     exit 1
 fi
 target_lock_created=1
-$docker_bin container start "$target_lock_container" >/dev/null
-if [ "$($docker_bin container inspect --format '{{.State.Running}}' "$target_lock_container")" != true ] || ! valid_target_lock; then
+"$docker_bin" container start "$target_lock_container" >/dev/null
+if [ "$("$docker_bin" container inspect --format '{{.State.Running}}' "$target_lock_container")" != true ] || ! valid_target_lock; then
     echo "$0: target lock container did not validate" >&2
     exit 1
 fi
 
 snapshot_status=0
-$docker_bin run --rm \
+"$docker_bin" run --rm \
     --read-only \
     --network none \
     --cap-drop ALL \
@@ -101,7 +137,8 @@ $docker_bin run --rm \
     "$busybox_image" sh -c '
         set -eu
         cd /checkout
-        tar --exclude=.git --exclude=target --exclude=Cargo.lock --exclude=./Cargo.lock -cf - . | tar -C /snapshot -xf -
+        tar --exclude=.git --exclude=target --exclude=Cargo.lock --exclude=./Cargo.lock -cf /tmp/snapshot.tar .
+        tar -C /snapshot -xf /tmp/snapshot.tar
         cp /checkout/ci/rocq-discharge.cargo-lock /snapshot/Cargo.lock
         if ! cmp -s /checkout/ci/rocq-discharge.cargo-lock /snapshot/Cargo.lock; then
             exit 45
@@ -118,7 +155,7 @@ if [ "$snapshot_status" -ne 0 ]; then
     exit "$snapshot_status"
 fi
 
-$docker_bin run --rm \
+"$docker_bin" run --rm \
     --read-only \
     --network bridge \
     --cap-drop ALL \
@@ -140,10 +177,11 @@ $docker_bin run --rm \
                 exit 1
                 ;;
         esac
-        exec cargo fetch --locked --manifest-path /workspace/Cargo.toml
+        cargo_path=$(rustup which cargo)
+        exec "$cargo_path" fetch --locked --manifest-path /workspace/Cargo.toml
     '
 
-$docker_bin run --rm \
+"$docker_bin" run --rm \
     --read-only \
     --network none \
     --cap-drop ALL \
@@ -157,5 +195,6 @@ $docker_bin run --rm \
     "$rust_image" sh -c '
         set -eu
         export RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu
-        exec cargo "$@"
+        cargo_path=$(rustup which cargo)
+        exec "$cargo_path" "$@"
     ' sh "$cargo_subcommand" --locked --offline --manifest-path /workspace/Cargo.toml "$@"
