@@ -38,12 +38,21 @@ arg_after() { wanted=$1; shift; previous=; for value in "$@"; do if [ "$previous
 mount_volume() { destination=$1; shift; previous=; for value in "$@"; do if [ "$previous" = --mount ]; then case "$value" in *"dst=$destination"*) source=${value#*src=}; source=${source%%,*}; printf '%s\n' "$source"; return 0;; esac; fi; previous=$value; done; return 1; }
 volume_dir() { printf '%s/volumes/%s\n' "$state" "$1"; }
 label_of() { cat "$(volume_dir "$1")/.label" 2>/dev/null || true; }
+has_arg() { wanted=$1; shift; for value in "$@"; do [ "$value" = "$wanted" ] && return 0; done; return 1; }
+has_pair() { wanted=$1; expected=$2; shift 2; previous=; for value in "$@"; do [ "$previous" = "$wanted" ] && [ "$value" = "$expected" ] && return 0; previous=$value; done; return 1; }
+require_arg() { has_arg "$1" "$@" || { echo "fake docker: missing argv $1" >&2; exit 73; }; }
+require_pair() { has_pair "$1" "$2" "$@" || { echo "fake docker: missing argv pair $1 $2" >&2; exit 74; }; }
+require_hardened() {
+    require_arg --read-only "$@"; require_pair --cap-drop ALL "$@"; require_pair --security-opt no-new-privileges "$@"; require_pair --tmpfs /tmp "$@"
+    for value in "$@"; do case "$value" in *docker.sock*) echo 'fake docker: Docker socket mount is forbidden' >&2; exit 75;; esac; done
+}
 
 if [ "$1" = volume ] && [ "$2" = create ]; then
     label=$(arg_after --label "$@" || true); name=$(last_arg "$@")
     if [ -n "$label" ]; then
         if [ "$name" != "$label" ]; then echo 'fake docker: source volume must be Docker-generated' >&2; exit 70; fi
         name=generated-source-$counter
+        printf '%s\n' "$name" >"$state/source-name"
     fi
     directory=$(volume_dir "$name"); mkdir -p "$directory"; printf '%s\n' "${label#*=}" >"$directory/.label"
     case "${FAKE_DOCKER_SOURCE_MODE:-clean}" in foreign) printf '%s\n' foreign-owner >"$directory/.label";; stale) printf stale >"$directory/stale-file";; esac
@@ -69,11 +78,27 @@ if [ "$1" = run ]; then
         cmp -s "$fixture/ci/rocq-discharge.cargo-lock" "$directory/Cargo.lock" || exit 45
         rm -rf "$state/observed-snapshot"; cp -R "$directory" "$state/observed-snapshot"; exit 0
     fi
+    case "$script" in
+        *'fetch --locked --manifest-path /workspace/Cargo.toml'*)
+            require_arg 'rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922' "$@"
+            require_pair --network bridge "$@"; require_hardened "$@"; require_pair -e CARGO_HOME=/cargo-home "$@"; require_pair -e CARGO_TARGET_DIR=/cargo-target "$@"
+            case "$script" in *'RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu'*'cargo_path=$(rustup which cargo)'*'exec "$cargo_path" fetch'*) ;; *) echo 'fake docker: fetch must execute rustup-resolved Cargo' >&2; exit 76;; esac
+            touch "$state/fetch-contract"
+            ;;
+        *'exec "$cargo_path" "$@"'*)
+            require_arg 'rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922' "$@"
+            require_pair --network none "$@"; require_hardened "$@"; require_pair -e CARGO_HOME=/cargo-home "$@"; require_pair -e CARGO_TARGET_DIR=/cargo-target "$@"
+            require_arg test "$@"; require_arg --locked "$@"; require_arg --offline "$@"; require_pair --manifest-path /workspace/Cargo.toml "$@"
+            case "$script" in *'RUSTUP_TOOLCHAIN=1.98.0-$(uname -m)-unknown-linux-gnu'*'cargo_path=$(rustup which cargo)'*'exec "$cargo_path" "$@"'*) ;; *) echo 'fake docker: execution must use rustup-resolved Cargo' >&2; exit 77;; esac
+            touch "$state/offline-contract"
+            ;;
+    esac
     exit 0
 fi
 echo "fake docker: unexpected command $1 $2" >&2; exit 72
 FAKE_DOCKER
 chmod +x "$fake_docker"
+volume_dir() { printf '%s/volumes/%s\n' "$state" "$1"; }
 
 run_runner() {
     mode=${1:-clean}; shift || true
@@ -87,6 +112,12 @@ test -f "$state/observed-snapshot/source.txt"
 test ! -e "$state/observed-snapshot/.git"
 test ! -e "$state/observed-snapshot/target"
 cmp -s "$fixture/ci/rocq-discharge.cargo-lock" "$state/observed-snapshot/Cargo.lock"
+[ -f "$state/fetch-contract" ] || { echo 'self-test: fetch container contract was not verified' >&2; exit 1; }
+[ -f "$state/offline-contract" ] || { echo 'self-test: offline container contract was not verified' >&2; exit 1; }
+source_name=$(cat "$state/source-name")
+test ! -d "$(volume_dir "$source_name")"
+test -d "$(volume_dir inference-cargo-home-rust-1.98)"
+test -d "$(volume_dir inference-cargo-target-rust-1.98)"
 
 expect_failure corrupt env FAKE_DOCKER_CORRUPT_LANE_LOCK=1 FAKE_DOCKER_STATE="$state" FAKE_DOCKER_FIXTURE="$fixture" DOCKER="$fake_docker" "$fixture/ci/rocq-rust-docker.sh" cargo test
 grep -F 'snapshot lane lock mismatch' "$work/corrupt.err" >/dev/null
