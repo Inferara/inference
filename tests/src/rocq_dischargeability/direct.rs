@@ -1,0 +1,526 @@
+use super::SUCCESS_LINE;
+use super::protocol::{RawHash, Request, RequestCase};
+use anyhow::{Context, Result, bail};
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const DISCHARGER_ENV: &str = "INFERENCE_WASM_VERIFIER_DISCHARGER";
+const REQUIRED_ENV: &str = "INFERENCE_ROCQ_DISCHARGE_REQUIRED";
+
+struct Invocation<'a> {
+    executable: &'a Path,
+    verifier_revision: &'a str,
+    case_id: &'a str,
+    raw_file: &'a Path,
+    receipt_dir: &'a Path,
+}
+
+struct RunOutput {
+    success: bool,
+    code: Option<i32>,
+    stderr: String,
+}
+
+trait Runner {
+    fn run(&mut self, invocation: &Invocation<'_>) -> Result<RunOutput>;
+}
+
+struct ProcessRunner {
+    environment: Vec<(OsString, OsString)>,
+}
+
+impl ProcessRunner {
+    fn with_environment(environment: Vec<(OsString, OsString)>) -> Self {
+        Self { environment }
+    }
+}
+
+impl Runner for ProcessRunner {
+    fn run(&mut self, invocation: &Invocation<'_>) -> Result<RunOutput> {
+        let output = Command::new(invocation.executable)
+            .arg("--protocol")
+            .arg("1")
+            .arg("--wasm-verifier-revision")
+            .arg(invocation.verifier_revision)
+            .arg("--case")
+            .arg(invocation.case_id)
+            .arg(invocation.raw_file)
+            .env(
+                "INFERENCE_WASM_VERIFIER_RECEIPT_DIR",
+                invocation.receipt_dir,
+            )
+            .envs(self.environment.iter().cloned())
+            .output()
+            .with_context(|| {
+                format!(
+                    "execute configured discharger for case `{}`",
+                    invocation.case_id
+                )
+            })?;
+        Ok(RunOutput {
+            success: output.status.success(),
+            code: output.status.code(),
+            stderr: bounded_first_line(&output.stderr),
+        })
+    }
+}
+
+fn run_from_configuration(
+    configured: Option<OsString>,
+    required: bool,
+    output: &mut dyn Write,
+) -> Result<()> {
+    let Some(configured) = configured else {
+        if required {
+            bail!("required dischargeability gate has no `{DISCHARGER_ENV}` executable");
+        }
+        writeln!(
+            output,
+            "rocq-discharge: SKIPPED `{DISCHARGER_ENV}` is not configured"
+        )
+        .context("write dischargeability skip marker")?;
+        return Ok(());
+    };
+
+    let mut runner = ProcessRunner::with_environment(Vec::new());
+    let summary = run_gate_with(Path::new(&configured), &mut runner)?;
+    writeln!(output, "{summary}").context("write dischargeability success marker")
+}
+
+fn run_gate_with<R: Runner>(executable: &Path, runner: &mut R) -> Result<&'static str> {
+    let exchange = tempfile::tempdir().context("create direct discharge exchange")?;
+    let request = super::export(exchange.path()).context("export fresh direct artifacts")?;
+    run_provenance_probe(executable, runner, exchange.path(), &request)?;
+
+    let trusted_receipts = exchange.path().join("receipts");
+    std::fs::create_dir(&trusted_receipts).with_context(|| {
+        format!(
+            "create trusted receipt directory {}",
+            trusted_receipts.display()
+        )
+    })?;
+    for case in request.cases() {
+        run_case(
+            executable,
+            runner,
+            exchange.path(),
+            &request,
+            case,
+            &trusted_receipts,
+        )?;
+    }
+    super::verify(exchange.path())
+}
+
+fn run_provenance_probe<R: Runner>(
+    executable: &Path,
+    runner: &mut R,
+    exchange: &Path,
+    request: &Request,
+) -> Result<()> {
+    let case = request
+        .cases()
+        .first()
+        .context("discharge request has no provenance-probe case")?;
+    let probe_files = tempfile::tempdir().context("create provenance probe directory")?;
+    let raw_path = exchange.join("raw").join(case.raw_basename());
+    let mut malformed = std::fs::read(&raw_path)
+        .with_context(|| format!("read probe source {}", raw_path.display()))?;
+    let first = malformed
+        .first_mut()
+        .context("cannot byte-mutate an empty raw artifact")?;
+    *first ^= 1;
+    let probe_path = probe_files.path().join(case.raw_basename());
+    std::fs::write(&probe_path, &malformed)
+        .with_context(|| format!("write malformed provenance probe {}", probe_path.display()))?;
+    let receipt_dir = tempfile::tempdir().context("create probe receipt directory")?;
+    require_empty_receipt_dir(receipt_dir.path())?;
+    let invocation = Invocation {
+        executable,
+        verifier_revision: request.wasm_verifier_revision(),
+        case_id: case.case_id(),
+        raw_file: &probe_path,
+        receipt_dir: receipt_dir.path(),
+    };
+    let output = run_with_raw_integrity(runner, &invocation, None)?;
+    if output.success {
+        bail!("malformed same-basename provenance probe was accepted");
+    }
+    Ok(())
+}
+
+fn run_case<R: Runner>(
+    executable: &Path,
+    runner: &mut R,
+    exchange: &Path,
+    request: &Request,
+    case: &RequestCase,
+    trusted_receipts: &Path,
+) -> Result<()> {
+    let invocation_receipts = tempfile::tempdir()
+        .with_context(|| format!("create receipt directory for `{}`", case.case_id()))?;
+    require_empty_receipt_dir(invocation_receipts.path())?;
+    let raw_file = exchange.join("raw").join(case.raw_basename());
+    let invocation = Invocation {
+        executable,
+        verifier_revision: request.wasm_verifier_revision(),
+        case_id: case.case_id(),
+        raw_file: &raw_file,
+        receipt_dir: invocation_receipts.path(),
+    };
+    let output = run_with_raw_integrity(runner, &invocation, Some(case.raw_sha256()))?;
+    if !output.success {
+        bail!(
+            "discharger case `{}` exited {:?}: {}",
+            case.case_id(),
+            output.code,
+            output.stderr
+        );
+    }
+
+    let receipt_path = single_receipt(invocation_receipts.path(), case.case_id())?;
+    let destination = trusted_receipts.join(format!("{}.json", case.case_id()));
+    let mut source = std::fs::File::open(&receipt_path)
+        .with_context(|| format!("open receipt {}", receipt_path.display()))?;
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .with_context(|| format!("create trusted receipt {}", destination.display()))?;
+    std::io::copy(&mut source, &mut target)
+        .with_context(|| format!("copy receipt for `{}`", case.case_id()))?;
+    target
+        .sync_all()
+        .with_context(|| format!("sync trusted receipt {}", destination.display()))?;
+    Ok(())
+}
+
+fn run_with_raw_integrity<R: Runner>(
+    runner: &mut R,
+    invocation: &Invocation<'_>,
+    expected_hash: Option<&str>,
+) -> Result<RunOutput> {
+    let before = file_hash(invocation.raw_file)?;
+    if let Some(expected_hash) = expected_hash
+        && before.as_str() != expected_hash
+    {
+        bail!(
+            "raw integrity failure before discharging `{}`",
+            invocation.case_id
+        );
+    }
+    let output = runner.run(invocation)?;
+    let after = file_hash(invocation.raw_file)?;
+    if before != after {
+        bail!(
+            "raw integrity failure while discharging `{}`",
+            invocation.case_id
+        );
+    }
+    Ok(output)
+}
+
+fn file_hash(path: &Path) -> Result<RawHash> {
+    let bytes = std::fs::read(path).with_context(|| format!("read raw file {}", path.display()))?;
+    Ok(RawHash::of(&bytes))
+}
+
+fn require_empty_receipt_dir(directory: &Path) -> Result<()> {
+    if !directory.is_absolute() {
+        bail!("receipt directory must be absolute");
+    }
+    let metadata = std::fs::symlink_metadata(directory)
+        .with_context(|| format!("inspect receipt directory {}", directory.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("receipt directory must be a nonsymlink directory");
+    }
+    if std::fs::read_dir(directory)
+        .with_context(|| format!("read receipt directory {}", directory.display()))?
+        .next()
+        .transpose()
+        .with_context(|| format!("read receipt entry in {}", directory.display()))?
+        .is_some()
+    {
+        bail!("receipt directory must be empty before invocation");
+    }
+    Ok(())
+}
+
+fn single_receipt(directory: &Path, case_id: &str) -> Result<PathBuf> {
+    let expected_name = format!("{case_id}.json");
+    let mut entries = std::fs::read_dir(directory)
+        .with_context(|| format!("read receipt directory {}", directory.display()))?;
+    let Some(entry) = entries
+        .next()
+        .transpose()
+        .with_context(|| format!("read receipt entry in {}", directory.display()))?
+    else {
+        bail!("receipt directory has no receipt for `{case_id}`");
+    };
+    if entries
+        .next()
+        .transpose()
+        .with_context(|| format!("read extra receipt entry in {}", directory.display()))?
+        .is_some()
+    {
+        bail!("receipt directory has additional entries for `{case_id}`");
+    }
+    if entry.file_name() != expected_name.as_str() {
+        bail!("receipt directory has the wrong receipt name for `{case_id}`");
+    }
+    let path = entry.path();
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect receipt {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("receipt must be a nonsymlink regular file for `{case_id}`");
+    }
+    Ok(path)
+}
+
+fn bounded_first_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .next()
+        .unwrap_or("no diagnostic")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+#[test]
+fn configured_dischargeability_gate() {
+    let configured = std::env::var_os(DISCHARGER_ENV);
+    let required = std::env::var_os(REQUIRED_ENV).is_some();
+    run_from_configuration(configured, required, &mut std::io::stdout().lock())
+        .unwrap_or_else(|error| panic!("configured Rocq dischargeability gate failed: {error:#}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cases::CASES;
+    use super::super::pin::Pin;
+    use super::super::protocol::RawHash;
+    use super::{DISCHARGER_ENV, Invocation, ProcessRunner, RunOutput, Runner, SUCCESS_LINE};
+    use super::{run_from_configuration, run_gate_with};
+    use anyhow::{Context, Result};
+    use serde_json::json;
+    use std::ffi::OsString;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    struct HelperBinary {
+        _directory: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    struct ReceiptTemplates {
+        _directory: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    fn repository_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("tests crate has a repository parent")
+    }
+
+    fn compile_helper() -> HelperBinary {
+        let executable_root = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_exe()
+                    .expect("locate current test executable")
+                    .parent()
+                    .expect("test executable has a directory")
+                    .to_path_buf()
+            });
+        let directory = tempfile::Builder::new()
+            .prefix("rocq-discharge-helper-")
+            .tempdir_in(executable_root)
+            .expect("create executable helper build directory");
+        let path = directory.path().join(format!(
+            "rocq-discharge-test-helper{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("bin")
+            .join("rocq-discharge-test-helper.rs");
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let output = Command::new(rustc)
+            .arg("--edition=2024")
+            .arg(&source)
+            .arg("-o")
+            .arg(&path)
+            .output()
+            .expect("invoke rustc for cross-platform fake discharger");
+        assert!(
+            output.status.success(),
+            "compile fake discharger failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        HelperBinary {
+            _directory: directory,
+            path,
+        }
+    }
+
+    fn receipt_templates() -> ReceiptTemplates {
+        let directory = tempfile::tempdir().expect("create receipt template directory");
+        let pin = Pin::read().expect("read pin");
+        for case in CASES {
+            let golden = std::fs::read(repository_root().join(case.golden_path()))
+                .expect("read case golden");
+            let receipt = json!({
+                "protocol": 1,
+                "case_id": case.id(),
+                "raw_basename": case.raw_basename(),
+                "raw_sha256": RawHash::of(&golden).as_str(),
+                "wasm_verifier_pinned": pin.wasm_verifier_revision(),
+                "wasm_verifier_observed": pin.wasm_verifier_revision(),
+                "coq_wasm_pinned": pin.coq_wasm_revision(),
+                "coq_wasm_observed": pin.coq_wasm_revision(),
+                "coq_version": pin.coq_series(),
+                "proved": case.expected_proved(),
+                "refuted": case.expected_refuted(),
+                "audited_endpoints": case.expected_proved() + case.expected_refuted(),
+                "allowlisted_dependencies": 0,
+                "raw_namespace_dependencies": 0,
+                "unapproved_dependencies": 0,
+                "result": "pass",
+            });
+            std::fs::write(
+                directory.path().join(format!("{}.json", case.id())),
+                serde_json::to_vec(&receipt).expect("serialize receipt template"),
+            )
+            .expect("write receipt template");
+        }
+        let path = directory.path().to_path_buf();
+        ReceiptTemplates {
+            _directory: directory,
+            path,
+        }
+    }
+
+    fn fake_runner(behavior: &str, templates: &ReceiptTemplates) -> ProcessRunner {
+        ProcessRunner::with_environment(vec![
+            (
+                OsString::from("INFERENCE_TEST_DISCHARGER_BEHAVIOR"),
+                OsString::from(behavior),
+            ),
+            (
+                OsString::from("INFERENCE_TEST_EXPECTED_RAW_DIR"),
+                repository_root()
+                    .join("tests")
+                    .join("test_data")
+                    .join("rocq")
+                    .into_os_string(),
+            ),
+            (
+                OsString::from("INFERENCE_TEST_RECEIPT_TEMPLATE_DIR"),
+                templates.path.clone().into_os_string(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn absent_configuration_skips_visibly_unless_required() {
+        let mut output = Vec::new();
+        run_from_configuration(None, false, &mut output).expect("optional absence should skip");
+        let output = String::from_utf8(output).expect("skip output is UTF-8");
+        assert!(
+            output.contains("SKIPPED"),
+            "skip was not visible: {output:?}"
+        );
+
+        let error = run_from_configuration(None, true, &mut Vec::new())
+            .expect_err("required absence must fail closed");
+        assert!(
+            error.to_string().contains(DISCHARGER_ENV),
+            "required error omitted configuration name: {error:#}"
+        );
+    }
+
+    #[test]
+    fn fake_discharger_failure_modes_are_rejected() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let cases = [
+            ("noop", "provenance probe"),
+            ("nonzero", "exited"),
+            ("no-receipt", "receipt directory"),
+            ("malformed", "strict receipt JSON"),
+            ("duplicate", "receipt directory"),
+        ];
+        let mut unexpected = Vec::new();
+        for (behavior, expected_error) in cases {
+            let mut runner = fake_runner(behavior, &templates);
+            let error = run_gate_with(&helper.path, &mut runner)
+                .expect_err("invalid fake behavior must fail");
+            if !format!("{error:#}").contains(expected_error) {
+                unexpected.push((behavior, format!("{error:#}")));
+            }
+        }
+        assert!(
+            unexpected.is_empty(),
+            "fake failure modes produced wrong errors: {unexpected:?}"
+        );
+    }
+
+    #[test]
+    fn valid_fake_discharger_runs_probe_five_cases_and_common_verify() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let mut runner = fake_runner("valid", &templates);
+
+        assert_eq!(
+            run_gate_with(&helper.path, &mut runner).expect("run valid fake discharger"),
+            SUCCESS_LINE
+        );
+    }
+
+    struct MutateAfterProcess {
+        inner: ProcessRunner,
+        invocations: usize,
+    }
+
+    impl Runner for MutateAfterProcess {
+        fn run(&mut self, invocation: &Invocation<'_>) -> Result<RunOutput> {
+            let output = self.inner.run(invocation)?;
+            self.invocations += 1;
+            if self.invocations == 2 {
+                let mut raw = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(invocation.raw_file)
+                    .with_context(|| {
+                        format!("open {} for TOCTOU mutation", invocation.raw_file.display())
+                    })?;
+                raw.write_all(b"mutated after process")
+                    .context("mutate raw after process")?;
+            }
+            Ok(output)
+        }
+    }
+
+    #[test]
+    fn raw_mutation_between_process_prehash_and_posthash_is_never_trusted() {
+        let helper = compile_helper();
+        let templates = receipt_templates();
+        let mut runner = MutateAfterProcess {
+            inner: fake_runner("valid", &templates),
+            invocations: 0,
+        };
+
+        let error =
+            run_gate_with(&helper.path, &mut runner).expect_err("TOCTOU raw mutation must fail");
+        let error = format!("{error:#}");
+        assert!(error.contains("raw integrity"), "unexpected error: {error}");
+        assert!(
+            !error.contains(SUCCESS_LINE),
+            "mutated result was trusted: {error}"
+        );
+    }
+}

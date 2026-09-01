@@ -10,6 +10,7 @@ mod hassert_translation;
 mod parser_literal_diagnostics;
 mod robustness;
 mod rocq_decls;
+pub mod rocq_dischargeability;
 mod rocq_stub_drift;
 mod rocq_test_support;
 mod rocq_typecheck;
