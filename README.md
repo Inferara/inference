@@ -172,7 +172,20 @@ The wrapper composes [`ci/rocq-rust-docker.sh`](ci/rocq-rust-docker.sh), preserv
 
 `--full` first runs the focused dischargeability tests, then the adapter flow, then the complete `inference-tests` crate (not the whole workspace). The clean Docker floor is exactly five Cargo `test result:` lines with at least 3,075 passed tests in aggregate and zero failed or filtered tests. Empty, single-binary, malformed, filtered, and under-floor logs fail closed.
 
-The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the revision in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). The supplied running container must implement the future verifier-side bridge contract: its strict `ci/discharge/container-pin.json` records protocol 1, the image reference and ID, `coq` user, repository mount destination, and exact supported Coq 8.20 patch version. Live inspection must also show that the canonical checkout is the mount source, `coq` has nonzero uid/gid, and the verifier revision plus observed `coq-wasm` tag/revision match Inference's pin.
+The verifier input must be an absolute canonical, clean `wasm-verifier` checkout whose `HEAD` equals the revision in [`core/wasm-to-v/wasm-verifier-pin.txt`](core/wasm-to-v/wasm-verifier-pin.txt). The supplied running container must implement the future verifier-side bridge contract. Its `ci/discharge/container-pin.json` is exact canonical eight-line JSON, including field order and commas:
+
+```json
+{
+  "protocol": 1,
+  "image_reference": "<pinned reference>",
+  "image_id": "sha256:<64 lowercase hex>",
+  "coq_user": "coq",
+  "repository_mount": "/workspaces/wasm-verifier",
+  "coq_version": "8.20.1"
+}
+```
+
+Immediately before and after every bridge, the wrapper rechecks the clean exact checkout, the identities and Git content of all configured bridge/inspection files, and the complete live container contract. Inspection must show the canonical checkout as the mount source, no Docker socket mount, canonical positive-decimal `coq` uid/gid values, exact Coq `8.20.1`, the pinned verifier revision and `coq-wasm` tag/revision, and exact origin `https://github.com/WasmCert/WasmCert-Coq.git`. The inspector must exit zero and emit exactly those eight canonical provenance lines with no extras or duplicates. Batch receives an empty wrapper-owned receipt setting; each single call receives only its new wrapper-owned receipt directory, regardless of ambient environment values.
 
 Phase A intentionally ships before those verifier-side bridge scripts, container inspection script, and `container-pin.json` exist. A normal invocation therefore fails closed with a bounded missing-prerequisite diagnostic; this phase does **not** claim real end-to-end discharge success. The deterministic fake self-test freezes the future contract and can be run without mounting `docker.sock`:
 
@@ -187,7 +200,7 @@ docker run --rm --read-only --network none --cap-drop ALL \
   sh ci/rocq-discharge-docker-self-test.sh
 ```
 
-Every bridge inherits `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`, the one wrapper-created host `0700` evidence directory. A future bridge must write `verifier.log` there before returning nonzero and must keep its public output bounded. The wrapper captures bridge stdout/stderr privately, validates the directory and regular `0600` log, removes transient staging and owned volumes, and prints exactly one sanitized evidence-directory locator. On success it deletes that evidence directory. Inference retains no raw private proof source or receipt contents.
+Every bridge inherits `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`, the one wrapper-created host `0700` evidence directory. A future bridge must write `verifier.log` there before returning nonzero and must keep its public output bounded. The wrapper holds the original identity-checked `0600` capture through a parent file descriptor and never reopens its bridge-visible path. With `--full`, it likewise creates an unpredictable identity-checked `0600` Cargo log before any bridge, writes and parses only through retained parent descriptors, and rejects path replacement. On a valid bridge failure it retains exactly the private evidence directory and prints one sanitized locator; on success, verified cleanup removes the capture, evidence, transient staging, and owned source/exchange volumes before the sole pass marker. Identity uncertainty preserves the suspect path and fails closed. Inference retains no raw private proof source or receipt contents.
 
 ## Roadmap
 
