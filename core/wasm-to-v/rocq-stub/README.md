@@ -144,20 +144,21 @@ regression, or a hand-crafted `.wasm` bypassing A042 — it becomes an
 "unbound constructor" `coqc` error against this stub rather than a
 silently type-checking term.
 
-## Proofs are not closed here (`Qed.` → `Admitted.`)
+## Proof skeletons are admitted, not closed
 
 Emitted per-spec and per-module theorems carry an unfilled
-`(* TODO: fill the proof *)` body terminated by `Qed.`, which `coqc`
-rejects as an incomplete proof (the prover worker is what fills these).
-Because this gate asserts **type-checking, not proof closure**, the test
-rewrites each `Qed.` terminator to `Admitted.` before running `coqc`.
-`Admitted` still fully elaborates and type-checks every `Definition`
+`(* TODO: fill the proof *)` body terminated by `Admitted.`, so freshly
+generated `.v` files type-check unchanged. `Admitted` still fully
+elaborates and type-checks every `Definition`
 (the module record, every instruction term, and every `hassert`
 obligation tree — where arity bugs live) and every theorem *statement*
 (where a `ValidModule`/`ValidSpec` shape drift surfaces), without
-demanding a closed proof. This is a boundary the stub cannot fake with
-signatures alone: it deliberately checks statements + definitions, not
-proofs.
+demanding a closed proof. The admitted skeletons remain unproved
+assumptions: a downstream completion replaces `Admitted.` with a real
+proof ending in `Qed.`, and an admission/assumption audit is required
+before claiming proof closure. This is a boundary the stub cannot fake
+with signatures alone: it deliberately checks statements + definitions,
+not proofs.
 
 ## How the gate uses it
 
@@ -174,8 +175,8 @@ proofs.
    always-on check.
 3. When `coqc` is available (`COQC` env var, else `coqc` on `PATH`),
    copies this stub into a scratch directory, compiles `Wasm` then
-   `WasmVerifier` once, rewrites every generated module's `Qed.` to
-   `Admitted.`, and compiles each one against the compiled stub.
+   `WasmVerifier` once, and compiles each generated module unchanged
+   against the compiled stub.
 4. Otherwise prints a clear "skipped" line and returns `Ok` — CI installs
    `coqc`, so the gate is real there; the corpus-generation and
    proof-surface-coverage checks from step 2 still run locally without it.
