@@ -297,8 +297,12 @@ path_mode() {
     stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 
-directory_identity() {
-    ls -di "$1" | awk '{print $1}'
+path_identity() {
+    stat -c '%u:%d:%i:%a' "$1" 2>/dev/null || stat -f '%u:%d:%i:%Lp' "$1" 2>/dev/null
+}
+
+identity_owner() {
+    printf '%s\n' "${1%%:*}"
 }
 
 validate_owned_directory() {
@@ -306,8 +310,34 @@ validate_owned_directory() {
     expected_identity=$2
     [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
     [ "$(CDPATH= cd -- "$directory" && pwd -P)" = "$directory" ] || return 1
-    [ "$(directory_identity "$directory")" = "$expected_identity" ] || return 1
-    [ "$(path_mode "$directory")" = 700 ] || return 1
+    actual_identity=$(path_identity "$directory") || return 1
+    [ "$actual_identity" = "$expected_identity" ] || return 1
+    [ "$(identity_owner "$actual_identity")" = "$current_uid" ] || return 1
+    [ "${actual_identity##*:}" = 700 ] || return 1
+}
+
+validate_owned_file() {
+    file=$1
+    expected_identity=$2
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    actual_identity=$(path_identity "$file") || return 1
+    [ "$actual_identity" = "$expected_identity" ] || return 1
+    [ "$(identity_owner "$actual_identity")" = "$current_uid" ] || return 1
+    [ "${actual_identity##*:}" = 600 ] || return 1
+}
+
+validate_tmp_root() {
+    directory=$1
+    identity=$(path_identity "$directory") || return 1
+    owner=$(identity_owner "$identity")
+    mode=${identity##*:}
+    if [ "$owner" = "$current_uid" ]; then
+        case "$mode" in [0-7][0145][0145]) return 0;; esac
+    fi
+    if [ "$owner" = 0 ]; then
+        case "$mode" in 1[0-7][0-7][2367]) return 0;; *) return 1;; esac
+    fi
+    return 1
 }
 
 wasm_verifier=
@@ -359,9 +389,9 @@ git_bin=${GIT:-git}
 [ -x "$rust_runner" ] || fail configuration 'missing Task-0 Rust Docker helper'
 [ -f "$inference_pin" ] && [ ! -L "$inference_pin" ] || fail configuration 'missing Inference verifier pin'
 [ -f "$container_pin" ] && [ ! -L "$container_pin" ] || fail configuration 'missing verifier container-pin.json prerequisite (Phase A has no bridge contract yet)'
-[ -x "$resolved_verifier/$container_inspector" ] || fail configuration 'missing verifier container inspection prerequisite (Phase A has no bridge contract yet)'
-case "$adapter" in batch|both) [ -x "$batch_bridge" ] || fail configuration 'missing verifier batch bridge prerequisite (Phase A has no bridge yet)';; esac
-case "$adapter" in single|both) [ -x "$case_bridge" ] || fail configuration 'missing verifier single bridge prerequisite (Phase A has no bridge yet)';; esac
+[ -f "$resolved_verifier/$container_inspector" ] && [ ! -L "$resolved_verifier/$container_inspector" ] && [ -x "$resolved_verifier/$container_inspector" ] || fail configuration 'missing verifier container inspection prerequisite (Phase A has no bridge contract yet)'
+case "$adapter" in batch|both) [ -f "$batch_bridge" ] && [ ! -L "$batch_bridge" ] && [ -x "$batch_bridge" ] || fail configuration 'missing verifier batch bridge prerequisite (Phase A has no bridge yet)';; esac
+case "$adapter" in single|both) [ -f "$case_bridge" ] && [ ! -L "$case_bridge" ] && [ -x "$case_bridge" ] || fail configuration 'missing verifier single bridge prerequisite (Phase A has no bridge yet)';; esac
 safe_text "$docker_requested" || fail configuration 'unsafe Docker executable input'
 case "$docker_requested" in
     */*) docker_candidate=$docker_requested ;;
@@ -370,6 +400,8 @@ esac
 docker_bin=$(canonical_executable "$docker_candidate") || fail configuration 'Docker executable is missing or noncanonical'
 wrapper_executable=$(canonical_executable "$repo_root/ci/rocq-discharge-docker.sh") || fail configuration 'wrapper executable is noncanonical'
 [ "$docker_bin" != "$wrapper_executable" ] && [ ! "$docker_bin" -ef "$wrapper_executable" ] || fail configuration 'Docker executable resolves to this wrapper'
+current_uid=$(id -u) || fail configuration 'could not determine caller uid'
+digits_only "$current_uid" || fail configuration 'caller uid is not canonical numeric data'
 
 pin_value() {
     key=$1
@@ -386,28 +418,26 @@ case "$verifier_revision:$coq_wasm_revision" in *[!0-9a-f:]*) fail pin 'noncanon
 safe_text "$coq_wasm_tag" || fail pin 'unsafe coq-wasm tag'
 [ "$coq_series" = 8.20 ] || fail pin 'Task 4 requires pinned Coq series 8.20'
 
-observed_revision=$("$git_bin" -C "$resolved_verifier" rev-parse HEAD 2>/dev/null || true)
-[ "$observed_revision" = "$verifier_revision" ] || fail pin 'wasm-verifier checkout revision mismatch'
-observed_dirty=$("$git_bin" -C "$resolved_verifier" status --porcelain --untracked-files=all 2>/dev/null || printf 'probe-failed')
-[ -z "$observed_dirty" ] || fail pin 'wasm-verifier checkout is not clean'
-
-json_string() {
-    key=$1
-    values=$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\\1/p" "$container_pin")
-    [ -n "$values" ] && [ "$(printf '%s\n' "$values" | wc -l | tr -d ' ')" -eq 1 ] || fail pin "invalid container pin field $key"
-    printf '%s\n' "$values"
+container_pin_line() {
+    line_number=$1
+    key=$2
+    comma=$3
+    if [ "$comma" = yes ]; then
+        sed -n "${line_number}s/^  \"$key\": \"\\([^\"]*\\)\",$/\\1/p" "$container_pin"
+    else
+        sed -n "${line_number}s/^  \"$key\": \"\\([^\"]*\\)\"$/\\1/p" "$container_pin"
+    fi
 }
-nonempty_lines=$(sed -n '/[^[:space:]]/p' "$container_pin" | wc -l | tr -d ' ')
-[ "$nonempty_lines" -eq 8 ] || fail pin 'container pin must contain only the local container contract'
-[ "$(wc -l <"$container_pin" | tr -d ' ')" -eq 8 ] || fail pin 'container pin must use the closed eight-line grammar'
-[ "$(sed -n '1p' "$container_pin")" = '{' ] && [ "$(sed -n '8p' "$container_pin")" = '}' ] || fail pin 'container pin braces are malformed'
-protocol_lines=$(sed -n 's/^[[:space:]]*"protocol"[[:space:]]*:[[:space:]]*1[[:space:]]*,[[:space:]]*$/1/p' "$container_pin")
-[ "$protocol_lines" = 1 ] || fail pin 'container pin protocol mismatch'
-pinned_image_reference=$(json_string image_reference)
-pinned_image_id=$(json_string image_id)
-pinned_user=$(json_string coq_user)
-pinned_repository_mount=$(json_string repository_mount)
-pinned_coq_version=$(json_string coq_version)
+[ "$(wc -l <"$container_pin" | tr -d ' ')" -eq 8 ] || fail pin 'container pin must use the canonical eight-line grammar'
+[ "$(sed -n '1p' "$container_pin")" = '{' ] || fail pin 'container pin opening brace is not canonical'
+[ "$(sed -n '2p' "$container_pin")" = '  "protocol": 1,' ] || fail pin 'container pin protocol line is not canonical'
+pinned_image_reference=$(container_pin_line 3 image_reference yes)
+pinned_image_id=$(container_pin_line 4 image_id yes)
+pinned_user=$(container_pin_line 5 coq_user yes)
+pinned_repository_mount=$(container_pin_line 6 repository_mount yes)
+pinned_coq_version=$(container_pin_line 7 coq_version no)
+[ -n "$pinned_image_reference" ] && [ -n "$pinned_image_id" ] && [ -n "$pinned_user" ] && [ -n "$pinned_repository_mount" ] && [ -n "$pinned_coq_version" ] || fail pin 'container pin fields or ordering are not canonical'
+[ "$(sed -n '8p' "$container_pin")" = '}' ] || fail pin 'container pin closing brace is not canonical'
 safe_text "$pinned_image_reference" || fail pin 'unsafe image reference in container pin'
 safe_text "$pinned_coq_version" || fail pin 'unsafe Coq version in container pin'
 [ "${#pinned_image_id}" -eq 71 ] || fail pin 'invalid image ID length'
@@ -417,64 +447,111 @@ esac
 case "$pinned_image_id" in sha256:*) :;; *) fail pin 'invalid image ID';; esac
 [ "$pinned_user" = coq ] || fail pin 'container pin must require coq user'
 safe_absolute_path "$pinned_repository_mount" || fail pin 'unsafe repository mount in container pin'
-case "$pinned_coq_version" in 8.20|8.20.*|8.20+*) :;; *) fail pin 'container pin is outside Coq 8.20';; esac
+[ "$pinned_coq_version" = 8.20.1 ] || fail pin 'container pin must require exact Coq 8.20.1'
 
-actual_running=$("$docker_bin" container inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)
-[ "$actual_running" = true ] || fail container 'configured verifier container is not running'
-actual_image_reference=$("$docker_bin" container inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)
-[ "$actual_image_reference" = "$pinned_image_reference" ] || fail container 'running container image reference mismatch'
-actual_image_id=$("$docker_bin" container inspect --format '{{.Image}}' "$container" 2>/dev/null || true)
-[ "$actual_image_id" = "$pinned_image_id" ] || fail container 'running container image ID mismatch'
-actual_user=$("$docker_bin" container inspect --format '{{.Config.User}}' "$container" 2>/dev/null || true)
-[ "$actual_user" = "$pinned_user" ] || fail container 'running container configured user mismatch'
-mounts=$("$docker_bin" container inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" .Destination .Source}}{{end}}' "$container" 2>/dev/null || true)
-mount_count=0
-mount_tab=$(printf '\t')
-while IFS="$mount_tab" read -r destination source; do
-    [ -n "$destination" ] || continue
-    safe_absolute_path "$destination" && safe_absolute_path "$source" || fail container 'unsafe running-container mount inspection'
-    case "$destination:$source" in *docker.sock*) fail container 'running container exposes a Docker socket mount';; esac
-    if [ "$destination" = "$pinned_repository_mount" ]; then
-        [ "$source" = "$resolved_verifier" ] || fail container 'repository mount source is not the canonical verifier checkout'
-        mount_count=$((mount_count + 1))
-    fi
-done <<MOUNTS
+assert_git_clean() {
+    if observed_revision=$("$git_bin" -C "$resolved_verifier" rev-parse HEAD 2>/dev/null); then :; else fail pin 'wasm-verifier revision inspection failed'; fi
+    [ "$observed_revision" = "$verifier_revision" ] || fail pin 'wasm-verifier checkout revision mismatch'
+    if observed_dirty=$("$git_bin" -C "$resolved_verifier" status --porcelain --untracked-files=all 2>/dev/null); then :; else fail pin 'wasm-verifier cleanliness inspection failed'; fi
+    [ -z "$observed_dirty" ] || fail pin 'wasm-verifier checkout is not clean'
+    set -- "$container_inspector" ci/discharge/container-pin.json
+    case "$adapter" in batch|both) set -- "$@" ci/discharge/run-docker-batch.sh;; esac
+    case "$adapter" in single|both) set -- "$@" ci/discharge/run-docker-case.sh;; esac
+    "$git_bin" -C "$resolved_verifier" diff --quiet HEAD -- "$@" 2>/dev/null || fail pin 'verifier bridge contract differs from clean Git content'
+}
+
+assert_git_clean
+inspector_identity=$(path_identity "$resolved_verifier/$container_inspector") || fail pin 'could not record verifier inspector identity'
+container_pin_identity=$(path_identity "$container_pin") || fail pin 'could not record container pin identity'
+batch_bridge_identity=
+case_bridge_identity=
+case "$adapter" in batch|both) batch_bridge_identity=$(path_identity "$batch_bridge") || fail pin 'could not record batch bridge identity';; esac
+case "$adapter" in single|both) case_bridge_identity=$(path_identity "$case_bridge") || fail pin 'could not record single bridge identity';; esac
+
+validate_contract_file() {
+    file=$1
+    expected_identity=$2
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    [ "$(path_identity "$file")" = "$expected_identity" ] || return 1
+}
+
+assert_verifier_checkout() {
+    assert_git_clean
+    validate_contract_file "$resolved_verifier/$container_inspector" "$inspector_identity" && [ -x "$resolved_verifier/$container_inspector" ] || fail pin 'verifier inspector identity changed'
+    validate_contract_file "$container_pin" "$container_pin_identity" || fail pin 'container pin identity changed'
+    case "$adapter" in batch|both) validate_contract_file "$batch_bridge" "$batch_bridge_identity" && [ -x "$batch_bridge" ] || fail pin 'batch bridge identity changed';; esac
+    case "$adapter" in single|both) validate_contract_file "$case_bridge" "$case_bridge_identity" && [ -x "$case_bridge" ] || fail pin 'single bridge identity changed';; esac
+}
+
+inspect_container_value() {
+    format=$1
+    if inspected=$("$docker_bin" container inspect --format "$format" "$container" 2>/dev/null); then :; else fail container 'running container inspection failed'; fi
+    printf '%s\n' "$inspected"
+}
+
+canonical_positive_decimal() {
+    case "$1" in ''|0|*[!0-9]*|0*) return 1;; [1-9]*) return 0;; *) return 1;; esac
+}
+
+assert_live_container() {
+    actual_running=$(inspect_container_value '{{.State.Running}}')
+    [ "$actual_running" = true ] || fail container 'configured verifier container is not running'
+    actual_image_reference=$(inspect_container_value '{{.Config.Image}}')
+    [ "$actual_image_reference" = "$pinned_image_reference" ] || fail container 'running container image reference mismatch'
+    actual_image_id=$(inspect_container_value '{{.Image}}')
+    [ "$actual_image_id" = "$pinned_image_id" ] || fail container 'running container image ID mismatch'
+    actual_user=$(inspect_container_value '{{.Config.User}}')
+    [ "$actual_user" = "$pinned_user" ] || fail container 'running container configured user mismatch'
+    mounts=$(inspect_container_value '{{range .Mounts}}{{printf "%s\t%s\n" .Destination .Source}}{{end}}')
+    mount_count=0
+    mount_tab=$(printf '\t')
+    while IFS="$mount_tab" read -r destination source; do
+        [ -n "$destination" ] || continue
+        safe_absolute_path "$destination" && safe_absolute_path "$source" || fail container 'unsafe running-container mount inspection'
+        case "$destination:$source" in *docker.sock*) fail container 'running container exposes a Docker socket mount';; esac
+        if [ "$destination" = "$pinned_repository_mount" ]; then
+            [ "$source" = "$resolved_verifier" ] || fail container 'repository mount source is not the canonical verifier checkout'
+            mount_count=$((mount_count + 1))
+        fi
+    done <<MOUNTS
 $mounts
 MOUNTS
-[ "$mount_count" -eq 1 ] || fail container 'running container repository mount destination mismatch'
+    [ "$mount_count" -eq 1 ] || fail container 'running container repository mount destination mismatch'
 
-provenance=$("$docker_bin" exec --user coq --workdir "$pinned_repository_mount" "$container" "$container_inspector" 2>/dev/null || true)
-[ -n "$provenance" ] && [ "${#provenance}" -le 1024 ] || fail container 'container provenance inspection failed'
-provenance_value() {
-    key=$1
-    values=$(printf '%s\n' "$provenance" | sed -n "s/^$key=\\([^=]*\\)$/\\1/p")
-    [ -n "$values" ] && [ "$(printf '%s\n' "$values" | wc -l | tr -d ' ')" -eq 1 ] || fail container "invalid container provenance field $key"
-    printf '%s\n' "$values"
+    provenance_sentinel=__INFERENCE_PROVENANCE_END__
+    if provenance=$(
+        "$docker_bin" exec --user coq --workdir "$pinned_repository_mount" "$container" "$container_inspector" 2>/dev/null || exit $?
+        printf '%s' "$provenance_sentinel"
+    ); then :; else fail container 'container provenance inspector exited nonzero'; fi
+    [ -n "$provenance" ] && [ "${#provenance}" -le 1200 ] || fail container 'container provenance inspection failed'
+    coq_uid=$(printf '%s\n' "$provenance" | sed -n '2s/^coq_uid=//p')
+    coq_gid=$(printf '%s\n' "$provenance" | sed -n '3s/^coq_gid=//p')
+    canonical_positive_decimal "$coq_uid" && canonical_positive_decimal "$coq_gid" || fail container 'coq user must have canonical positive uid and gid'
+    expected_provenance=$(printf 'coq_user=coq\ncoq_uid=%s\ncoq_gid=%s\nwasm_verifier_revision=%s\ncoq_version=8.20.1\ncoq_wasm_origin=https://github.com/WasmCert/WasmCert-Coq.git\ncoq_wasm_tag=%s\ncoq_wasm_revision=%s\n%s' "$coq_uid" "$coq_gid" "$verifier_revision" "$coq_wasm_tag" "$coq_wasm_revision" "$provenance_sentinel")
+    [ "$provenance" = "$expected_provenance" ] || fail container 'container provenance is not the exact canonical eight-line contract'
 }
-[ "$(printf '%s\n' "$provenance" | sed -n '/^[a-z_][a-z_]*=[^=]*$/p' | wc -l | tr -d ' ')" -eq 7 ] || fail container 'unexpected container provenance fields'
-[ "$(provenance_value coq_user)" = coq ] || fail container 'container execution user mismatch'
-coq_uid=$(provenance_value coq_uid); coq_gid=$(provenance_value coq_gid)
-case "$coq_uid" in ''|*[!0-9]*|0) fail container 'coq user must have nonzero numeric uid and gid';; esac
-case "$coq_gid" in ''|*[!0-9]*|0) fail container 'coq user must have nonzero numeric uid and gid';; esac
-[ "$(provenance_value wasm_verifier_revision)" = "$verifier_revision" ] || fail container 'in-container verifier revision mismatch'
-[ "$(provenance_value coq_version)" = "$pinned_coq_version" ] || fail container 'exact Coq version mismatch'
-[ "$(provenance_value coq_wasm_tag)" = "$coq_wasm_tag" ] || fail container 'observed coq-wasm tag mismatch'
-[ "$(provenance_value coq_wasm_revision)" = "$coq_wasm_revision" ] || fail container 'observed coq-wasm revision mismatch'
+
+assert_verifier_checkout
+assert_live_container
 
 tmp_root=${TMPDIR:-/tmp}
 safe_absolute_path "$tmp_root" || fail configuration 'unsafe temporary-directory root'
 [ -d "$tmp_root" ] && [ ! -L "$tmp_root" ] || fail configuration 'temporary-directory root is not a nonsymlink directory'
 tmp_root=$(CDPATH= cd -- "$tmp_root" && pwd -P)
+validate_tmp_root "$tmp_root" || fail configuration 'temporary-directory root ownership or permissions are unsafe'
 old_umask=$(umask)
 umask 077
 staging=$(mktemp -d "$tmp_root/inference-rocq-discharge.XXXXXX")
 evidence_dir=
 evidence_retained=0
+evidence_identity=
+capture_file=
+capture_identity=
 umask "$old_umask"
 staging=$(CDPATH= cd -- "$staging" && pwd -P)
 safe_absolute_path "$staging" || fail configuration 'unsafe resolved staging directory'
 chmod 700 "$staging"
-staging_identity=$(directory_identity "$staging")
+staging_identity=$(path_identity "$staging") || fail configuration 'could not record staging directory identity'
 
 run_token=${staging##*.}
 valid_run_token "$run_token" || fail configuration 'mktemp returned an invalid random run token'
@@ -483,18 +560,29 @@ source_volume=inference-rocq-discharge-$run_token-source
 exchange_volume=inference-rocq-discharge-$run_token-exchange
 source_owner_file=$staging/source.owner
 exchange_created=0
+cleanup_complete=0
+staging_suspect=0
+evidence_suspect=0
+capture_fd_open=0
+full_log_fd_open=0
+full_log=
+full_log_identity=
 
 assert_staging_identity() {
-    validate_owned_directory "$staging" "$staging_identity" || fail staging-identity 'staging directory identity or mode changed'
+    validate_owned_directory "$staging" "$staging_identity" || { staging_suspect=1; fail staging-identity 'staging directory identity or mode changed'; }
 }
 
 volume_owner() {
-    "$docker_bin" volume inspect --format "{{ index .Labels \"$owner_label\" }}" "$1" 2>/dev/null || true
+    if inspected_owner=$("$docker_bin" volume inspect --format "{{ index .Labels \"$owner_label\" }}" "$1" 2>/dev/null); then :; else return $?; fi
+    printf '%s\n' "$inspected_owner"
 }
 
 cleanup() {
     status=$?
     trap - EXIT
+    if [ "$capture_fd_open" -eq 1 ]; then exec 3>&-; capture_fd_open=0; fi
+    if [ "$full_log_fd_open" -eq 1 ]; then exec 4>&- 5>&-; full_log_fd_open=0; fi
+    [ "$cleanup_complete" -eq 0 ] || exit "$status"
     if [ -f "$source_owner_file" ] && [ ! -L "$source_owner_file" ]; then
         source_owner=$(sed -n '1p' "$source_owner_file")
         if digits_only "$source_owner" && [ "$(volume_owner "$source_volume")" = "$source_owner" ]; then
@@ -504,24 +592,45 @@ cleanup() {
     if [ "$exchange_created" -eq 1 ] && [ "$(volume_owner "$exchange_volume")" = "$run_owner" ]; then
         "$docker_bin" volume rm "$exchange_volume" >/dev/null 2>&1 || true
     fi
-    if [ -n "$evidence_dir" ] && [ "$evidence_retained" -eq 0 ]; then
+    if [ -n "$evidence_dir" ] && [ "$evidence_retained" -eq 0 ] && [ "$evidence_suspect" -eq 0 ]; then
         case "$evidence_dir" in
             "$tmp_root"/wasm-verifier-discharge-evidence.*)
-                if validate_evidence_directory 2>/dev/null; then rm -rf "$evidence_dir"; fi
+                if validate_owned_directory "$evidence_dir" "$evidence_identity" 2>/dev/null; then
+                    if [ -z "$capture_file" ] || validate_owned_file "$capture_file" "$capture_identity" 2>/dev/null; then
+                        rm -rf "$evidence_dir"
+                    fi
+                fi
                 ;;
         esac
     fi
-    case "$staging" in
+    if [ "$staging_suspect" -eq 0 ]; then case "$staging" in
         "$tmp_root"/inference-rocq-discharge.*)
-            if validate_owned_directory "$staging" "$staging_identity" 2>/dev/null; then rm -rf "$staging"; fi
+            if validate_owned_directory "$staging" "$staging_identity" 2>/dev/null; then
+                if [ -z "$full_log" ] || validate_owned_file "$full_log" "$full_log_identity" 2>/dev/null; then
+                    rm -rf "$staging"
+                fi
+            fi
             ;;
-    esac
+    esac; fi
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ "$full" -eq 1 ]; then
+    assert_staging_identity
+    old_umask=$(umask); umask 077
+    full_log=$(mktemp "$staging/inference-tests.log.XXXXXX")
+    umask "$old_umask"
+    [ -f "$full_log" ] && [ ! -L "$full_log" ] || fail full-log-identity 'could not securely create full-test log'
+    chmod 600 "$full_log"
+    if exec 4>"$full_log" 5<"$full_log"; then :; else fail full-log-identity 'could not open retained full-test log descriptors'; fi
+    full_log_fd_open=1
+    full_log_identity=$(path_identity "$full_log") || fail full-log-identity 'could not record full-test log identity'
+    validate_owned_file "$full_log" "$full_log_identity" || fail full-log-identity 'full-test log identity or mode was unsafe at creation'
+fi
 
 if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1 || "$docker_bin" volume inspect "$exchange_volume" >/dev/null 2>&1; then
     fail cleanup 'unique transient volume name collision'
@@ -530,7 +639,8 @@ fi
 exchange_created=1
 [ "$(volume_owner "$exchange_volume")" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate'
 
-run_rust() {
+run_rust() (
+    exec 3>&- 4>&- 5>&-
     INFERENCE_ROCQ_DOCKER_PROXY_MODE=1 \
     INFERENCE_ROCQ_DOCKER_PROXY_REAL_DOCKER="$docker_bin" \
     INFERENCE_ROCQ_DOCKER_PROXY_SOURCE_VOLUME="$source_volume" \
@@ -538,7 +648,7 @@ run_rust() {
     INFERENCE_ROCQ_DOCKER_PROXY_RUN_OWNER="$run_owner" \
     INFERENCE_ROCQ_DOCKER_PROXY_SOURCE_OWNER_FILE="$source_owner_file" \
     DOCKER="$repo_root/ci/rocq-discharge-docker.sh" "$rust_runner" cargo "$@"
-}
+)
 
 busybox_run() {
     "$docker_bin" run --rm \
@@ -555,15 +665,13 @@ if [ "$full" -eq 1 ]; then
 fi
 run_rust run -p inference-tests --bin rocq-discharge -- export --exchange /exchange
 
-record_identity() {
-    output=$1
-    assert_staging_identity
-    busybox_run \
+fingerprint_exchange() {
+    if fingerprint_output=$(busybox_run \
         --mount "type=volume,src=$exchange_volume,dst=/exchange,readonly" \
-        --mount "type=bind,src=$staging,dst=/staging" \
         "$busybox_image" sh -c '
-            # task4-identity
-            set -eu
+            # task4-fingerprint
+            material=/tmp/material
+            : >"$material" || exit 41
             for path in \
                 request.json \
                 raw/rocq_prime_bounded_example.v \
@@ -572,38 +680,41 @@ record_identity() {
                 raw/spec_narrow_discharge.v \
                 raw/rocq_false_certificate.v
             do
-                [ -f "/exchange/$path" ] && [ ! -L "/exchange/$path" ] || exit 41
+                file=/exchange/$path
+                [ -f "$file" ] && [ ! -L "$file" ] || exit 42
+                printf "%s\000" "$path" >>"$material" || exit 43
+                byte_count=$(wc -c <"$file") || exit 44
+                set -- $byte_count
+                [ "$#" -eq 1 ] || exit 45
+                case "$1" in ""|*[!0-9]*) exit 46;; esac
+                printf "%s\000" "$1" >>"$material" || exit 47
+                cat "$file" >>"$material" || exit 48
+                printf "\000" >>"$material" || exit 49
             done
-            {
-                for path in \
-                    request.json \
-                    raw/rocq_prime_bounded_example.v \
-                    raw/rocq_exists_spec.v \
-                    raw/rocq_unique_spec.v \
-                    raw/spec_narrow_discharge.v \
-                    raw/rocq_false_certificate.v
-                do
-                    printf "%s\000" "$path"
-                    wc -c <"/exchange/$path" | tr -d " "
-                    printf "\000"
-                    cat "/exchange/$path"
-                    printf "\000"
-                done
-            } | sha256sum | cut -d " " -f 1 >"/staging/exchange.identity.next"
-        '
-    mv "$staging/exchange.identity.next" "$output"
+            hash_output=$(sha256sum "$material") || exit 50
+            set -- $hash_output
+            [ "$#" -eq 2 ] && [ "$2" = "$material" ] || exit 51
+            digest=$1
+            [ "${#digest}" -eq 64 ] || exit 52
+            case "$digest" in *[!0-9a-f]*) exit 53;; esac
+            printf "%s\n" "$digest" || exit 54
+        ' 2>/dev/null
+    ); then :; else return $?; fi
+    [ "${#fingerprint_output}" -eq 64 ] || return 55
+    case "$fingerprint_output" in *[!0-9a-f]*) return 56;; esac
+    printf '%s\n' "$fingerprint_output"
 }
 
-identity=$staging/exchange.identity
-record_identity "$identity"
+if exchange_fingerprint=$(fingerprint_exchange); then :; else fail input-integrity 'could not establish immutable request/raw fingerprint'; fi
 bridge_raw_basename=
 assert_identity() {
-    identity_matches || fail input-integrity 'immutable request/raw fingerprint changed'
+    if current_fingerprint=$(fingerprint_exchange); then :; else fail input-integrity 'immutable request/raw fingerprint helper failed'; fi
+    [ "$current_fingerprint" = "$exchange_fingerprint" ] || fail input-integrity 'immutable request/raw fingerprint changed'
 }
 
 identity_matches() {
-    record_identity "$staging/exchange.identity.check"
-    cmp -s "$identity" "$staging/exchange.identity.check"
+    if current_fingerprint=$(fingerprint_exchange); then :; else return 1; fi
+    [ "$current_fingerprint" = "$exchange_fingerprint" ]
 }
 
 prepare_evidence() {
@@ -614,70 +725,131 @@ prepare_evidence() {
     evidence_dir=$(CDPATH= cd -- "$evidence_dir" && pwd -P)
     safe_absolute_path "$evidence_dir" || fail configuration 'unsafe evidence directory'
     chmod 700 "$evidence_dir"
-    evidence_identity=$(ls -di "$evidence_dir" | awk '{print $1}')
-    (umask 077; : >"$evidence_dir/bridge-output.log")
+    evidence_identity=$(path_identity "$evidence_dir") || fail evidence-contract 'could not record private evidence directory identity'
+    validate_owned_directory "$evidence_dir" "$evidence_identity" || fail evidence-contract 'private evidence directory was unsafe at creation'
+    capture_file=$evidence_dir/bridge-output.log
+    old_umask=$(umask); umask 077
+    set -C
+    : >"$capture_file" || { set +C; umask "$old_umask"; fail evidence-contract 'could not securely create bridge capture'; }
+    set +C
+    if exec 3>>"$capture_file"; then :; else umask "$old_umask"; fail evidence-contract 'could not open retained bridge capture descriptor'; fi
+    capture_fd_open=1
+    umask "$old_umask"
+    chmod 600 "$capture_file"
+    capture_identity=$(path_identity "$capture_file") || fail evidence-contract 'could not record bridge capture identity'
+    validate_owned_file "$capture_file" "$capture_identity" || fail evidence-contract 'bridge capture identity or mode was unsafe at creation'
 }
 
 validate_evidence_directory() {
-    validate_owned_directory "$evidence_dir" "$evidence_identity"
+    validate_owned_directory "$evidence_dir" "$evidence_identity" &&
+        validate_owned_file "$capture_file" "$capture_identity"
+}
+
+validate_full_log() {
+    [ "$full" -eq 0 ] || validate_owned_file "$full_log" "$full_log_identity"
+}
+
+require_evidence_identity() {
+    message=$1
+    validate_evidence_directory || { evidence_suspect=1; fail evidence-contract "$message"; }
+}
+
+require_full_log_identity() {
+    message=$1
+    validate_full_log || { staging_suspect=1; fail full-log-identity "$message"; }
 }
 
 validate_failure_evidence() {
     validate_evidence_directory || return 1
-    [ -f "$evidence_dir/bridge-output.log" ] && [ ! -L "$evidence_dir/bridge-output.log" ] || return 1
     [ -f "$evidence_dir/verifier.log" ] && [ ! -L "$evidence_dir/verifier.log" ] || return 1
-    [ "$(path_mode "$evidence_dir/bridge-output.log")" = 600 ] || return 1
-    [ "$(path_mode "$evidence_dir/verifier.log")" = 600 ] || return 1
+    verifier_log_identity=$(path_identity "$evidence_dir/verifier.log") || return 1
+    validate_owned_file "$evidence_dir/verifier.log" "$verifier_log_identity" || return 1
     [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 2 ] || return 1
     [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 2 ] || return 1
 }
 
+bridge_receipt_dir=
 run_bridge() {
     phase=$1
     shift
     assert_identity
     if [ -n "$bridge_raw_basename" ]; then validate_staged_raw "$bridge_raw_basename"; fi
+    require_full_log_identity 'full-test log identity or mode changed before bridge invocation'
     prepare_evidence
-    validate_evidence_directory || fail evidence-contract 'private evidence directory identity or mode changed'
+    require_evidence_identity 'private evidence directory identity or mode changed'
     [ ! -e "$evidence_dir/verifier.log" ] && [ ! -L "$evidence_dir/verifier.log" ] || fail evidence-contract 'stale verifier evidence existed before bridge invocation'
+    assert_verifier_checkout
+    assert_live_container
     old_umask=$(umask)
     umask 077
-    if INFERENCE_WASM_VERIFIER_EVIDENCE_DIR="$evidence_dir" \
-        INFERENCE_WASM_VERIFIER_RECEIPT_DIR="${INFERENCE_WASM_VERIFIER_RECEIPT_DIR:-}" \
+    if (
+        exec 1>&3 2>&1
+        exec 3>&- 4>&- 5>&-
+        DOCKER="$docker_bin" \
+        INFERENCE_WASM_VERIFIER_EVIDENCE_DIR="$evidence_dir" \
+        INFERENCE_WASM_VERIFIER_RECEIPT_DIR="$bridge_receipt_dir" \
         WASM_VERIFIER_CONTAINER="$container" \
-        "$@" >>"$evidence_dir/bridge-output.log" 2>&1
+        exec "$@"
+    )
     then
         umask "$old_umask"
+        assert_verifier_checkout
+        assert_live_container
         assert_staging_identity
         assert_identity
         if [ -n "$bridge_raw_basename" ]; then validate_staged_raw "$bridge_raw_basename"; fi
-        validate_evidence_directory || fail evidence-contract 'private evidence directory identity or mode changed'
+        require_full_log_identity 'full-test log identity or mode changed after bridge invocation'
+        require_evidence_identity 'private evidence directory identity or mode changed'
         [ ! -e "$evidence_dir/verifier.log" ] && [ ! -L "$evidence_dir/verifier.log" ] || fail evidence-contract 'successful bridge left a private failure log'
         return 0
     else
         status=$?
         umask "$old_umask"
+        post_staging_ok=1
+        post_identity_ok=1
+        post_staged_raw_ok=1
+        post_verifier_ok=1
+        post_container_ok=1
+        post_full_log_ok=1
+        (assert_verifier_checkout) >/dev/null 2>&1 || post_verifier_ok=0
+        (assert_live_container) >/dev/null 2>&1 || post_container_ok=0
+        validate_owned_directory "$staging" "$staging_identity" || post_staging_ok=0
+        identity_matches >/dev/null 2>&1 || post_identity_ok=0
+        if [ -n "$bridge_raw_basename" ]; then staged_raw_matches "$bridge_raw_basename" >/dev/null 2>&1 || post_staged_raw_ok=0; fi
+        validate_full_log || post_full_log_ok=0
+        if ! validate_evidence_directory; then
+            evidence_suspect=1
+            fail evidence-contract 'bridge changed private evidence directory or capture identity'
+        fi
         if ! validate_failure_evidence; then
             fail evidence-contract 'bridge failed without one safe private verifier log'
         fi
         evidence_retained=1
-        if ! validate_owned_directory "$staging" "$staging_identity"; then
-            phase=staging-identity
-        elif ! identity_matches; then
-            phase=input-integrity
-        elif [ -n "$bridge_raw_basename" ] && ! staged_raw_matches "$bridge_raw_basename"; then
-            phase=input-integrity
-        fi
+        [ "$post_staging_ok" -eq 1 ] || phase=staging-identity
+        [ "$post_identity_ok" -eq 1 ] && [ "$post_staged_raw_ok" -eq 1 ] || phase=input-integrity
+        [ "$post_verifier_ok" -eq 1 ] || phase=verifier-contract
+        [ "$post_container_ok" -eq 1 ] || phase=container-contract
+        [ "$post_full_log_ok" -eq 1 ] || { phase=full-log-identity; staging_suspect=1; }
         echo "rocq-discharge-docker: phase=$phase evidence=$evidence_dir" >&2
         exit "$status"
     fi
 }
 
-verify_exchange() { run_rust run -p inference-tests --bin rocq-discharge -- verify --exchange /exchange; }
+verify_exchange() {
+    assert_identity
+    if run_rust run -p inference-tests --bin rocq-discharge -- verify --exchange /exchange; then
+        verify_status=0
+    else
+        verify_status=$?
+    fi
+    assert_identity
+    assert_staging_identity
+    [ "$verify_status" -eq 0 ] || fail verify "Rust receipt verification failed in pinned Docker (status $verify_status)"
+}
 
 run_batch() {
+    bridge_receipt_dir=
     run_bridge batch "$batch_bridge" --exchange-volume "$exchange_volume"
-    assert_identity
     verify_exchange
 }
 
@@ -749,15 +921,23 @@ remove_batch_receipts() {
     assert_identity
 }
 
-validate_single_receipt() {
+validate_single_receipt_layout() {
     case_id=$1
     directory=$2
     expected_identity=$3
-    validate_owned_directory "$directory" "$expected_identity" || fail single 'single-case receipt directory identity or mode changed'
-    [ -f "$directory/$case_id.json" ] && [ ! -L "$directory/$case_id.json" ] || fail single 'missing single-case receipt'
-    [ "$(path_mode "$directory/$case_id.json")" = 600 ] || fail single 'single-case receipt mode is not private'
-    [ "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 1 ] || fail single 'single-case receipt directory is not exact'
-    [ "$(find "$directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] || fail single 'single-case receipt directory contains an extra entry'
+    validate_owned_directory "$directory" "$expected_identity" || { staging_suspect=1; fail single 'single-case receipt directory identity or mode changed'; }
+    [ -f "$directory/$case_id.json" ] && [ ! -L "$directory/$case_id.json" ] || { staging_suspect=1; fail single 'missing single-case receipt'; }
+    [ "$(find "$directory" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 1 ] || { staging_suspect=1; fail single 'single-case receipt directory is not exact'; }
+    [ "$(find "$directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] || { staging_suspect=1; fail single 'single-case receipt directory contains an extra entry'; }
+}
+
+validate_single_receipt() {
+    case_id=$1
+    directory=$2
+    expected_directory_identity=$3
+    expected_file_identity=$4
+    validate_single_receipt_layout "$case_id" "$directory" "$expected_directory_identity"
+    validate_owned_file "$directory/$case_id.json" "$expected_file_identity" || { staging_suspect=1; fail single 'single-case receipt file identity or mode changed'; }
 }
 
 copy_single_receipts() {
@@ -781,6 +961,11 @@ copy_single_receipts() {
 
 run_single() {
     copy_raw_to_staging
+    prime_bounded_receipt_dir_identity= prime_bounded_receipt_file_identity=
+    exists_receipt_dir_identity= exists_receipt_file_identity=
+    unique_receipt_dir_identity= unique_receipt_file_identity=
+    narrow_domain_receipt_dir_identity= narrow_domain_receipt_file_identity=
+    false_spec_receipt_dir_identity= false_spec_receipt_file_identity=
     for record in \
         'prime-bounded:rocq_prime_bounded_example.v' \
         'exists:rocq_exists_spec.v' \
@@ -792,16 +977,32 @@ run_single() {
         basename=${record#*:}
         receipt_dir=$staging/receipts/$case_id
         mkdir -m 700 "$receipt_dir"
-        receipt_identity=$(directory_identity "$receipt_dir")
+        receipt_identity=$(path_identity "$receipt_dir") || fail single 'could not record single-case receipt directory identity'
         validate_owned_directory "$receipt_dir" "$receipt_identity" || fail single 'single-case receipt directory was unsafe before bridge invocation'
         [ -z "$(find "$receipt_dir" -mindepth 1 -print -quit)" ] || fail single 'single-case receipt directory was not empty before bridge invocation'
         bridge_raw_basename=$basename
-        INFERENCE_WASM_VERIFIER_RECEIPT_DIR="$receipt_dir" run_bridge "single-$case_id" \
+        bridge_receipt_dir=$receipt_dir
+        run_bridge "single-$case_id" \
             "$case_bridge" --protocol 1 --wasm-verifier-revision "$verifier_revision" --case "$case_id" "$staging/raw/$basename"
         bridge_raw_basename=
-        validate_single_receipt "$case_id" "$receipt_dir" "$receipt_identity"
+        bridge_receipt_dir=
+        validate_single_receipt_layout "$case_id" "$receipt_dir" "$receipt_identity"
+        receipt_file_identity=$(path_identity "$receipt_dir/$case_id.json") || fail single 'could not record single-case receipt file identity'
+        validate_single_receipt "$case_id" "$receipt_dir" "$receipt_identity" "$receipt_file_identity"
+        case "$case_id" in
+            prime-bounded) prime_bounded_receipt_dir_identity=$receipt_identity; prime_bounded_receipt_file_identity=$receipt_file_identity ;;
+            exists) exists_receipt_dir_identity=$receipt_identity; exists_receipt_file_identity=$receipt_file_identity ;;
+            unique) unique_receipt_dir_identity=$receipt_identity; unique_receipt_file_identity=$receipt_file_identity ;;
+            narrow-domain) narrow_domain_receipt_dir_identity=$receipt_identity; narrow_domain_receipt_file_identity=$receipt_file_identity ;;
+            false-spec) false_spec_receipt_dir_identity=$receipt_identity; false_spec_receipt_file_identity=$receipt_file_identity ;;
+        esac
         assert_identity
     done
+    validate_single_receipt prime-bounded "$staging/receipts/prime-bounded" "$prime_bounded_receipt_dir_identity" "$prime_bounded_receipt_file_identity"
+    validate_single_receipt exists "$staging/receipts/exists" "$exists_receipt_dir_identity" "$exists_receipt_file_identity"
+    validate_single_receipt unique "$staging/receipts/unique" "$unique_receipt_dir_identity" "$unique_receipt_file_identity"
+    validate_single_receipt narrow-domain "$staging/receipts/narrow-domain" "$narrow_domain_receipt_dir_identity" "$narrow_domain_receipt_file_identity"
+    validate_single_receipt false-spec "$staging/receipts/false-spec" "$false_spec_receipt_dir_identity" "$false_spec_receipt_file_identity"
     copy_single_receipts
     verify_exchange
 }
@@ -817,7 +1018,6 @@ case "$adapter" in
 esac
 
 parse_full_results() {
-    log=$1
     summary=$(LC_ALL=C awk -v expected_lines="$full_result_lines" -v floor="$full_passed_floor" '
         /^test result:/ {
             lines++
@@ -832,23 +1032,60 @@ parse_full_results() {
             if (bad || lines != expected_lines || passed < floor || filtered != 0) exit 1
             printf "%d %d %d\n", lines, passed, ignored
         }
-    ' "$log") || fail full-test-floor 'crate test result lines were empty, malformed, filtered-only, under floor, or wrong in count'
+    ') || fail full-test-floor 'crate test result lines were empty, malformed, filtered-only, under floor, or wrong in count'
     set -- $summary
     echo "rocq-discharge-docker: full crate=inference-tests result-lines=$1 passed=$2 floor=$full_passed_floor ignored=$3"
 }
 
 if [ "$full" -eq 1 ]; then
-    full_log=$staging/inference-tests.log
-    if run_rust test --color never -p inference-tests -- --test-threads=1 >"$full_log" 2>&1; then
-        parse_full_results "$full_log"
+    require_full_log_identity 'full-test log identity or mode changed before crate test'
+    if run_rust test --color never -p inference-tests -- --test-threads=1 >&4 2>&1; then
+        require_full_log_identity 'full-test log identity or mode changed after crate test'
+        parse_full_results <&5
+        exec 4>&- 5>&-
+        full_log_fd_open=0
     else
         status=$?
         fail full-test "inference-tests crate failed in pinned Docker (status $status)"
     fi
 fi
 
-if [ -n "$evidence_dir" ]; then
-    validate_evidence_directory || fail evidence-contract 'private evidence directory identity or mode changed before success cleanup'
-    case "$evidence_dir" in "$tmp_root"/wasm-verifier-discharge-evidence.*) rm -rf "$evidence_dir"; evidence_dir=;; esac
-fi
+verified_success_cleanup() {
+    assert_staging_identity
+    assert_identity
+    require_full_log_identity 'full-test log identity or mode changed before success cleanup'
+    if [ -n "$evidence_dir" ]; then
+        require_evidence_identity 'private evidence directory or capture identity changed before success cleanup'
+        [ ! -e "$evidence_dir/verifier.log" ] && [ ! -L "$evidence_dir/verifier.log" ] || fail evidence-contract 'successful run retained a private failure log'
+        [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 1 ] || fail evidence-contract 'successful evidence directory is not exact'
+        [ "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] || fail evidence-contract 'successful evidence directory contains an extra entry'
+    fi
+    if [ "$capture_fd_open" -eq 1 ]; then exec 3>&-; capture_fd_open=0; fi
+    if [ "$full_log_fd_open" -eq 1 ]; then exec 4>&- 5>&-; full_log_fd_open=0; fi
+    if [ -n "$evidence_dir" ]; then
+        case "$evidence_dir" in "$tmp_root"/wasm-verifier-discharge-evidence.*) :;; *) fail cleanup 'unsafe evidence cleanup target';; esac
+        rm -rf "$evidence_dir" || fail cleanup 'could not remove private evidence directory'
+        [ ! -e "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || fail cleanup 'private evidence directory survived cleanup'
+        evidence_dir=
+    fi
+    if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1; then
+        [ -f "$source_owner_file" ] && [ ! -L "$source_owner_file" ] || fail cleanup 'source volume survived without a safe owner record'
+        source_owner=$(sed -n '1p' "$source_owner_file")
+        digits_only "$source_owner" && [ "$(volume_owner "$source_volume")" = "$source_owner" ] || fail cleanup 'source volume owner label did not validate at success cleanup'
+        "$docker_bin" volume rm "$source_volume" >/dev/null 2>&1 || fail cleanup 'could not remove owned source volume'
+        if "$docker_bin" volume inspect "$source_volume" >/dev/null 2>&1; then fail cleanup 'owned source volume survived cleanup'; fi
+    fi
+    [ "$(volume_owner "$exchange_volume")" = "$run_owner" ] || fail cleanup 'exchange volume owner label did not validate at success cleanup'
+    "$docker_bin" volume rm "$exchange_volume" >/dev/null 2>&1 || fail cleanup 'could not remove owned exchange volume'
+    exchange_created=0
+    if "$docker_bin" volume inspect "$exchange_volume" >/dev/null 2>&1; then fail cleanup 'owned exchange volume survived cleanup'; fi
+    assert_staging_identity
+    require_full_log_identity 'full-test log identity changed at staging cleanup boundary'
+    case "$staging" in "$tmp_root"/inference-rocq-discharge.*) :;; *) fail cleanup 'unsafe staging cleanup target';; esac
+    rm -rf "$staging" || fail cleanup 'could not remove owned staging directory'
+    [ ! -e "$staging" ] && [ ! -L "$staging" ] || fail cleanup 'owned staging directory survived cleanup'
+    cleanup_complete=1
+}
+
+verified_success_cleanup
 echo "rocq-discharge-docker: result=pass adapter=$adapter verifier=$verifier_revision coq=$pinned_coq_version"
