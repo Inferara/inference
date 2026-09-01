@@ -465,19 +465,17 @@ mod gate {
 
     #[test]
     fn shared_generator_preserves_existing_output() {
-        let existing_wasm = rocq_test_support::compile_fixture(
-            "rocq_exists_spec.inf",
-            "rocq_exists_spec",
-            CompilationMode::Proof,
-        );
-        let existing = rocq_test_support::translate(
-            "rocq_exists_spec.inf",
-            "rocq_exists_spec",
-            &existing_wasm,
-        );
+        let golden_path = exists_spec_golden_path();
+        let existing = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", golden_path.display()));
         let shared = rocq_test_support::generate_v("rocq_exists_spec.inf", "rocq_exists_spec");
 
-        assert_eq!(shared, existing);
+        assert_eq!(
+            shared,
+            existing,
+            "shared generator output drifted from the pre-extraction golden {}",
+            golden_path.display(),
+        );
     }
 
     /// Proof-mode `.v` for a fixture that links external `.wasm` modules,
