@@ -40,7 +40,7 @@ false obligation valid cannot pass as a successful generalization.
   pin drift, proof holes, unreviewed assumptions, malformed receipts, and a
   misconfigured no-op oracle.
 - Run all local Rocq verification in the pinned Coq 8.20 Docker environment.
-- Run compiler-side local verification in an isolated Linux Rust 1.91 Docker
+- Run compiler-side local verification in an isolated Linux Rust 1.98 Docker
   environment with a dedicated Cargo target volume.
 
 ## Non-goals
@@ -114,7 +114,10 @@ For a refutation entry, the generated gate introduces the same host context as
 the raw theorem, specializes the raw theorem type to that context, negates its
 result proposition, and closes the negation with the companion certificate.
 This proves `~ ValidSpec ...` for every generated host context rather than merely
-showing that one tactic script happens to fail.
+showing that one tactic script happens to fail. In the pinned libraries that
+context generalizes as host-function-class, memory, then host; an explicit
+application therefore uses `@Raw.<theorem> _ _ ho`, not
+`@Raw.<theorem> ho`.
 
 ## Initial case matrix
 
@@ -164,7 +167,9 @@ makes strictified inequality permissive causes the negation proof to fail.
 
 ## Names-only manifest
 
-wasm-verifier maintains one manifest entry per stable case. An entry contains:
+wasm-verifier maintains one manifest entry per stable case. The manifest
+contains the canonical 40-character reciprocal Inference commit A at its root;
+each case entry contains:
 
 - stable case ID;
 - expected raw basename;
@@ -186,6 +191,14 @@ Proof.
 Admitted.
 ```
 
+The raw scanner tokenizes nested Coq comments and strings before classifying
+top-level commands. The manifest-listed ordered `Theorem` declarations and
+their exact skeletons are the only accepted proof commands. Extra `Theorem`
+declarations and theorem synonyms such as `Lemma`, `Remark`, `Fact`,
+`Corollary`, `Proposition`, and `Example` are rejected rather than escaping
+manifest coverage. Stray `Proof`/`Goal`, proof-mode definitions or obligations,
+ML module declarations, and guard-check changes are likewise rejected.
+
 Any other `Admitted.`, `admit`, `Abort.`, direct axiom/parameter/conjecture, or
 kernel-check bypass is rejected. Proof companions, generated rebound sources,
 and audit sources permit none of those constructs.
@@ -202,6 +215,12 @@ $INFERENCE_WASM_VERIFIER_DISCHARGER \
   <fresh-raw-file.v>
 ```
 
+The executable writes its single receipt into the empty absolute directory in
+`INFERENCE_WASM_VERIFIER_RECEIPT_DIR`, using the stable case ID as the basename
+(`<case-id>.json`). The harness creates a new directory for every invocation
+and rejects any pre-existing or additional entry, so a stale receipt cannot be
+mistaken for the current verdict.
+
 Exit zero is necessary but not sufficient. A successful executable writes one
 machine-readable receipt containing:
 
@@ -212,18 +231,37 @@ machine-readable receipt containing:
 - pinned and observed coq-wasm revisions;
 - observed Coq version;
 - proved and refuted endpoint counts;
-- audited assumption count;
+- audited endpoint count and the cardinality of the distinct union of
+  allowlisted dependencies across those endpoints;
+- raw-namespace and unapproved dependency counts, both zero;
 - result `pass`.
 
 The Rust harness validates every field against its input, case expectation, and
-pin file. A zero exit with no receipt, a duplicate receipt, malformed data, or a
-field mismatch is a failure. A deliberately malformed raw-file provenance probe
-must also be rejected before any case result is trusted; `/bin/true` therefore
-cannot masquerade as the discharger.
+pin file. The audited endpoint count must equal the proved-plus-refuted count;
+the allowlisted dependency count may not exceed the reviewed allowlist size
+recorded in the pin; and both rejected-dependency counts must be zero. A zero
+exit with no receipt, a duplicate receipt, malformed data, or a field mismatch
+is a failure. A deliberately malformed raw-file provenance probe must also be
+rejected before any case result is trusted; `/bin/true` therefore cannot
+masquerade as the discharger.
+
+The configured Rust test obtains its case bytes through the same common export
+path as the batch lane: it freshly generates all five artifacts, checks each
+against its golden, builds the request using the current verifier pin, runs the
+malformed provenance probe and five single-case invocations, then feeds the
+receipts through the common verifier. It never submits committed goldens
+directly to the configured executable.
 
 The protocol transmits no proof source or private library diagnostics back to
 Inference. On failure, the discharger keeps the full log in its local temporary
 area and emits only a stable case label plus a bounded first error line.
+
+The verifier exposes three non-overlapping command modes. `single` implements
+the configured executable contract above. `batch` consumes a live Inference C
+request plus its `raw/` directory. `pinned-inference` reads the immutable A
+goldens with `git show` and constructs a verifier-owned request naming its own
+clean B checkout. The B-side job cannot reuse A's exported request because that
+request still names the pre-B verifier revision.
 
 ## Integrity and assumption checks
 
@@ -231,7 +269,10 @@ For every invocation, the discharger:
 
 1. Verifies that the local wasm-verifier checkout is clean and exactly the
    requested pinned revision.
-2. Verifies Coq 8.20, the pinned coq-wasm commit, and the configured container.
+2. Verifies Coq 8.20 and the configured container, then observes the installed
+   coq-wasm pin from both its normalized opam URL/tag and the exact commit in
+   the switch source checkout. Missing source provenance or either mismatch is
+   a hard failure.
 3. Hashes the received raw file.
 4. Verifies its basename, expected generated skeletons, theorem set, and
    reciprocal-pin hash where applicable.
@@ -248,6 +289,11 @@ The per-case footprint may be a subset of `ci/assumptions.allow`; unused
 upstream assumptions are not required. wasm-verifier's existing full-build
 assumption audit continues to require the complete reviewed baseline, catching
 unexpected removal as well as addition at the repository level.
+
+An endpoint reported as `Closed under the global context` contributes no name
+to that union. A dependency repeated by several endpoint blocks is counted
+once. A single-case invocation requires exactly that case's proved-plus-refuted
+blocks; complete batch and reciprocal-pin runs require all twelve.
 
 ## CI ownership and security
 
@@ -294,9 +340,14 @@ The commits land without a circular pin:
 2. wasm-verifier commit B adds proof companions and pins commit A.
 3. Inference commit C pins commit B and enables the configured discharge lane.
 
-The live Inference pull-request lane always sends freshly generated bytes, not
-commit A's golden, so later producer drift fails even while the historical
-reciprocal pin remains stable.
+The two directions deliberately construct different requests during the
+bootstrap. wasm-verifier at B reads raw goldens from commit A but constructs a
+verifier-side request whose expected verifier revision is its own clean B
+checkout. It cannot consume A's exported request because A still names the old
+verifier pin. Only Inference C exports a live request naming B. The live
+Inference pull-request lane always sends freshly generated bytes, not commit
+A's golden, so later producer drift fails even while the historical reciprocal
+pin remains stable.
 
 ## Docker-only local verification
 
@@ -304,31 +355,57 @@ Host Rocq output is not accepted as verification evidence.
 
 The local verification entry point orchestrates two isolated environments:
 
-1. A `rust:1.91-bookworm` container mounts the Inference source read-only and
-   writes Cargo registry and Linux build artifacts to dedicated named volumes.
-   In export mode, the Rust harness runs the targeted golden/case tests and
-   writes freshly generated raw artifacts plus a machine-readable request to a
-   temporary exchange volume.
-2. The existing `wasm-verifier` Coq 8.20 devcontainer consumes those exact raw
-   files, runs the discharger, and writes receipts to the exchange volume. The
-   same Rust container then runs the harness in verify mode, validating every
+1. A `rust:1.98-bookworm` image pinned by digest runs Rust 1.98.0. The declared
+   workspace MSRV is 1.91, but the current `inference-tests` dependency graph
+   includes Wasmtime/Cranelift releases whose metadata requires Rust 1.94; the
+   measured 1.91 Docker build therefore fails before this issue's tests run.
+   This lane verifies issue #450 on the current stable toolchain and is not
+   evidence that the separate 1.91 MSRV claim passes. A tracked lane-specific
+   lockfile, `ci/rocq-discharge.cargo-lock`, fixes the exact dependency graph
+   without changing the repository's ignored root-lock policy. The wrapper
+   copies the current Inference checkout into a disposable writable source
+   volume, installs that tracked file as snapshot-root `Cargo.lock`, and asserts
+   the observed compiler and lock hash before building. Fetching runs once with
+   `--locked`; then every build/test is offline and locked. The host checkout
+   remains untouched. Cargo registry and Linux build artifacts live in
+   dedicated named volumes. In export mode, the Rust harness runs the targeted
+   golden/case tests and writes freshly generated raw artifacts plus a
+   machine-readable request to a temporary exchange volume.
+2. Docker cannot attach that exchange volume to an already-running container.
+   A host-side bridge therefore uses a transient volume-mounted copy container
+   plus `docker cp` to move the exact request directory into the existing
+   `wasm-verifier` Coq 8.20 devcontainer. The verifier runs the batch discharger
+   there, and the bridge copies only the receipt directory back to the exchange
+   volume. The same bridge also exposes the configured single-case executable
+   contract by copying one host raw file in and exactly one receipt out. The
+   same Rust image then runs the harness in verify mode, validating every
    receipt and the aggregate floors against the exported request.
 
-The host script only orchestrates containers and validates their exit status;
-it does not compile Rust or Rocq. The Rust container is not given the Docker
-socket, and the host performs no receipt interpretation. The exchange volume is
-deleted after verification, and the Linux Cargo target volume is reused
-serially rather than duplicated per lane.
+The verifier records the supported local Coq container reference, image/config
+ID, `coq` user, repository mount destination, and exact Coq patch version in a
+machine-readable local-container pin. The host bridge validates that contract;
+the action-container path validates the in-container Coq and coq-wasm
+provenance without assuming a platform-specific Docker image ID.
+
+The host script only orchestrates containers, copies opaque directories, and
+validates container exit status; it does not compile Rust or Rocq and performs
+no receipt interpretation. The Rust container is not given the Docker socket.
+The exchange and source-snapshot volumes are deleted after verification, while
+the Linux Cargo target and registry volumes are reused serially rather than
+duplicated per lane.
 
 Required local evidence:
 
 - each proof companion builds in the Coq 8.20 container;
-- wasm-verifier's full `coqbuild.sh` succeeds, including proof-hole and
-  assumptions audits;
+- the proof-completeness scanner reports zero holes across both `theories` and
+  `ci/discharge/proofs`, and wasm-verifier's full `coqbuild.sh` succeeds with
+  its existing assumptions audit;
 - the verifier-side pinned-artifact discharge check succeeds;
 - the Inference targeted Rocq/golden/case tests succeed in the Rust container;
 - the end-to-end five-case discharge run reports exactly eleven proved and one
   refuted endpoint;
+- both the batch-volume and configured single-case host bridges independently
+  produce receipts that the Rust verifier accepts;
 - the broader `inference-tests` crate suite succeeds in the same Rust target
   volume.
 
@@ -378,9 +455,10 @@ Inference's Rocq contract documents three separate claims:
 3. exact-artifact dischargeability for the named subset.
 
 wasm-verifier documentation identifies proof companions as certificates over
-external raw artifacts, not generated-looking source copies. Both changelogs
-record the initial case floor, the negative certificate, and the reciprocal
-pins.
+external raw artifacts, not generated-looking source copies. Inference's
+changelog and wasm-verifier's verifier/CI documentation record the initial case
+floor, the negative certificate, and the reciprocal pins (wasm-verifier does
+not currently maintain a changelog).
 
 ## Acceptance criteria
 
