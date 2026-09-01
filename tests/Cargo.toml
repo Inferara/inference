@@ -8,6 +8,7 @@ repository = { workspace = true }
 
 [dependencies]
 anyhow.workspace = true
+getrandom = "0.4"
 same-file = "1.0.6"
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +26,12 @@ inference.workspace = true
 inf-wasmparser.workspace = true
 rustc-hash.workspace = true
 wasmprinter = "0.245.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 cov-mark = { workspace = true, features = ["enable"] }
