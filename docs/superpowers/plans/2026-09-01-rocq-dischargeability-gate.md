@@ -15,13 +15,13 @@
 - Work directly on `450-bug-fix-rocq-dischargeability` in both repositories. Do not create worktrees and never implement on `main`.
 - Every Rust implementation task is assigned to a rust-developer agent. A second agent reviews each Rust task before its commit.
 - Follow test-driven development: add the named failing test, run it and record the expected failure, implement only enough to pass, then run the focused regression set.
-- Run local compilation and tests only in Docker. Host commands may inspect files, orchestrate Docker, and perform version-control operations; they may not compile Rust or Rocq.
+- Keep every Rocq compilation, proof, and bridge/discharge execution in the pinned Docker environments. The product Rust wrapper also remains Docker-isolated. For implementation and verification of this issue through Task 12, the user explicitly authorized a narrow Rust-only host evidence lane: use an isolated Rust 1.98 toolchain and the tracked lane lock in a validated non-worktree source snapshot, reuse the single session target, and never run Rocq on the host. This evidence exception does not change the product wrapper contract.
 - Keep the existing unbounded `rocq_prime_example` source and golden byte-for-byte unchanged and explicitly uncertified.
 - Do not copy generated definitions into wasm-verifier. Companion files import `DischargeCase.Raw` and contain only independent proof support and certificate endpoints.
 - Do not splice proof bodies into generated files. `Raw.v` is hashed before and after compilation and must retain the exact producer bytes.
 - Use the A → B → C landing sequence. wasm-verifier commit B pins Inference commit A; Inference commit C pins verifier commit B. Never create a circular “latest branch” dependency.
 - The public floor is exactly five ordered cases, eleven proved endpoints, and one refuted endpoint. Any addition is a reviewed manifest and floor change.
-- Keep private proof diagnostics out of public CI logs. Public failure text is limited to case ID, phase, and one bounded diagnostic line.
+- Keep private proof diagnostics out of public CI logs. Public failure text is limited to a bounded structured diagnostic and a sanitized local evidence locator; the complete log remains only in the validated private evidence directory.
 - Reuse one Linux Cargo target volume for the whole session. Do not create per-agent target directories.
 - Treat Rust 1.98 as this gate's verified build toolchain, not as MSRV evidence. The workspace declares Rust 1.91, but the current `inference-tests` Wasmtime/Cranelift graph requires at least Rust 1.94 and the measured Rust 1.91 Docker build fails before the issue tests run; do not hide or “fix” that separate pre-existing mismatch in this PR.
 - If a touched source file would exceed 25,000 tokens, split it by concern before adding more code.
@@ -63,7 +63,7 @@ Each strict `receipts/<case-id>.json` contains:
 }
 ```
 
-The exact `coq_version` value may include a patch/suffix, but its parsed major/minor must be `8.20`. `allowlisted_dependencies` is the cardinality of the distinct union of allowlisted names across all endpoint audit blocks in that case; repeated names count once and `Closed under the global context` contributes zero. Unknown JSON fields, duplicate keys, wrong directory entries, non-canonical hashes, totals mismatches, stale receipts, and extra receipts all fail.
+The exact `coq_version` value must match the whole-string grammar `major.minor`, `major.minor.<numeric-patch>`, or `major.minor+<nonempty-safe-suffix>`, and its parsed major/minor must be `8.20`; `8.20.1+suffix`, leading prose, trailing text, and nonnumeric patch components fail. `allowlisted_dependencies` is the cardinality of the distinct union of allowlisted names across all endpoint audit blocks in that case; repeated names count once and `Closed under the global context` contributes zero. Unknown JSON fields, duplicate keys, wrong directory entries, non-canonical hashes, totals mismatches, stale receipts, and extra receipts all fail.
 
 The configured single-case executable contract is:
 
@@ -74,6 +74,11 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
   --case <stable-id> \
   <fresh-raw-file.v>
 ```
+
+Across the ordered five-case run, the caller creates five distinct fresh empty
+`0700` receipt directories, one per invocation. Each successful invocation
+leaves exactly one regular nonsymlink, single-link `0600`
+`<stable-id>.json` in its caller-owned directory.
 
 ## Phase A — producer fixtures, protocol, and Docker exporter in Inference
 
@@ -217,9 +222,10 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 - [ ] Run the Rust export in a container with no Docker socket. After fetch, use `--network none`, a read-only root filesystem, `--cap-drop ALL`, `no-new-privileges`, and a tmpfs `/tmp`. Apply the same network/read-only/capability/security restrictions to every BusyBox helper container and remove helpers before deleting their volumes.
 - [ ] Call `<wasm-verifier>/ci/discharge/run-docker-batch.sh --exchange-volume <name>` on the host. That script is an opaque Docker bridge; this Inference wrapper must not parse receipts or private logs.
 - [ ] Run Rust verify against the same exchange volume, again without a Docker socket or network.
-- [ ] Support `--adapter batch|single|both` with `both` as the verification default. For `single`, export in Rust Docker, copy each raw file to one validated `0700` host staging directory with the helper, invoke the host `run-docker-case.sh` five times, copy the five receipts back to the exchange volume, and run Rust verify. For `both`, verify batch receipts, replace only the validated receipt directory, then exercise and verify the single-case path over the same immutable request/raw bytes.
+- [ ] Fingerprint `request.json` and all five ordered raw files before every external bridge call and require the same complete fingerprint immediately after it returns. Apply this to batch and to each single-case call so neither bridge can mutate a non-current case or coherently replace the request/raw set.
+- [ ] Support `--adapter batch|single|both` with `both` as the verification default. For `single`, export in Rust Docker, copy each raw file to one validated `0700` host staging directory with the helper, create five distinct caller-owned fresh empty `0700` receipt directories, invoke the host `run-docker-case.sh` once per ordered case, require exactly one regular nonsymlink, single-link `0600` `<case-id>.json` in each corresponding directory, copy those five receipts back to the exchange volume, and run Rust verify. For `both`, verify batch receipts, replace only the validated receipt directory, then exercise and verify the single-case path over the same immutable request/raw bytes.
 - [ ] Before invoking either bridge, inspect the configured running verifier container and require the image ID/reference, unprivileged `coq` execution user, repository mount path, and Coq version recorded in verifier B's `ci/discharge/container-pin.json`, plus the exact clean requested revision and observed coq-wasm provenance used by Dune. Reject any mismatch.
-- [ ] Support `--full` to run the targeted tests, end-to-end export/verify, and the entire `inference-tests` crate serially in the same target volume. State that this is crate scope, not the full workspace. After the Phase A tests land, sum every test-binary result line from a clean Docker run, encode that concrete numeric floor in the script (no placeholder), and test the multi-binary parser so a silently empty filter cannot pass.
+- [ ] Always run fresh export, five-golden byte equality, the selected adapter discharge path, and Rust receipt verification. `--full` additionally runs the focused tests and the entire `inference-tests` crate serially in the same target volume; it must not gate export or verification. State that this is crate scope, not the full workspace. After the Phase A tests land, sum every test-binary result line from a clean Docker run, encode that concrete numeric floor in the script (no placeholder), and test the multi-binary parser so a silently empty filter cannot pass.
 - [ ] Remove all host staging on success. On failure, first copy the full private verifier log to exactly one validated verifier-host `0700` evidence directory, retain only bounded/sanitized Rust-orchestrator evidence on the public Inference side, print the exact local evidence path, and then remove all helper containers and container-side temporary state. Never publish or retain raw private proof sources in a public artifact.
 - [ ] Document prerequisites: Docker, the tracked lane lock, a clean verifier branch at the pinned revision, and the expected running `wasm-verifier` Coq 8.20 container/image. State that an ignored local root `Cargo.lock` is neither read nor accepted as evidence.
 - [ ] Do not claim end-to-end success in Phase A: the verifier bridge and proofs do not exist until commit B.
@@ -230,14 +236,16 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 
 - Modify: `core/wasm-to-v/ROCQ_CONTRACT.md`
 - Modify: `CHANGELOG.md`
-- Modify: `docs/superpowers/specs/2026-09-01-rocq-dischargeability-gate-design.md` only if implementation exposed a reviewed contract correction
+- Modify: `docs/superpowers/specs/2026-09-01-rocq-dischargeability-gate-design.md` for the reviewed Task 4 bridge/evidence and Task 6/10 contract corrections frozen before commit A
+- Modify: `docs/superpowers/plans/2026-09-01-rocq-dischargeability-gate.md` only for the reviewed Task 6/10 protocol corrections frozen before commit A
 
 - [ ] Document the distinction between vendored-stub elaboration, real-library elaboration, and exact-artifact dischargeability. List the five selected cases and state that the unbounded prime artifact remains uncertified.
 - [ ] Record the producer fixtures, strict protocol, negative certificate, Docker-only local path, and A→B→C pin sequence in `CHANGELOG.md` without claiming the verifier lane is enabled yet.
-- [ ] Run in the Rust Docker image: selected golden tests, all `rocq_dischargeability::` tests, `stock_validity::`, `cargo fmt --check`, and `cargo clippy -p inference-tests --all-targets -- -D warnings`.
+- [ ] Retain the selected-golden, `rocq_dischargeability::`, and `stock_validity::` evidence from the tracked-lock Rust Docker lane. Under the explicit Task 5 exception, also run the Rust-only checks from a validated non-worktree host snapshot with the tracked lane lock and an isolated Rust 1.98 toolchain: `cargo fmt --check`, locked Clippy, and the same three locked filters. Record any confirmed pre-existing workspace baseline separately; do not reformat or edit unrelated Rust to make a docs-only commit green. Rocq remains Docker-only.
 - [ ] Inspect the complete diff and verify no unrelated refactor, old-prime change, generated proof edit, or host-built artifact is present.
 - [ ] Commit the Phase A changes with a focused message such as `test: define emitted Rocq discharge contract`.
 - [ ] Record the resulting 40-character commit as commit A. All verifier hashes and reciprocal reads in Phase B use that immutable revision, never the moving branch.
+- [ ] Re-read each selected golden with `git show A:<path>`, compute its SHA-256 from those immutable bytes, and record A plus all five hashes in the ignored Task 5 report. Do not use moving working-tree bytes as Phase B manifest evidence.
 
 ## Phase B — independent certificates and discharger in wasm-verifier
 
@@ -253,8 +261,8 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 - Create: `ci/discharge/tests/fixtures/`
 - Modify: `ci/check-proof-completeness.py`
 
-- [ ] Add `--root PATH` (repeatable) to `check-proof-completeness.py` while preserving `theories` as its no-argument default. Extend its self-test for multiple roots, symlink loops, an empty root, and a hole in the second root.
-- [ ] Create the manifest from commit A with a top-level canonical 40-hex `inference_revision`, exact ordered theorem names, and SHA-256 values. Its only theorem-semantic metadata is `prove`/`refute` polarity and companion endpoint names; it contains no theorem type. Require `--inference-revision` to equal that persisted A pin, resolve verifier `HEAD` to a canonical 40-hex B revision before request/receipt construction, test both mismatches, and assert exactly five ordered cases, eleven prove entries, one refute entry, and twelve endpoints.
+- [ ] Add `--root PATH` (repeatable) to `check-proof-completeness.py` while preserving `theories` as its no-argument default. Resolve every supplied root under the canonical repository root; after resolution each must be a real directory and independently contain at least one `.v`. Reject duplicate roots, escapes, empty roots, and every unknown option or positional argument. Extend its self-test for multiple roots, symlink loops, an empty root, a duplicate root, an escape, and a hole in the second root.
+- [ ] Create the manifest from commit A with top-level operational provenance `inference_revision` (canonical lowercase 40-hex A), `coq_wasm_tag: "v2.2.0"`, `coq_wasm_revision: "0fd83fa708922721132b6d6737179568d1f1d553"`, and `coq_series: "8.20"`. Keep those fields separate from theorem-semantic metadata and do not duplicate them in `container-pin.json`. Each case has exact ordered theorem names and SHA-256 values; its only theorem-semantic metadata is `prove`/`refute` polarity and companion endpoint names, with no theorem type. `single` compares the local manifest's coq-wasm/Coq pins to live opam/source observations before compile or receipt; `batch` additionally requires request pins to match; `pinned-inference` requires `--inference-revision` to equal the persisted A pin. Resolve verifier `HEAD` to a canonical 40-hex B revision before request/receipt construction, test both revision mismatches, and assert exactly five ordered cases, eleven prove entries, one refute entry, and twelve endpoints.
 - [ ] Define and test three concrete entry points in `discharger.py`:
 
   ```text
@@ -264,7 +272,7 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
   ```
 
   `single` writes through `INFERENCE_WASM_VERIFIER_RECEIPT_DIR`. `batch` consumes the request exported by live Inference C. `pinned-inference` reads A's committed goldens with `git show`, constructs a verifier-owned temporary request expecting the clean current B revision, and must never consume A's request because A still names the pre-B verifier pin.
-- [ ] Write failing Python unit tests for strict/duplicate-key request parsing, path traversal, wrong pin/hash/basename/theorem order, missing/extra skeletons, noncanonical generated admission shapes, stray theorem-like commands, nested Coq comments, proof holes, zero endpoints, raw mutation during compilation, receipt atomicity, exact coq-wasm provenance, and bounded public diagnostics.
+- [ ] Write failing Python unit tests for strict/duplicate-key request parsing, path traversal, wrong pin/hash/basename/theorem order, missing/extra skeletons, noncanonical generated admission shapes, stray theorem-like commands, nested Coq comments, proof holes, zero endpoints, raw mutation during compilation, receipt atomicity, exact coq-wasm provenance, bounded public diagnostics, and both fixed subprocess-timeout classes through injected runners.
 - [ ] Implement lexical raw validation that permits `Admitted.` only in the exact generated skeleton:
 
   ```coq
@@ -273,9 +281,9 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
   Admitted.
   ```
 
-  Tokenize Coq nested comments and strings correctly. The only top-level theorem/proof commands accepted are the manifest-listed ordered `Theorem` declarations followed by the exact skeleton above. Reject any top-level `Proof` outside such a skeleton, extra `Theorem` declarations, and every `Lemma`, `Remark`, `Fact`, `Corollary`, `Proposition`, `Example`, or `Goal`, plus proof-mode `Definition`, `Program Definition`/obligations, `admit`, `Abort`, axioms/parameters/conjectures, `Declare Module`/`Declare ML Module`, guard-check changes, and kernel-check bypasses everywhere else.
+  Tokenize Coq nested comments and strings correctly. The only top-level theorem/proof commands accepted are the manifest-listed ordered `Theorem` declarations followed by the exact skeleton above. Allow ordinary generated definitions with a body (`Definition name ... := ... .`). Reject any top-level `Proof` outside a listed skeleton, extra `Theorem`, and every `Lemma`, `Remark`, `Fact`, `Corollary`, `Proposition`, `Example`, or `Goal`, plus proof-style `Definition name : T.` without `:=`, every `Program Definition` and obligation command, `admit`, `Abort`, axioms/parameters/conjectures, `Declare Module`/`Declare ML Module`, guard-check changes, and kernel-check bypasses everywhere else.
 
-- [ ] Require `opam exec -- dune build` before discharge. Compile each case in a fresh private directory with the exact load-path shape `opam exec -- coqc -q -Q _build/default/theories WasmVerifier -Q <work> DischargeCase <file>`. Copy the received bytes to `Raw.v`, hash before/after, and compile in order: `Raw.v`, verifier-owned `Proofs.v`, generated `Rebind.v`, generated `Audit.v`.
+- [ ] Require `opam exec -- dune build` before discharge. Compile each case in a fresh private directory with the exact load-path shape `opam exec -- coqc -q -Q _build/default/theories WasmVerifier -Q <work> DischargeCase <file>`. Copy the received bytes to `Raw.v`, hash before/after, and compile in order: `Raw.v`, verifier-owned `Proofs.v`, generated `Rebind.v`, generated `Audit.v`. Use fixed 1,800-second timeouts for every Dune/coqc proof command and fixed 60-second timeouts for git, opam, provenance, and other metadata probes; expose no production bypass flag.
 - [ ] Observe coq-wasm from the installed opam pin, not from repository text alone: require the normalized pin URL/tag, discover exactly one validated coq-wasm source checkout under the active switch (allowing opam's version-suffixed layout), and resolve its `git rev-parse HEAD` to the pinned 40-character commit. Fail closed on zero/multiple candidates, missing Git metadata, or either mismatch; cover all observations with injected tests.
 - [ ] Generate positive rebound endpoints with:
 
@@ -285,11 +293,11 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
   Proof. exact (@Proofs.checked_endpoint). Qed.
   ```
 
-- [ ] For the one refutation, open the same three-binder host context as the generated `ValidSpec` theorem, derive the proposition from `type of (@Raw.generated_theorem _ _ ho)`, negate it, and close it with `@Proofs.checked_refutation _ _ ho`. Do not restate `ValidSpec` manually. A real-Coq test must assert all generalized binders are preserved.
+- [ ] For the one refutation, open the same three-binder host context as the generated `ValidSpec` theorem, derive the proposition from `type of (@Raw.generated_theorem _ _ ho)`, negate it, and close it directly with `@Proofs.checked_valid_spec_is_false _ _ ho`. The manifest names `checked_valid_spec_is_false` directly; do not add a `checked_refutation` alias or a thirteenth endpoint, and do not restate `ValidSpec` manually. A real-Coq test must assert all generalized binders are preserved.
 - [ ] Bracket each `Print Assumptions Rebind.gate_endpoint.` output with unique begin/end markers. Require exactly `proved + refuted` parseable blocks in each single-case execution (two or three), and exactly twelve only for a complete `batch`/`pinned-inference` aggregate. Parse both `Closed under the global context` and multi-line `Axioms:` output; reject duplicate/missing markers, shortened or fully qualified Raw namespace dependencies, and every unknown name. Count `allowlisted_dependencies` as the distinct union per case, not the sum of block occurrences.
 - [ ] Write receipts to a temporary file, flush and fsync the file, close it, fsync the directory where supported, and rename atomically only after all phases and a post-compilation raw re-hash pass. An injected runner must mutate Raw between compilation and the post-hash and prove that no receipt is published.
 - [ ] Add a real-Coq self-test whose cheating companion closes `False` with a raw admitted theorem. It must compile and then fail specifically in the raw-namespace assumptions audit. Also test an independently closed `True` endpoint succeeds.
-- [ ] Keep the production revision/clean-tree check strict. Unit tests may inject a revision probe, but must not add a bypassing CLI flag. Commit this harness as a focused intermediate verifier commit, then run the real audit self-test from that clean commit in the Coq 8.20 devcontainer.
+- [ ] Set `sys.dont_write_bytecode = True` before local imports. Structure the production revision/clean-tree gate before importing or executing sibling implementation modules wherever practicable, and set `PYTHONDONTWRITEBYTECODE=1` in bridges and CI. Keep the gate strict: unit tests may inject a revision probe or subprocess runner, but must not add bypassing revision or timeout CLI flags. Commit this harness as a focused intermediate verifier commit, then run the real audit self-test from that clean commit in the Coq 8.20 devcontainer.
 
 ### Task 7: Add the negative and narrow-domain companions
 
@@ -344,6 +352,7 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 
 - Create: `ci/discharge/docker-bridge.sh`
 - Create: `ci/discharge/container-pin.json`
+- Create: `ci/discharge/inspect-container.sh`
 - Create: `ci/discharge/run-docker-case.sh`
 - Create: `ci/discharge/run-docker-batch.sh`
 - Create: `ci/discharge/tests/test_docker_bridge.sh`
@@ -351,14 +360,41 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 - Modify: `README.md`
 - Modify: `ci/check-proof-completeness.py` if review found scanner gaps
 
-- [ ] Record the supported local container contract in `container-pin.json`: image reference `coqorg/coq:8.20`, image/config ID `sha256:e50d77c4c5a9aa0d76ae1b343d79c5f922da3a75054b79c5dc635895438e4674`, user `coq`, repository destination `/workspaces/wasm-verifier`, and Coq `8.20.1`. Keep CI's action-container validation version/provenance based; the local image ID is not assumed portable to another platform/container implementation.
-- [ ] First write `test_docker_bridge.sh` with a fake Docker executable and observe failures for the absent adapters. Cover exact single/batch arguments, pin mismatches, unsafe names/paths, wrong user/mount, helper hardening/cleanup, receipt-only copying, and exit propagation.
-- [ ] Implement shared `docker-bridge.sh` copy/validation primitives plus both public adapters. `run-docker-batch.sh --exchange-volume <validated-name>` copies `request.json` and `raw/` from the volume to one `mktemp -d` staging directory with the pinned BusyBox helper, `docker cp`s that opaque directory into a fresh path in the already-running verifier container, executes `discharger.py batch` there as `--user coq`, copies only `receipts/` back, and replaces the exchange volume's receipt directory atomically.
-- [ ] Implement `run-docker-case.sh` with the exact configured-executable arguments from the protocol and the host `INFERENCE_WASM_VERIFIER_RECEIPT_DIR`. It copies the one raw file into a fresh verifier-container directory, executes `discharger.py single` as `coq`, and copies exactly `<case-id>.json` to the caller's new empty receipt directory. This is the direct host-to-container adapter used by Inference C.
-- [ ] Pin the copy helper by the BusyBox digest from Task 4 and harden it with no network, a read-only root, dropped capabilities, and `no-new-privileges`. Validate container/volume names, case IDs, basenames, absolute paths, the local pin's image ID/reference, execution user, repository mount destination, clean requested revision, Coq version, and coq-wasm provenance before copying. Use argument arrays/no `eval`, correct copied-file ownership before executing as `coq`, label helper containers, remove them before volumes, and use traps that validate exact container/staging targets before cleanup.
-- [ ] Keep full failure logs private: before container cleanup, copy them to one validated verifier-host `0700` evidence directory and print that local path only to an authorized local operator. Emit only the bounded public diagnostic required by the protocol to Inference/CI output.
+- [ ] Record the supported local container contract in `container-pin.json` with this exact eight-line grammar, field order, commas, and final newline:
+
+  ```json
+  {
+    "protocol": 1,
+    "image_reference": "coqorg/coq:8.20",
+    "image_id": "sha256:e50d77c4c5a9aa0d76ae1b343d79c5f922da3a75054b79c5dc635895438e4674",
+    "coq_user": "coq",
+    "repository_mount": "/workspaces/wasm-verifier",
+    "coq_version": "8.20.1"
+  }
+  ```
+
+  Do not duplicate the manifest's coq-wasm tag/revision or `coq_series` here. Keep CI's action-container validation version/provenance based; the local image ID is not assumed portable to another platform/container implementation. Receipt validation remains series-based and accepts only the reviewed whole-string `8.20`, `8.20.<numeric-patch>`, or `8.20+<nonempty-safe-suffix>` grammar; `8.20.1+suffix`, leading prose, trailing text, and nonnumeric patch components fail. The local inspector remains exact at `8.20.1`.
+- [ ] Create executable `inspect-container.sh`. It exits zero and emits exactly these eight newline-terminated lines, in order and with no duplicates or extras:
+
+  ```text
+  coq_user=coq
+  coq_uid=<canonical-positive-decimal>
+  coq_gid=<canonical-positive-decimal>
+  wasm_verifier_revision=<canonical-lowercase-40-hex-B>
+  coq_version=8.20.1
+  coq_wasm_origin=https://github.com/WasmCert/WasmCert-Coq.git
+  coq_wasm_tag=v2.2.0
+  coq_wasm_revision=0fd83fa708922721132b6d6737179568d1f1d553
+  ```
+
+  The live container must have exactly one mount total: a `bind` from the canonical verifier checkout to `/workspaces/wasm-verifier`; reject every extra bind/volume/socket, alias or parent mount, and type/source/destination mismatch. Do not substitute a literal Docker-socket substring scan for exact mount-list equality.
+- [ ] First write `test_docker_bridge.sh` with a fake Docker executable and observe failures for the absent inspector/helper/adapters. Cover exact single/batch arguments, pin/inspector mismatches, zero/extra/alias/parent/wrong-type mounts, unsafe names/paths, wrong user, missing/replaced/hard-linked helper or configured adapter, helper hardening/cleanup, receipt-only copying, evidence/log attacks, and exit propagation.
+- [ ] Implement executable shared `docker-bridge.sh` copy/validation primitives plus both executable public adapters. The Inference wrapper requires clean Git content and stable identity for the regular nonsymlink, single-link pin, inspector, helper, and configured adapter(s) before and after each call; `both` covers all five artifacts. `run-docker-batch.sh --exchange-volume <validated-name>` copies `request.json` and `raw/` from the volume to one `mktemp -d` staging directory with the pinned BusyBox helper, `docker cp`s that opaque directory into a fresh path in the already-running verifier container, executes `discharger.py batch` there as `--user coq`, copies only `receipts/` back, and replaces the exchange volume's receipt directory atomically.
+- [ ] Implement `run-docker-case.sh` with the exact configured-executable arguments from the protocol and the host `INFERENCE_WASM_VERIFIER_RECEIPT_DIR`. For the ordered five-case run, Inference supplies five distinct caller-owned fresh empty `0700` receipt directories, one per invocation. The adapter copies the one raw file into a fresh verifier-container directory, executes `discharger.py single` as `coq`, and copies exactly one regular nonsymlink, single-link `0600` `<case-id>.json` to the corresponding caller-owned directory. This is the direct host-to-container adapter used by Inference C.
+- [ ] Pin the copy helper by the BusyBox digest from Task 4 and harden it with no network, a read-only root, dropped capabilities, and `no-new-privileges`. Validate container/volume names, case IDs, basenames, absolute paths, the exact one-bind container contract, clean requested revision, Coq version, and live coq-wasm provenance before copying. Use argument arrays/no `eval`, correct copied-file ownership before executing as `coq`, label helper containers, remove them before volumes, and use traps that validate exact container/staging targets before cleanup.
+- [ ] Adopt the Task 4 evidence environment contract exactly. The bridge accepts only the wrapper-supplied absolute, identity-checked private `0700` `INFERENCE_WASM_VERIFIER_EVIDENCE_DIR`. On every nonzero return it writes the complete private log to exactly `verifier.log` there as a regular nonsymlink, single-link `0600` file before container cleanup; on success it leaves no `verifier.log`. Keep public output to a bounded structured diagnostic plus a sanitized local evidence locator, and let the wrapper retain the validated directory on failure. Receipt files and every other regular contract/evidence file are also single-link; do not publish log bodies, proof sources, or receipt contents.
 - [ ] Add a pinned-artifact CI step that checks out public Inference at commit A into a runner-temp or sibling directory outside the verifier checkout, passes it to `discharger.py pinned-inference`, reads each golden with `git show <A>:<path>`, constructs a verifier-side request expecting the current clean B checkout, and runs all five cases in the Coq 8.20 action container. Never place A inside B's tree, dirty the verifier root, or read an A-era exported request.
-- [ ] Run `check-proof-completeness.py --root theories --root ci/discharge/proofs` before Dune and keep the existing no-argument behavior tested. Then run `opam exec -- dune build` before any real discharger command so the exact `WasmVerifier` load path exists.
+- [ ] Set `PYTHONDONTWRITEBYTECODE=1` in both adapters and CI. Run `check-proof-completeness.py --root theories --root ci/discharge/proofs` before Dune and keep the existing no-argument behavior tested; each resolved root must independently contain a `.v`. Then run `opam exec -- dune build` before any real discharger command so the exact `WasmVerifier` load path exists, under the fixed 1,800-second proof-command timeout. Metadata/provenance probes use the fixed 60-second timeout; neither class has a bypass flag.
 - [ ] Document exact-artifact certificates, the names-only manifest, local Docker bridge, assumption policy, and why raw admissions are allowed only in `Raw.v`.
 - [ ] Before the final commit, run Python unit/static/bridge self-tests, proof-completeness self-test and both roots, `dune build`, and `ci/check-assumptions.sh`. Do not invoke the production pinned-artifact mode while bridge/workflow/docs changes leave the verifier tree dirty. Treat the two-root scanner and `coqbuild.sh`/Dune as separate evidence; do not claim the existing wrapper scans the new proof root unless it is explicitly changed and tested to do so.
 - [ ] Commit the bridge/workflow/docs as the final focused Phase B commit such as `ci: certify exact generated Rocq artifacts`, record the resulting clean 40-character HEAD as B, then run the production `pinned-inference` discharge and inspect all five audit blocks/aggregate receipt from that clean revision. Require `rocq-discharge: result=pass cases=5 proved=11 refuted=1`. If it fails, fix and commit again, redefine B, and rerun; never preserve the failed SHA as the pin. Earlier focused proof commits are part of B's ancestry but are not reciprocal pins.
@@ -384,22 +420,22 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 - [ ] Preserve `pull_request` rather than `pull_request_target`, keep no path filter, and document that environment approval—not the label—is the security boundary for executing PR Rust code near a private verifier.
 - [ ] Assert the bootstrap direction explicitly in tests/docs: verifier B certifies immutable A goldens with its verifier-owned request; live Inference C freshly exports a different request naming B and invokes the single-case adapter. Neither side trusts a request naming the old verifier revision.
 - [ ] Update contract/changelog wording from “producer protocol present” to “five-case exact-artifact gate pinned to verifier B,” including the eleven/one floor and negative certificate.
-- [ ] Run focused pin, protocol, direct fake-discharger, and workflow-structure tests in the Rust Docker image.
+- [ ] Run focused pin, protocol, direct fake-discharger, and workflow-structure tests under the explicitly authorized isolated host Rust 1.98 snapshot with the tracked lane lock. This Rust-only evidence exception does not move any Rocq or bridge/discharge execution out of Docker.
 - [ ] Commit Phase C with a focused message such as `ci: require selected Rocq discharge certificates`.
 
 ## Final verification and review
 
-### Task 12: Prove the complete result in Docker
+### Task 12: Prove the complete result with isolated host Rust and Docker Rocq
 
 **Files:** no intended source changes; mutation artifacts remain ephemeral.
 
 - [ ] Read and apply `superpowers:verification-before-completion` before making any success claim.
 - [ ] Ensure both direct repository branches are clean and at the intended A/B/C history; do not create worktrees.
-- [ ] From Inference run `ci/rocq-discharge-docker.sh --adapter both --full`. This must perform Rust export, both Coq 8.20 bridge/discharge adapters, Rust receipt verification after each, and the broader `inference-tests` suite without a host compiler.
+- [ ] From Inference run `ci/rocq-discharge-docker.sh --adapter both --full`. This canonical product path must still perform Docker-isolated Rust export, both Coq 8.20 bridge/discharge adapters, Rust receipt verification after each, and the broader `inference-tests` crate suite without exposing a Docker socket to Rust. The separate host-Rust evidence exception does not alter this wrapper behavior.
 - [ ] In the verifier Coq 8.20 container first run `check-proof-completeness.py --root theories --root ci/discharge/proofs`, then run its complete `coqbuild.sh` path. Expected: the separate multi-root scan reports zero holes, Dune passes, and the global assumptions audit remains exactly the reviewed ten-dependency baseline.
 - [ ] Run the verifier pinned-artifact direction against commit A and the Inference live-artifact direction at commit C. Both must report the exact five/eleven/one floor.
 - [ ] Run all load-bearing mutations in containers and require red results for: `/bin/true`, missing receipt, wrong hash, changed raw byte, missing/extra theorem, proof hole, direct raw-admission use, false payload changed to true, and unbounded prime substituted for bounded.
-- [ ] Run `cargo fmt --check`, `cargo clippy -p inference-tests --all-targets -- -D warnings`, targeted tests, and full crate-scoped `cargo test -p inference-tests` in the pinned Rust container. Record the executed-test count and require it to meet the reviewed floor encoded by `--full`.
+- [ ] Run `cargo fmt --check`, locked `cargo clippy -p inference-tests --all-targets -- -D warnings`, targeted tests, and full crate-scoped `cargo test -p inference-tests` in a validated non-worktree host snapshot using the tracked lane lock and an isolated exact Rust 1.98 toolchain. Record the executed-test count and require it to meet the reviewed floor encoded by `--full`; record confirmed pre-existing fmt/Clippy baselines without modifying unrelated Rust. All Rocq and bridge/discharge evidence remains Docker-only.
 - [ ] Inspect `git diff main...HEAD` and `git status --short` in each repository. Confirm no temporary files, generated `.vo/.glob/.aux` files, Docker artifacts, lockfile changes, or unrelated refactors are tracked.
 - [ ] Use `superpowers:requesting-code-review` with separate Rust/protocol, proof/soundness, Docker/security, and CI/pinning review focuses. Address findings through `superpowers:receiving-code-review` and rerun affected Docker checks.
 - [ ] Use `superpowers:finishing-a-development-branch` only after every required check is green. Ask the user whether to push/open PRs; do not perform remote writes without that direction.
@@ -415,5 +451,5 @@ INFERENCE_WASM_VERIFIER_RECEIPT_DIR=<new-empty-absolute-directory>
 - [ ] Both batch-volume and configured single-case Docker adapters pass their self-tests and end-to-end paths without exposing a Docker socket to Rust containers.
 - [ ] The reciprocal hashes and A/B/C revisions are immutable and non-circular.
 - [ ] Missing capability is visibly `SKIPPED`; required mode is red.
-- [ ] Local proof evidence came only from Rust 1.98 and Coq 8.20 Docker environments.
+- [ ] Rust evidence came from the explicitly authorized isolated exact-host-Rust 1.98 snapshots with the tracked lane lock, while every Rocq proof and bridge/discharge execution came from the pinned Coq 8.20 Docker environments; the canonical product wrapper also passed in its Docker-isolated form.
 - [ ] Both repositories are clean on direct issue branches and ready for user-directed publication.
