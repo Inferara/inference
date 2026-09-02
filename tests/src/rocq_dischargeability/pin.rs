@@ -179,6 +179,14 @@ mod tests {
         .expect("read real-library workflow")
     }
 
+    fn normalize_line_endings(text: &str) -> String {
+        text.replace("\r\n", "\n")
+    }
+
+    fn with_crlf_line_endings(text: &str) -> String {
+        normalize_line_endings(text).replace('\n', "\r\n")
+    }
+
     fn assert_protected_checkout_step(selected: &str) {
         const CHECKOUT_STEP: &str = "      - name: Checkout\n";
         assert_eq!(
@@ -215,7 +223,7 @@ mod tests {
     }
 
     fn assert_workflow_contract(workflow: &str) {
-        let workflow = workflow.replace("\r\n", "\n");
+        let workflow = normalize_line_endings(workflow);
         let gate = workflow
             .split_once("  dischargeability-gate:")
             .expect("workflow has dischargeability capability job")
@@ -300,7 +308,8 @@ mod tests {
 
     #[test]
     fn workflow_contract_is_independent_of_checkout_line_endings() {
-        let workflow = read_workflow().replace('\n', "\r\n");
+        let source_crlf = with_crlf_line_endings(&read_workflow());
+        let workflow = with_crlf_line_endings(&source_crlf);
 
         assert_workflow_contract(&workflow);
     }
