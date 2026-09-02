@@ -4,7 +4,7 @@ name: Rocq real libraries (wasm-to-v)
 # libraries it mirrors, and the emitted `.v` to those libraries themselves.
 #
 # `rocq-typecheck.yml` compiles proof-mode output against the stub, which is only
-# as true as the stub is. This workflow closes the two gaps that leaves:
+# as true as the stub is. This workflow closes the three gaps that leaves:
 #
 #   * the stub-drift job compares the stub's declarations with the PUBLIC
 #     coq-wasm library at the revision `core/wasm-to-v/wasm-verifier-pin.txt`
@@ -13,6 +13,8 @@ name: Rocq real libraries (wasm-to-v)
 #   * the real-library job type-checks every gated module against the real
 #     libraries, including the PRIVATE wasm-verifier one. That needs a runner
 #     carrying those libraries, so it skips loudly where none is configured.
+#   * the selected-artifact job asks pinned verifier B to discharge five exact
+#     fresh artifacts and requires the eleven-proved/one-refuted result.
 
 on:
   push:
@@ -26,6 +28,9 @@ on:
     # ask for this workflow would get no run at all unless the PR happened to
     # touch a matching path.
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   stub-drift:
@@ -215,6 +220,111 @@ jobs:
           else
             echo "checkout=true" >> "$GITHUB_OUTPUT"
           fi
+
+  # Capability discovery stays on a hosted runner. It never executes the
+  # configured verifier adapter; it only makes absence visible. Pull-request
+  # scheduling intentionally matches the existing real-library capability gate.
+  dischargeability-gate:
+    name: Selected-artifact dischargeability check
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.discharger.outputs.present }}
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.pull_request.head.repo.full_name == github.repository
+          && contains(github.event.pull_request.labels.*.name, 'ci:real-rocq'))
+    steps:
+      - name: Look for the configured single-case discharger
+        id: discharger
+        env:
+          DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}
+          RUNNER: ${{ vars.WASM_VERIFIER_RUNNER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCHARGER:-}" ] || [ -z "${RUNNER:-}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Selected-artifact dischargeability skipped::The \
+          WASM_VERIFIER_DISCHARGER adapter and dedicated WASM_VERIFIER_RUNNER must both \
+          be configured, so no selected generated artifact was discharged in this run."
+            {
+              echo "### Selected-artifact dischargeability: SKIPPED"
+              echo
+              echo "Both \`WASM_VERIFIER_DISCHARGER\` and \`WASM_VERIFIER_RUNNER\`"
+              echo "must be configured. At least one is absent, so this run"
+              echo "did not prove or refute any freshly generated Rocq obligation."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # This job builds and executes untrusted pull-request Rust next to the private
+  # verifier. The ci:real-rocq label only schedules it, and real-rocq environment
+  # approval means an authorized reviewer explicitly trusts that PR code for this
+  # run; neither is isolation. WASM_VERIFIER_RUNNER must select a dedicated private
+  # runner registered for one-job ephemeral use in a dedicated group, with no
+  # unrelated state or credentials. Keep the trigger as pull_request, never
+  # pull_request_target.
+  #
+  # WASM_VERIFIER_DISCHARGER must resolve to verifier B
+  # 181cd676662453182b9753d1b19ca933c68770c3's
+  # ci/discharge/run-docker-case.sh. The adapter itself requires that clean B
+  # revision and implements the protocol-1 single-case executable contract.
+  selected-artifact-discharge:
+    name: Selected-artifact discharge
+    # This job's configured adapter is verifier B
+    # 181cd676662453182b9753d1b19ca933c68770c3 ci/discharge/run-docker-case.sh.
+    needs: dischargeability-gate
+    if: needs.dischargeability-gate.outputs.present == 'true'
+    runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}
+    environment: real-rocq
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.3
+
+      - name: Prepare the tracked Rust 1.98 lane
+        run: |
+          set -euo pipefail
+          test ! -e Cargo.lock
+          cp ci/rocq-discharge.cargo-lock Cargo.lock
+          cmp -s ci/rocq-discharge.cargo-lock Cargo.lock
+          case "$(rustc +1.98.0 --version)" in
+            'rustc 1.98.0 '*) ;;
+            *) echo '::error::selected-artifact discharge requires exact Rust 1.98.0' >&2; exit 1 ;;
+          esac
+          cargo +1.98.0 fetch --locked
+
+      - name: Discharge the five selected fresh artifacts
+        env:
+          INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}
+          INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'
+        run: |
+          set -euo pipefail
+          cargo +1.98.0 test -p inference-tests --locked --offline --verbose \
+            "rocq_dischargeability::direct::configured_dischargeability_gate" \
+            -- --exact --nocapture 2>&1 | tee selected-discharge.log
+          marker='rocq-discharge: result=pass cases=5 proved=11 refuted=1'
+          if marker_count=$(awk -v marker="$marker" \
+            '$0 == marker { count++ } END { print count + 0 }' selected-discharge.log)
+          then
+            :
+          else
+            echo '::error::could not count selected-artifact success markers' >&2
+            exit 1
+          fi
+          case "$marker_count" in
+            ''|*[!0-9]*) echo '::error::invalid success-marker count' >&2; exit 1 ;;
+          esac
+          if [ "$marker_count" -ne 1 ]; then
+            echo "::error::selected-artifact discharge emitted $marker_count exact success \
+          markers; expected exactly one five-case, eleven-proved, one-refuted marker"
+            exit 1
+          fi
+          {
+            echo "### Selected-artifact dischargeability: CHECKED"
+            echo
+            echo "Exactly five fresh artifacts discharged: eleven endpoints proved,"
+            echo "one false-spec endpoint refuted, against pinned verifier B."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Its own job rather than a step of the type-check below, so that a drift
   # failure and a type-check failure are distinguishable in the checks list, and

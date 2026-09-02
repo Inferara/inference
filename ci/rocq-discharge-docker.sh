@@ -316,8 +316,16 @@ path_identity() {
     stat -c '%u:%d:%i:%a' "$1" 2>/dev/null || stat -f '%u:%d:%i:%Lp' "$1" 2>/dev/null
 }
 
+path_object_identity() {
+    stat -c '%u:%d:%i' "$1" 2>/dev/null || stat -f '%u:%d:%i' "$1" 2>/dev/null
+}
+
 file_identity() {
     stat -c '%u:%d:%i:%a:%h' "$1" 2>/dev/null || stat -f '%u:%d:%i:%Lp:%l' "$1" 2>/dev/null
+}
+
+file_object_identity() {
+    stat -c '%u:%d:%i:%h' "$1" 2>/dev/null || stat -f '%u:%d:%i:%l' "$1" 2>/dev/null
 }
 
 identity_owner() {
@@ -490,6 +498,21 @@ assert_git_clean() {
     case "$adapter" in batch|both) set -- "$@" ci/discharge/run-docker-batch.sh;; esac
     case "$adapter" in single|both) set -- "$@" ci/discharge/run-docker-case.sh;; esac
     "$git_bin" -C "$resolved_verifier" diff --quiet HEAD -- "$@" 2>/dev/null || fail pin 'verifier bridge contract differs from clean Git content'
+    for contract_path in "$@"; do
+        if index_entry=$("$git_bin" -C "$resolved_verifier" ls-files -v -- "$contract_path" 2>/dev/null); then :; else
+            fail pin 'verifier bridge contract index inspection failed'
+        fi
+        [ "$index_entry" = "H $contract_path" ] || fail pin 'verifier bridge contract has an unsafe index flag'
+        if head_blob=$("$git_bin" -C "$resolved_verifier" rev-parse --verify "HEAD:$contract_path" 2>/dev/null); then :; else
+            fail pin 'verifier bridge contract HEAD blob inspection failed'
+        fi
+        if worktree_blob=$("$git_bin" -C "$resolved_verifier" hash-object -- "$resolved_verifier/$contract_path" 2>/dev/null); then :; else
+            fail pin 'verifier bridge contract worktree hashing failed'
+        fi
+        [ "${#head_blob}" -eq 40 ] && [ "${#worktree_blob}" -eq 40 ] || fail pin 'verifier bridge contract blob ID is noncanonical'
+        case "$head_blob:$worktree_blob" in *[!0-9a-f:]*) fail pin 'verifier bridge contract blob ID is noncanonical';; esac
+        [ "$worktree_blob" = "$head_blob" ] || fail pin 'verifier bridge contract bytes differ from HEAD'
+    done
 }
 
 assert_git_clean
@@ -572,6 +595,7 @@ staging=$(CDPATH= cd -- "$staging" && pwd -P)
 safe_absolute_path "$staging" || fail configuration 'unsafe resolved staging directory'
 chmod 700 "$staging"
 staging_identity=$(path_identity "$staging") || fail configuration 'could not record staging directory identity'
+staging_object_identity=$(path_object_identity "$staging") || fail configuration 'could not record immutable staging directory identity'
 
 run_token=${staging##*.}
 valid_run_token "$run_token" || fail configuration 'mktemp returned an invalid random run token'
@@ -590,6 +614,12 @@ full_log_identity=
 
 assert_staging_identity() {
     validate_owned_directory "$staging" "$staging_identity" || { staging_suspect=1; fail staging-identity 'staging directory identity or mode changed'; }
+}
+
+assert_staging_object_identity() {
+    [ -d "$staging" ] && [ ! -L "$staging" ] || { staging_suspect=1; fail staging-identity 'staging directory object changed'; }
+    [ "$(CDPATH= cd -- "$staging" && pwd -P)" = "$staging" ] || { staging_suspect=1; fail staging-identity 'staging directory became noncanonical'; }
+    [ "$(path_object_identity "$staging")" = "$staging_object_identity" ] || { staging_suspect=1; fail staging-identity 'staging directory object changed'; }
 }
 
 volume_owner() {
@@ -882,24 +912,88 @@ run_batch() {
 }
 
 copy_raw_to_staging() {
+    assert_staging_identity
     mkdir -m 700 "$staging/raw" "$staging/receipts"
-    busybox_run \
+    raw_directory_object_identity=$(path_object_identity "$staging/raw") || fail staging-identity 'could not record raw staging directory identity'
+    receipts_directory_object_identity=$(path_object_identity "$staging/receipts") || fail staging-identity 'could not record receipt staging root identity'
+    for raw_name in \
+        rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
+        spec_narrow_discharge.v rocq_false_certificate.v
+    do
+        raw_path=$staging/raw/$raw_name
+        old_umask=$(umask); umask 077
+        set -C
+        : >"$raw_path" || { set +C; umask "$old_umask"; fail staging-identity 'could not exclusively precreate a staged raw file'; }
+        set +C
+        umask "$old_umask"
+        chmod 600 "$raw_path"
+        case "$raw_name" in
+            rocq_prime_bounded_example.v) raw_prime_object_identity=$(file_object_identity "$raw_path") ;;
+            rocq_exists_spec.v) raw_exists_object_identity=$(file_object_identity "$raw_path") ;;
+            rocq_unique_spec.v) raw_unique_object_identity=$(file_object_identity "$raw_path") ;;
+            spec_narrow_discharge.v) raw_narrow_object_identity=$(file_object_identity "$raw_path") ;;
+            rocq_false_certificate.v) raw_false_object_identity=$(file_object_identity "$raw_path") ;;
+        esac
+    done
+    validate_raw_staging 700 600
+    chmod 755 "$staging" "$staging/raw"
+    chmod 666 "$staging/raw/"*.v
+    validate_raw_staging 755 666
+    if busybox_run \
         --mount "type=volume,src=$exchange_volume,dst=/exchange,readonly" \
         --mount "type=bind,src=$staging,dst=/staging" \
         "$busybox_image" sh -c '
             # task4-copy-raw
             set -eu
-            cp /exchange/raw/rocq_prime_bounded_example.v /staging/raw/rocq_prime_bounded_example.v
-            cp /exchange/raw/rocq_exists_spec.v /staging/raw/rocq_exists_spec.v
-            cp /exchange/raw/rocq_unique_spec.v /staging/raw/rocq_unique_spec.v
-            cp /exchange/raw/spec_narrow_discharge.v /staging/raw/spec_narrow_discharge.v
-            cp /exchange/raw/rocq_false_certificate.v /staging/raw/rocq_false_certificate.v
+            cat /exchange/raw/rocq_prime_bounded_example.v > /staging/raw/rocq_prime_bounded_example.v
+            cat /exchange/raw/rocq_exists_spec.v > /staging/raw/rocq_exists_spec.v
+            cat /exchange/raw/rocq_unique_spec.v > /staging/raw/rocq_unique_spec.v
+            cat /exchange/raw/spec_narrow_discharge.v > /staging/raw/spec_narrow_discharge.v
+            cat /exchange/raw/rocq_false_certificate.v > /staging/raw/rocq_false_certificate.v
             cmp -s /exchange/raw/rocq_prime_bounded_example.v /staging/raw/rocq_prime_bounded_example.v
             cmp -s /exchange/raw/rocq_exists_spec.v /staging/raw/rocq_exists_spec.v
             cmp -s /exchange/raw/rocq_unique_spec.v /staging/raw/rocq_unique_spec.v
             cmp -s /exchange/raw/spec_narrow_discharge.v /staging/raw/spec_narrow_discharge.v
             cmp -s /exchange/raw/rocq_false_certificate.v /staging/raw/rocq_false_certificate.v
-        '
+        '; then
+        copy_status=0
+    else
+        copy_status=$?
+    fi
+    validate_raw_staging 755 666
+    chmod 700 "$staging" "$staging/raw"
+    chmod 600 "$staging/raw/"*.v
+    validate_raw_staging 700 600
+    [ "$copy_status" -eq 0 ] || fail input-integrity "raw staging helper failed (status $copy_status)"
+    assert_staging_identity
+}
+
+validate_raw_staging() {
+    expected_directory_mode=$1
+    expected_file_mode=$2
+    assert_staging_object_identity
+    [ "$(path_mode "$staging")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'staging directory exposure mode changed'; }
+    [ -d "$staging/raw" ] && [ ! -L "$staging/raw" ] || { staging_suspect=1; fail staging-identity 'raw staging directory changed'; }
+    [ "$(path_object_identity "$staging/raw")" = "$raw_directory_object_identity" ] || { staging_suspect=1; fail staging-identity 'raw staging directory object changed'; }
+    [ "$(path_mode "$staging/raw")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'raw staging directory mode changed'; }
+    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 5 ] || { staging_suspect=1; fail staging-identity 'raw staging regular-file set changed'; }
+    [ "$(find "$staging/raw" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 5 ] || { staging_suspect=1; fail staging-identity 'raw staging entry set changed'; }
+    for raw_name in \
+        rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
+        spec_narrow_discharge.v rocq_false_certificate.v
+    do
+        raw_path=$staging/raw/$raw_name
+        case "$raw_name" in
+            rocq_prime_bounded_example.v) expected_object=$raw_prime_object_identity ;;
+            rocq_exists_spec.v) expected_object=$raw_exists_object_identity ;;
+            rocq_unique_spec.v) expected_object=$raw_unique_object_identity ;;
+            spec_narrow_discharge.v) expected_object=$raw_narrow_object_identity ;;
+            rocq_false_certificate.v) expected_object=$raw_false_object_identity ;;
+        esac
+        [ -f "$raw_path" ] && [ ! -L "$raw_path" ] || { staging_suspect=1; fail staging-identity 'staged raw file changed type'; }
+        [ "$(file_object_identity "$raw_path")" = "$expected_object" ] || { staging_suspect=1; fail staging-identity 'staged raw file object changed'; }
+        [ "$(path_mode "$raw_path")" = "$expected_file_mode" ] || { staging_suspect=1; fail staging-identity 'staged raw file mode changed'; }
+    done
 }
 
 validate_staged_raw() {
@@ -908,7 +1002,17 @@ validate_staged_raw() {
 
 staged_raw_matches() {
     basename=$1
-    busybox_run \
+    case "$basename" in
+        rocq_prime_bounded_example.v|rocq_exists_spec.v|rocq_unique_spec.v|spec_narrow_discharge.v|rocq_false_certificate.v) : ;;
+        *) return 1 ;;
+    esac
+    validate_raw_staging 700 600
+    chmod 755 "$staging" "$staging/raw"
+    chmod 644 "$staging/raw/$basename"
+    assert_staging_object_identity || return 1
+    [ "$(path_mode "$staging")" = 755 ] && [ "$(path_mode "$staging/raw")" = 755 ] || return 1
+    [ "$(path_mode "$staging/raw/$basename")" = 644 ] || return 1
+    if busybox_run \
         --mount "type=volume,src=$exchange_volume,dst=/exchange,readonly" \
         --mount "type=bind,src=$staging,dst=/staging,readonly" \
         "$busybox_image" sh -c '
@@ -921,7 +1025,16 @@ staged_raw_matches() {
             [ -f "/exchange/raw/$1" ] && [ ! -L "/exchange/raw/$1" ]
             [ -f "/staging/raw/$1" ] && [ ! -L "/staging/raw/$1" ]
             cmp -s "/exchange/raw/$1" "/staging/raw/$1"
-        ' sh "$basename"
+        ' sh "$basename"; then
+        compare_status=0
+    else
+        compare_status=$?
+    fi
+    assert_staging_object_identity || return 1
+    chmod 600 "$staging/raw/$basename" || return 1
+    chmod 700 "$staging" "$staging/raw" || return 1
+    validate_raw_staging 700 600
+    return "$compare_status"
 }
 
 remove_batch_receipts() {
@@ -970,7 +1083,15 @@ validate_single_receipt() {
 
 copy_single_receipts() {
     assert_identity
-    busybox_run \
+    validate_receipt_staging 700 600
+    chmod 755 "$staging" "$staging/receipts" "$staging/receipts/"*
+    chmod 644 "$staging/receipts/prime-bounded/prime-bounded.json" \
+        "$staging/receipts/exists/exists.json" \
+        "$staging/receipts/unique/unique.json" \
+        "$staging/receipts/narrow-domain/narrow-domain.json" \
+        "$staging/receipts/false-spec/false-spec.json"
+    validate_receipt_staging 755 644
+    if busybox_run \
         --mount "type=volume,src=$exchange_volume,dst=/exchange" \
         --mount "type=bind,src=$staging,dst=/staging,readonly" \
         "$busybox_image" sh -c '
@@ -983,17 +1104,65 @@ copy_single_receipts() {
             cp /staging/receipts/unique/unique.json /exchange/receipts/unique.json
             cp /staging/receipts/narrow-domain/narrow-domain.json /exchange/receipts/narrow-domain.json
             cp /staging/receipts/false-spec/false-spec.json /exchange/receipts/false-spec.json
-        '
+        '; then
+        receipt_copy_status=0
+    else
+        receipt_copy_status=$?
+    fi
+    validate_receipt_staging 755 644
+    chmod 700 "$staging" "$staging/receipts" "$staging/receipts/"*
+    chmod 600 "$staging/receipts/prime-bounded/prime-bounded.json" \
+        "$staging/receipts/exists/exists.json" \
+        "$staging/receipts/unique/unique.json" \
+        "$staging/receipts/narrow-domain/narrow-domain.json" \
+        "$staging/receipts/false-spec/false-spec.json"
+    validate_receipt_staging 700 600
+    [ "$receipt_copy_status" -eq 0 ] || fail single "receipt copy helper failed (status $receipt_copy_status)"
     assert_identity
+}
+
+validate_receipt_staging() {
+    expected_directory_mode=$1
+    expected_file_mode=$2
+    assert_staging_object_identity
+    [ "$(path_mode "$staging")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'staging receipt exposure mode changed'; }
+    [ -d "$staging/receipts" ] && [ ! -L "$staging/receipts" ] || { staging_suspect=1; fail staging-identity 'receipt staging root changed'; }
+    [ "$(path_object_identity "$staging/receipts")" = "$receipts_directory_object_identity" ] || { staging_suspect=1; fail staging-identity 'receipt staging root object changed'; }
+    [ "$(path_mode "$staging/receipts")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'receipt staging root mode changed'; }
+    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 5 ] || { staging_suspect=1; fail staging-identity 'receipt staging directory set changed'; }
+    [ "$(find "$staging/receipts" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 5 ] || { staging_suspect=1; fail staging-identity 'receipt staging root has extra entries'; }
+    for case_id in prime-bounded exists unique narrow-domain false-spec; do
+        receipt_directory=$staging/receipts/$case_id
+        receipt_file=$receipt_directory/$case_id.json
+        case "$case_id" in
+            prime-bounded) expected_directory_object=$prime_bounded_receipt_dir_object; expected_file_object=$prime_bounded_receipt_file_object ;;
+            exists) expected_directory_object=$exists_receipt_dir_object; expected_file_object=$exists_receipt_file_object ;;
+            unique) expected_directory_object=$unique_receipt_dir_object; expected_file_object=$unique_receipt_file_object ;;
+            narrow-domain) expected_directory_object=$narrow_domain_receipt_dir_object; expected_file_object=$narrow_domain_receipt_file_object ;;
+            false-spec) expected_directory_object=$false_spec_receipt_dir_object; expected_file_object=$false_spec_receipt_file_object ;;
+        esac
+        [ -d "$receipt_directory" ] && [ ! -L "$receipt_directory" ] || { staging_suspect=1; fail staging-identity 'single receipt directory changed type'; }
+        [ "$(path_object_identity "$receipt_directory")" = "$expected_directory_object" ] || { staging_suspect=1; fail staging-identity 'single receipt directory object changed'; }
+        [ "$(path_mode "$receipt_directory")" = "$expected_directory_mode" ] || { staging_suspect=1; fail staging-identity 'single receipt directory mode changed'; }
+        [ -f "$receipt_file" ] && [ ! -L "$receipt_file" ] || { staging_suspect=1; fail staging-identity 'single receipt file changed type'; }
+        [ "$(file_object_identity "$receipt_file")" = "$expected_file_object" ] || { staging_suspect=1; fail staging-identity 'single receipt file object changed'; }
+        [ "$(path_mode "$receipt_file")" = "$expected_file_mode" ] || { staging_suspect=1; fail staging-identity 'single receipt file mode changed'; }
+        [ "$(find "$receipt_directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] || { staging_suspect=1; fail staging-identity 'single receipt directory has extra entries'; }
+    done
 }
 
 run_single() {
     copy_raw_to_staging
     prime_bounded_receipt_dir_identity= prime_bounded_receipt_file_identity=
+    prime_bounded_receipt_dir_object= prime_bounded_receipt_file_object=
     exists_receipt_dir_identity= exists_receipt_file_identity=
+    exists_receipt_dir_object= exists_receipt_file_object=
     unique_receipt_dir_identity= unique_receipt_file_identity=
+    unique_receipt_dir_object= unique_receipt_file_object=
     narrow_domain_receipt_dir_identity= narrow_domain_receipt_file_identity=
+    narrow_domain_receipt_dir_object= narrow_domain_receipt_file_object=
     false_spec_receipt_dir_identity= false_spec_receipt_file_identity=
+    false_spec_receipt_dir_object= false_spec_receipt_file_object=
     for record in \
         'prime-bounded:rocq_prime_bounded_example.v' \
         'exists:rocq_exists_spec.v' \
@@ -1016,13 +1185,15 @@ run_single() {
         bridge_receipt_dir=
         validate_single_receipt_layout "$case_id" "$receipt_dir" "$receipt_identity"
         receipt_file_identity=$(file_identity "$receipt_dir/$case_id.json") || fail single 'could not record single-case receipt file identity'
+        receipt_dir_object=$(path_object_identity "$receipt_dir") || fail single 'could not record single-case receipt directory object'
+        receipt_file_object=$(file_object_identity "$receipt_dir/$case_id.json") || fail single 'could not record single-case receipt file object'
         validate_single_receipt "$case_id" "$receipt_dir" "$receipt_identity" "$receipt_file_identity"
         case "$case_id" in
-            prime-bounded) prime_bounded_receipt_dir_identity=$receipt_identity; prime_bounded_receipt_file_identity=$receipt_file_identity ;;
-            exists) exists_receipt_dir_identity=$receipt_identity; exists_receipt_file_identity=$receipt_file_identity ;;
-            unique) unique_receipt_dir_identity=$receipt_identity; unique_receipt_file_identity=$receipt_file_identity ;;
-            narrow-domain) narrow_domain_receipt_dir_identity=$receipt_identity; narrow_domain_receipt_file_identity=$receipt_file_identity ;;
-            false-spec) false_spec_receipt_dir_identity=$receipt_identity; false_spec_receipt_file_identity=$receipt_file_identity ;;
+            prime-bounded) prime_bounded_receipt_dir_identity=$receipt_identity; prime_bounded_receipt_file_identity=$receipt_file_identity; prime_bounded_receipt_dir_object=$receipt_dir_object; prime_bounded_receipt_file_object=$receipt_file_object ;;
+            exists) exists_receipt_dir_identity=$receipt_identity; exists_receipt_file_identity=$receipt_file_identity; exists_receipt_dir_object=$receipt_dir_object; exists_receipt_file_object=$receipt_file_object ;;
+            unique) unique_receipt_dir_identity=$receipt_identity; unique_receipt_file_identity=$receipt_file_identity; unique_receipt_dir_object=$receipt_dir_object; unique_receipt_file_object=$receipt_file_object ;;
+            narrow-domain) narrow_domain_receipt_dir_identity=$receipt_identity; narrow_domain_receipt_file_identity=$receipt_file_identity; narrow_domain_receipt_dir_object=$receipt_dir_object; narrow_domain_receipt_file_object=$receipt_file_object ;;
+            false-spec) false_spec_receipt_dir_identity=$receipt_identity; false_spec_receipt_file_identity=$receipt_file_identity; false_spec_receipt_dir_object=$receipt_dir_object; false_spec_receipt_file_object=$receipt_file_object ;;
         esac
         assert_identity
     done

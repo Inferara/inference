@@ -9,7 +9,7 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `77f1126`, and the vendored
+verified against wasm-verifier commit `181cd67`, and the vendored
 signature stub in `rocq-stub/` type-checks the emittable subset of it
 locally), built on **vanilla WasmCert-Coq v2.2.0** at commit `0fd83fa`
 — not the `WasmCert-Coq-Essence` fork this crate previously targeted.
@@ -79,12 +79,13 @@ collapsed:
    assumptions. No generated definition, theorem statement, scope key, or
    other raw byte may be spliced into or rewritten in the proof companion.
 
-Inference Phase A defines and tests the producer half of that third protocol,
-but it does not yet establish exact-artifact discharge. The independent
-companions, manifest, discharger, and Docker adapters first exist in
-wasm-verifier commit B; live Inference verification first names B in commit C.
-Until C, a Phase-A run can establish fresh-generation/golden identity and the
-strict exchange contract, not downstream proof closure.
+Inference now pins the independent companions, manifest, discharger, and
+Docker adapters at wasm-verifier B
+(`181cd676662453182b9753d1b19ca933c68770c3`). The configured CI lane therefore
+establishes the five-case exact-artifact claim rather than merely the Phase-A
+producer protocol: exactly eleven endpoints are proved and the false fixture's
+positive endpoint is refuted. Absence of the configured executable is reported
+as `Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
 The initial ordered floor is exact:
 
@@ -141,6 +142,20 @@ normal result is trusted, a deliberately malformed same-basename provenance
 probe must fail.
 For `false-spec`, success requires the one refutation rather than accepting a
 positive `ValidSpec` certificate.
+
+On the private runner, `WASM_VERIFIER_DISCHARGER` must resolve to B's
+`ci/discharge/run-docker-case.sh`, and `WASM_VERIFIER_RUNNER` must name the
+dedicated runner. Both are repository- or organization-level Actions variables
+visible to the hosted capability job, not environment-scoped variables that
+become visible only after job routing. The hosted job reports the lane present
+only when both settings exist. Execution is separated into its own job guarded
+by the protected `real-rocq` environment. Environment approval explicitly
+trusts the pull request's code for that run; it is not process isolation. The
+selected runner must be registered for one-job ephemeral use in a dedicated
+group and carry no unrelated state or credentials. The same-repository
+`ci:real-rocq` label only schedules pull-request work and is not an authorization
+boundary. The workflow deliberately uses `pull_request`, not
+`pull_request_target`, because it builds and executes the pull request's Rust.
 
 The canonical local product wrapper pins
 `rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922`

@@ -149,15 +149,16 @@ fn require_coq_series(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::Pin;
+    use std::path::Path;
+
+    const VERIFIER_B: &str = "181cd676662453182b9753d1b19ca933c68770c3";
+    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=5 proved=11 refuted=1";
 
     #[test]
     fn pin_supplies_every_discharge_protocol_value() {
         let pin = Pin::read().expect("read the committed verifier pin");
 
-        assert_eq!(
-            pin.wasm_verifier_revision(),
-            "77f1126d5de023d9f8464c60c0137b6321126757"
-        );
+        assert_eq!(pin.wasm_verifier_revision(), VERIFIER_B);
         assert_eq!(pin.coq_wasm_tag(), "v2.2.0");
         assert_eq!(
             pin.coq_wasm_revision(),
@@ -165,5 +166,83 @@ mod tests {
         );
         assert_eq!(pin.coq_series(), "8.20");
         assert_eq!(pin.assumption_allowlist_count(), 10);
+    }
+
+    #[test]
+    fn workflow_requires_the_configured_single_case_discharger() {
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("tests crate has a repository parent")
+                .join(".github/workflows/rocq-real-library.yml"),
+        )
+        .expect("read real-library workflow");
+
+        let gate = workflow
+            .split_once("  dischargeability-gate:")
+            .expect("workflow has dischargeability capability job")
+            .1
+            .split_once("  selected-artifact-discharge:")
+            .expect("workflow has selected-artifact job after capability job")
+            .0;
+        let selected = workflow
+            .split_once("  selected-artifact-discharge:")
+            .expect("workflow has selected-artifact job")
+            .1
+            .split_once("  # Its own job rather than a step")
+            .expect("selected-artifact job has a bounded workflow slice")
+            .0;
+
+        for required in [
+            "runs-on: ubuntu-latest",
+            "Selected-artifact dischargeability: SKIPPED",
+            "DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}",
+            "RUNNER: ${{ vars.WASM_VERIFIER_RUNNER }}",
+            "[ -z \"${DISCHARGER:-}\" ] || [ -z \"${RUNNER:-}\" ]",
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            "contains(github.event.pull_request.labels.*.name, 'ci:real-rocq')",
+        ] {
+            assert!(
+                gate.contains(required),
+                "capability job omitted configured discharge fragment {required:?}"
+            );
+        }
+        for required in [
+            "needs: dischargeability-gate",
+            "if: needs.dischargeability-gate.outputs.present == 'true'",
+            "environment: real-rocq",
+            "runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}",
+            "INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}",
+            "INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'",
+            "test ! -e Cargo.lock",
+            "cp ci/rocq-discharge.cargo-lock Cargo.lock",
+            "cmp -s ci/rocq-discharge.cargo-lock Cargo.lock",
+            "rustc +1.98.0 --version",
+            "'rustc 1.98.0 '*",
+            "cargo +1.98.0 fetch --locked",
+            "cargo +1.98.0 test -p inference-tests --locked --offline --verbose",
+            "rocq_dischargeability::direct::configured_dischargeability_gate",
+            "-- --exact --nocapture",
+            "'$0 == marker { count++ } END { print count + 0 }'",
+            SUCCESS_LINE,
+            VERIFIER_B,
+            "ci/discharge/run-docker-case.sh",
+        ] {
+            assert!(
+                selected.contains(required),
+                "selected-artifact job omitted discharge contract fragment {required:?}"
+            );
+        }
+        assert!(!selected.contains("ubuntu-latest"));
+        assert!(!selected.contains("|| true"));
+        assert!(workflow.contains("permissions:\n  contents: read"));
+        assert!(
+            workflow.contains("pull_request:\n    types: [opened, synchronize, reopened, labeled]"),
+            "workflow no longer preserves pull_request scheduling"
+        );
+        assert!(
+            !workflow.contains("pull_request_target:"),
+            "workflow must never execute this lane through pull_request_target"
+        );
     }
 }
