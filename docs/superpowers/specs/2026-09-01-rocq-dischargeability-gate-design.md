@@ -418,11 +418,13 @@ Inference's `rocq-real-library` workflow gains:
   an error rather than a test skip.
 
 Pull requests retain the existing same-repository `ci:real-rocq` label gate.
-The label is scheduling, not authorization. The protected `real-rocq`
-environment, private runner group, and outside-collaborator approval remain the
-security boundary because the job builds and executes pull-request code. The
-workflow must not use `pull_request_target`, and it must not add a path filter
-that would break label-triggered runs.
+The label is scheduling, not authorization. Approving the protected
+`real-rocq` environment explicitly trusts the pull request code that the job
+builds and executes; the environment and runner group do not isolate that code.
+The selected runner must therefore be a one-job ephemeral runner in a dedicated
+group, with no unrelated state or credentials. The workflow must not use
+`pull_request_target`, and it must not add a path filter that would break
+label-triggered runs.
 
 wasm-verifier CI checks its proof companions against the raw committed goldens
 from the reciprocal pinned Inference revision. Inference CI checks the current

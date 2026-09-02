@@ -978,6 +978,7 @@ mod drift {
     /// Prose files restating the pin. Both are the contract documents a reader
     /// consults instead of the pin file, so both have to agree with it.
     const PROSE: &[&str] = &[
+        "README.md",
         "core/wasm-to-v/ROCQ_CONTRACT.md",
         "core/wasm-to-v/rocq-stub/README.md",
     ];
@@ -989,7 +990,7 @@ mod drift {
     /// agreement. Adding a restatement raises the count and still passes;
     /// deleting one fails, which is the point -- a restatement silently dropped
     /// is a claim that stops being checked.
-    const PROSE_RESTATEMENT_FLOOR: usize = 9;
+    const PROSE_RESTATEMENT_FLOOR: usize = 10;
 
     /// A pin value restated in prose.
     #[derive(Debug, PartialEq)]

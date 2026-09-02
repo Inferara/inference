@@ -26,7 +26,7 @@
 # no longer matches, and the differing names are printed at failure time from
 # the developer's own checkout -- never written here.
 
-revision 77f1126d5de023d9f8464c60c0137b6321126757
+revision 181cd676662453182b9753d1b19ca933c68770c3
 coq-wasm-tag v2.2.0
 coq-wasm-commit 0fd83fa708922721132b6d6737179568d1f1d553
 coq 8.20

@@ -10,6 +10,7 @@ repo_root=$(
 runner_source=$repo_root/ci/rocq-discharge-docker.sh
 rust_runner_source=$repo_root/ci/rocq-rust-docker.sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/rocq-discharge-docker-self-test.XXXXXX")
+work=$(cd -- "$work" && pwd -P)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 test_tmp=$work/tmp
 mkdir -m 700 "$test_tmp"
@@ -25,7 +26,7 @@ fake_git=$fake_bin/'git tool'
 FAKE_DOCKER_PATH=$fake_docker
 export FAKE_DOCKER_PATH
 verifier=$fixture/verifier
-revision=77f1126d5de023d9f8464c60c0137b6321126757
+revision=181cd676662453182b9753d1b19ca933c68770c3
 coq_wasm_revision=0fd83fa708922721132b6d6737179568d1f1d553
 image_reference=ghcr.io/inferara/wasm-verifier-coq:8.20@sha256:1111111111111111111111111111111111111111111111111111111111111111
 image_id=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -148,6 +149,9 @@ printf 'git' >>"$state/git-calls"
 for argument in "$@"; do printf ' <%s>' "$argument" >>"$state/git-calls"; done
 printf '\n' >>"$state/git-calls"
 case "$*" in
+    *' rev-parse --verify HEAD:'*)
+        printf '%040d\n' 1
+        ;;
     *' rev-parse HEAD')
         if [ "${FAKE_MISMATCH:-}" = checkout-revision ]; then
             printf '%040d\n' 0
@@ -160,6 +164,22 @@ case "$*" in
         ;;
     *' diff --quiet HEAD -- '*)
         [ ! -f "$state/verifier-dirty" ]
+        ;;
+    *' ls-files -v -- '*)
+        for contract_path in "$@"; do :; done
+        index_tag=H
+        case "${FAKE_MISMATCH:-}" in
+            skip-index) [ "$contract_path" != ci/discharge/inspect-container.sh ] || index_tag=S ;;
+            assume-index) [ "$contract_path" != ci/discharge/inspect-container.sh ] || index_tag=h ;;
+        esac
+        printf '%s %s\n' "$index_tag" "$contract_path"
+        ;;
+    *' hash-object -- '*)
+        if [ "${FAKE_MISMATCH:-}" = contract-blob ]; then
+            printf '%040d\n' 2
+        else
+            printf '%040d\n' 1
+        fi
         ;;
     *) echo "fake git: unexpected arguments: $*" >&2; exit 91 ;;
 esac
@@ -245,6 +265,9 @@ require_hardened() {
     has_pair --cap-drop ALL "$@" || { echo 'fake docker: missing --cap-drop ALL' >&2; exit 72; }
     has_pair --security-opt no-new-privileges "$@" || { echo 'fake docker: missing no-new-privileges' >&2; exit 73; }
     has_pair --tmpfs /tmp "$@" || { echo 'fake docker: missing tmpfs /tmp' >&2; exit 74; }
+}
+host_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 for argument in "$@"; do
     case "$argument" in *docker.sock*) echo 'fake docker: Docker socket token is forbidden' >&2; exit 75;; esac
@@ -455,7 +478,7 @@ if [ "$1" = run ]; then
                 printf 'verify-time mutation\n' >"$state/volumes/$exchange/request.json"
             fi
             if [ "${FAKE_REPLACE_STAGING_ON_VERIFY:-0}" = 1 ]; then
-                staging_path=$(find "${FAKE_TMP_ROOT:?}" -mindepth 1 -maxdepth 1 -type d -name 'inference-rocq-discharge.*' | sed -n '1p')
+                staging_path=$(find "${FAKE_TMP_ROOT:?}" -mindepth 1 -maxdepth 1 -type d -name 'inference-rocq-discharge.*' | tail -n 1)
                 mv "$staging_path" "$staging_path.original"
                 mkdir -m 700 "$staging_path"
                 printf 'replacement sentinel\n' >"$staging_path/replacement-sentinel"
@@ -530,11 +553,40 @@ if [ "$1" = run ]; then
             if [ "${FAKE_FINGERPRINT_MODE:-}" = stale-failure ] && [ "$fingerprint_count" -ge 2 ]; then exit 49; fi
             ;;
         *task4-copy-raw*)
+            for raw_file in \
+                rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
+                spec_narrow_discharge.v rocq_false_certificate.v
+            do
+                printf '%s\n' "$script" | grep -F "cat /exchange/raw/$raw_file > /staging/raw/$raw_file" >/dev/null || exit 64
+            done
+            if printf '%s\n' "$script" | grep -F 'cp /exchange/raw/' >/dev/null; then exit 64; fi
+            if [ "${FAKE_REQUIRE_LINUX_STAGING:-0}" = 1 ]; then
+                [ "$(host_mode "$staging")" = 755 ] || exit 61
+                [ "$(host_mode "$staging/raw")" = 755 ] || exit 61
+                for raw_file in \
+                    rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
+                    spec_narrow_discharge.v rocq_false_certificate.v
+                do
+                    [ -f "$staging/raw/$raw_file" ] && [ "$(host_mode "$staging/raw/$raw_file")" = 666 ] || exit 61
+                done
+                : >"$state/linux-copy-raw-modes"
+            fi
             mkdir -p "$staging/raw"
-            cp "$state/volumes/$exchange/raw/"*.v "$staging/raw/"
+            for raw_file in \
+                rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
+                spec_narrow_discharge.v rocq_false_certificate.v
+            do
+                cat "$state/volumes/$exchange/raw/$raw_file" >"$staging/raw/$raw_file"
+            done
             ;;
         *task4-check-staged-raw*)
             basename=$(last_arg "$@")
+            if [ "${FAKE_REQUIRE_LINUX_STAGING:-0}" = 1 ]; then
+                [ "$(host_mode "$staging")" = 755 ] || exit 62
+                [ "$(host_mode "$staging/raw")" = 755 ] || exit 62
+                [ "$(host_mode "$staging/raw/$basename")" = 644 ] || exit 62
+                : >"$state/linux-check-raw-modes"
+            fi
             cmp "$state/volumes/$exchange/raw/$basename" "$staging/raw/$basename"
             ;;
         *task4-remove-receipts*)
@@ -548,6 +600,15 @@ if [ "$1" = run ]; then
             rm -rf "$receipt_root"
             ;;
         *task4-copy-receipts*)
+            if [ "${FAKE_REQUIRE_LINUX_STAGING:-0}" = 1 ]; then
+                [ "$(host_mode "$staging")" = 755 ] || exit 63
+                [ "$(host_mode "$staging/receipts")" = 755 ] || exit 63
+                for case_id in prime-bounded exists unique narrow-domain false-spec; do
+                    [ "$(host_mode "$staging/receipts/$case_id")" = 755 ] || exit 63
+                    [ "$(host_mode "$staging/receipts/$case_id/$case_id.json")" = 644 ] || exit 63
+                done
+                : >"$state/linux-copy-receipt-modes"
+            fi
             mkdir "$state/volumes/$exchange/receipts"
             for case_id in prime-bounded exists unique narrow-domain false-spec; do cp "$staging/receipts/$case_id/$case_id.json" "$state/volumes/$exchange/receipts/"; done
             ;;
@@ -723,6 +784,7 @@ chmod +x "$verifier/ci/discharge/"*.sh
 
 reset_state() {
     rm -rf "$state"
+    find "$test_tmp" -mindepth 1 -maxdepth 1 -type d -name 'inference-rocq-discharge.*' -exec rm -rf -- {} +
     mkdir -p "$state/calls" "$state/volumes" "$state/labels" "$state/containers"
     write_container_pin
 }
@@ -788,6 +850,24 @@ expect_status() {
     }
     case "$label" in
         proxy-*) [ -z "$(find "$state/calls" -mindepth 1 -type f -print -quit)" ] || { echo "self-test: $label reached real Docker" >&2; exit 1; } ;;
+    esac
+}
+assert_no_match() {
+    match_kind=$1
+    pattern=$2
+    path=$3
+    set +e
+    case "$match_kind" in
+        fixed) grep -F -q -- "$pattern" "$path" ;;
+        regex) grep -q -- "$pattern" "$path" ;;
+        *) echo "self-test: invalid negative-match kind $match_kind" >&2; exit 1 ;;
+    esac
+    match_status=$?
+    set -e
+    case "$match_status" in
+        1) : ;;
+        0) echo "self-test: unexpected match $pattern in $path" >&2; exit 1 ;;
+        *) echo "self-test: grep failed for $path (status $match_status)" >&2; exit 1 ;;
     esac
 }
 base_args="--wasm-verifier $verifier --container verifier-dev"
@@ -922,11 +1002,21 @@ for adapter in batch single both; do
     # shellcheck disable=SC2086
     run_wrapper $base_args --adapter "$adapter" >"$work/$adapter.out"
     case "$adapter" in
-        batch) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; ! grep -q '^case ' "$state/bridge-calls" ;;
-        single) ! grep -q '^batch ' "$state/bridge-calls"; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ] ;;
+        batch) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; assert_no_match regex '^case ' "$state/bridge-calls" ;;
+        single) assert_no_match regex '^batch ' "$state/bridge-calls"; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ] ;;
         both) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ] ;;
     esac
 done
+
+reset_state
+FAKE_REQUIRE_LINUX_STAGING=1
+export FAKE_REQUIRE_LINUX_STAGING
+# shellcheck disable=SC2086
+run_wrapper $base_args --adapter single >"$work/linux-staging.out"
+unset FAKE_REQUIRE_LINUX_STAGING
+test -f "$state/linux-copy-raw-modes"
+test -f "$state/linux-check-raw-modes"
+test -f "$state/linux-copy-receipt-modes"
 
 # The shared verifier bridge helper is mandatory and identity-checked like every public adapter.
 helper_path=$verifier/ci/discharge/docker-bridge.sh
@@ -956,7 +1046,7 @@ unset FAKE_REPLACE_SHARED_HELPER
 rm "$helper_path"
 cp "$helper_pristine" "$helper_path"
 chmod 755 "$helper_path"
-! grep -F 'rocq-discharge-docker: result=pass' "$work/helper-replaced-after-bridge.out" >/dev/null
+assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/helper-replaced-after-bridge.out"
 
 # Bridge-owned environment values never override the orchestrator's exact batch/single receipt contract.
 reset_state
@@ -979,7 +1069,7 @@ for boundary_attack in dirty-next replace-next container image-provenance final-
     esac
     # shellcheck disable=SC2086
     expect_failure "boundary-$boundary_attack" run_wrapper $base_args --adapter both
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/boundary-$boundary_attack.out" >/dev/null
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/boundary-$boundary_attack.out"
     unset FAKE_DIRTY_NEXT_BRIDGE FAKE_REPLACE_NEXT_BRIDGE FAKE_AFTER_BRIDGE_MISMATCH FAKE_DIRTY_AFTER_CASE 2>/dev/null || true
 done
 
@@ -1019,7 +1109,7 @@ for full_log_attack in symlink fifo hardlink; do
     [ "$(cat "$state/nonclobber-target")" = 'do not clobber' ]
     [ "$(find "$full_attack_tmp" -mindepth 1 -maxdepth 1 -type d -name 'inference-rocq-discharge.*' | wc -l | tr -d ' ')" -eq 1 ]
     if [ "$full_log_attack" = hardlink ]; then [ -f "$state/full-log-hardlink-target" ]; fi
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/full-log-replaced-$full_log_attack.out" >/dev/null
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/full-log-replaced-$full_log_attack.out"
 done
 
 for floor_mode in empty single under malformed filtered-only failed; do
@@ -1029,7 +1119,7 @@ for floor_mode in empty single under malformed filtered-only failed; do
     grep -F 'phase=full-test-floor' "$work/floor-$floor_mode.err" >/dev/null
 done
 
-for mismatch in stopped image-reference image-id user mount mount-source mount-socket mount-extra-bind mount-alias-socket mount-volume mount-malformed mount-duplicate provenance-user provenance-uid provenance-gid provenance-uid-padded provenance-gid-padded provenance-revision provenance-exit provenance-origin-missing provenance-origin-duplicate provenance-extra coq-version coq-version-patch coq-wasm-origin coq-wasm-tag coq-wasm-revision checkout-revision dirty-checkout; do
+for mismatch in stopped image-reference image-id user mount mount-source mount-socket mount-extra-bind mount-alias-socket mount-volume mount-malformed mount-duplicate provenance-user provenance-uid provenance-gid provenance-uid-padded provenance-gid-padded provenance-revision provenance-exit provenance-origin-missing provenance-origin-duplicate provenance-extra coq-version coq-version-patch coq-wasm-origin coq-wasm-tag coq-wasm-revision checkout-revision dirty-checkout skip-index assume-index contract-blob; do
     reset_state
     expect_failure "mismatch-$mismatch" env FAKE_MISMATCH="$mismatch" FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev
     test ! -e "$state/bridge-calls"
@@ -1063,7 +1153,7 @@ test ! -e "$state/bridge-calls"
 reset_state
 expect_status 37 bridge-failure env FAKE_BRIDGE_FAIL=batch FAKE_BRIDGE_STATUS=37 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev
 [ "$(wc -l <"$work/bridge-failure.err" | tr -d ' ')" -eq 1 ]
-! grep -F 'PRIVATE' "$work/bridge-failure.err" >/dev/null
+assert_no_match fixed 'PRIVATE' "$work/bridge-failure.err"
 evidence=$(sed -n 's/^rocq-discharge-docker: phase=batch evidence=//p' "$work/bridge-failure.err")
 [ -d "$evidence" ] && [ ! -L "$evidence" ] && [ -f "$evidence/verifier.log" ]
 evidence_line=$(grep -n 'bridge-evidence-written' "$state/events" | cut -d: -f1)
@@ -1074,7 +1164,7 @@ rm -rf "$evidence"
 reset_state
 expect_status 55 single-bridge-failure env FAKE_BRIDGE_FAIL=case:prime-bounded FAKE_BRIDGE_STATUS=55 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev --adapter single
 [ "$(wc -l <"$work/single-bridge-failure.err" | tr -d ' ')" -eq 1 ]
-! grep -F 'PRIVATE' "$work/single-bridge-failure.err" >/dev/null
+assert_no_match fixed 'PRIVATE' "$work/single-bridge-failure.err"
 single_evidence=$(sed -n 's/^rocq-discharge-docker: phase=single-prime-bounded evidence=//p' "$work/single-bridge-failure.err")
 [ -d "$single_evidence" ] && [ -f "$single_evidence/verifier.log" ]
 rm -rf "$single_evidence"
@@ -1082,7 +1172,7 @@ rm -rf "$single_evidence"
 reset_state
 expect_failure bridge-missing-log env FAKE_BRIDGE_FAIL=batch FAKE_BRIDGE_MISSING_LOG=1 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev
 grep -F 'phase=evidence-contract' "$work/bridge-missing-log.err" >/dev/null
-! grep -F 'evidence=' "$work/bridge-missing-log.err" >/dev/null
+assert_no_match fixed 'evidence=' "$work/bridge-missing-log.err"
 
 for verifier_log_attack in mode symlink fifo hardlink extra; do
     reset_state
@@ -1100,9 +1190,9 @@ for verifier_log_attack in mode symlink fifo hardlink extra; do
     TMPDIR=$saved_tmp
     export TMPDIR
     grep -F 'phase=evidence-contract' "$work/verifier-log-$verifier_log_attack.err" >/dev/null
-    ! grep -F 'PRIVATE' "$work/verifier-log-$verifier_log_attack.err" >/dev/null
-    ! grep -F ' evidence=' "$work/verifier-log-$verifier_log_attack.err" >/dev/null
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/verifier-log-$verifier_log_attack.out" >/dev/null
+    assert_no_match fixed 'PRIVATE' "$work/verifier-log-$verifier_log_attack.err"
+    assert_no_match fixed ' evidence=' "$work/verifier-log-$verifier_log_attack.err"
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/verifier-log-$verifier_log_attack.out"
     [ "$(cat "$state/nonclobber-target")" = 'unrelated private inode' ]
     if [ "$verifier_log_attack" = hardlink ]; then
         [ "$(find "$evidence_attack_tmp" -mindepth 1 -maxdepth 1 -type d -name 'wasm-verifier-discharge-evidence.*' | wc -l | tr -d ' ')" -eq 1 ]
@@ -1112,7 +1202,7 @@ done
 reset_state
 expect_failure bridge-success-log env FAKE_BRIDGE_STALE_LOG=1 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev --adapter batch
 grep -F 'phase=evidence-contract' "$work/bridge-success-log.err" >/dev/null
-! grep -F 'evidence=' "$work/bridge-success-log.err" >/dev/null
+assert_no_match fixed 'evidence=' "$work/bridge-success-log.err"
 
 for capture_attack in symlink fifo hardlink; do
     reset_state
@@ -1133,7 +1223,7 @@ for capture_attack in symlink fifo hardlink; do
     [ "$(cat "$state/nonclobber-target")" = 'do not clobber' ]
     [ "$(find "$capture_attack_tmp" -mindepth 1 -maxdepth 1 -type d -name 'wasm-verifier-discharge-evidence.*' | wc -l | tr -d ' ')" -eq 1 ]
     if [ "$capture_attack" = hardlink ]; then [ -f "$state/capture-hardlink-target" ]; fi
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/capture-$capture_attack.out" >/dev/null
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/capture-$capture_attack.out"
 done
 
 reset_state
@@ -1176,13 +1266,13 @@ expect_failure verify-post-fingerprint run_wrapper $base_args --adapter batch
 unset FAKE_MUTATE_EXCHANGE_ON_VERIFY
 grep -F 'phase=input-integrity' "$work/verify-post-fingerprint.err" >/dev/null
 test -e "$state/verify-1"
-! grep -F 'rocq-discharge-docker: result=pass' "$work/verify-post-fingerprint.out" >/dev/null
+assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/verify-post-fingerprint.out"
 
 reset_state
 expect_failure batch-extra-receipt env FAKE_BATCH_EXTRA=1 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev --adapter both
 [ "$(grep -c '/receipts/.*\.json$' "$state/rejected-batch-layout")" -eq 5 ]
 [ "$(grep -c '/receipts/extra$' "$state/rejected-batch-layout")" -eq 1 ]
-! grep -q '^case ' "$state/bridge-calls"
+assert_no_match regex '^case ' "$state/bridge-calls"
 
 for receipt_attack in mode extra replace; do
     reset_state
@@ -1243,7 +1333,7 @@ unset FAKE_REPLACE_STAGING_ON_VERIFY
 grep -F 'phase=staging-identity' "$work/staging-replacement-at-success.err" >/dev/null
 replaced_staging=$(cat "$state/replaced-staging-path")
 [ -f "$replaced_staging/replacement-sentinel" ]
-! grep -F 'rocq-discharge-docker: result=pass' "$work/staging-replacement-at-success.out" >/dev/null
+assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/staging-replacement-at-success.out"
 
 for cleanup_volume in source source-false-success source-hidden-live exchange exchange-false-success exchange-hidden-live; do
     reset_state
@@ -1256,7 +1346,7 @@ for cleanup_volume in source source-false-success source-hidden-live exchange ex
         sed -n '1,20p' "$work/cleanup-volume-busy-$cleanup_volume.err" >&2
         exit 1
     }
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/cleanup-volume-busy-$cleanup_volume.out" >/dev/null
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/cleanup-volume-busy-$cleanup_volume.out"
 done
 
 for volume_query_attack in failure existing extra; do
@@ -1270,7 +1360,7 @@ for volume_query_attack in failure existing extra; do
     expect_failure "volume-query-$volume_query_attack" run_wrapper $base_args --adapter batch
     unset FAKE_VOLUME_LS_FAIL FAKE_VOLUME_LS_EXISTING FAKE_VOLUME_LS_EXTRA 2>/dev/null || true
     grep -F 'phase=cleanup' "$work/volume-query-$volume_query_attack.err" >/dev/null
-    ! grep -F 'rocq-discharge-docker: result=pass' "$work/volume-query-$volume_query_attack.out" >/dev/null
+    assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/volume-query-$volume_query_attack.out"
 done
 
 reset_state
