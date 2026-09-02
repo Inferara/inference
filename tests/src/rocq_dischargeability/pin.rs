@@ -152,8 +152,7 @@ mod tests {
     use std::path::Path;
 
     const VERIFIER_B: &str = "181cd676662453182b9753d1b19ca933c68770c3";
-    const PROTECTED_CHECKOUT_STEP: &str =
-        "uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
+    const PROTECTED_CHECKOUT: &str = "actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
     const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=5 proved=11 refuted=1";
 
     #[test]
@@ -178,6 +177,41 @@ mod tests {
                 .join(".github/workflows/rocq-real-library.yml"),
         )
         .expect("read real-library workflow")
+    }
+
+    fn assert_protected_checkout_step(selected: &str) {
+        const CHECKOUT_STEP: &str = "      - name: Checkout\n";
+        assert_eq!(
+            selected.matches(CHECKOUT_STEP).count(),
+            1,
+            "selected-artifact job must contain exactly one named Checkout step"
+        );
+        let step = selected
+            .split_once(CHECKOUT_STEP)
+            .expect("selected-artifact job has a named Checkout step")
+            .1;
+        let step = step
+            .split_once("\n      - name: ")
+            .map_or(step, |(checkout, _)| checkout);
+        let uses = step
+            .lines()
+            .filter_map(|line| line.strip_prefix("        uses: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uses.len(),
+            1,
+            "named Checkout step must contain exactly one uses line"
+        );
+        let checkout = uses[0].split_once(" #").map_or(uses[0], |(value, _)| value);
+        assert_eq!(
+            checkout, PROTECTED_CHECKOUT,
+            "named Checkout step must use the protected checkout revision"
+        );
+        assert_eq!(
+            step.matches("actions/checkout@").count(),
+            1,
+            "named Checkout step must not contain a second checkout revision"
+        );
     }
 
     fn assert_workflow_contract(workflow: &str) {
@@ -216,7 +250,6 @@ mod tests {
             "if: needs.dischargeability-gate.outputs.present == 'true'",
             "environment: real-rocq",
             "runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}",
-            PROTECTED_CHECKOUT_STEP,
             "INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}",
             "INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'",
             "test ! -e Cargo.lock",
@@ -238,6 +271,7 @@ mod tests {
                 "selected-artifact job omitted discharge contract fragment {required:?}"
             );
         }
+        assert_protected_checkout_step(selected);
         assert!(!selected.contains("ubuntu-latest"));
         assert!(!selected.contains("uses: actions/checkout@v"));
         assert!(!selected.contains("|| true"));
@@ -252,6 +286,13 @@ mod tests {
         );
     }
 
+    fn assert_workflow_rejected(workflow: &str) {
+        assert!(
+            std::panic::catch_unwind(|| assert_workflow_contract(workflow)).is_err(),
+            "deceptive workflow unexpectedly satisfied the selected-artifact contract"
+        );
+    }
+
     #[test]
     fn workflow_requires_the_configured_single_case_discharger() {
         assert_workflow_contract(&read_workflow());
@@ -262,5 +303,53 @@ mod tests {
         let workflow = read_workflow().replace('\n', "\r\n");
 
         assert_workflow_contract(&workflow);
+    }
+
+    #[test]
+    fn workflow_rejects_protected_sha_only_in_checkout_comment() {
+        let workflow = read_workflow();
+        let deceptive = workflow.replacen(
+            "        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3",
+            "        uses: actions/checkout@main # uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f",
+            1,
+        );
+        assert_ne!(
+            deceptive, workflow,
+            "deceptive fixture did not mutate checkout"
+        );
+
+        assert_workflow_rejected(&deceptive);
+    }
+
+    #[test]
+    fn workflow_rejects_protected_sha_only_in_a_second_checkout_step() {
+        let workflow = read_workflow();
+        let deceptive = workflow.replacen(
+            "        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3",
+            "        uses: actions/checkout@main\n\n      - name: Decoy checkout\n        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f",
+            1,
+        );
+        assert_ne!(
+            deceptive, workflow,
+            "deceptive fixture did not mutate checkout"
+        );
+
+        assert_workflow_rejected(&deceptive);
+    }
+
+    #[test]
+    fn workflow_rejects_an_additional_checkout_revision_in_the_named_step() {
+        let workflow = read_workflow();
+        let deceptive = workflow.replacen(
+            "        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3",
+            "        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # actions/checkout@main",
+            1,
+        );
+        assert_ne!(
+            deceptive, workflow,
+            "deceptive fixture did not mutate checkout"
+        );
+
+        assert_workflow_rejected(&deceptive);
     }
 }

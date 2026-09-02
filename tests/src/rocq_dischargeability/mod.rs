@@ -265,7 +265,7 @@ impl ExportTransaction {
         hook(ExportEvent::RawDirectoryCreated(&self.raw_staging))?;
         self.ensure_raw_staging_identity()?;
 
-        self.exchange.require_exact_entries(&[&self.raw_staging])?;
+        self.validate_empty_raw_staging()?;
         let final_raw = self.exchange.path().join("raw");
         atomic_rename_noreplace(&self.raw_staging, &final_raw).with_context(|| {
             format!(
@@ -347,6 +347,16 @@ impl ExportTransaction {
         hook(ExportEvent::FinalLayoutValidated(self.exchange.path()))?;
         self.validate_committed()?;
         self.state = PublicationState::Committed;
+        Ok(())
+    }
+
+    fn validate_empty_raw_staging(&self) -> Result<()> {
+        self.exchange.require_exact_entries(&[&self.raw_staging])?;
+        self.ensure_raw_staging_identity()?;
+        let observed = directory_entry_names(&self.raw_staging)?;
+        if !observed.is_empty() {
+            bail!("raw staging directory must be empty before publication: observed {observed:?}");
+        }
         Ok(())
     }
 
@@ -800,6 +810,51 @@ mod tests {
             exchange_names(exchange.path()),
             BTreeSet::new(),
             "generation failed before staging but changed the exchange"
+        );
+    }
+
+    #[test]
+    fn contaminated_raw_staging_is_rejected_before_publication() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let mut contaminated_staging = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RawDirectoryCreated(path) = event {
+                    std::fs::write(path.join("foreign"), b"foreign contamination")
+                        .expect("contaminate raw staging before publication");
+                    contaminated_staging = Some(path.to_path_buf());
+                }
+                Ok(())
+            },
+        )
+        .expect_err("contaminated raw staging must fail export");
+
+        let contaminated_staging = contaminated_staging.expect("record contaminated staging");
+        assert_eq!(
+            exchange_names(exchange.path()),
+            BTreeSet::from([contaminated_staging
+                .file_name()
+                .expect("staging has basename")
+                .to_string_lossy()
+                .into_owned(),]),
+            "contaminated staging must remain hidden and be the only preserved exchange entry"
+        );
+        assert_eq!(
+            std::fs::read(contaminated_staging.join("foreign"))
+                .expect("read preserved foreign contamination"),
+            b"foreign contamination",
+            "failed publication deleted or changed foreign contamination"
+        );
+        assert!(
+            !exchange.path().join("raw").exists(),
+            "contaminated staging must never be published as raw"
+        );
+        assert!(
+            !exchange.path().join("request.json").exists(),
+            "contaminated staging must never publish the request commit marker"
         );
     }
 
