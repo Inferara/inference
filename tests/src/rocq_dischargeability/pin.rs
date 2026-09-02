@@ -152,6 +152,8 @@ mod tests {
     use std::path::Path;
 
     const VERIFIER_B: &str = "181cd676662453182b9753d1b19ca933c68770c3";
+    const PROTECTED_CHECKOUT_STEP: &str =
+        "uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
     const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=5 proved=11 refuted=1";
 
     #[test]
@@ -168,16 +170,18 @@ mod tests {
         assert_eq!(pin.assumption_allowlist_count(), 10);
     }
 
-    #[test]
-    fn workflow_requires_the_configured_single_case_discharger() {
-        let workflow = std::fs::read_to_string(
+    fn read_workflow() -> String {
+        std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .expect("tests crate has a repository parent")
                 .join(".github/workflows/rocq-real-library.yml"),
         )
-        .expect("read real-library workflow");
+        .expect("read real-library workflow")
+    }
 
+    fn assert_workflow_contract(workflow: &str) {
+        let workflow = workflow.replace("\r\n", "\n");
         let gate = workflow
             .split_once("  dischargeability-gate:")
             .expect("workflow has dischargeability capability job")
@@ -212,6 +216,7 @@ mod tests {
             "if: needs.dischargeability-gate.outputs.present == 'true'",
             "environment: real-rocq",
             "runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}",
+            PROTECTED_CHECKOUT_STEP,
             "INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}",
             "INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'",
             "test ! -e Cargo.lock",
@@ -234,6 +239,7 @@ mod tests {
             );
         }
         assert!(!selected.contains("ubuntu-latest"));
+        assert!(!selected.contains("uses: actions/checkout@v"));
         assert!(!selected.contains("|| true"));
         assert!(workflow.contains("permissions:\n  contents: read"));
         assert!(
@@ -244,5 +250,17 @@ mod tests {
             !workflow.contains("pull_request_target:"),
             "workflow must never execute this lane through pull_request_target"
         );
+    }
+
+    #[test]
+    fn workflow_requires_the_configured_single_case_discharger() {
+        assert_workflow_contract(&read_workflow());
+    }
+
+    #[test]
+    fn workflow_contract_is_independent_of_checkout_line_endings() {
+        let workflow = read_workflow().replace('\n', "\r\n");
+
+        assert_workflow_contract(&workflow);
     }
 }

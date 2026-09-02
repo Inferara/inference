@@ -265,8 +265,19 @@ impl ExportTransaction {
         hook(ExportEvent::RawDirectoryCreated(&self.raw_staging))?;
         self.ensure_raw_staging_identity()?;
 
+        self.exchange.require_exact_entries(&[&self.raw_staging])?;
+        let final_raw = self.exchange.path().join("raw");
+        atomic_rename_noreplace(&self.raw_staging, &final_raw).with_context(|| {
+            format!(
+                "atomically publish empty raw without clobbering {} as {}",
+                self.raw_staging.display(),
+                final_raw.display()
+            )
+        })?;
+        self.state = PublicationState::RawPublished;
+
         for raw in &self.prepared.raw {
-            let path = self.raw_staging.join(raw.case.raw_basename());
+            let path = final_raw.join(raw.case.raw_basename());
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -317,16 +328,7 @@ impl ExportTransaction {
         drop(request_file);
         hook(ExportEvent::RequestTemporaryWritten(&request_staging))?;
 
-        self.validate_staging()?;
-        let final_raw = self.exchange.path().join("raw");
-        atomic_rename_noreplace(&self.raw_staging, &final_raw).with_context(|| {
-            format!(
-                "atomically publish raw without clobbering {} as {}",
-                self.raw_staging.display(),
-                final_raw.display()
-            )
-        })?;
-        self.state = PublicationState::RawPublished;
+        self.validate_raw_published()?;
         hook(ExportEvent::PublishedRawDirectoryReady(&final_raw))?;
         self.validate_raw_published()?;
 
@@ -346,17 +348,6 @@ impl ExportTransaction {
         self.validate_committed()?;
         self.state = PublicationState::Committed;
         Ok(())
-    }
-
-    fn validate_staging(&self) -> Result<()> {
-        let request = self
-            .request_staging
-            .as_deref()
-            .context("request staging path was not recorded")?;
-        self.exchange
-            .require_exact_entries(&[&self.raw_staging, request])?;
-        self.validate_raw_directory(&self.raw_staging)?;
-        self.validate_request(request)
     }
 
     fn validate_raw_published(&self) -> Result<()> {
@@ -813,6 +804,57 @@ mod tests {
     }
 
     #[test]
+    fn failure_after_first_raw_write_preserves_partial_raw_without_a_request() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let canonical_exchange =
+            std::fs::canonicalize(exchange.path()).expect("canonicalize exchange");
+        let mut written_path = None;
+
+        let error = export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::RawArtifactWritten(path) = event
+                    && written_path.is_none()
+                {
+                    written_path = Some(path.to_path_buf());
+                    anyhow::bail!("injected failure after first raw write");
+                }
+                Ok(())
+            },
+        )
+        .expect_err("failure after the first raw write must abort export");
+
+        let raw = canonical_exchange.join("raw");
+        assert_eq!(
+            written_path
+                .as_deref()
+                .and_then(Path::parent)
+                .expect("record first written raw path"),
+            raw,
+            "raw files must be written inside the already-published directory"
+        );
+        assert_eq!(
+            exchange_names(exchange.path()),
+            BTreeSet::from(["raw".to_string()]),
+            "failed export must preserve only the partial raw publication"
+        );
+        assert_eq!(
+            exchange_names(&raw),
+            BTreeSet::from([CASES[0].raw_basename().to_string()]),
+            "failed export preserved an unexpected raw artifact set"
+        );
+        assert!(
+            !exchange.path().join("request.json").exists(),
+            "a partial raw publication must never expose the commit marker"
+        );
+        assert!(
+            format!("{error:#}").contains("injected failure after first raw write"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn failed_request_publication_preserves_staging_and_a_foreign_directory() {
         let exchange = tempfile::tempdir().expect("create exchange");
         let injected_request = exchange.path().join("request.json");
@@ -1168,7 +1210,7 @@ mod tests {
                     ExportEvent::FailurePreservationStarted(path)
                         if !traversal_race_injected
                             && path.file_name().is_some_and(|name| {
-                                name.to_string_lossy().starts_with(".rocq-")
+                                name == "raw" || name.to_string_lossy().starts_with(".rocq-")
                             }) =>
                     {
                         std::fs::rename(path, &moved_staging)
@@ -1278,6 +1320,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn race_published_raw_substitution_before_validation_is_rejected() {
         let exchange = tempfile::tempdir().expect("create exchange");
@@ -1303,6 +1346,46 @@ mod tests {
         assert!(
             foreign_raw.expect("record foreign raw path").is_dir(),
             "foreign published raw replacement was deleted"
+        );
+    }
+
+    #[test]
+    fn race_published_raw_artifact_substitution_before_validation_is_rejected() {
+        let exchange = tempfile::tempdir().expect("create exchange");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let outside_owned = outside.path().join(CASES[0].raw_basename());
+        let mut foreign_raw = None;
+
+        export_with_generator_and_hook(
+            exchange.path(),
+            |case| Ok(std::fs::read(repository_root().join(case.golden_path()))?),
+            |event| {
+                if let ExportEvent::PublishedRawDirectoryReady(path) = event {
+                    let artifact = path.join(CASES[0].raw_basename());
+                    std::fs::rename(&artifact, &outside_owned)
+                        .expect("move newly published raw artifact");
+                    std::fs::write(&artifact, b"foreign raw replacement")
+                        .expect("install foreign published raw artifact");
+                    foreign_raw = Some(artifact);
+                }
+                Ok(())
+            },
+        )
+        .expect_err("substituted published raw artifact must never complete export");
+
+        assert!(
+            outside_owned.is_file(),
+            "owned published raw artifact was deleted"
+        );
+        assert_eq!(
+            std::fs::read(foreign_raw.expect("record foreign raw artifact"))
+                .expect("read foreign raw artifact"),
+            b"foreign raw replacement",
+            "foreign published raw artifact was deleted or changed"
+        );
+        assert!(
+            !exchange.path().join("request.json").exists(),
+            "substituted raw artifact must never publish the request commit marker"
         );
     }
 
