@@ -367,22 +367,20 @@ Inference source. Only top-level `pub fn` declarations produce WASM exports.
 
 ### Recursion
 
-Direct or indirect recursion is explicitly forbidden in Inference (Power of 10, Rule 1).
-The analysis pass that detects recursive call graphs has not yet been implemented. At
-codegen time, a recursive call is not specially detected — it would generate a valid `call`
-instruction. The analysis pass must be added to reject recursive programs before they reach
-codegen.
+Direct or indirect recursion is forbidden in Inference (Power of 10, Rule 1), and the
+analysis pass rejects it: **A035** (`RecursionDetected`) walks the call graph and refuses a
+direct or mutual cycle before code generation runs. Codegen itself still does nothing
+special with a recursive call — it would emit an ordinary `call` — so A035 is what keeps
+one from reaching this lowering at all.
 
 ### Uzumaki Arguments
 
-Passing `@` (uzumaki) as a function argument (e.g., `foo(@)`) triggers a type-checker
-panic because the type-checker does not yet propagate the expected parameter type onto the
-`@` expression. This is a gap in the type-checker, not in codegen.
-
-### Multi-File Calls
-
-`build_func_name_to_idx` is invoked per source file. Cross-file function calls cannot be
-resolved until multi-file compilation is implemented (currently `todo!()` in `codegen()`).
+A **compound** `@` cannot be a call argument: an array uzumaki is rejected by **A014**
+(`ArrayUzumakiAsArgument`) and a struct uzumaki by **A039** (`StructUzumakiAsArgument`),
+both of which ask for an assignment to a named binding first. The reason is the lowering
+described above rather than a type-checker gap — a compound value reaches a callee as a
+pointer into linear memory, so it needs a named frame slot to point at, and an argument
+position supplies none.
 
 ## Coverage Marks
 

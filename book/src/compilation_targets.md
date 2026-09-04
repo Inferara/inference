@@ -8,16 +8,16 @@
 
 | Option | Mode | Profile | Has `non_det_operations` | Behavior |
 |--------|------|---------|--------------------------|----------|
-| 1 | `compile` | `debug`   | no  | Compile with the chosen `Target` skipping optimizations |
-| 2 | `compile` | `release` | no  | Compile with the chosen `Target` and its default optimization |
+| 1 | `compile` | `debug`   | no  | Compile with the chosen `Target`, recording `OptLevel::O0` |
+| 2 | `compile` | `release` | no  | Compile with the chosen `Target`, recording its default `OptLevel` |
 | 3 | `compile` | `debug`   | yes | Exclude `spec` nodes from codegen, then compile as `Option 1` |
 | 4 | `compile` | `release` | yes | Exclude `spec` nodes from codegen, then compile as `Option 2` |
 | 5 | `proof`   | *(fixed)* | no  | Identical to `Option 2` — no spec code to preserve, output matches compile mode release |
-| 6 | `proof`   | *(fixed)* | yes | Spec functions: `optnone`+`noinline` (`-O0`). Execution functions: target's default release optimization (same as `Option 2`). All code emitted. |
+| 6 | `proof`   | *(fixed)* | yes | Spec functions lowered 1:1 from source. Execution functions byte-identical to `Option 2`'s. All code emitted. |
 
-**`compile` mode**: Produces production binaries. Debug/release profiles control optimization. Non-det `spec` nodes are stripped from codegen since they have no runtime meaning. The output can be the verification target — the artifact whose behavior is proven correct by Rocq proofs.
+**`compile` mode**: Produces production binaries. Non-det `spec` nodes are stripped from codegen since they have no runtime meaning. The output can be the verification target — the artifact whose behavior is proven correct by Rocq proofs.
 
-**`proof` mode**: Emits all code (including spec functions with non-det intrinsics) into a single WASM module for `wasm_to_v` Rocq translation. Only spec functions (those containing `non_det_operations`) receive `optnone`+`noinline` barriers to preserve 1:1 structural correspondence with the source code — this ensures Rocq readability. Execution functions are compiled at the target's default release optimization, identical to compile mode release, so that Rocq proofs cover the actual deployed code. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32` (custom intrinsics require strict MVP). Build profiles (`debug`/`release`) do not apply to proof mode — execution always uses release optimization, spec always uses `O0` + barriers.
+**`proof` mode**: Emits all code (including spec functions with non-det intrinsics) into a single WASM module for `wasm_to_v` Rocq translation. Spec functions (those containing `non_det_operations`) are lowered structurally 1:1 from the source, which is what gives Rocq readability — the compiler applies no optimization pass to reshape them, so there is no barrier to preserve the correspondence against. Execution functions are byte-for-byte identical to what compile mode's release profile emits for the same source, so Rocq proofs cover the artifact that actually ships. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32` (custom intrinsics require strict MVP). Build profiles (`debug`/`release`) do not change proof mode's output — only the `OptLevel` value it records, which today changes no emitted byte either way (see Appendix A below).
 
 The contract between the generated `.wasm` binary, the per-spec function index map carried alongside (or embedded as the `inference.spec_funcs` custom section), and the Rocq predicates the generated `.v` file depends on is documented in [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../core/wasm-to-v/ROCQ_CONTRACT.md).
 
@@ -29,12 +29,12 @@ For project-aware builds — `Inference.toml`, project discovery, and the `infs 
 
 | Property | Value | Rationale |
 |----------|-------|-----------|
-| Spec function optimization | `-O0` + `optnone` + `noinline` | 1:1 structural correspondence for Rocq translation |
-| Execution function optimization | Target's default release (e.g., `-O3` for Wasm32) | Proofs must cover the actual deployed code, not a differently-compiled variant |
+| Spec function lowering | Structural 1:1 from source | Rocq readability — no optimizer runs to disturb it |
+| Execution function bytes | Byte-identical to compile mode release | Proofs must cover the actual deployed code, not a differently-compiled variant |
 | Target | Wasm32 only | Custom 0xfc intrinsics required |
 | Name section | Always emitted | Rocq identifiers require function/local names |
 | DWARF | Never | Not useful for formal verification |
-| wasm-opt | Never on spec functions | Would destroy structural correspondence of specs |
+| wasm-opt | Never applied to proof-mode output | `[build.wasm-opt]` (`infs`'s opt-in Binaryen post-build step) explicitly skips proof/`-v` builds — Binaryen has no lowering for the non-det opcode family a spec function may carry |
 | Code inclusion | All (spec + executable) | Spec code defines properties; execution code is the verification target |
 | No non_det output | Identical to compile mode release | Nothing to formalize structurally |
 | Determinism | Bitwise reproducible | Same source must produce same `.v` file |
@@ -53,7 +53,7 @@ In the linking scenario, a user:
 5. The unified module is translated to Rocq (`.v`) by `wasm_to_v`
 6. The user writes Rocq proofs establishing properties about the external function's behavior
 
-The external artifact remains as-is (potentially fully optimized). The `spec` code requires structural identity for Rocq readability. Execution code — whether from Inference source or external modules — is compiled at the target's default release optimization so that Rocq proofs cover the actual deployed artifact. Only spec functions receive `optnone`+`noinline` barriers; execution functions are optimized normally.
+The external artifact remains as-is (however it was built, and by whatever compiler produced it). The `spec` code requires structural identity for Rocq readability, which the compiler gives it by lowering it 1:1 from source rather than by withholding an optimizer that does not otherwise run. Execution code — whether from Inference source or external modules — is exactly the bytes that will run, so Rocq proofs cover the actual deployed artifact.
 
 The language-level constructs that import external functions (`external fn`, `use … from`) are documented in [External Functions and WASM Linking](external-functions-and-wasm-linking.md); the static merge that folds them into the verified artifact — feasibility tiers and the Tier-B provenance proof — in [The WASM Linker](the-wasm-linker.md).
 
@@ -70,9 +70,8 @@ Purpose: general WASM execution and verification of Inference code.
 |---------|-------|
 | Target | `wasm32-unknown-unknown` |
 | WASM features | MVP baseline (no post-MVP features) |
-| Optimization (compile) | `-O3` |
-| Optimization (proof, execution functions) | `-O3` (same as compile release) |
-| Optimization (proof, spec functions) | `-O0` (unoptimized) |
+| Recorded `OptLevel` (compile) | `O3` — no optimization pass currently acts on it |
+| Proof mode output | Byte-identical to compile mode's, plus structurally 1:1 spec functions |
 
 ### Stellar Soroban
 
@@ -113,14 +112,20 @@ Purpose: deploy to Stellar network as Soroban smart contracts.
 
 # Appendix A: Optimization Levels
 
-| Optimization Level | Description |
+`OptLevel` is a single per-build value recorded on the compiled output — not a
+per-function-kind setting, and not something the compiler itself currently
+acts on. No optimization pass runs during WASM emission in either mode: the
+descriptions below are the levels' *intended* meaning for a future consumer
+(a `wasm-opt` integration, say), not present-day behavior.
+
+| Optimization Level | Intended meaning |
 |--------------------|-------------|
-| `-O0` | No optimizations. Used for spec functions to preserve structural correspondence. |
+| `-O0` | No optimizations. Recorded by `BuildProfile::Debug` in compile mode. |
 | `-O1` | Some optimizations. Balanced compile time and code size. |
 | `-O2` | Aggressive optimizations. Standard release. |
-| `-O3` | Maximum optimizations. Default for Wasm32 target. |
+| `-O3` | Maximum optimizations. Default recorded level for the Wasm32 target. |
 | `-Os` | Optimize for size. Similar to `-O2` with additional size reductions. |
-| `-Oz` | Optimize for minimum size. Default for Soroban target. |
+| `-Oz` | Optimize for minimum size. Default recorded level for the Soroban target. |
 
 # Appendix B: WebAssembly Features
 

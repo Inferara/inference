@@ -20,8 +20,10 @@
 //!   stripped from codegen since they have no runtime meaning.
 //! - [`CompilationMode::Proof`] -- Produces WASM for formal verification. Spec functions
 //!   (containing non-deterministic operations) are compiled to preserve 1:1 structural
-//!   correspondence for Rocq formalization. Execution functions use the target's release
-//!   optimization.
+//!   correspondence for Rocq formalization. Execution functions are emitted exactly as
+//!   `compile` mode would emit them: codegen applies no optimization pass in either mode
+//!   (see [`OptLevel`]), so an execution function's bytes are identical across modes and
+//!   Rocq proofs cover the artifact that actually ships.
 //!
 //! # Optimization Level
 //!
@@ -106,20 +108,26 @@ pub enum Target {
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CompilationMode {
-    /// Produces optimized production binaries.
+    /// Produces production binaries.
     ///
     /// Non-deterministic `spec` nodes are stripped from codegen since they have no
-    /// runtime meaning. The target's default optimization level applies.
+    /// runtime meaning. Codegen applies no optimization pass; the target's default
+    /// [`OptLevel`] is recorded on the output for a downstream tool (e.g. a
+    /// `[build.wasm-opt]` post-build step) to act on, not applied here.
     #[default]
     Compile,
 
     /// Produces WASM for formal verification via Rocq translation.
     ///
     /// All code (including spec functions with non-deterministic instructions) is
-    /// emitted into the WASM module. Spec functions preserve 1:1 structural
-    /// correspondence with the source code for Rocq readability. Execution functions
-    /// are compiled at the target's default release optimization so that Rocq proofs
-    /// cover the actual deployed code (Decision #32).
+    /// emitted into the WASM module. Codegen applies no optimization pass in this
+    /// mode either, so an execution function's bytes are byte-for-byte identical to
+    /// what `Compile` mode would emit for the same source -- Rocq proofs therefore
+    /// cover the artifact that actually ships, with no separate "unoptimized proof
+    /// build" to fall out of sync with it. Spec functions carry no counterpart in
+    /// `Compile` mode at all: they are structurally lowered 1:1 from the source for
+    /// Rocq readability, which is a property of the lowering, not of an optimizer
+    /// being withheld.
     ///
     /// The target is always `Wasm32` -- custom non-deterministic instructions require
     /// the Wasm32 target.
