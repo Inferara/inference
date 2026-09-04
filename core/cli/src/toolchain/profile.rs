@@ -1,7 +1,10 @@
 //! Build profile configuration for the Inference compiler.
 //!
-//! The [`BuildProfile`] enum controls optimization behavior for compilation.
-//! It determines the optimization level used during code generation.
+//! The [`BuildProfile`] enum selects which [`OptLevel`] is recorded on the
+//! compiled output. Codegen applies no optimization pass over that value (see
+//! [`OptLevel`]'s own documentation), so today `Debug` and `Release` produce
+//! byte-identical WASM; the level exists to be meaningful once a downstream
+//! tool -- a `[build.wasm-opt]` post-build step, say -- consumes it.
 //!
 //! # Profile Matrix
 //!
@@ -11,42 +14,44 @@
 //! | Release | O3             | Oz              | O3 / Oz             |
 //!
 //! `Release` is the default, matching the current behavior where Wasm32 Compile
-//! uses O3. In Proof mode, build profiles are ignored -- the target's release
-//! optimization is always used.
+//! records O3. In Proof mode, build profiles are ignored -- the target's
+//! release-profile level is always recorded, regardless of `self`.
 
 use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
-/// Build profile controlling optimization level for compilation.
+/// Build profile selecting which [`OptLevel`] is recorded for compilation.
 ///
-/// `Release` is the default, matching the existing behavior. `Debug` disables
-/// optimization for faster builds and easier debugging.
+/// `Release` is the default, matching the existing behavior. Codegen applies
+/// no optimization pass over the recorded level, so `Debug` and `Release`
+/// currently produce byte-identical WASM; the distinction is preserved for
+/// a downstream tool that consumes the level.
 ///
-/// In Proof mode, the profile is ignored -- the target's release optimization
-/// is always used.
+/// In Proof mode, the profile is ignored -- the target's release-profile
+/// level is always recorded.
 ///
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BuildProfile {
-    /// No optimization (`-O0`). Faster builds, easier debugging.
-    ///
-    /// Not yet exposed via CLI flags — will be activated by `--debug` flag
-    /// in a future issue.
+    /// Records `-O0`. Not yet exposed via CLI flags — will be activated by
+    /// `--debug` flag in a future issue.
     #[allow(dead_code)]
     Debug,
-    /// Target-appropriate optimization. Wasm32 uses `-O3`, Soroban uses `-Oz`.
+    /// Records the target-appropriate level: Wasm32 gets `-O3`, Soroban gets
+    /// `-Oz`.
     #[default]
     Release,
 }
 
 impl BuildProfile {
-    /// Resolves the optimization level for the given target and mode.
+    /// Resolves the [`OptLevel`] to record for the given target and mode.
     ///
-    /// In Proof mode, returns the target's release optimization regardless of
-    /// profile. This ensures Rocq proofs cover the deployed code.
+    /// In Proof mode, returns the target's release-profile level regardless
+    /// of `self`, so the recorded level always matches what a deployed
+    /// artifact would carry rather than a debug one.
     ///
     #[must_use]
     pub fn resolve_opt_level(self, target: Target, mode: CompilationMode) -> OptLevel {
         match mode {
-            // Decision #32: Proof mode uses the target's release optimization.
+            // Proof mode always records the target's release-profile level.
             CompilationMode::Proof => target.default_opt_level(),
             CompilationMode::Compile => match self {
                 Self::Debug => OptLevel::O0,
@@ -88,7 +93,7 @@ mod tests {
 
     #[test]
     fn release_wasm32_proof_is_o3() {
-        // Decision #32: Proof mode uses target's release optimization.
+        // Proof mode always records the target's release-profile level.
         assert_eq!(
             BuildProfile::Release.resolve_opt_level(Target::Wasm32, CompilationMode::Proof),
             OptLevel::O3,
@@ -97,7 +102,7 @@ mod tests {
 
     #[test]
     fn release_soroban_proof_is_oz() {
-        // Decision #32: Proof mode uses target's release optimization.
+        // Proof mode always records the target's release-profile level.
         assert_eq!(
             BuildProfile::Release.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
             OptLevel::Oz,
@@ -124,7 +129,7 @@ mod tests {
 
     #[test]
     fn debug_wasm32_proof_is_o3() {
-        // Decision #32: Proof mode ignores profile, uses target's release optimization.
+        // Proof mode ignores profile, always records the target's release-profile level.
         assert_eq!(
             BuildProfile::Debug.resolve_opt_level(Target::Wasm32, CompilationMode::Proof),
             OptLevel::O3,
@@ -133,7 +138,7 @@ mod tests {
 
     #[test]
     fn debug_soroban_proof_is_oz() {
-        // Decision #32: Proof mode ignores profile, uses target's release optimization.
+        // Proof mode ignores profile, always records the target's release-profile level.
         assert_eq!(
             BuildProfile::Debug.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
             OptLevel::Oz,
