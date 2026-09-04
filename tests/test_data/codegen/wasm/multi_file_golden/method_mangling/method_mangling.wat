@@ -22,11 +22,11 @@
     i64.store offset=8
     local.get $__frame_ptr
     i32.const 8
-    call $Point.at
+    call $lib.geo.Point.at
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point.dist
+    call $lib.geo.Point.dist
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -34,13 +34,13 @@
     return
     unreachable
   )
-  (func $Point.dist (;1;) (type 1) (param $self i32) (result i32)
+  (func $lib.geo.Point.dist (;1;) (type 1) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Point.at (;2;) (type 2) (param $sret i32) (param $v i32)
+  (func $lib.geo.Point.at (;2;) (type 2) (param $sret i32) (param $v i32)
     local.get $sret
     local.get $v
     i32.store

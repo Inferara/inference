@@ -1,8 +1,9 @@
-// Specifications about a linked artifact no Inference compiler produced. Both
-// externals arrive from `tests/test_data/wasmlib/rustlib.wasm`, the committed
-// output of `cargo build --release --target wasm32-unknown-unknown`, and are
-// spliced in by the static-merge linker under the name section symbols
-// `rustlib.clamp_add` and `rustlib.sum_n`, which is what the obligations apply.
+// Specifications about a linked artifact no Inference compiler produced. All
+// three externals arrive from `tests/test_data/wasmlib/rustlib.wasm`, the
+// committed output of `cargo build --release --target wasm32-unknown-unknown`,
+// and are spliced in by the static-merge linker under the name section symbols
+// `rustlib::clamp_add`, `rustlib::mulhi` and `rustlib::sum_n`, which is what the
+// obligations apply.
 //
 // The sibling `spec_linked_extern.inf` already puts a merged body in front of
 // `coqc`, but its external came out of this compiler's own emitter, so every

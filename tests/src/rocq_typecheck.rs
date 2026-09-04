@@ -213,7 +213,7 @@ mod gate {
     /// emitter as everything else. What is new is that the module record `coqc`
     /// elaborates contains a body the linker produced, under a `Definition`
     /// name that came out of `sanitize_rocq_identifier` over a symbol
-    /// containing `.`, with an obligation applying it at that body's own index.
+    /// containing `::`, with an obligation applying it at that body's own index.
     ///
     /// `spec_linked_toolchain.inf` is the acceptance criterion the envelope was
     /// built for (#363): its external is a committed `wasm32-unknown-unknown`
@@ -1011,7 +1011,7 @@ mod gate {
             let v = generate_linked_v(source, module, externals);
             let defined = module_func_names(&v);
             for external in externals {
-                // The linker names a merged body `<logical module>.<field>`,
+                // The linker names a merged body `<logical module>::<field>`,
                 // which `wasm-to-v` sanitizes into the `Definition` name; every
                 // body spliced in from this external shares that prefix.
                 let prefix = format!("{}_", external.logical_module.replace(['.', ':'], "_"));

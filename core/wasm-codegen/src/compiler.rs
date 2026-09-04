@@ -427,15 +427,15 @@ pub(crate) struct Compiler {
     /// definitions.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
     /// Real shadow-stack frame size in bytes for each function, keyed by its
-    /// canonical [`FnKey`] display string. Recorded in
+    /// structured [`FnKey`] (not its lossy `Display` string). Recorded in
     /// [`Self::visit_function_definition`] right after the frame layout is
     /// computed; frameless functions record 0. Moved out by
     /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
     /// invariant (A036's estimate ≥ this) can be checked cross-crate.
     ///
-    /// Keyed by the structured [`FnKey`] (not its lossy `Display` string) so the
-    /// cross-crate parity test cannot collapse two distinct functions whose keys
-    /// render to the same string into one slot.
+    /// Keyed by the structured key so the cross-crate parity test cannot
+    /// collapse two distinct functions whose keys render to the same string
+    /// into one slot.
     frame_sizes: FxHashMap<FnKey, u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
     /// bounds-check guard (`index >= length → unreachable`). Default `false`;
@@ -1397,15 +1397,26 @@ impl Compiler {
             }
             (None, None) => FnKey::free_in(module_path.to_vec(), &raw_name),
         };
-        // For diagnostics and debug names we keep the mangled-string form
-        // (`Struct.method` / bare name); spec-inner-ness is implicit via
-        // `current_spec` for any consumer that needs it. The `.` here is the
-        // method-name separator, the same one `FnKey::Display` uses.
+        // The source-level name of this function: the mangled-string form
+        // (`Struct.method` / bare name), never file-qualified. It names the
+        // function the way the user wrote it, which is what the export section,
+        // the `main` entry check and the diagnostics below all need.
+        // Spec-inner-ness is implicit via `current_spec` for any consumer that
+        // needs it. The `.` here is the method-name separator, the same one
+        // `FnKey::Display` uses.
         let fn_name = if let Some(struct_name) = method_struct_name {
             format!("{struct_name}.{raw_name}")
         } else {
             raw_name
         };
+        // The debug name written into the WASM `name` section is a *different*
+        // rendering of the same function. That section is one namespace shared
+        // with the static-merge linker's spliced-in external bodies, and the
+        // proof translation resolves an obligation's function symbol against it
+        // by string equality — so what goes in answers to that namespace's
+        // rules, not to what reads best in a diagnostic. `FnKey` owns both
+        // renderings so the rules live in one place.
+        let name_section_symbol = current_fn_key.name_section_symbol();
         self.current_fn_key = Some(current_fn_key.clone());
 
         let is_array_return = self.func_array_returns.contains_key(&current_fn_key);
@@ -1894,7 +1905,7 @@ impl Compiler {
             );
         }
 
-        self.func_names.push((self.func_idx, fn_name.clone()));
+        self.func_names.push((self.func_idx, name_section_symbol));
         let mut local_name_entries: Vec<(u32, String)> = self
             .locals_map
             .iter()
@@ -3209,10 +3220,10 @@ impl Compiler {
     }
 
     /// Lowers the initializer of a `let`/`const` binding, dispatching among the
-    /// sret, array-copy, struct-copy, and scalar/literal paths. AD-1 / AD-5
-    /// commit to byte-identical WASM emission between function-scoped `const`
-    /// and the equivalent immutable `let`; this helper is the single dispatch
-    /// site that both arms route through.
+    /// sret, array-copy, struct-copy, and scalar/literal paths. Function-scoped
+    /// `const` and the equivalent immutable `let` commit to byte-identical WASM
+    /// emission; this helper is the single dispatch site that both arms route
+    /// through.
     fn lower_named_binding_init(
         &mut self,
         arena: &AstArena,

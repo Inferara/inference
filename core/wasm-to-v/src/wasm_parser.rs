@@ -480,9 +480,14 @@ fn parse(
                                     // string too: an `inference.hspecs`
                                     // obligation references a callee by exactly
                                     // this symbol (`is_prime`, `Point.new`, or
-                                    // a merged external's `mathlib.sum`), and
+                                    // a merged external's `mathlib::sum`), and
                                     // `T_app` resolution keys on it —
-                                    // sanitization would break the match.
+                                    // sanitization would break the match. It is
+                                    // also what keeps the two halves of the
+                                    // section apart: sanitizing folds `.` and
+                                    // `::` onto the same identifier, so only the
+                                    // raw string distinguishes a compiled
+                                    // function from a merged body.
                                     raw_func_names_map
                                         .insert(func_name.index, func_name.name.to_string());
                                 }

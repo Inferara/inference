@@ -72,28 +72,53 @@ named `Definition`s rather than opaque `func_<uuid>` placeholders:
 - Main module local functions keep their source debug names (re-indexed onto the
   import-free output space).
 - Every merged external function is named under its source's logical module,
-  using a `module.field` form:
-  - A merged closure **root** is named `<module>.<import field>` — a closure that
-    satisfies import `sum` bound under logical module `mathlib` becomes
-    `mathlib.sum`.
-  - A merged **inner callee** the source module named keeps that name, prefixed:
-    `mathlib.helper`.
+  joined with `::` (`inference_fn_key::merged_name`):
+  - A merged closure **root** is named `<module>::<import field>` — a closure
+    that satisfies import `sum` bound under logical module `mathlib` becomes
+    `mathlib::sum`.
+  - A merged **inner callee** the source module named keeps that name behind an
+    internal mark: `mathlib::#helper`.
   - A **nameless** inner callee (an external stripped of its name section) is
-    given a deterministic fallback derived from its output index, prefixed the
-    same way: `mathlib.func_<idx>`.
+    given a deterministic fallback derived from its output index, in the same
+    form: `mathlib::#func_<idx>`.
 - If no function carries a name, the name section is omitted entirely.
 
-The module prefix is collision-free by construction: two externals bound under
-different logical modules may export — and internally call — functions of the
-same field, and an unprefixed scheme would let those names collide in the name
-section, forcing the Rocq translator down its index-suffix disambiguation
-(`sum` vs `sum_2`), which is index-dependent and shifts across merges. The `.`
-separator matches Inference's `Type.method` naming convention. The Rocq
-translator (`core/wasm-to-v/src/rocq_names.rs`) sanitizes every non-alphanumeric
-to `_`, so `mathlib.sum` reads as `Definition mathlib_sum` in the `.v`. A residual
-name collision after sanitization (e.g. two distinct logical modules that
-sanitize to the same identifier) is still disambiguated by the translator's index
-suffix; the module prefix removes the common case rather than every possible one.
+Three separations keep that half of the section unambiguous:
+
+- `::` is the boundary against the **program** half. A compiled function's
+  name-section symbol is built from Inference identifiers joined by `.`, so it
+  can never contain a `:` — a source module named `mathlib` and a linked logical
+  module named `mathlib` therefore cannot collide, however deliberately the two
+  are made to match.
+- The **module prefix** separates externals from each other: two bound under
+  different logical modules may export — and internally call — functions of the
+  same field, and an unprefixed scheme would drive the Rocq translator down its
+  index-suffix disambiguation (`sum` vs `sum_2`), which is index-dependent and
+  shifts across merges.
+- The **internal mark** separates a module's roots from its own private callees.
+  A root is named after an import field, which is an Inference identifier; an
+  inner callee keeps the debug name its foreign module gave it, which is
+  unconstrained and may be exactly that field.
+
+A WASM name map holds one name per function index, so when one foreign body
+satisfies several imports — an export bound under two fields — only the least of
+its root names is recorded, and any obligation over the others is rewritten onto
+it before the section is emitted. Picking the least rather than the last keeps
+the output independent of the order the main module lists its imports in.
+
+The Rocq translator (`core/wasm-to-v/src/rocq_names.rs`) maps every byte outside
+`[A-Za-z0-9_]` to `_` and collapses the runs, so `mathlib::sum` reads as
+`Definition mathlib_sum` in the `.v`, exactly as it did before the separator
+changed. A residual name collision after sanitization (two distinct logical
+modules that sanitize to one identifier) is still disambiguated by the
+translator's index suffix; the scheme above removes the common cases rather than
+every possible one.
+
+Before it emits, the merge checks that every function symbol the main module's
+obligations apply is carried by exactly one function of the output — see
+`LinkError::UnresolvedObligationSymbol` and `LinkError::AmbiguousObligationSymbol`
+in the error reference. That check lives here rather than in the translator
+because this is the last phase that still knows which import supplied which body.
 
 ## Proof-Mode Custom Sections
 
@@ -532,6 +557,8 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
 | `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
+| `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
+| `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
 
 ## Supported Subset
 
@@ -661,6 +688,5 @@ corpus, so the seam is exercised under stable `cargo test` even without
 - `core/hassert` — the `HAssert`/`HTerm` IR and `inference.hspecs` codec shared by `wasm-codegen`, this crate, and `wasm-to-v`
 - `core/wasm-to-v/ROCQ_CONTRACT.md` — how the Rocq translator consumes both sections downstream of this crate
 - `core/inference/src/lib.rs` — driver entry points (`codegen`, `link`, `wasm_to_v`)
-- Master plan: `.claude/docs/issues/9/master_plan.md` — design decisions and phase scope
 - [WebAssembly binary format](https://webassembly.github.io/spec/core/binary/index.html) — section ordering, index spaces
 - [WASM name custom section](https://github.com/WebAssembly/extended-name-section/blob/main/proposals/extended-name-section/Overview.md) — function debug names

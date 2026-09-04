@@ -55,6 +55,26 @@ bytes come from through the [`FileLoader`] seam — a trait with two methods,
   is stripped identically everywhere.
 - **Project errors** — [`InferenceError`], the structured errors the fail-fast
   walk raises.
+- **The `use` path-segment grammar** — every segment of a *path-form* `use`
+  directive, the project-import form, is validated as an Inference identifier
+  (`[A-Za-z_][A-Za-z0-9_]*`) before it is turned into a module path, rejecting
+  anything else with `InferenceError::InvalidImportSegment`. The `from`-form
+  (`use { f } from lib;`) names an external module rather than a project one and
+  is skipped here, resolving through `inference::wasm_link` instead. This is the
+  one place a *project* module-path segment is minted, so it is the only gate on
+  the alphabet everything downstream derives from one: the filesystem path a
+  `use` resolves to, and the WASM `name`-section symbol code generation later
+  writes for a non-entry-file function (a `.`-join of the module path with the
+  item name; a spec-inner function is carved out of that qualification and keeps
+  a bare symbol).
+  A segment carrying a `:` would let a program function's own name-section
+  symbol collide with the `::`-joined naming the static-merge linker uses for
+  a merged external body — see
+  [`core/fn-key`](../fn-key/README.md#the-wasm-name-section-namespace). The
+  lexer already produces only identifiers, so no source a user can write
+  reaches this check and fails it; it exists to tie the invariant to where
+  segments are created rather than leave it implied by a grammar three crates
+  away.
 - **Manifest source-root discovery** — [`manifest_source_root`], which derives
   the `<manifest_dir>/src` root an opened file's imports resolve against so the
   IDE resolves exactly as `infs` would.

@@ -41,6 +41,44 @@ mod analysis_rules_tests {
         assert!(has_a024, "expected ExternFunctionCall, got: {errors:?}");
     }
 
+    /// The message states the real condition — no `use … from` directive binds
+    /// the declaration — and hands back the binding to write.
+    ///
+    /// The wording it replaced said external functions "cannot be compiled to
+    /// WebAssembly yet" and named codegen, both false since bound externals are
+    /// compiled to imports and merged, and a call inside a `spec` reaches this
+    /// rule without codegen being involved at all.
+    #[test]
+    fn a024_message_names_the_missing_binding_and_the_remedy() {
+        let source = r#"
+            external fn print(val: i32) -> ();
+            fn main() { print(42); }
+        "#;
+        let errors = expect_errors(source);
+        let rendered = errors
+            .iter()
+            .find(|e| matches!(e, AnalysisDiagnostic::ExternFunctionCall { .. }))
+            .expect("A024 must fire on a call to an unbound extern")
+            .to_string();
+        assert!(
+            rendered.contains("no `use ... from` directive binds"),
+            "the message must state the missing binding; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("use { print } from <module>;"),
+            "the message must show the binding to add, naming the function; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("declared inside a `spec` must be moved out"),
+            "the message must cover the spec-inner case, which no `use` can reach; \
+             got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("codegen") && !rendered.contains("WebAssembly"),
+            "the message must not blame code generation; got: {rendered}"
+        );
+    }
+
     #[test]
     fn a024_extern_function_declared_but_not_called_accepted() {
         let source = r#"

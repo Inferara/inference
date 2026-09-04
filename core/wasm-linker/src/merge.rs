@@ -29,6 +29,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use inf_wasmparser::ExternalKind;
+use inference_hassert::{HAssert, HFnRef, HSpecMap, HTerm};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection, GlobalSection,
     GlobalType as EncGlobalType, MemorySection, MemoryType as EncMemoryType, Module, NameMap,
@@ -98,6 +99,14 @@ pub(crate) fn link(
         .collect::<Result<Vec<_>, _>>()?;
 
     let plan = Plan::build(&main, &externals, contracts)?;
+
+    // The obligation symbols are cleared against the module the plan describes,
+    // before a byte of it exists. An obligation that names nothing, or names two
+    // things, is a defect in the deliverable this whole pass exists to produce,
+    // and the plan is the last place that still knows what each name was
+    // supposed to refer to.
+    plan.check_obligation_symbols(&main, &externals)?;
+
     let merged = plan.emit(&main, &externals)?;
 
     // Post-merge validation gate. The effect scanner is an allow-list and can
@@ -220,8 +229,13 @@ struct MergedFunc {
     out_type_idx: u32,
     /// The name to record for this function in the output `name` section, so
     /// the Rocq translator emits a `Definition <name>` rather than an opaque
-    /// `func_<uuid>`. A closure root takes the satisfied import field; an inner
-    /// callee keeps its own debug name when the source module carried one.
+    /// `func_<uuid>`. A closure root takes a satisfied import field; an inner
+    /// callee keeps its own debug name, marked, when the source module carried
+    /// one.
+    ///
+    /// One name, because a WASM name map holds one per function index — a body
+    /// satisfying several imports records the least of its root names, and
+    /// [`Plan::root_symbols`] is what keeps the rest resolvable.
     name: Option<String>,
 }
 
@@ -242,6 +256,26 @@ struct Plan {
     merged: Vec<MergedFunc>,
     /// `(external_idx, source_func_idx) -> output function index`.
     merged_index: BTreeMap<(usize, u32), u32>,
+    /// Every merged root name the satisfied imports asked for, against the
+    /// output function index of the body that answers it.
+    ///
+    /// This is the `(logical_module, export_field) -> merged function index`
+    /// table the name section cannot be: one foreign body may satisfy several
+    /// imports, and a WASM name map holds one name per index. It is what makes
+    /// an alias the section could not record still resolvable, and it is what
+    /// lets a failure to resolve an obligation symbol say which imports the
+    /// merge actually satisfied.
+    root_symbols: BTreeMap<String, u32>,
+    /// The main module's obligation payload as the output will carry it: every
+    /// applied symbol naming an unrecorded root alias rewritten onto the name
+    /// the output's name section records for that body.
+    ///
+    /// Held on the plan rather than re-derived in [`Self::emit`] so the symbols
+    /// the post-merge check clears are the symbols the emitted bytes carry.
+    hspecs: Option<inference_hassert::HSpecMap>,
+    /// The distinct function symbols [`Self::hspecs`] applies, after that
+    /// rewrite — the set [`Self::check_obligation_symbols`] must resolve.
+    obligation_symbols: BTreeSet<String>,
     /// Per external module: `source_type_idx -> output type idx` for the types
     /// its merged closure references.
     external_type_remap: Vec<BTreeMap<u32, u32>>,
@@ -364,6 +398,12 @@ impl Plan {
         //    logical modules are never conflated.
         let main_import_count = main.imported_funcs.len() as u32;
         let mut import_target = BTreeMap::new();
+        // Every merged root name the imports ask for, against the body that
+        // satisfies it. Keyed by the joined name rather than the pair it is
+        // built from because that is the form an obligation writes and the name
+        // section carries; the pair is recoverable from neither on its own, and
+        // nothing here needs it split.
+        let mut root_symbols: BTreeMap<String, u32> = BTreeMap::new();
         let mut merged: Vec<MergedFunc> = Vec::new();
         let mut merged_index: BTreeMap<(usize, u32), u32> = BTreeMap::new();
         let mut external_type_remap: Vec<BTreeMap<u32, u32>> =
@@ -523,20 +563,23 @@ impl Plan {
                 let out_func_idx = next_output_idx;
                 next_output_idx += 1;
                 merged_index.insert(key, out_func_idx);
-                // Prefix the merged inner callee's debug name with its logical
-                // module (`mathlib.helper`). Two externals bound under different
-                // logical modules may export — and internally call — functions of
-                // the same name; without the prefix those names would collide in
-                // the output name section and force wasm-to-v's index-suffix
-                // disambiguation (`helper` vs `helper_2`), which is index-
-                // dependent and shifts across merges. The prefix keeps each merged
-                // function traceable to its source module and makes the *wasm-level*
-                // names distinct. It is not a hard collision guarantee at the Rocq
-                // level: wasm-to-v sanitizes `.` (and other non-identifier bytes)
-                // to `_`, so two distinct sources can still sanitize to the same
-                // Rocq identifier (e.g. via `__` runs); wasm-to-v's index suffix
-                // remains the final disambiguator. The `.` separator matches
-                // Inference's `Type.method` convention.
+                // Name the merged inner callee under its logical module and
+                // the internal mark (`mathlib::#helper`). Two externals bound
+                // under different logical modules may export — and internally
+                // call — functions of the same name; without the prefix those
+                // names would collide in the output name section and force
+                // wasm-to-v's index-suffix disambiguation (`helper` vs
+                // `helper_2`), which is index-dependent and shifts across
+                // merges. The mark additionally holds a private callee apart
+                // from a root of its own module: an inner debug name comes from
+                // the foreign module and is unconstrained, so it may be exactly
+                // an export field one of that module's roots is named after.
+                //
+                // Both separations are *wasm-level*. Neither is a collision
+                // guarantee at the Rocq level: wasm-to-v maps every
+                // non-identifier byte to `_` and collapses the runs, so two
+                // distinct sources can still sanitize to one Rocq identifier,
+                // and its index suffix remains the final disambiguator there.
                 merged.push(MergedFunc {
                     external_idx: ext_idx,
                     source_func_idx: src_func,
@@ -549,51 +592,63 @@ impl Plan {
 
             let root_output = merged_index[&(ext_idx, root)];
             import_target.insert(import_idx as u32, root_output);
+            root_symbols.insert(
+                inference_fn_key::merged_name::root(&external.logical_module, field),
+                root_output,
+            );
+        }
 
-            // The closure root satisfies this import: name it after the import
-            // field, prefixed with the external's logical module
-            // (`mathlib.sum`), so the merged function reads as an ordinary, named
-            // definition that is traceable to its source module. The field alone
-            // is not unique: two externals bound under different logical modules
-            // may satisfy imports of the same field, and their roots would then
-            // collide in the output name section, forcing wasm-to-v's index-
-            // suffix disambiguation (`sum` vs `sum_2`), which is index-dependent
-            // across merges. The module prefix makes the wasm-level names distinct;
-            // it is not a hard Rocq-level collision guarantee, since wasm-to-v
-            // sanitizes `.` to `_` and two distinct sources can still sanitize to
-            // the same Rocq identifier (`__` runs), with wasm-to-v's index suffix
-            // as the final disambiguator. The `.` separator matches Inference's
-            // `Type.method` convention. An explicit debug name on the source module
-            // would otherwise win, but a codegen-produced external typically
-            // exports the field under that same name, so this is stable.
-            //
-            // A proof-mode obligation that applies this external writes the same
-            // string, so the name comes from the shared producer rather than a
-            // second `format!` that could drift from it.
-            if let Some(root_merged) = merged.iter_mut().find(|m| {
-                merged_index.get(&(m.external_idx, m.source_func_idx)) == Some(&root_output)
-            }) {
-                root_merged.name = Some(inference_fn_key::merged_name::root(
-                    &external.logical_module,
-                    field,
-                ));
+        // Name every closure root after an import field it satisfies, under its
+        // external's logical module (`mathlib::sum`), so the merged function
+        // reads as an ordinary named definition traceable to its source module.
+        // A proof-mode obligation applying that external writes the same string
+        // through the same producer, so the name comes from there rather than a
+        // second `format!` that could drift from it. An explicit debug name on
+        // the source module is overwritten, because the field the import names
+        // is what an obligation can refer to.
+        //
+        // One foreign body can satisfy several imports — an external exporting
+        // one function under two fields, bound by two `external fn`
+        // declarations, roots both at the same output index — and only one of
+        // those names can be recorded. A WASM name map is a map from a function
+        // index to *one* name, and the Rocq translator's own model of the
+        // section is likewise index-keyed, so a second entry for one index is
+        // dropped downstream even where the encoder accepts the bytes. What
+        // keeps the unrecorded alias usable is `root_symbols`, which holds every
+        // `(logical_module, export_field)` pair the merge was asked for against
+        // the body that satisfies it: the obligation payload is rewritten
+        // through it below, so an obligation over either alias applies the name
+        // the section does carry.
+        //
+        // The recorded name is the least of a body's aliases rather than the
+        // last one written, so the output depends on the set of imports and not
+        // on the order the main module happens to list them in — the rule the
+        // output global space already follows.
+        let mut canonical_root: BTreeMap<u32, &str> = BTreeMap::new();
+        for (root_name, out_idx) in &root_symbols {
+            canonical_root.entry(*out_idx).or_insert(root_name.as_str());
+        }
+        for m in &mut merged {
+            if let Some(out_idx) = merged_index.get(&(m.external_idx, m.source_func_idx))
+                && let Some(name) = canonical_root.get(out_idx)
+            {
+                m.name = Some((*name).to_string());
             }
         }
 
         // Give every still-nameless merged inner callee a name derived from its
-        // output function index, prefixed with its logical module
-        // (`lib.func_5`). An external stripped of its `name` section (third-party
-        // / `wasm-tools`-stripped) leaves inner callees with `name: None`;
-        // without a name `build_func_names` emits no name-section entry, and
-        // `wasm-to-v` then falls back to a per-process random UUID `Definition`
-        // name, making the `.v` non-reproducible for byte-identical input. Naming
-        // each from its deterministic output index keeps the name section
-        // complete and the proof artifact reproducible. The module prefix keeps
-        // the synthesized name in the same `module.field` namespace as the named
+        // output function index, under its logical module and the internal mark
+        // (`lib::#func_5`). An external stripped of its `name` section
+        // (third-party / `wasm-tools`-stripped) leaves inner callees with
+        // `name: None`; without a name `build_func_names` emits no name-section
+        // entry, and `wasm-to-v` then falls back to a per-process random UUID
+        // `Definition` name, making the `.v` non-reproducible for byte-identical
+        // input. Naming each from its deterministic output index keeps the name
+        // section complete and the proof artifact reproducible. The prefix and
+        // the mark keep the synthesized name in the same merged namespace as the
         // roots and callees above, so two stripped externals can never produce
-        // the same fallback name for distinct functions. The `.` separator
-        // matches Inference's `Type.method` convention and sanitizes to `_` in
-        // the Rocq name.
+        // the same fallback name for distinct functions and no root can be
+        // shadowed by one.
         let merged_base = main_local_base + main.local_funcs.len() as u32;
         for (i, m) in merged.iter_mut().enumerate() {
             if m.name.is_none() {
@@ -604,6 +659,50 @@ impl Plan {
                 ));
             }
         }
+
+        // Point every obligation that applies an unrecorded root alias at the
+        // name the section carries for that body, and collect the symbol set
+        // the merged module must answer for.
+        //
+        // The rewrite is a repair for a name the merge could not record, so an
+        // alias some function is already named is left out of it. Such a name is
+        // not dangling — it already resolves — and rewriting it would move a
+        // resolvable obligation onto a different body, silently, since the
+        // result then passes the check below with a single carrier. Dropping the
+        // alias instead leaves the symbol to resolve against the section like any
+        // other. `link` takes arbitrary main bytes, so this is reachable even
+        // though code generation cannot give one of the program's own functions
+        // a `::`-joined name.
+        //
+        // Re-validating is not ceremony: the payload arrived validated, but the
+        // rewrite is this crate's own edit of it, and `encode` *panics* on a map
+        // its decoder would reject. Checking the edited map turns a producer
+        // defect into a diagnosable link failure.
+        let carried: BTreeSet<&str> = name_section_entries(main, main_local_base, &merged)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        let mut hspecs = main.hspecs.clone();
+        let obligation_symbols = match &mut hspecs {
+            Some(map) => {
+                let aliases: BTreeMap<&str, &str> = root_symbols
+                    .iter()
+                    .filter_map(|(root_name, out_idx)| {
+                        let canonical = *canonical_root.get(out_idx)?;
+                        (canonical != root_name && !carried.contains(root_name.as_str()))
+                            .then_some((root_name.as_str(), canonical))
+                    })
+                    .collect();
+                let symbols = canonicalize_applied_symbols(map, &aliases);
+                inference_hassert::validate(map).map_err(|e| {
+                    LinkError::Parse(format!(
+                        "inference.hspecs section, after rewriting merged-body aliases: {e}"
+                    ))
+                })?;
+                symbols
+            }
+            None => BTreeSet::new(),
+        };
 
         // Build the output global space: main's globals keep indices `0..`, and
         // each contributing external's are appended after them.
@@ -646,6 +745,9 @@ impl Plan {
             main_local_base,
             merged,
             merged_index,
+            root_symbols,
+            hspecs,
+            obligation_symbols,
             external_type_remap,
             out_globals,
             external_global_remap,
@@ -841,13 +943,15 @@ impl Plan {
         }
 
         // `inference.hspecs` section: the obligation payload references functions
-        // by symbolic name, not index, so — unlike `spec_funcs` — the merge
-        // carries it through with no remap. The main module's function names
-        // survive the rebuilt name section verbatim (only merged external names
-        // are synthesized), so every symbol stays resolvable post-link. It was
-        // validated at parse time; re-encoding the decoded map reproduces the
-        // canonical bytes.
-        if let Some(hspecs) = &main.hspecs {
+        // by symbolic name, not index, so — unlike `spec_funcs` — no index remap
+        // applies. The main module's function names survive the rebuilt name
+        // section verbatim (only merged external names are synthesized), and the
+        // plan has already pointed any applied symbol naming an unrecorded root
+        // alias at the name this section does record, so every symbol resolves
+        // against the module emitted here. `Plan::build` re-validated the map
+        // after that rewrite, which is what keeps `encode` — it panics on a map
+        // its own decoder would reject — off a payload this crate edited.
+        if let Some(hspecs) = &self.hspecs {
             let payload = inference_hassert::encode(hspecs);
             module.section(&wasm_encoder::CustomSection {
                 name: inference_hassert::HSPECS_SECTION_NAME.into(),
@@ -910,35 +1014,166 @@ impl Plan {
         Some(indirect)
     }
 
-    /// Builds the output `name`-section function map: main locals keep their
-    /// source debug names (re-indexed onto the import-free output space), and
-    /// each merged function takes the name resolved at plan-build time. Returns
-    /// `None` when no function carries a name, leaving the section out entirely.
+    /// The output `name` section's function entries, ascending by output index:
+    /// main locals under their source debug names (re-indexed onto the
+    /// import-free output space), then each merged function under the name
+    /// resolved at plan-build time.
+    ///
+    /// The single source of what the emitted section says. The encoder,
+    /// [`Self::check_obligation_symbols`] and the alias rewrite in
+    /// [`Self::build`] all read it, so each clears the names the artifact
+    /// actually carries rather than a second reconstruction of them.
+    fn func_name_entries<'a>(&'a self, main: &'a ParsedModule) -> Vec<(u32, &'a str)> {
+        name_section_entries(main, self.main_local_base, &self.merged)
+    }
+
+    /// Output function index of the first merged external body.
+    fn merged_base(&self, main: &ParsedModule) -> u32 {
+        self.main_local_base + main.local_funcs.len() as u32
+    }
+
+    /// Builds the output `name`-section function map from
+    /// [`Self::func_name_entries`]. Returns `None` when no function carries a
+    /// name, leaving the section out entirely.
     fn build_func_names(&self, main: &ParsedModule) -> Option<NameMap> {
-        let import_count = main.imported_funcs.len() as u32;
-        let mut entries: Vec<(u32, &str)> = Vec::new();
-
-        for (local_idx, _) in main.local_funcs.iter().enumerate() {
-            let source_idx = import_count + local_idx as u32;
-            if let Some(name) = main.func_name(source_idx) {
-                entries.push((self.main_local_base + local_idx as u32, name));
-            }
-        }
-        for (i, m) in self.merged.iter().enumerate() {
-            if let Some(name) = &m.name {
-                entries.push((self.main_local_base + main.local_funcs.len() as u32 + i as u32, name));
-            }
-        }
-
+        let entries = self.func_name_entries(main);
         if entries.is_empty() {
             return None;
         }
-        entries.sort_unstable_by_key(|(idx, _)| *idx);
         let mut names = NameMap::new();
         for (idx, name) in entries {
             names.append(idx, name);
         }
         Some(names)
+    }
+
+    /// Main's specification functions, at their post-merge output indices.
+    ///
+    /// Reads the same `inference.spec_funcs` payload [`Self::remap_spec_funcs`]
+    /// re-encodes into the output, through the same index mapping, so the set
+    /// this returns is exactly the set the emitted section names. Empty when
+    /// main carries no such section, which is every compile-mode build.
+    fn merged_spec_func_indices(&self, main: &ParsedModule) -> Result<BTreeSet<u32>, LinkError> {
+        let Some(spec_funcs) = &main.spec_funcs else {
+            return Ok(BTreeSet::new());
+        };
+        let mut indices = BTreeSet::new();
+        for (_, listed) in spec_funcs {
+            for &idx in listed {
+                indices.insert(self.map_main_func(main, idx)?);
+            }
+        }
+        Ok(indices)
+    }
+
+    /// Rejects a merge whose obligation payload applies a function symbol the
+    /// merged module does not answer for with exactly one function.
+    ///
+    /// The proof translator resolves an obligation's `T_app` / `HA_app_ok`
+    /// symbol by looking it up in the emitted `name` section, so a symbol no
+    /// function carries has nothing to say and a symbol two functions share
+    /// silently picks one. Either way the obligation stops describing the
+    /// program it was written about — and a *true* obligation about the wrong
+    /// body is the worst outcome, because it discharges.
+    ///
+    /// The check belongs here rather than in the translator because this is the
+    /// last phase that knows what the symbol was supposed to name: which imports
+    /// were satisfied, from which logical module, under which export field, and
+    /// which external supplied each merged body. `emit` writes no import
+    /// section, so downstream all of that is gone and the only honest report
+    /// left is the symbol itself.
+    ///
+    /// Only *applied* symbols are checked. An obligation's own `fn_symbol`
+    /// names a specification function, which is resolved against the
+    /// `inference.spec_funcs` index list under a spec-name-stripping rule the
+    /// translator owns; re-deciding it here would be a second implementation of
+    /// that rule, free to disagree with the one that governs.
+    ///
+    /// A carrier the merged `inference.spec_funcs` lists is not a candidate, for
+    /// the same reason the translator does not count one: a specification
+    /// function's symbol is deliberately left unqualified by its defining file,
+    /// so a spec-inner `fn helper` and the program's own `fn helper` share one
+    /// string — and no obligation may apply a specification function anyway.
+    /// Counting them would make the link fail on a program the translator
+    /// resolves correctly.
+    ///
+    /// When *every* carrier is a specification function the full set stands, so
+    /// the count is over specification functions after all: two or more are
+    /// still ambiguous here, and exactly one is deliberately let through. That
+    /// one is not resolvable either, but the translator is the phase that can
+    /// say *why* — naming the target as an omitted or a retained specification
+    /// function — where a rejection here could report only the symbol.
+    fn check_obligation_symbols(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+    ) -> Result<(), LinkError> {
+        if self.obligation_symbols.is_empty() {
+            return Ok(());
+        }
+        let entries = self.func_name_entries(main);
+        let spec_funcs = self.merged_spec_func_indices(main)?;
+        for symbol in &self.obligation_symbols {
+            let all: Vec<u32> = entries
+                .iter()
+                .filter(|(_, name)| *name == symbol)
+                .map(|(idx, _)| *idx)
+                .collect();
+            let applicable: Vec<u32> = all
+                .iter()
+                .copied()
+                .filter(|idx| !spec_funcs.contains(idx))
+                .collect();
+            let carriers = if applicable.is_empty() { all } else { applicable };
+            match carriers[..] {
+                [_one] => {}
+                [] => {
+                    return Err(LinkError::UnresolvedObligationSymbol {
+                        symbol: symbol.clone(),
+                        merged_roots: self.root_symbols.keys().cloned().collect(),
+                    });
+                }
+                _ => {
+                    return Err(LinkError::AmbiguousObligationSymbol {
+                        symbol: symbol.clone(),
+                        carriers: carriers
+                            .iter()
+                            .map(|&idx| self.describe_function(main, externals, idx))
+                            .collect(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the output function at `idx` came from, in the terms the user
+    /// wrote: their own program, an import they declared, or a private function
+    /// of a module they linked against.
+    fn describe_function(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+        idx: u32,
+    ) -> String {
+        let merged_base = self.merged_base(main);
+        if idx < merged_base {
+            return format!("the program's own function at index {idx}");
+        }
+        if let Some((root, _)) = self.root_symbols.iter().find(|(_, out)| **out == idx) {
+            return format!("the body merged to satisfy `{root}`, at index {idx}");
+        }
+        let module = self
+            .merged
+            .get((idx - merged_base) as usize)
+            .and_then(|m| externals.get(m.external_idx))
+            .map(|external| external.logical_module.as_str());
+        match module {
+            Some(module) => {
+                format!("a private function of linked module `{module}`, at index {idx}")
+            }
+            None => format!("the function at index {idx}"),
+        }
     }
 
     fn reencode_main_body(
@@ -1182,6 +1417,131 @@ fn find_export(
         }
     }
     Ok(found)
+}
+
+/// Points every function symbol the obligations *apply* at its entry in
+/// `aliases`, and returns the distinct symbols left applied.
+///
+/// An applied symbol is a `T_app`'s or an `HA_app_ok`'s head — the two positions
+/// in which an obligation names a function whose body the module must contain,
+/// and so the two the merge has to answer for. An entry's own `fn_symbol` is
+/// deliberately left alone: it names a specification function of the main
+/// module, which is never a merged body, so no root alias can reach it.
+///
+/// The matches below are exhaustive on purpose. Both languages are a wire
+/// format shared with the proof translator, and a variant added without a case
+/// here would quietly stop being rewritten and stop being checked; a compile
+/// error is the only notice that carries.
+fn canonicalize_applied_symbols(
+    map: &mut HSpecMap,
+    aliases: &BTreeMap<&str, &str>,
+) -> BTreeSet<String> {
+    let mut applied = BTreeSet::new();
+    for entries in map.values_mut() {
+        for entry in entries {
+            canonicalize_in_assert(&mut entry.hassert, aliases, &mut applied);
+        }
+    }
+    applied
+}
+
+/// The assertion half of [`canonicalize_applied_symbols`]. Recursion is bounded
+/// by the decoder's tree-depth cap, which every payload reaching here has
+/// already passed.
+fn canonicalize_in_assert(
+    assert: &mut HAssert,
+    aliases: &BTreeMap<&str, &str>,
+    applied: &mut BTreeSet<String>,
+) {
+    match assert {
+        HAssert::True | HAssert::False => {}
+        HAssert::Not(inner) | HAssert::Ex(inner) | HAssert::All(inner) => {
+            canonicalize_in_assert(inner, aliases, applied);
+        }
+        HAssert::And(left, right) | HAssert::Imp(left, right) | HAssert::Or(left, right) => {
+            canonicalize_in_assert(left, aliases, applied);
+            canonicalize_in_assert(right, aliases, applied);
+        }
+        HAssert::TermEq(left, right) => {
+            canonicalize_in_term(left, aliases, applied);
+            canonicalize_in_term(right, aliases, applied);
+        }
+        HAssert::HasType(term, _) | HAssert::Defined(term) => {
+            canonicalize_in_term(term, aliases, applied);
+        }
+        HAssert::AppOk(symbol, args) => {
+            canonicalize_symbol(symbol, aliases, applied);
+            for arg in args {
+                canonicalize_in_term(arg, aliases, applied);
+            }
+        }
+    }
+}
+
+/// The term half of [`canonicalize_applied_symbols`].
+fn canonicalize_in_term(
+    term: &mut HTerm,
+    aliases: &BTreeMap<&str, &str>,
+    applied: &mut BTreeSet<String>,
+) {
+    match term {
+        HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => {}
+        HTerm::App(symbol, args) => {
+            canonicalize_symbol(symbol, aliases, applied);
+            for arg in args {
+                canonicalize_in_term(arg, aliases, applied);
+            }
+        }
+        HTerm::Binop(_, _, left, right) | HTerm::Relop(_, _, left, right) => {
+            canonicalize_in_term(left, aliases, applied);
+            canonicalize_in_term(right, aliases, applied);
+        }
+    }
+}
+
+/// The output `name` section's function entries, ascending by output index:
+/// main locals under their source debug names (re-indexed onto the import-free
+/// output space), then each merged function under the name resolved at
+/// plan-build time.
+///
+/// Taken as loose parts rather than a `&Plan` so the alias rewrite, which runs
+/// while the plan is still being assembled, reads the same listing the encoder
+/// will emit instead of rebuilding it.
+fn name_section_entries<'a>(
+    main: &'a ParsedModule,
+    main_local_base: u32,
+    merged: &'a [MergedFunc],
+) -> Vec<(u32, &'a str)> {
+    let import_count = main.imported_funcs.len() as u32;
+    let mut entries: Vec<(u32, &str)> = Vec::new();
+
+    for (local_idx, _) in main.local_funcs.iter().enumerate() {
+        let source_idx = import_count + local_idx as u32;
+        if let Some(name) = main.func_name(source_idx) {
+            entries.push((main_local_base + local_idx as u32, name));
+        }
+    }
+    let merged_base = main_local_base + main.local_funcs.len() as u32;
+    for (i, m) in merged.iter().enumerate() {
+        if let Some(name) = &m.name {
+            entries.push((merged_base + i as u32, name));
+        }
+    }
+
+    entries.sort_unstable_by_key(|(idx, _)| *idx);
+    entries
+}
+
+/// Rewrites one applied symbol through `aliases` and records the result.
+fn canonicalize_symbol(
+    symbol: &mut HFnRef,
+    aliases: &BTreeMap<&str, &str>,
+    applied: &mut BTreeSet<String>,
+) {
+    if let Some(canonical) = aliases.get(symbol.0.as_str()) {
+        symbol.0 = (*canonical).to_string();
+    }
+    applied.insert(symbol.0.clone());
 }
 
 /// Collects the type indices a body references through function-typed

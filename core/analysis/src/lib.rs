@@ -38,7 +38,7 @@
 //!
 //! - A025: Variable declarations must have an initializer
 //!
-//! ### Codegen Restrictions (A012–A019, A022–A031, A038–A040)
+//! ### Codegen Restrictions (A012–A019, A022–A023, A026–A032, A038–A040)
 //!
 //! These rules describe constructs that are valid in the type system but cannot
 //! be lowered by the current code generator.
@@ -52,7 +52,6 @@
 //! - A019: 64-bit integer used as an array index
 //! - A022: Numeric literal out of range for its declared type
 //! - A023: Uzumaki used in a variable reassignment (only `let` initializers allowed)
-//! - A024: Call to an external (`extern`) function
 //! - A026: Nested compound type depth exceeds one level
 //! - A027: Uzumaki on struct with compound fields (nested struct)
 //! - A028: Uzumaki on array of structs
@@ -81,8 +80,11 @@
 //!
 //! ### External Function Contracts (A024, A047)
 //!
-//! - A024: Call to an *unbound* external function (listed above with the codegen
-//!   restrictions, since an unbound extern has no body to merge)
+//! - A024: A call to an `external fn` that no `use … from` directive binds. A
+//!   bound external lowers to a WASM import the static-merge linker satisfies, so
+//!   calling one is supported everywhere — including from inside a `spec`. An
+//!   unbound declaration names no module, so nothing supplies a body for the call
+//!   to reach, in any mode. See [`rules::extern_function_call`].
 //! - A047: A compound argument at a `mut` `external fn` parameter must be rooted
 //!   at a `mut` binding. A linked external shares the caller's linear memory, so
 //!   a struct or array argument reaches it as a raw pointer with no copy in

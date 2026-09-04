@@ -321,11 +321,11 @@ fn merged_functions_are_named_after_satisfied_import_fields() {
     // Output indices: compute=0, merged sum=1, merged sub=2.
     let names = function_names(&linked);
     assert!(
-        names.contains(&(1, "mathlib.sum".to_string())),
+        names.contains(&(1, "mathlib::sum".to_string())),
         "merged sum must be named after its module-prefixed import field, got {names:?}"
     );
     assert!(
-        names.contains(&(2, "mathlib.sub".to_string())),
+        names.contains(&(2, "mathlib::sub".to_string())),
         "merged sub must be named after its module-prefixed import field, got {names:?}"
     );
 }
@@ -356,7 +356,7 @@ fn main_function_names_survive_the_merge() {
         "main `compute` name must survive at output index 0, got {names:?}"
     );
     assert!(
-        names.contains(&(1, "mathlib.sum".to_string())),
+        names.contains(&(1, "mathlib::sum".to_string())),
         "merged `sum` must be named with its module prefix, got {names:?}"
     );
 }
@@ -3433,8 +3433,8 @@ fn same_field_two_modules_binds_the_named_module_not_the_first() {
 
 /// Two externals bound under *different* logical modules both export `sum`, and
 /// the main module imports `sum` from each. The module-prefixed naming makes the
-/// two merged roots' name-section entries distinct by construction (`alib.sum`,
-/// `blib.sum`), so neither collides nor forces wasm-to-v's index-suffix
+/// two merged roots' name-section entries distinct by construction (`alib::sum`,
+/// `blib::sum`), so neither collides nor forces wasm-to-v's index-suffix
 /// disambiguation — even though their import field is identical.
 #[test]
 fn same_field_two_modules_get_distinct_prefixed_names() {
@@ -3493,12 +3493,12 @@ fn same_field_two_modules_get_distinct_prefixed_names() {
         .map(|(_, n)| n.as_str())
         .collect();
     assert!(
-        merged.contains("alib.sum"),
-        "the alib-bound root must be named `alib.sum`, got {names:?}"
+        merged.contains("alib::sum"),
+        "the alib-bound root must be named `alib::sum`, got {names:?}"
     );
     assert!(
-        merged.contains("blib.sum"),
-        "the blib-bound root must be named `blib.sum`, got {names:?}"
+        merged.contains("blib::sum"),
+        "the blib-bound root must be named `blib::sum`, got {names:?}"
     );
     assert_eq!(
         merged.len(),
@@ -3507,12 +3507,15 @@ fn same_field_two_modules_get_distinct_prefixed_names() {
     );
 }
 
-/// A logical module name carrying Inference's `::` path separator
-/// (`crypto::sha256`) must flow through the prefix unchanged and deterministically
-/// (`crypto::sha256.hash`), with no panic. The downstream Rocq translator
-/// sanitizes every non-alphanumeric to `_`, so the residual `::` is the
-/// translator's concern, not the linker's — the linker keeps the logical name
-/// verbatim so the prefix stays traceable to its source module.
+/// A logical module name is itself a `::`-joined path (`crypto::sha256`, from
+/// `use { hash } from crypto::sha256;`), and it must flow into the merged name
+/// verbatim and deterministically (`crypto::sha256::hash`), with no panic. The
+/// prefix boundary is not found by looking for the first `::`, and does not need
+/// to be: an export field is an Inference identifier, so the name decomposes
+/// only one way. The downstream Rocq translator maps every non-identifier byte
+/// to `_`, so the separators are its concern, not the linker's — the linker
+/// keeps the logical name verbatim so the prefix stays traceable to its source
+/// module.
 #[test]
 fn a_path_separated_logical_module_name_prefixes_deterministically() {
     let main = wasm(
@@ -3545,7 +3548,7 @@ fn a_path_separated_logical_module_name_prefixes_deterministically() {
 
     let names = function_names(&linked);
     assert!(
-        names.contains(&(1, "crypto::sha256.hash".to_string())),
+        names.contains(&(1, "crypto::sha256::hash".to_string())),
         "the merged root must keep its logical module verbatim in the prefix, got {names:?}"
     );
 }
@@ -3933,6 +3936,550 @@ fn malformed_main_with_out_of_range_type_index_is_a_clean_error_not_a_panic() {
     assert!(
         matches!(&err, LinkError::Parse(_)),
         "expected a clean Parse rejection, got {err:?}"
+    );
+}
+
+// -- Obligation symbols in the merged name section ---------------------------
+
+/// A one-entry obligation map under spec `S` whose assertion applies `symbol`.
+///
+/// `HA_app_ok` is the smallest position in which an obligation names a function
+/// whose body the module must contain, which is exactly what the merge has to
+/// answer for.
+fn applying(symbol: &str) -> inference_hassert::HSpecMap {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
+    let mut map = HSpecMap::default();
+    map.insert(
+        "S".to_string(),
+        vec![HSpecEntry::new(
+            HFnRef("S.claim".to_string()),
+            HAssert::AppOk(HFnRef(symbol.to_string()), vec![HTerm::Local(0)]),
+            SpecKind::Forall,
+        )],
+    );
+    map
+}
+
+/// `bytes` with an `inference.hspecs` section carrying `map` appended.
+fn with_hspecs(bytes: &[u8], map: &inference_hassert::HSpecMap) -> Vec<u8> {
+    use wasm_encoder::Section as _;
+    let mut out = bytes.to_vec();
+    wasm_encoder::CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: (&inference_hassert::encode(map)[..]).into(),
+    }
+    .append_to(&mut out);
+    out
+}
+
+/// The function symbol the sole obligation of `bytes` applies.
+fn sole_applied_symbol(bytes: &[u8]) -> String {
+    let data = custom_section_data(bytes, inference_hassert::HSPECS_SECTION_NAME)
+        .expect("the module must carry an inference.hspecs section");
+    let map = inference_hassert::decode(&data).expect("carried hspecs must decode");
+    let entries = map.get("S").expect("spec `S`");
+    match &entries[..] {
+        [entry] => match &entry.hassert {
+            inference_hassert::HAssert::AppOk(symbol, _) => symbol.0.clone(),
+            other => panic!("unexpected obligation shape: {other:?}"),
+        },
+        other => panic!("expected exactly one obligation, got {}", other.len()),
+    }
+}
+
+/// A main module importing the named `mathlib` fields and defining one local
+/// function per entry of `local_names`, each recorded in the `name` section
+/// under the name given.
+///
+/// Built through `wasm_encoder` rather than WAT so a test can put an arbitrary
+/// string at a chosen index — a merged body's `::`-joined name against one of
+/// the program's own functions, which is the collision the two name spaces exist
+/// to prevent. Every function shares `mathlib`'s `(i32, i32) -> i32` shape, so
+/// the imports are satisfiable by [`mathlib_pure`].
+fn main_with_names(imports: &[&str], local_names: &[&str]) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, EntityType, Function, FunctionSection, ImportSection, Instruction, Module,
+        NameMap, NameSection, TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    module.section(&types);
+
+    if !imports.is_empty() {
+        let mut section = ImportSection::new();
+        for field in imports {
+            section.import("mathlib", field, EntityType::Function(0));
+        }
+        module.section(&section);
+    }
+
+    let mut funcs = FunctionSection::new();
+    let mut code = CodeSection::new();
+    for _ in local_names {
+        funcs.function(0);
+        let mut body = Function::new([]);
+        body.instruction(&Instruction::LocalGet(0));
+        body.instruction(&Instruction::End);
+        code.function(&body);
+    }
+    module.section(&funcs);
+    module.section(&code);
+
+    let mut names = NameSection::new();
+    let mut func_names = NameMap::new();
+    for (i, name) in local_names.iter().enumerate() {
+        func_names.append(imports.len() as u32 + i as u32, name);
+    }
+    names.functions(&func_names);
+    module.section(&names);
+
+    module.finish()
+}
+
+/// An external exporting one body under two fields — the shape two `external fn`
+/// declarations of different names, bound from the same module, resolve onto.
+fn aliased_export_lib() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            local.get 0
+            local.get 0
+            i32.add)
+          (export "double" (func 0))
+          (export "twice" (func 0)))
+        "#,
+    )
+}
+
+/// A main module importing `mathlib`'s two aliases of one body, in the order
+/// given, and calling each once.
+fn main_importing_aliases(first: &str, second: &str) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (import "mathlib" "{first}" (func (;0;) (type 0)))
+          (import "mathlib" "{second}" (func (;1;) (type 0)))
+          (func $compute (;2;) (type 0) (param i32) (result i32)
+            local.get 0
+            call 0
+            call 1)
+          (export "compute" (func 2)))
+        "#
+    ))
+}
+
+/// One foreign body satisfying two imports must be reached by both of them, and
+/// must be named the same way whichever order the main module lists them in.
+///
+/// The name section holds one name per function index, so only one of the two
+/// root names can be recorded. Recording the *last* one written would make the
+/// output depend on import order, and would leave the earlier alias naming
+/// nothing at all.
+#[test]
+fn one_body_bound_under_two_fields_is_reached_by_both_and_named_stably() {
+    let lib = aliased_export_lib();
+
+    for (first, second) in [("double", "twice"), ("twice", "double")] {
+        let main = main_importing_aliases(first, second);
+        let linked = raw_link(&main, &[("mathlib", &lib)], None)
+            .expect("one export bound under two fields must link");
+        assert_valid(&linked);
+        assert!(function_imports(&linked).is_empty());
+
+        // The closure is deduped on the source function, so there is one merged
+        // body and both calls redirect onto it.
+        assert_eq!(
+            code_body_count(&linked),
+            2,
+            "main `compute` plus the single merged body"
+        );
+        assert_eq!(
+            body_call_targets(&linked, 0),
+            vec![1, 1],
+            "both imports must retarget onto the one merged body"
+        );
+
+        let merged: Vec<String> = function_names(&linked)
+            .into_iter()
+            .filter(|(idx, _)| *idx == 1)
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(
+            merged,
+            vec!["mathlib::double".to_string()],
+            "the merged body must carry exactly one root name, the same one in either \
+             import order, got {merged:?} for ({first}, {second})"
+        );
+    }
+}
+
+/// An obligation over the alias the name section could not record still applies
+/// the body it was always about.
+///
+/// This is what keeps the one-name-per-index limit from silently costing an
+/// obligation: the merge knows both root names denote one body, so it points the
+/// obligation at the name the artifact carries rather than leaving it to resolve
+/// against nothing.
+#[test]
+fn an_obligation_over_an_unrecorded_alias_is_pointed_at_the_recorded_name() {
+    let main = with_hspecs(
+        &main_importing_aliases("double", "twice"),
+        &applying("mathlib::twice"),
+    );
+    let linked = raw_link(&main, &[("mathlib", &aliased_export_lib())], None)
+        .expect("an obligation over an aliased root must link");
+    assert_valid(&linked);
+
+    assert_eq!(
+        sole_applied_symbol(&linked),
+        "mathlib::double",
+        "the obligation must apply the name the merged body actually carries"
+    );
+    assert!(
+        function_names(&linked).contains(&(1, "mathlib::double".to_string())),
+        "and that name must be the merged body's, got {:?}",
+        function_names(&linked)
+    );
+}
+
+/// A merged root and a private callee of the same module whose debug name equals
+/// the export field are two functions, and must stay two names.
+///
+/// The root's name comes from the import field, which is an Inference
+/// identifier; the callee keeps the name its own module gave it, which is
+/// unconstrained and may be exactly that field. The internal mark is what holds
+/// them apart — without it both render `mathlib::double` and an obligation over
+/// the root resolves ambiguously.
+#[test]
+fn a_private_callee_named_like_the_export_field_stays_distinct_from_the_root() {
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func $entry (;0;) (type 0) (param i32) (result i32)
+            local.get 0
+            call 1)
+          (func $double (;1;) (type 0) (param i32) (result i32)
+            local.get 0
+            local.get 0
+            i32.add)
+          (export "double" (func 0)))
+        "#,
+    );
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (import "mathlib" "double" (func (;0;) (type 0)))
+          (func $compute (;1;) (type 0) (param i32) (result i32)
+            local.get 0
+            call 0)
+          (export "compute" (func 1)))
+        "#,
+    );
+
+    let linked = raw_link(&main, &[("mathlib", &lib)], None)
+        .expect("a module whose private callee shares the export field must link");
+    assert_valid(&linked);
+
+    let names = function_names(&linked);
+    assert!(
+        names.contains(&(1, "mathlib::double".to_string())),
+        "the root takes the import field, got {names:?}"
+    );
+    assert!(
+        names.contains(&(2, "mathlib::#double".to_string())),
+        "the private callee keeps its own name behind the internal mark, got {names:?}"
+    );
+}
+
+/// An obligation naming a merged body the merge did not produce is rejected
+/// here, where the imports it was meant to name are still known.
+#[test]
+fn an_obligation_naming_no_merged_body_is_rejected_naming_what_was_satisfied() {
+    let main = with_hspecs(
+        &main_with_names(&["sum"], &["compute"]),
+        &applying("mathlib::product"),
+    );
+    let err = raw_link(&main, &[("mathlib", &mathlib_pure())], None)
+        .expect_err("an obligation over an unsatisfied field must not link silently");
+
+    assert!(
+        matches!(
+            &err,
+            LinkError::UnresolvedObligationSymbol { symbol, merged_roots }
+                if symbol == "mathlib::product" && merged_roots == &["mathlib::sum".to_string()]
+        ),
+        "expected the unresolved-symbol rejection, got {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("`mathlib::product`") && rendered.contains("`mathlib::sum`"),
+        "the message must name both the symbol and what the merge did satisfy; got: {rendered}"
+    );
+}
+
+/// The same rejection for a symbol in the *program* half of the name section
+/// says something else, because the repair is not the same one: no import is
+/// involved, so pointing at the satisfied import list would send the author
+/// looking in the wrong place.
+#[test]
+fn an_obligation_naming_no_program_function_is_rejected_as_a_program_symbol() {
+    let main = with_hspecs(
+        &main_with_names(&["sum"], &["compute"]),
+        &applying("helper"),
+    );
+    let err = raw_link(&main, &[("mathlib", &mathlib_pure())], None)
+        .expect_err("an obligation over a function the program does not define must be rejected");
+
+    assert!(
+        matches!(&err, LinkError::UnresolvedObligationSymbol { symbol, .. } if symbol == "helper"),
+        "expected the unresolved-symbol rejection, got {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("the program's own functions"),
+        "the message must place the symbol in the program half; got: {rendered}"
+    );
+}
+
+/// A program function and a merged body sharing one name is rejected, not
+/// resolved.
+///
+/// Inference codegen cannot produce this — a compiled function's symbol is built
+/// from identifiers joined by dots and can carry no `:` — but the linker is a
+/// public API that accepts arbitrary main bytes, so the argument for the two
+/// halves being disjoint is enforced here rather than assumed.
+#[test]
+fn a_program_function_sharing_a_merged_body_name_is_rejected_as_ambiguous() {
+    let main = with_hspecs(
+        &main_with_names(&["sum"], &["mathlib::sum"]),
+        &applying("mathlib::sum"),
+    );
+    let err = raw_link(&main, &[("mathlib", &mathlib_pure())], None)
+        .expect_err("two functions of one name must not resolve an obligation");
+
+    assert!(
+        matches!(
+            &err,
+            LinkError::AmbiguousObligationSymbol { symbol, carriers }
+                if symbol == "mathlib::sum" && carriers.len() == 2
+        ),
+        "expected the ambiguous-symbol rejection, got {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("the program's own function at index 0")
+            && rendered.contains("the body merged to satisfy `mathlib::sum`"),
+        "the message must say where each carrier came from; got: {rendered}"
+    );
+}
+
+/// Two of the program's own functions sharing one name is rejected too, on a
+/// module that links no external at all.
+///
+/// The program half of the name section is not injective on its own: a method
+/// key and a free-function key of a longer module path render alike, which is a
+/// pre-existing property of the rendering rather than anything the merge does.
+/// It stays fail-closed, and it fails here rather than in the translator, which
+/// would have only the symbol to report.
+#[test]
+fn two_program_functions_sharing_one_name_are_rejected_as_ambiguous() {
+    let main = with_hspecs(
+        &main_with_names(&[], &["lib.geo.make", "lib.geo.make"]),
+        &applying("lib.geo.make"),
+    );
+    let err = raw_link(&main, &[], None)
+        .expect_err("two program functions of one name must not resolve an obligation");
+
+    assert!(
+        matches!(
+            &err,
+            LinkError::AmbiguousObligationSymbol { symbol, carriers }
+                if symbol == "lib.geo.make" && carriers.len() == 2
+        ),
+        "expected the ambiguous-symbol rejection, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("the program's own function at index 1"),
+        "the message must name both carriers; got: {err}"
+    );
+}
+
+/// `bytes` with an `inference.spec_funcs` section recording each spec's function
+/// indices, in the pre-link index space.
+fn with_spec_funcs(bytes: &[u8], specs: &[(&str, &[u32])]) -> Vec<u8> {
+    use wasm_encoder::Section as _;
+    let mut payload = vec![1u8, u8::try_from(specs.len()).expect("fixture is small")];
+    for (name, indices) in specs {
+        payload.push(u8::try_from(name.len()).expect("fixture names are short"));
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(u8::try_from(indices.len()).expect("fixture is small"));
+        for &idx in *indices {
+            payload.push(u8::try_from(idx).expect("fixture indices are small"));
+        }
+    }
+    let mut out = bytes.to_vec();
+    wasm_encoder::CustomSection {
+        name: "inference.spec_funcs".into(),
+        data: (&payload[..]).into(),
+    }
+    .append_to(&mut out);
+    out
+}
+
+/// A specification function carrying an applied symbol's name does not make it
+/// ambiguous — the link succeeds, as the translation of the same module does.
+///
+/// A spec-inner function's symbol is deliberately left unqualified by its
+/// defining file, so it can share a string with the program's own function of
+/// that name. No obligation may apply a specification function, so the shared
+/// string leaves exactly one candidate; counting the spec function would fail a
+/// link the translator would then have resolved correctly.
+#[test]
+fn a_spec_function_sharing_an_applied_symbol_does_not_make_it_ambiguous() {
+    let main = with_spec_funcs(
+        &with_hspecs(
+            &main_with_names(&[], &["helper", "helper"]),
+            &applying("helper"),
+        ),
+        &[("S", &[1])],
+    );
+
+    let linked = raw_link(&main, &[], None)
+        .expect("a spec function of the same name must not make the symbol ambiguous");
+    assert_valid(&linked);
+}
+
+/// When *every* carrier is a specification function the full set stands, so the
+/// symbol still fails closed here rather than being quietly waved through.
+#[test]
+fn an_applied_symbol_carried_only_by_spec_functions_is_still_rejected() {
+    let main = with_spec_funcs(
+        &with_hspecs(
+            &main_with_names(&[], &["helper", "helper"]),
+            &applying("helper"),
+        ),
+        &[("S", &[0, 1])],
+    );
+
+    let err = raw_link(&main, &[], None)
+        .expect_err("a symbol only specification functions carry must not link");
+    assert!(
+        matches!(
+            &err,
+            LinkError::AmbiguousObligationSymbol { symbol, carriers }
+                if symbol == "helper" && carriers.len() == 2
+        ),
+        "expected the ambiguous-symbol rejection, got {err:?}"
+    );
+}
+
+/// One spec carrier is deliberately let through the link, and rejected by the
+/// translator that can say why.
+///
+/// The narrowing that drops specification carriers leaves nothing behind when
+/// every carrier is one, so the count falls back to the full set — which for a
+/// single spec function is one, and passes. That is not an oversight: the symbol
+/// is unresolvable either way, and only the translator can name the target as an
+/// omitted or a retained specification function. The link succeeding is the
+/// contract, so it is pinned here rather than left to be "obviously" either way.
+#[test]
+fn an_applied_symbol_carried_only_by_one_spec_function_passes_the_link() {
+    let main = with_spec_funcs(
+        &with_hspecs(
+            &main_with_names(&[], &["compute", "helper"]),
+            &applying("helper"),
+        ),
+        &[("S", &[1])],
+    );
+
+    let linked = raw_link(&main, &[], None)
+        .expect("a symbol one specification function carries is left to the translator");
+    assert_valid(&linked);
+}
+
+/// The one-body-two-exports external at `main_with_names`' two-argument shape,
+/// so a main module built there can import both of its aliases.
+fn aliased_export_lib_i32x2() -> Vec<u8> {
+    wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "double" (func 0))
+          (export "twice" (func 0)))
+        "#,
+    )
+}
+
+/// A program function already named like an unrecorded root alias keeps the
+/// obligation that applies it.
+///
+/// The alias rewrite exists to repair a name the merge could not record, and a
+/// name some function *is* recorded under is not that. Rewriting it anyway would
+/// move the obligation onto the merged body and then pass the ambiguity check
+/// with a single carrier — a true claim about a function nobody wrote it about,
+/// at exit 0. `link` takes arbitrary main bytes, so a `::`-joined program name is
+/// reachable even though code generation cannot produce one.
+#[test]
+fn an_alias_a_program_function_already_carries_is_not_rewritten() {
+    // `double` and `twice` are two exports of one body, so `mathlib::double`
+    // is recorded and `mathlib::twice` is the alias the section drops — and a
+    // program function is named exactly that.
+    let main = with_hspecs(
+        &main_with_names(&["double", "twice"], &["mathlib::twice"]),
+        &applying("mathlib::twice"),
+    );
+    let linked = raw_link(&main, &[("mathlib", &aliased_export_lib_i32x2())], None)
+        .expect("an obligation over the program's own function must link");
+    assert_valid(&linked);
+
+    assert_eq!(
+        sole_applied_symbol(&linked),
+        "mathlib::twice",
+        "the obligation must keep naming the function the section records it against"
+    );
+    let names = function_names(&linked);
+    assert!(
+        names.contains(&(0, "mathlib::twice".to_string())),
+        "the program's own function keeps the name, got {names:?}"
+    );
+    assert!(
+        names.contains(&(1, "mathlib::double".to_string())),
+        "and the merged body keeps the root name it could record, got {names:?}"
+    );
+}
+
+/// A merge that changes no obligation symbol leaves the payload's bytes alone.
+///
+/// The alias rewrite runs on every link, so this pins that it is a no-op in the
+/// common case: the emitted section is the canonical encoding of the map that
+/// arrived, byte for byte.
+#[test]
+fn an_obligation_over_no_alias_survives_the_merge_byte_for_byte() {
+    let map = applying("mathlib::sum");
+    let payload = inference_hassert::encode(&map);
+    let main = with_hspecs(&main_with_names(&["sum"], &["compute"]), &map);
+
+    let linked = raw_link(&main, &[("mathlib", &mathlib_pure())], None)
+        .expect("an obligation over a satisfied import must link");
+    assert_eq!(
+        custom_section_data(&linked, inference_hassert::HSPECS_SECTION_NAME)
+            .expect("the linked module must carry the hspecs section"),
+        payload,
+        "a payload with no alias to rewrite must survive the merge verbatim"
     );
 }
 
@@ -5422,10 +5969,10 @@ fn external_nested_within_the_cap_merges() {
 /// The external (built from plain WAT) has no name section, so its inner callee
 /// `func 1` starts nameless. The closure root that satisfies the import is
 /// renamed to the import field, prefixed with its logical module
-/// (`lib.compute`); the inner callee must be filled with `<module>.func_<out_idx>`
-/// (`lib.func_2`) rather than left nameless (which previously forced wasm-to-v
-/// down a per-process random-UUID path). The `lib.` prefix sanitizes to `lib_`
-/// in the downstream Rocq names.
+/// (`lib::compute`); the inner callee must be filled with the marked
+/// `<module>::#func_<out_idx>` (`lib::#func_2`) rather than left nameless (which
+/// previously forced wasm-to-v down a per-process random-UUID path). The `lib::`
+/// prefix sanitizes to `lib_` in the downstream Rocq names.
 #[test]
 fn nameless_merged_inner_callee_gets_deterministic_name() {
     let main = wasm(
@@ -5463,21 +6010,21 @@ fn nameless_merged_inner_callee_gets_deterministic_name() {
     // The closure root is named after the import field it satisfies, prefixed
     // with its logical module.
     assert!(
-        names.iter().any(|(_, n)| n == "lib.compute"),
-        "the closure root should be named `lib.compute`: {names:?}"
+        names.iter().any(|(_, n)| n == "lib::compute"),
+        "the closure root should be named `lib::compute`: {names:?}"
     );
     // Every merged function carries a name (a complete name section), and the
     // nameless inner callee is named deterministically from its output index,
     // under the same `<module>.` namespace as the root — never left out of the
     // section.
     assert!(
-        names.iter().any(|(_, n)| n == "lib.func_2"),
-        "the nameless inner callee should get a deterministic `lib.func_<idx>` name: {names:?}"
+        names.iter().any(|(_, n)| n == "lib::#func_2"),
+        "the nameless inner callee should get a deterministic `lib::#func_<idx>` name: {names:?}"
     );
     // No UUID-style name leaks in: a deterministic fallback name is a plain
-    // `<module>.func_<idx>` whose suffix after the last `.` parses as an integer.
+    // `<module>::#func_<idx>` whose suffix after the mark parses as an integer.
     for (_, n) in &names {
-        if let Some(suffix) = n.rsplit('.').next().and_then(|s| s.strip_prefix("func_")) {
+        if let Some(suffix) = n.rsplit('#').next().and_then(|s| s.strip_prefix("func_")) {
             assert!(
                 suffix.parse::<u32>().is_ok(),
                 "a `func_`-prefixed fallback name must be index-derived, not a UUID: {n}"

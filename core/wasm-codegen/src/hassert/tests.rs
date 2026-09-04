@@ -2051,7 +2051,7 @@ spec S { fn f() forall { let a: i32 = @; assert(double(a) == a + a); } }
     let applied = applied_symbols(&sole_obligation(&map, "S"));
     assert_eq!(
         applied,
-        vec!["mathlib.double".to_string()],
+        vec!["mathlib::double".to_string()],
         "the obligation must apply the extern under the linker's merged-body name"
     );
 }
@@ -2068,7 +2068,7 @@ spec S { fn f() forall { let a: i32 = @; assert(hash(a) == a); } }
 ");
     assert_eq!(
         applied_symbols(&sole_obligation(&map, "S")),
-        vec!["crypto::digest.hash".to_string()]
+        vec!["crypto::digest::hash".to_string()]
     );
 }
 
@@ -2111,7 +2111,7 @@ spec Outer { fn f() forall { let a: i32 = @; assert(probe(a) == a); } }
     let map = ok(sibling);
     assert_eq!(
         applied_symbols(&sole_obligation(&map, "Outer")),
-        vec!["sensors.probe".to_string()],
+        vec!["sensors::probe".to_string()],
         "the sibling spec sees only the bound file-scope declaration"
     );
 }
@@ -2157,12 +2157,12 @@ fn an_extern_in_one_file_does_not_capture_a_sibling_files_call() {
     );
     assert_eq!(
         applied_symbols(&sole_obligation(&map, "MainSpec")),
-        vec!["libA.scale".to_string()],
+        vec!["libA::scale".to_string()],
         "the entry file's spec names the declaration its own file bound"
     );
     assert_eq!(
         applied_symbols(&sole_obligation(&map, "side_SideSpec")),
-        vec!["libB.scale".to_string()],
+        vec!["libB::scale".to_string()],
         "the sibling's spec names the declaration its own file bound"
     );
 }
@@ -2276,7 +2276,7 @@ spec S { fn f() forall { let a: i32 = @; emit(a); } }
         sole_obligation(&map, "S"),
         imp(
             guard(0),
-            HAssert::AppOk(HFnRef("telemetry.emit".to_string()), vec![local(0)])
+            HAssert::AppOk(HFnRef("telemetry::emit".to_string()), vec![local(0)])
         )
     );
 }

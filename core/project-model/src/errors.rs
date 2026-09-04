@@ -27,11 +27,12 @@ pub enum InferenceError {
         suggestion: Option<String>,
     },
 
-    /// A `use` path segment is not a valid file/directory name (empty, `.`,
-    /// `..`, or carrying a path separator), so it cannot be mapped to a file.
+    /// A `use` path segment is not an identifier, so it can be mapped neither to
+    /// a file on disk nor to a WASM debug name.
     #[error(
         "invalid import path segment `{segment}` in `use {referenced_as};` — \
-         path segments must be plain file or directory names"
+         path segments must be identifiers: a letter or `_`, then letters, \
+         digits or `_`"
     )]
     InvalidImportSegment {
         referenced_as: String,

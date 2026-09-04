@@ -41,11 +41,11 @@
     unreachable
   )
   (func $there_b (;1;) (type 1) (result i32)
-    call $"#func2 there_b"
+    call $lib.shapes.there_b
     return
     unreachable
   )
-  (func $"#func2 there_b" (@name "there_b") (;2;) (type 2) (result i32)
+  (func $lib.shapes.there_b (;2;) (type 2) (result i32)
     (local $p i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 16

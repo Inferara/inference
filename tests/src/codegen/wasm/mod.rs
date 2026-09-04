@@ -35,6 +35,7 @@ mod loops;
 mod multi_file;
 mod multi_file_extern;
 mod multi_file_golden;
+mod name_section_identity;
 mod negative;
 mod param_by_ref;
 mod self_extern_escape;

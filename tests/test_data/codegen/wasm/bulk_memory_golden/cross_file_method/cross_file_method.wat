@@ -19,11 +19,11 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    call $Point.origin
+    call $lib.geo.Point.origin
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point.dist
+    call $lib.geo.Point.dist
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -31,13 +31,13 @@
     return
     unreachable
   )
-  (func $Point.dist (;1;) (type 1) (param $self i32) (result i32)
+  (func $lib.geo.Point.dist (;1;) (type 1) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Point.origin (;2;) (type 2) (param $sret i32)
+  (func $lib.geo.Point.origin (;2;) (type 2) (param $sret i32)
     local.get $sret
     i32.const 5
     i32.store

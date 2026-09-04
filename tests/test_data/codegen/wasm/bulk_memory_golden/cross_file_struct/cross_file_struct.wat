@@ -20,7 +20,7 @@
     local.get $__frame_ptr
     i32.const 3
     i32.const 4
-    call $make
+    call $lib.geom.make
     local.get $__frame_ptr
     local.set $p
     local.get $p
@@ -32,7 +32,7 @@
     return
     unreachable
   )
-  (func $make (;1;) (type 1) (param $sret i32) (param $a i32) (param $b i32)
+  (func $lib.geom.make (;1;) (type 1) (param $sret i32) (param $a i32) (param $b i32)
     local.get $sret
     local.get $a
     i32.store

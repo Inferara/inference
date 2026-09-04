@@ -1,11 +1,12 @@
-//! A024: Calls to *unbound* external functions are not supported in codegen.
+//! A024: a call to an `external fn` that no `use … from` directive binds.
 //!
 //! An `external fn` bound to a source module via `use { f } from <module>;`
 //! lowers to a WASM import that the static-merge linker later satisfies (issue
-//! #9), so calling it is fully supported. An *unbound* bare extern — declared
-//! `external fn` with no binding `use` — has no source module to merge, would
-//! emit no import, and so cannot be compiled. This rule rejects calls to those
-//! unbound externs only.
+//! #9), so calling it is fully supported — in executable code and inside a
+//! `spec` alike. An *unbound* bare extern — declared `external fn` with no
+//! binding `use` — names no module at all, so nothing supplies a body for the
+//! call to reach: there is no import to emit and nothing for the merge to
+//! splice in. This rule rejects calls to those unbound externs only.
 //!
 //! Resolution is *scope-aware*, not name-keyed. Two distinct `external fn f`
 //! declarations — a bound top-level `f` and an unbound spec-inner `f` — share
@@ -41,7 +42,7 @@ use crate::{
 };
 
 crate::rule! {
-    /// Calls to unbound external functions are not supported in codegen.
+    /// A call to an `external fn` that no `use … from` directive binds.
     #[id = "A024"]
     #[name = "External function call"]
     #[severity = error]

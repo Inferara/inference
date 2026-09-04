@@ -78,6 +78,35 @@ pub(crate) enum CodegenError {
         second: String,
         qualified: String,
     },
+    /// Two of the program's own functions would be written into the WASM `name`
+    /// section under one symbol, in proof mode, and an obligation applies that
+    /// symbol — so the claim it carries names both functions at once.
+    ///
+    /// The section joins a function's defining file to its source name with
+    /// `.`, and joins a struct to its method with the same `.`, so the two
+    /// spellings meet: a free `helper` in `lib.inf` and a `helper` method on an
+    /// entry-file struct `lib` both render `lib.helper`, as do a free `make` in
+    /// `lib/mid.inf` and a `make` method on a struct `mid` in `lib.inf`.
+    /// Nothing downstream can tell the two apart — an obligation applying the
+    /// symbol names a string, and both functions answer to it — so rather than
+    /// let one silently win, codegen names both and asks for a rename.
+    ///
+    /// A shared symbol *no* obligation applies is left alone: the two functions
+    /// still receive distinct Rocq definitions, and nothing resolves them by the
+    /// shared string. Compile mode is unaffected for the same reason — there the
+    /// section carries debug names only, and no obligation reads it.
+    #[error(
+        "proof-mode symbol collision: {first} and {second} are both recorded as \
+         `{symbol}` in the verification artifact, and a proof obligation applies that \
+         symbol — so the claim it carries names both. The two joins are spelled alike: \
+         `.` separates a struct from its method, and equally separates a defining file \
+         from the name it declares. Rename the struct, the function, or the file"
+    )]
+    NameSectionSymbolCollision {
+        symbol: String,
+        first: String,
+        second: String,
+    },
     /// A spec's file-qualified name is not a legal Rocq identifier, so the
     /// emitted `<module>__<spec>_specs` definition and `valid_<module>__<spec>`
     /// theorem would be rejected by the Rocq translator. The most common cause is
