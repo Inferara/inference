@@ -304,12 +304,42 @@ the call graph). The four variants of `FnKey` are:
 Every variant carries the `module_path` of the **defining** file. This is what keeps two
 `fn add` functions in two different files as distinct internal keys.
 
-The function names written into the WASM name section (and visible in `.wat` output) use the
-bare function name (or `StructName.method_name` for methods), not a file-prefixed form.
-When two functions share a bare name across files, the WAT renderer deduplicates them with a
-numbered suffix like `#func2 there_b`. The `FnKey` dot-qualified string (`lib.arith.add`) is
-an internal key used for function-index lookup — it does not appear verbatim in the binary's
-name section.
+The function names written into the WASM name section (and visible in `.wat` output) are
+**file-qualified** for every non-entry-file function: the symbol is
+[`FnKey::name_section_symbol()`](../../core/fn-key/README.md#the-wasm-name-section-namespace), which joins the defining
+file's `.`-separated module path onto the bare name (or `StructName.method_name` for a
+method). An entry-file function keeps its unqualified name (`add`, `Point.new`); an `add` in
+`lib/arith.inf` is `lib.arith.add`, and a method defined in `lib/geo.inf` is
+`lib.geo.Point.dist`. This is the same dot-qualified string `FnKey::Display` renders for free
+and method keys, and it appears exactly this way, verbatim, in the binary's name section — it
+is not merely an internal function-index lookup key.
+
+Because two functions in different files ordinarily write distinct strings, the WAT renderer
+has nothing left to disambiguate when their bare names collide: no numbered suffix, no
+`(@name …)` annotation.
+
+The join is not injective, though: a method's `StructName.method_name` and a free function's
+file-qualified name are both built by joining segments with the same `.`, so the two shapes
+can land on one string. A method `make` on a struct `mid` defined in `lib.inf` and a free
+function `make` defined in `lib/mid.inf` both render `lib.mid.make` — the struct join and the
+file-path join are indistinguishable once written. Codegen only rejects this when it would
+actually mislead something: `CodegenError::NameSectionSymbolCollision` fires exclusively when
+a proof obligation applies the colliding symbol (a `T_app` or `HA_app_ok` head), since the
+name section is read *by* a symbol only there. The two functions still get distinct Rocq
+`Definition` names and distinct WASM indices regardless of the shared name-section string, so
+a collision nothing applies is harmless and the program keeps building — but the WAT text does
+still show it the old way: with two functions genuinely sharing one name-section entry, the
+renderer's own duplicate-name fallback (the numbered synthetic id plus `(@name …)` annotation
+from before file qualification existed) is exactly what fires, e.g.
+`(func $"#func1 lib.mid.make" (@name "lib.mid.make") ...)` for the second. That fallback did
+not go away; qualification only makes it unreachable for the common case of two same-kind
+functions in different files. Only the `Free` and `Method` keys can collide this way; a
+specification function is the deliberate exception to
+file qualification in the first place — its symbol stays bare regardless of its defining file,
+because spec membership travels separately as indices in `inference.spec_funcs` rather than
+through the name section (see
+[Specs in Multi-File Proofs](#specs-in-multi-file-proofs) below), so it is never a candidate
+for this check either.
 
 WASM exports are controlled by the entry file and by visibility. The rule:
 
@@ -324,9 +354,9 @@ interface; imported library code is internal.
 ```wat
 ;; root_only_export example: lib::arith::add is compiled but not exported
 (module $output
-  (export "run" (func $run))   ;; only the entry-file pub fn is exported
+  (export "run" (func $run))         ;; only the entry-file pub fn is exported
   (func $run ...)
-  (func $add ...)              ;; add is compiled but unexported
+  (func $lib.arith.add ...)          ;; add is compiled, file-qualified, and unexported
 )
 ```
 

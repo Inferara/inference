@@ -35,7 +35,8 @@
 //! - **`Compile`** mode: Produces production binaries. Spec nodes are stripped.
 //! - **`Proof`** mode: Produces WASM for Rocq formalization. All code is emitted,
 //!   including spec functions with non-deterministic instructions. Always uses
-//!   `Wasm32` target (Decision #32).
+//!   the `Wasm32` target, since the custom non-deterministic instructions it
+//!   emits require that target.
 //!
 //! # Module Organization
 //!
@@ -49,8 +50,9 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::Def;
+use inference_fn_key::FnKey;
 use inference_type_checker::typed_context::TypedContext;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
@@ -392,6 +394,15 @@ fn traverse_t_ast_with_compiler(
                 .join("\n");
             return Err(CodegenError::UntranslatableSpec(rendered));
         }
+
+        // Refuse a program whose own functions share a `name`-section symbol an
+        // obligation applies. The obligations have to exist first: the section
+        // is only a namespace to the extent something resolves a name through
+        // it, so the applied set is half of the question and is settled here.
+        // Nothing is written yet — the caller writes the artifact only once this
+        // function returns — so rejecting this late still leaves no stale
+        // `.wasm` behind.
+        check_name_section_symbols(arena, &buckets, &hspecs)?;
         Ok(hspecs)
     } else {
         Ok(HSpecMap::default())
@@ -449,6 +460,210 @@ fn check_spec_name_collisions(specs: &[VisitedSpec]) -> Result<(), CodegenError>
         }
     }
     Ok(())
+}
+
+/// Rejects a program two of whose own functions render one `name`-section
+/// symbol *and* whose obligations apply that symbol.
+///
+/// The symbol is [`FnKey::name_section_symbol`], the same rendering code
+/// generation writes, computed here from the same buckets body compilation
+/// iterates — so this decides on exactly the strings that will be emitted
+/// rather than on a parallel derivation of them.
+///
+/// The applied set is the other half of the question, and is what keeps this
+/// from refusing programs that were never at risk. A shared symbol is dangerous
+/// only where something resolves a function *by* it: the proof translator does
+/// that for an obligation's `T_app` / `HA_app_ok` head and nowhere else. It
+/// emits the two functions themselves under distinct `Definition` names either
+/// way, appending the WASM function index to the second — so with nothing
+/// applying the symbol there is no lookup to misresolve, and a program that
+/// built before the obligations existed keeps building.
+///
+/// Only non-specification functions are compared. A spec-inner function's
+/// symbol is deliberately left unqualified by its defining file, so it may
+/// legitimately coincide with a program function's or with another spec's; the
+/// proof translator resolves that coincidence by dropping specification
+/// functions from an applied symbol's candidate set, and `inference.spec_funcs`
+/// is what tells it which those are. Only the two non-spec keys can collide:
+/// `Method` on a struct `mid` in file `lib` and `Free` in file `lib/mid` both
+/// join to `lib.mid.make`, because the struct join and the path join are the
+/// same `.`.
+fn check_name_section_symbols(
+    arena: &AstArena,
+    buckets: &EmittableFunctions,
+    hspecs: &HSpecMap,
+) -> Result<(), CodegenError> {
+    let applied = applied_obligation_symbols(hspecs);
+    if applied.is_empty() {
+        return Ok(());
+    }
+
+    let mut seen: FxHashMap<String, SymbolSource<'_>> = FxHashMap::default();
+    for source in symbol_sources(arena, buckets) {
+        let symbol = source.symbol();
+        if let Some(previous) = seen.get(&symbol)
+            && applied.contains(&symbol)
+        {
+            // Ordered so the message does not depend on which file was walked
+            // first.
+            let (a, b) = (previous.render(), source.render());
+            let (first, second) = if a <= b { (a, b) } else { (b, a) };
+            return Err(CodegenError::NameSectionSymbolCollision {
+                symbol,
+                first,
+                second,
+            });
+        }
+        seen.insert(symbol, source);
+    }
+    Ok(())
+}
+
+/// Every function symbol the program's obligations apply.
+///
+/// An applied symbol is a `T_app`'s or an `HA_app_ok`'s head — the two positions
+/// in which an obligation names a function the proof resolves through the `name`
+/// section. An entry's own `fn_symbol` is deliberately not one: it names a
+/// specification function, which the translator finds through the
+/// `inference.spec_funcs` index list rather than by a lookup over the whole
+/// section.
+///
+/// The matches are exhaustive on purpose: a variant added without a case here
+/// would quietly stop being collected, and a compile error is the only notice
+/// that carries.
+fn applied_obligation_symbols(hspecs: &HSpecMap) -> FxHashSet<String> {
+    fn walk_assert(assert: &HAssert, acc: &mut FxHashSet<String>) {
+        match assert {
+            HAssert::True | HAssert::False => {}
+            HAssert::Not(inner) | HAssert::Ex(inner) | HAssert::All(inner) => {
+                walk_assert(inner, acc);
+            }
+            HAssert::And(left, right) | HAssert::Imp(left, right) | HAssert::Or(left, right) => {
+                walk_assert(left, acc);
+                walk_assert(right, acc);
+            }
+            HAssert::TermEq(left, right) => {
+                walk_term(left, acc);
+                walk_term(right, acc);
+            }
+            HAssert::HasType(term, _) | HAssert::Defined(term) => walk_term(term, acc),
+            HAssert::AppOk(symbol, args) => {
+                acc.insert(symbol.0.clone());
+                for arg in args {
+                    walk_term(arg, acc);
+                }
+            }
+        }
+    }
+    fn walk_term(term: &HTerm, acc: &mut FxHashSet<String>) {
+        match term {
+            HTerm::Const(_) | HTerm::LVar(_) | HTerm::Local(_) => {}
+            HTerm::App(symbol, args) => {
+                acc.insert(symbol.0.clone());
+                for arg in args {
+                    walk_term(arg, acc);
+                }
+            }
+            HTerm::Binop(_, _, left, right) | HTerm::Relop(_, _, left, right) => {
+                walk_term(left, acc);
+                walk_term(right, acc);
+            }
+        }
+    }
+
+    let mut acc = FxHashSet::default();
+    for entries in hspecs.values() {
+        for entry in entries {
+            walk_assert(&entry.hassert, &mut acc);
+        }
+    }
+    acc
+}
+
+/// Every compiled non-specification function, in the order code generation
+/// registers them: free functions first, then struct methods.
+fn symbol_sources<'a>(
+    arena: &'a AstArena,
+    buckets: &'a EmittableFunctions,
+) -> impl Iterator<Item = SymbolSource<'a>> {
+    let funcs = buckets.funcs.iter().map(|entry| SymbolSource::Free {
+        module_path: &entry.module_path,
+        name: arena.def_name(entry.def_id),
+    });
+    let methods = buckets.methods.iter().map(|entry| SymbolSource::Method {
+        module_path: &entry.module_path,
+        struct_name: &entry.struct_name,
+        name: arena.def_name(entry.def_id),
+    });
+    funcs.chain(methods)
+}
+
+/// One compiled function as both halves of the collision report: the
+/// `name`-section symbol it is compared by, and the source terms it is named in
+/// if the comparison fails.
+///
+/// The two are kept apart because only the first is needed on every proof-mode
+/// build. Rendering the human description costs a `String` per function and is
+/// read only when a collision is both found and applied, so it is produced from
+/// the borrowed parts on that path alone.
+enum SymbolSource<'a> {
+    Free {
+        module_path: &'a [String],
+        name: &'a str,
+    },
+    Method {
+        module_path: &'a [String],
+        struct_name: &'a str,
+        name: &'a str,
+    },
+}
+
+impl SymbolSource<'_> {
+    /// The string code generation writes into the `name` section for this
+    /// function, produced by the renderer that writes it.
+    fn symbol(&self) -> String {
+        match self {
+            Self::Free { module_path, name } => {
+                FnKey::free_in(module_path.to_vec(), *name).name_section_symbol()
+            }
+            Self::Method {
+                module_path,
+                struct_name,
+                name,
+            } => FnKey::method_in(module_path.to_vec(), *struct_name, *name).name_section_symbol(),
+        }
+    }
+
+    /// The function named the way its author wrote it: `function 'add' in file
+    /// 'lib::arith'`, or `method 'make' on struct 'mid' in file 'lib'`, without
+    /// the file clause in the entry file.
+    fn render(&self) -> String {
+        match self {
+            Self::Free { module_path, name } => match file_clause(module_path) {
+                Some(file) => format!("function '{name}' in file '{file}'"),
+                None => format!("function '{name}'"),
+            },
+            Self::Method {
+                module_path,
+                struct_name,
+                name,
+            } => match file_clause(module_path) {
+                Some(file) => {
+                    format!("method '{name}' on struct '{struct_name}' in file '{file}'")
+                }
+                None => format!("method '{name}' on struct '{struct_name}'"),
+            },
+        }
+    }
+}
+
+/// The `::`-joined source path of a defining file, or `None` for the entry file.
+fn file_clause(module_path: &[String]) -> Option<String> {
+    if module_path.is_empty() {
+        None
+    } else {
+        Some(module_path.join("::"))
+    }
 }
 
 /// Rejects any spec whose file-qualified name is not a legal Rocq identifier.
@@ -747,11 +962,7 @@ impl VisitedSpec {
     /// Lets a diagnostic name the file separately from the spec, so the message
     /// reads `spec 'S' in file 'lib::checks'` rather than splicing them.
     fn file_label(&self) -> Option<String> {
-        if self.module_path.is_empty() {
-            None
-        } else {
-            Some(self.module_path.join("::"))
-        }
+        file_clause(&self.module_path)
     }
 }
 
@@ -1254,5 +1465,188 @@ mod spec_name_tests {
             }
             other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
         }
+    }
+}
+
+/// The `name`-section symbol collision codegen refuses in proof mode.
+///
+/// The section is one namespace with two joins in it — a struct's
+/// `<struct>.<method>` and a defining file's `<file>.<function>` — and they are
+/// spelled alike, so one program can put two functions under one symbol. That
+/// symbol is what a proof obligation resolves an applied function name through,
+/// so a program whose obligations *do* apply it is refused while both
+/// definitions can still be named — and a program whose obligations do not is
+/// left alone, because nothing there resolves anything by the shared string.
+#[cfg(test)]
+mod name_section_symbol_tests {
+    use super::{CodegenOptions, CompilationMode, codegen};
+    use inference_ast::arena::AstArena;
+    use inference_type_checker::TypeCheckerBuilder;
+    use inference_type_checker::typed_context::TypedContext;
+
+    /// The entry file declares a struct named `lib` carrying a `helper` method;
+    /// `lib.inf` declares a free `helper`. `Method{[], "lib", "helper"}` and
+    /// `Free{["lib"], "helper"}` both render `lib.helper`.
+    const ENTRY: &str = r"
+        struct lib {
+            fn helper() -> i32 { return 1; }
+        }
+        fn main() -> i32 { return 0; }
+    ";
+
+    /// `lib.inf` with a spec whose obligation applies the shared `lib.helper`.
+    const LIB_APPLIED: &str = r"
+        fn helper() -> i32 { return 2; }
+        fn other() -> i32 { return 3; }
+        spec LibSpec {
+            fn claim() forall { assert(helper() == 2); }
+        }
+    ";
+
+    /// The same file and the same collision, with the obligation applying the
+    /// file's *other* function instead. The program still carries obligations,
+    /// so this isolates the applied symbol as the thing that decides.
+    const LIB_UNAPPLIED: &str = r"
+        fn helper() -> i32 { return 2; }
+        fn other() -> i32 { return 3; }
+        spec LibSpec {
+            fn claim() forall { assert(other() == 3); }
+        }
+    ";
+
+    fn type_check_multi(files: &[(&[&str], &str)]) -> TypedContext {
+        let mut arena = AstArena::default();
+        for (module_path, source) in files {
+            let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+            let parsed = inference_parser::parse_into(arena, source, module_path);
+            assert!(
+                parsed.errors.is_empty(),
+                "parse errors: {:?}",
+                parsed.errors
+            );
+            arena = parsed.arena;
+        }
+        TypeCheckerBuilder::build_typed_context(arena)
+            .expect("multi-file type checking should succeed")
+            .typed_context()
+    }
+
+    fn compile(
+        files: &[(&[&str], &str)],
+        mode: CompilationMode,
+    ) -> anyhow::Result<crate::CodegenOutput> {
+        let ctx = type_check_multi(files);
+        codegen(
+            &ctx,
+            "output",
+            CodegenOptions {
+                mode,
+                ..CodegenOptions::default()
+            },
+        )
+    }
+
+    /// The collision with an obligation that applies it.
+    fn compile_applied(mode: CompilationMode) -> anyhow::Result<crate::CodegenOutput> {
+        compile(&[(&[], ENTRY), (&["lib"], LIB_APPLIED)], mode)
+    }
+
+    #[test]
+    fn a_method_and_a_free_function_under_one_applied_symbol_are_refused_in_proof_mode() {
+        let err = compile_applied(CompilationMode::Proof)
+            .expect_err("an obligation over two functions of one symbol must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`lib.helper`"),
+            "the message must name the shared symbol; got: {msg}"
+        );
+        assert!(
+            msg.contains("method 'helper' on struct 'lib'")
+                && msg.contains("function 'helper' in file 'lib'"),
+            "the message must name both definitions as their author wrote them; got: {msg}"
+        );
+    }
+
+    /// The diagnostic is one flowing sentence, not a string with the line
+    /// continuations left out of it.
+    ///
+    /// A message assembled from a multi-line literal loses its `\` and ships
+    /// with runs of source indentation inside it. Every substring an assertion
+    /// would naturally reach for sits *inside* one of those runs, so the garbled
+    /// form passes a substring check; only a phrase that spans a line boundary,
+    /// and a direct look for a double space, can see it.
+    #[test]
+    fn the_collision_message_reads_as_one_sentence() {
+        let err = compile_applied(CompilationMode::Proof)
+            .expect_err("an obligation over two functions of one symbol must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recorded as `lib.helper` in the verification artifact"),
+            "the phrase spanning the literal's line break must read continuously; got: {msg}"
+        );
+        assert!(
+            !msg.contains("  "),
+            "no run of source indentation may survive into the message; got: {msg}"
+        );
+    }
+
+    /// The same collision, in a program whose obligations name something else,
+    /// builds.
+    ///
+    /// Nothing resolves a function by the shared symbol here, and the two
+    /// functions still receive distinct Rocq definitions — so refusing this
+    /// would cost a program that was never at risk.
+    #[test]
+    fn the_same_collision_builds_when_no_obligation_applies_the_symbol() {
+        compile(
+            &[(&[], ENTRY), (&["lib"], LIB_UNAPPLIED)],
+            CompilationMode::Proof,
+        )
+        .expect("a shared symbol no obligation applies is not a proof-mode error");
+    }
+
+    /// A program with no specification at all — the shape a collision cannot
+    /// endanger, because there is no obligation to misresolve.
+    ///
+    /// Written as the deeper `lib.inf` / `lib/mid.inf` pair, the other way the
+    /// two joins meet: `Method{["lib"], "mid", "make"}` and
+    /// `Free{["lib", "mid"], "make"}` both render `lib.mid.make`.
+    #[test]
+    fn a_collision_in_a_specless_program_builds_in_both_modes() {
+        let files: &[(&[&str], &str)] = &[
+            (
+                &[],
+                r"
+                use lib;
+                use lib::mid;
+                fn main() -> i32 { return lib::helper(1); }
+                ",
+            ),
+            (
+                &["lib"],
+                r"
+                pub struct mid {
+                    x: i32;
+                    pub fn make(v: i32) -> i32 { return v + 1; }
+                }
+                pub fn helper(v: i32) -> i32 { return v + 2; }
+                ",
+            ),
+            (
+                &["lib", "mid"],
+                r"pub fn make(v: i32) -> i32 { return v + 3; }",
+            ),
+        ];
+        compile(files, CompilationMode::Proof)
+            .expect("a specless program has nothing to misresolve");
+        compile(files, CompilationMode::Compile).expect("and compile mode never read the section");
+    }
+
+    /// Compile mode writes the same two names, but nothing reads the section as a
+    /// namespace there, so even the applied program still compiles.
+    #[test]
+    fn the_applied_program_still_compiles_in_compile_mode() {
+        compile_applied(CompilationMode::Compile)
+            .expect("a colliding debug name is not a compile-mode error");
     }
 }

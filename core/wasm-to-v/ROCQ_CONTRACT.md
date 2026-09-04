@@ -913,14 +913,29 @@ static-merge linker carries an `inference.hspecs` section verbatim
 (index-free) precisely so this resolution can happen once, post-link,
 when the final function layout is known.
 
-Two producers write those strings, and an obligation may name either:
+Two producers write those strings into **one** name section, and an
+obligation may name either. They are held apart by a character the
+Inference identifier grammar cannot produce, so no program can be written
+whose own function answers for a linked body or the reverse:
 
-- **compiled from source** — code generation's own mangled name
-  (`is_prime`, `Point.new`);
+- **compiled from source** — `FnKey::name_section_symbol`, the
+  function's file-qualified name over the alphabet `[A-Za-z0-9_.]`
+  (`is_prime` and `Point.new` in the entry file, `lib.arith.add` and
+  `lib.geo.Point.dist` elsewhere). Every component is an Inference
+  identifier and the joiner is `.`, so the string can never contain a
+  `:`. A **specification** function is the deliberate exception: its
+  symbol stays bare (`ex_double`, `Point.dist`), because spec membership
+  already travels as indices in `inference.spec_funcs` and
+  `classify_reachability_targets` recovers the bare name by stripping the
+  folded spec prefix;
 - **linked from an external `.wasm`** — the name the merge gives the
   body it splices in for a satisfied import,
-  `inference_fn_key::merged_name::root` (`mathlib.sum`). Code generation
-  writes that same string for a call to a bound `external fn`, resolving
+  `inference_fn_key::merged_name::root` (`mathlib::sum`), every one of
+  which carries `::`. A private callee of the same linked module is
+  marked (`mathlib::#helper`), so a foreign module's inner name — which
+  is unconstrained and may be exactly one of that module's export fields
+  — cannot shadow a root. Code generation writes that same string for a
+  call to a bound `external fn`, resolving
   the declaration by `DefId` rather than by name: two `external fn`s may
   share a name across scopes and only one of them be bound (a `use … from`
   clause binds top-level declarations only), so a name-keyed lookup would
@@ -936,6 +951,40 @@ An obligation about a linked external therefore resolves only against
 the **merged** module. Translating the compiler's direct output instead
 leaves the symbol naming an import, which `resolve_app_symbols` rejects
 with a message naming the missing link step.
+
+None of these separators survives into the `.v`:
+`sanitize_rocq_identifier` maps every byte outside `[A-Za-z0-9_]` to `_`
+and collapses the runs, so `mathlib.sum`, `mathlib::sum` and
+`mathlib::#sum` all name `Definition mathlib_sum`. The separators are a
+**resolution** device, read from the raw name-section string before
+sanitization.
+
+That does not mean every emitted identifier is what it always was. An
+entry-file function's symbol, and a specification function's symbol (bare
+by the carve-out above regardless of its file), sanitize to the same
+`Definition` name they did before this scheme existed. A **non-entry-file**
+compiled function's symbol is now file-qualified
+(`FnKey::name_section_symbol`), and that qualifier survives sanitization
+like any other component: a `lib/arith.inf` function `add` used to name
+`Definition add` and now names `Definition lib_arith_add`. No committed
+`.v` golden in this repository moves, but only because every corpus `.v`
+fixture is single-file — a multi-file proof-mode program's `.v` output
+does move, and a downstream proof naming a non-entry-file function's
+`Definition` must be re-pinned to the qualified identifier.
+
+The merge itself enforces the discipline for a linked module: before it
+emits, it checks that every symbol its obligations apply is carried by
+exactly one function of the output, rejecting a symbol nothing carries
+(`LinkError::UnresolvedObligationSymbol`) or two functions share
+(`LinkError::AmbiguousObligationSymbol`). It is the last phase that knows
+which import supplied which body — after the merge there is no import
+section to report against — so `resolve_app_symbols` is a backstop on the
+artifact rather than the first line of defense.
+
+One foreign body may satisfy two imports, and a WASM name map holds one
+name per index; the merge records the least of that body's root names and
+rewrites an obligation over the other onto it, so both declarations
+describe the body they name.
 
 ### What a linked body brings that compiled code cannot
 

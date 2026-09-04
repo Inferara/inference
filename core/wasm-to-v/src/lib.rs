@@ -2598,6 +2598,155 @@ mod reachability_emission {
         );
     }
 
+    /// Appends a `name` section mapping each `(function index, name)` pair.
+    ///
+    /// Symbolic WAT identifiers are unique by construction, so a fixture that
+    /// needs one string on two functions — the whole subject of the tests below
+    /// — has to write the section itself. Indices and lengths are emitted as
+    /// single LEB128 bytes, which is exact for the small fixtures here.
+    fn with_func_names(mut bytes: Vec<u8>, names: &[(u8, &str)]) -> Vec<u8> {
+        let mut subsection = vec![u8::try_from(names.len()).expect("fixture is small")];
+        for (idx, name) in names {
+            subsection.push(*idx);
+            subsection.push(u8::try_from(name.len()).expect("fixture names are short"));
+            subsection.extend_from_slice(name.as_bytes());
+        }
+        let mut payload = vec![0x04];
+        payload.extend_from_slice(b"name");
+        payload.push(0x01);
+        payload.push(u8::try_from(subsection.len()).expect("fixture is small"));
+        payload.extend_from_slice(&subsection);
+
+        bytes.push(0x00);
+        bytes.push(u8::try_from(payload.len()).expect("fixture is small"));
+        bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    /// A specification function is not a candidate for an applied symbol, so it
+    /// does not make the program's own function of that name ambiguous.
+    ///
+    /// A spec-inner function's `name`-section symbol is deliberately left
+    /// unqualified by its defining file, while a non-entry program function's is
+    /// qualified — so a spec-inner `fn helper` and the program's own
+    /// `lib.util.helper` do not collide, but a spec-inner `fn helper` and an
+    /// *entry-file* `fn helper` share one string. That is a coincidence of two
+    /// naming rules, not an ambiguity: no obligation may apply a specification
+    /// function at all. The application resolves to the one function it can
+    /// mean.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_specification_function_does_not_make_an_applied_symbol_ambiguous() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Claims",
+            vec![1],
+            vec![HSpecEntry::new(
+                HFnRef("Claims.claim".to_string()),
+                HAssert::Defined(HTerm::App(
+                    HFnRef("helper".to_string()),
+                    vec![HTerm::Local(0)],
+                )),
+                SpecKind::Forall,
+            )],
+        );
+        // Function 0 is the program's own `helper`; function 1 is spec `S`'s
+        // inner `helper`. Both carry the string `helper`.
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func (param i32) (result i32) local.get 0)
+              (func (param i32) (result i32) local.get 0))
+            "#,
+        )
+        .expect("fixture WAT assembles");
+        let bytes = with_func_names(skeleton, &[(0, "helper"), (1, "helper")]);
+
+        let v = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect("the application resolves to the program's own function");
+        assert!(
+            v.contains("T_app 0"),
+            "the application must resolve to the program's own function at \
+             `mod_funcs` index 0; got:\n{v}"
+        );
+    }
+
+    /// Two of the program's *own* functions sharing one symbol stay a hard
+    /// error: neither is a specification function, so the filter above removes
+    /// nothing and there is no principled way to pick one.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn two_program_functions_sharing_an_applied_symbol_are_ambiguous() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Claims",
+            vec![],
+            vec![HSpecEntry::new(
+                HFnRef("Claims.claim".to_string()),
+                HAssert::Defined(HTerm::App(
+                    HFnRef("lib.mid.make".to_string()),
+                    vec![HTerm::Local(0)],
+                )),
+                SpecKind::Forall,
+            )],
+        );
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func (param i32) (result i32) local.get 0)
+              (func (param i32) (result i32) local.get 0))
+            "#,
+        )
+        .expect("fixture WAT assembles");
+        let bytes = with_func_names(skeleton, &[(0, "lib.mid.make"), (1, "lib.mid.make")]);
+
+        let err = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect_err("two program functions of one symbol must not resolve");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2 defined") && msg.contains("ambiguous") && msg.contains("lib.mid.make"),
+            "the rejection must name the symbol and count its carriers; got: {msg}",
+        );
+    }
+
+    /// A symbol whose only carrier is a specification function keeps the precise
+    /// rejection rather than degrading to "nothing carries it".
+    ///
+    /// Dropping specification functions from the candidate set would empty it
+    /// here, and an empty set reads as "no defined function carries the symbol"
+    /// — which is false and points nowhere. The full set stands instead, so the
+    /// omitted-function rejection gets to say what is actually wrong. Its
+    /// retained counterpart is pinned by
+    /// [`applying_a_retained_spec_function_symbol_is_rejected`].
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_applied_symbol_carried_only_by_a_spec_function_keeps_its_reason() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Claims",
+            vec![1],
+            vec![HSpecEntry::new(
+                HFnRef("Claims.claim".to_string()),
+                HAssert::Defined(HTerm::App(HFnRef("spec_helper".to_string()), vec![])),
+                SpecKind::Forall,
+            )],
+        );
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func)
+              (func))
+            "#,
+        )
+        .expect("fixture WAT assembles");
+        let bytes = with_func_names(skeleton, &[(0, "exec"), (1, "spec_helper")]);
+
+        let err = translate_bytes("Prog", &bytes, &spec_funcs, &hspecs)
+            .expect_err("applying an omitted specification function must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("omitted specification function"),
+            "the rejection must name the omission rule; got: {msg}",
+        );
+    }
+
     /// The two ways an obligation can name an *imported* function, and the two
     /// different rejections they get.
     ///
@@ -2627,7 +2776,7 @@ mod reachability_emission {
 
         // Unnamed import: no name-section entry to match, and the symbol is
         // recognizably this module's own import.
-        let (spec_funcs, hspecs) = applier("mathlib.sum");
+        let (spec_funcs, hspecs) = applier("mathlib::sum");
         let err = translate(
             r#"(module (import "mathlib" "sum" (func)) (func $applier))"#,
             &spec_funcs,
@@ -2652,6 +2801,39 @@ mod reachability_emission {
         assert!(
             err.to_string().contains("imports rather than defines"),
             "the rejection must say the target is imported; got: {err}",
+        );
+    }
+
+    /// After the link there is no import section left, so a merged-body symbol
+    /// that resolves to nothing can no longer be recognized as an unmerged
+    /// import — the branch above is unreachable on exactly the modules it was
+    /// written for. The symbol's shape still says what it is (no compiled
+    /// Inference function's name can carry `::`), and the linker clears every
+    /// applied symbol against the module it emits, so a linked module arriving
+    /// here carries a `name` section something rewrote after the link.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_missing_merged_symbol_in_an_import_free_module_names_the_post_link_cause() {
+        let (spec_funcs, hspecs) = spec_maps(
+            "Applied",
+            vec![],
+            vec![HSpecEntry::new(
+                HFnRef("applier".to_string()),
+                HAssert::AppOk(HFnRef("mathlib::sum".to_string()), vec![]),
+                SpecKind::Forall,
+            )],
+        );
+        let err = translate(r#"(module (func $applier))"#, &spec_funcs, &hspecs)
+            .expect_err("a merged-body symbol no function carries must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("this module imports nothing")
+                && msg.contains("Translate the linker's own output"),
+            "the rejection must say the merge has already run; got: {msg}",
+        );
+        assert!(
+            !msg.contains("Link the module before translating it"),
+            "the pre-link repair cannot apply to a module with no imports; got: {msg}",
         );
     }
 

@@ -151,10 +151,13 @@ pub(crate) struct ParsedModule {
     pub spec_funcs: Option<Vec<(String, Vec<u32>)>>,
     /// The decoded `inference.hspecs` custom section: per-spec `hassert`
     /// obligations keyed by folded spec name. Unlike `spec_funcs`, the payload
-    /// references functions by symbolic name, not index, so the merge carries it
-    /// through unchanged — no remap. Decoded (validated) here so a corrupt main
-    /// section fails the link; the merge re-encodes it canonically. Only the
-    /// main module carries one; an external's is stripped.
+    /// references functions by symbolic name, not index, so no index remap
+    /// applies; the merge edits it in exactly one way, pointing a symbol that
+    /// names a root alias the output's name section could not record at the
+    /// name it did record. Decoded (validated) here so a corrupt main section
+    /// fails the link; the merge re-validates after that edit and re-encodes
+    /// canonically. Only the main module carries one; an external's is
+    /// stripped.
     pub hspecs: Option<inference_hassert::HSpecMap>,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.

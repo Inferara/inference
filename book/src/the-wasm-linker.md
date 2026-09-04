@@ -466,22 +466,35 @@ named `Definition`s rather than opaque `func_<idx>` placeholders:
 
 - Main module local functions keep their source debug names, re-indexed onto the
   import-free output space.
-- Every merged external function is named under its source's logical module using
-  a `module.field` form:
+- Every merged external function is named under its source's logical module,
+  joined with `::`:
   - A closure **root** satisfying import `sum` bound under logical module `mathlib`
-    becomes `mathlib.sum`.
-  - An internal callee the source module named keeps that name, prefixed:
-    `mathlib.helper`.
+    becomes `mathlib::sum`.
+  - An internal callee the source module named keeps that name behind an internal
+    mark: `mathlib::#helper`.
   - A **nameless** inner callee (an external with no name section) receives a
-    deterministic fallback derived from its output index: `mathlib.func_<idx>`.
+    deterministic fallback derived from its output index: `mathlib::#func_<idx>`.
 
-The `.` separator prevents collision between two libraries that export
-same-named fields under different logical modules. The Rocq translator
-(`core/wasm-to-v/src/rocq_names.rs`) sanitizes every non-alphanumeric character
-to `_`, so `mathlib.sum` becomes `Definition mathlib_sum` in the `.v` file.
-A residual collision after sanitization (e.g. two modules that sanitize to the
-same identifier) is still disambiguated by the translator's index suffix;
-the module prefix removes the common case rather than every possible one.
+The section is one namespace with two halves, and `::` is the boundary. A
+compiled function's name-section symbol is built from Inference identifiers
+joined by `.`, so it can never carry a `:`: a source module named `mathlib` and a
+linked logical module named `mathlib` are free to coexist. Within the merged
+half, the module prefix keeps two libraries that export the same field apart, and
+the internal mark keeps a module's private callees from shadowing its own roots —
+an inner debug name comes from the foreign module and is unconstrained, so it may
+be exactly an export field.
+
+A WASM name map holds one name per function index. When one foreign body
+satisfies two imports (an export bound under two fields), the least of its root
+names is recorded and an obligation over the other is rewritten onto it, so both
+declarations still describe the body they name.
+
+The Rocq translator (`core/wasm-to-v/src/rocq_names.rs`) maps every byte outside
+`[A-Za-z0-9_]` to `_` and collapses the runs, so `mathlib::sum` becomes
+`Definition mathlib_sum` in the `.v` file — the same identifier the dotted form
+produced. A residual collision after sanitization (two modules that sanitize to
+one identifier) is still disambiguated by the translator's index suffix; the
+scheme removes the common cases rather than every possible one.
 
 ## Error Reference
 
@@ -497,6 +510,10 @@ the module prefix removes the common case rather than every possible one.
 | `LinkError::IncompatibleMemory { field, reason }` | The linear memory requirements of the main module and the Tier-B external cannot be reconciled into one shared output memory |
 | `LinkError::InvalidMergedModule(msg)` | The post-merge structural validator rejected the merged output; this is a guard against allow-list gaps — it converts a potential silent miscompile into a clean diagnostic |
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | A Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters (checked mode only — see [The Declared Write-Set Check](#the-declared-write-set-check)); the message names the offending parameter and, when the declaration uses an unnamed form, says to name it before it can be marked `mut` |
+| `LinkError::UndescribedExternWrite { module, field, param_index }` | A Tier-B closure may store through a parameter, and the checked-mode contract list supplied for this link holds no entry at all for this import — named or unnamed. An import nothing describes is held to writing nothing, so the store is refused rather than admitted unchecked |
+| `LinkError::DuplicateWriteContract { module, field }` | The checked-mode contract list holds more than one entry for the same `(module, field)` import; the linker has no basis to choose which one governs |
+| `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
+| `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
 
 ## Supported WASM Subset
 
@@ -525,11 +542,43 @@ stand-in. A proof that `sort_demo` returns the expected value reasons about
 the real `mathlib_sort` and `memlib_store_at` bodies — not their declared
 signatures.
 
-The `inference.spec_funcs` custom section (`src/spec_funcs.rs`) carries the WASM
-function indices the Rocq translator must turn into proof obligations. The merge
-removes imports and shifts indices, so the linker decodes this section,
-remaps every index through the unified index space, and re-emits it. The
-round-trip is byte-stable: proof obligations are never lost across the link step.
+Two custom sections carry the program's proof obligations, and the linker treats
+them differently because their payloads are shaped differently:
+
+- `inference.spec_funcs` (`src/spec_funcs.rs`) records, per spec, the WASM
+  **function indices** that make up that spec — its membership list, not its
+  obligations. The Rocq translator reads it to decide which functions leave the
+  emitted module record (a `forall` or plain spec function becomes a downstream
+  contract, so its body is dropped) and which stay in it (an `exists` or
+  `unique` function's body is what its reachability judgment reduces), and to
+  disambiguate which function a reachability obligation judges. The merge
+  removes imports and shifts every function index, so an index recorded pre-link
+  is stale afterward; the linker decodes the section, remaps each index through
+  the unified index space via `Plan::map_main_func`, and re-emits it
+  canonically.
+- `inference.hspecs` records the `hassert` obligations an `assert(...)` inside
+  a spec compiles to, referencing the functions they apply by **symbolic
+  name** — a `name`-section string, not an index — so no index remap applies.
+  The merge re-emits it otherwise unchanged, editing exactly one thing: when a
+  merged body ends up recorded in the output under a different alias than the
+  one an obligation names (the aliased-export case in
+  [Name Preservation](#name-preservation) above), the affected symbol is
+  rewritten onto the alias the output's name section actually
+  carries. A merge whose obligations still fail to resolve after that rewrite
+  is rejected — see `LinkError::UnresolvedObligationSymbol` and
+  `LinkError::AmbiguousObligationSymbol` in the [Error Reference](#error-reference)
+  below.
+
+Both of the above describe the **main module's own** sections only. An
+**external** module's `inference.spec_funcs` and `inference.hspecs` — the spec
+membership and `hassert` obligations a linked *library* recorded about its own
+code — are not decoded at all: `ParsedModule::parse_external` skips
+both sections unconditionally (`src/parse.rs`), and a malformed one never fails
+the link, because the merge only ever mines an external for the executable
+closure of a satisfied export. A library's own proof obligations are
+therefore **dropped, silently**, at the link step today — there is no warning,
+and no way to opt a library's obligations into the main module's proof. Only
+the compiled program's own specs and assertions survive linking.
 
 ## Comparison with Traditional Linkers
 

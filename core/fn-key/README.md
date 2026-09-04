@@ -85,7 +85,7 @@ assert_ne!(folded, bare);          // distinct keys
 assert_eq!(folded.to_string(), bare.to_string()); // same rendered name
 ```
 
-`Display` is used for diagnostic messages, `.wat` output, panic descriptions, and the codegen-to-analysis frame-size interchange map (where the strings are compared by the same `Display` implementation on both sides, so the lossiness is harmless in that context).
+`Display` is used for diagnostic messages and panic descriptions. The codegen-to-analysis frame-size interchange map (`CodegenOutput::frame_sizes`, `estimate_frame_sizes`) is keyed by the structured `FnKey` itself, not by `Display` — keying it by the rendered string would let two keys that render identically collapse into one slot, which is exactly what the structured key exists to prevent. `.wat` output is a separate consumer of a separate rendering, [`name_section_symbol()`](#the-wasm-name-section-namespace) — for the `Free`/`Method` variants the two happen to produce the same string (`name_section_symbol()` delegates to `Display` for exactly those two), but for a spec key they diverge (`Display` folds the file in, `name_section_symbol()` deliberately does not), so `.wat` output should be attributed to `name_section_symbol()`, not to `Display` itself.
 
 ## `fold_spec_name`
 
@@ -96,6 +96,34 @@ pub fn fold_spec_name(module_path: &[String], spec: &str) -> String
 Folds a defining file's module path into a spec name for display and the Rocq proof grammar. An empty `module_path` returns the spec name unchanged; a non-empty path joins its segments with `_` ahead of the spec name (`["lib", "checks"] + S` → `lib_checks_S`). Underscore rather than `.` keeps the result a legal Rocq identifier.
 
 This function is the single implementation of the spec-name fold. Both `FnKey::Display` and the code generator's `qualified_spec_name` delegate to it, so every phase produces byte-identical spec identifiers.
+
+## The WASM Name-Section Namespace
+
+The WASM name section that code generation, the static-merge linker, and the proof translation all touch has two producers, and this crate defines the grammar that keeps their strings apart.
+
+- **Compiled functions** — `FnKey::name_section_symbol()` — join Inference identifiers with `.`, so a symbol is always drawn from the alphabet `[A-Za-z0-9_.]`:
+
+  ```rust
+  assert_eq!(FnKey::free_in(vec![], "add").name_section_symbol(), "add"); // entry file, == Display
+  assert_eq!(
+      FnKey::free_in(vec!["lib".into(), "arith".into()], "add").name_section_symbol(),
+      "lib.arith.add", // non-entry file, unlike Display this is intentional and always written
+  );
+  ```
+
+  A spec-inner key (`SpecFree`/`SpecMethod`) is the deliberate exception: `name_section_symbol()` leaves it bare (`ex_double`, not `lib.checks.ex_double`), because spec membership already travels as indices in `inference.spec_funcs` and the translator recovers the bare name by stripping the folded spec prefix. Qualifying spec keys would move every `Definition` name a spec function emits.
+
+- **Merged external bodies** — `merged_name::{root, callee, anonymous}` — join with `MERGED_SEPARATOR` (`"::"`), a sequence a compiled symbol can never contain:
+
+  ```rust
+  assert_eq!(merged_name::root("mathlib", "double"), "mathlib::double");
+  assert_eq!(merged_name::callee("mathlib", "helper"), "mathlib::#helper");
+  assert_eq!(merged_name::anonymous("mathlib", 7), "mathlib::#func_7");
+  ```
+
+  `callee` and `anonymous` also carry `MERGED_INTERNAL_MARK` (`"#"`) immediately after the module, marking a linked module's own private function as distinct from one of its `root` exports — an export field is always an Inference identifier and so can never itself start with `#`.
+
+The two sets are disjoint by construction — no compiled symbol can contain `:`, and no merged name can omit it — which is what lets the proof translation resolve an `hspecs` obligation's applied symbol by plain string equality over the whole post-merge name section without a source-level function ever being answered for by a linked external's body, or the reverse. `METHOD_SEPARATOR` stays crate-private; nothing outside needs the dot. Of the two merged-name separators, only `MERGED_SEPARATOR` has callers outside this crate — the linker and the translator each use it for the `contains` check that finds a name's merged half; `MERGED_INTERNAL_MARK` has no callers outside this crate — it is `pub(crate)`, not `pub` — and in production code it is applied only inside `merged_name` itself (by `callee` and `anonymous`), the only place that needs to tell a merged root from a merged inner callee; this crate's own test suite reads the raw constant too, but only to assert on that internal behavior. See [`core/wasm-linker`](../wasm-linker/README.md#proof-mode-custom-sections) for how the linker writes `merged_name` strings and enforces that every applied obligation symbol resolves, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md#t_app-resolution-discipline) for how the translator reads them back.
 
 ## Usage
 
@@ -123,4 +151,6 @@ graph.entry(caller).or_default().push(callee);
 ## Related Resources
 
 - [`core/analysis`](../analysis/README.md) — consumes `FnKey` to key the whole-program call graph (A035, A036)
-- [`core/wasm-codegen`](../wasm-codegen/README.md) — uses `FnKey` to assign WASM function indices and emit frame-size maps
+- [`core/wasm-codegen`](../wasm-codegen/README.md) — uses `FnKey` to assign WASM function indices, emit frame-size maps, and write `name_section_symbol()` into the WASM name section
+- [`core/wasm-linker`](../wasm-linker/README.md) — writes `merged_name` strings for a merged external body and checks that every `hspecs` obligation symbol resolves to exactly one function
+- [`core/wasm-to-v`](../wasm-to-v/ROCQ_CONTRACT.md) — resolves an obligation's applied symbol against the post-merge name section

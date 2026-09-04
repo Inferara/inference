@@ -13,22 +13,28 @@
 //! 3. **structural validation** via `inf_wasmparser::validate`;
 //! 4. **execution** under Wasmtime of a cross-file call.
 //!
-//! ## What file-qualification is — and is not — visible in the WAT
+//! ## What file-qualification looks like in the WAT
 //!
-//! Multi-file codegen file-qualifies the *internal* function key (the index-map
-//! mangling that keeps two same-named functions in different files from
-//! colliding). That qualification is **not** a WASM-visible name: the name
-//! section records the *bare* item name (`add`, or `Struct.method` for methods
-//! like `Point.dist`), never a `lib.arith.add`-style dotted name. So the golden
-//! WAT shows bare debug names regardless of defining file. The cross-file
-//! distinctness surfaces instead as:
+//! Multi-file codegen file-qualifies the function key that keeps two same-named
+//! functions in different files apart, and the WASM name section carries that
+//! qualification: a non-entry file's `add` is `$lib.arith.add` and its method
+//! `Point.dist` is `$lib.geo.Point.dist`. An entry-file item keeps its bare
+//! name, so a program that happens to have one file is byte-identical to what
+//! single-file codegen produces. Spec-inner functions are the one deliberate
+//! exception and stay bare wherever they are defined: spec membership travels
+//! as function indices in `inference.spec_funcs`, and the proof translation
+//! resolves a reachability obligation by stripping the folded spec prefix and
+//! looking the remaining bare name up in the section.
 //!
-//!   - two separate `(func ...)` entries (wasmprinter renders the duplicate
-//!     name-section entry as `$"#funcN there_b" (@name "there_b")`), and
-//!   - distinct field offsets baked into each function's loads/stores.
+//! The qualification is not cosmetic. The name section is a namespace the proof
+//! translation reads back: an obligation names its function by `FnKey::Display`
+//! and is resolved against the section by string equality. Qualifying makes the
+//! two agree for every file rather than only for the entry, which is what lets
+//! a specification call a function in another file at all.
 //!
-//! Tests assert those observable facts rather than a dotted name that does not
-//! exist. See the per-test comments.
+//! Cross-file distinctness therefore surfaces as distinct `(func $…)` names,
+//! and — for two files defining a same-named struct — as distinct field offsets
+//! baked into each function's loads and stores.
 
 #[cfg(test)]
 mod multi_file_golden_codegen_tests {
@@ -93,22 +99,31 @@ mod multi_file_golden_codegen_tests {
     /// The corrected three-file re-export chain (the normative issue example):
     /// `main` `use math;` → `math` `pub use lib::arith;` → `lib/arith` exposes
     /// `pub fn add`. `main` reaches `math::arith::add` only through the re-export.
-    /// All four tiers, plus structural checks that the non-entry function carries
-    /// a *bare* `add` debug name (file qualification is FnKey-internal, not a WAT
-    /// name) and that only the entry `run` is exported.
+    /// All four tiers, plus structural checks that each non-entry function
+    /// carries its own defining file in its debug name and that only the entry
+    /// `run` is exported.
     #[test]
     fn re_export_chain_test() {
         let wasm = golden_bytes_wat_validate(module_path!(), "re_export_chain");
         let wat = wat_of(&wasm, "re_export_chain");
-        // The non-entry function keeps its bare name in the WAT; the module-path
-        // qualification (`lib.arith.add`) is internal to the index map only.
+        // Every non-entry function carries its own defining file, not the file
+        // that imported it: `add` is qualified by `lib.arith` even though the
+        // entry reaches it through `math`'s re-export, and `math`'s own `foo` is
+        // qualified by `math`. A bare name here would be resolvable by an
+        // obligation only for the entry file, and collidable with every other
+        // file's same-named item.
         assert!(
-            wat.contains("(func $add "),
-            "imported `add` must keep its bare debug name (no `lib.arith.add`); WAT:\n{wat}"
+            wat.contains("(func $lib.arith.add "),
+            "`add` must be qualified by its defining file, not the re-exporting \
+             one; WAT:\n{wat}"
         );
         assert!(
-            !wat.contains("lib.arith.add"),
-            "file qualification is FnKey-internal and must NOT appear in the WAT; WAT:\n{wat}"
+            wat.contains("(func $math.foo "),
+            "`math.inf`'s own `foo` must be qualified by `math`; WAT:\n{wat}"
+        );
+        assert!(
+            !wat.contains("(func $add ") && !wat.contains("(func $foo "),
+            "no non-entry function may keep an unqualified debug name; WAT:\n{wat}"
         );
         // The entry function is exported by its bare name; the re-exported chain
         // members are not WASM exports.
@@ -128,8 +143,8 @@ mod multi_file_golden_codegen_tests {
     /// `{ a: i32, b: i32 }` puts `b` at offset 4; the imported `{ a: i64, b: i32 }`
     /// puts `b` at offset 8. The file-qualified type keys keep the layouts
     /// distinct — a single shared layout would mis-read one file. The two distinct
-    /// offsets are baked into the WAT, and the two same-named `there_b` functions
-    /// render as distinct `(func ...)` entries. All four tiers + structural.
+    /// offsets are baked into the WAT, and the two `there_b` functions carry
+    /// distinct debug names. All four tiers + structural.
     #[test]
     fn dup_struct_test() {
         let wasm = golden_bytes_wat_validate(module_path!(), "dup_struct");
@@ -144,12 +159,17 @@ mod multi_file_golden_codegen_tests {
             wat.contains("i32.const 8\n    i32.add"),
             "imported Pair must read .b at offset 8; WAT:\n{wat}"
         );
-        // The two same-named `there_b` functions are distinct: wasmprinter renders
-        // the duplicate name-section entry with a `#funcN` prefix but the real name
-        // is preserved via `@name`.
+        // The two `there_b` functions are not same-named in the section: the
+        // imported one carries its defining file, so the section holds two
+        // distinct strings and wasmprinter has no duplicate to disambiguate.
         assert!(
-            wat.contains("(@name \"there_b\")"),
-            "the duplicate `there_b` must appear as a second function with @name; WAT:\n{wat}"
+            wat.contains("(func $there_b ") && wat.contains("(func $lib.shapes.there_b "),
+            "the entry and imported `there_b` must be distinctly named; WAT:\n{wat}"
+        );
+        assert!(
+            !wat.contains("(@name "),
+            "distinct names leave wasmprinter nothing to disambiguate with \
+             `@name`; WAT:\n{wat}"
         );
         let (mut store, instance) = instantiate(&wasm);
         assert_eq!(call_i32(&mut store, &instance, "here_b"), 20);
@@ -211,23 +231,26 @@ mod multi_file_golden_codegen_tests {
         );
     }
 
-    /// Method name-mangling for an imported struct's method. The internal `FnKey`
-    /// is file-qualified, but the *WAT debug name* is the `Struct.method` form
-    /// (`Point.dist` / `Point.at`) — the file prefix (`lib.geo.`) is NOT present in
-    /// the name section. This test pins that observable form so a future change to
-    /// the mangling that leaked the file prefix into the WAT would be caught. Four
-    /// tiers.
+    /// Method name-mangling for an imported struct's method: the WAT debug name
+    /// is the defining file joined to the `Struct.method` form
+    /// (`lib.geo.Point.dist` / `lib.geo.Point.at`). The qualifier is the
+    /// **struct's** file, not the call site's — both calls are made from
+    /// `main.inf`. This test pins the observable form so a change to the
+    /// mangling that dropped the file prefix, and with it every non-entry
+    /// obligation's ability to name the function it means, would be caught.
+    /// Four tiers.
     #[test]
     fn method_mangling_test() {
         let wasm = golden_bytes_wat_validate(module_path!(), "method_mangling");
         let wat = wat_of(&wasm, "method_mangling");
         assert!(
-            wat.contains("$Point.dist") && wat.contains("$Point.at"),
-            "methods use the bare `Struct.method` debug name; WAT:\n{wat}"
+            wat.contains("(func $lib.geo.Point.dist ") && wat.contains("(func $lib.geo.Point.at "),
+            "a method on an imported struct uses the `file.Struct.method` debug \
+             name; WAT:\n{wat}"
         );
         assert!(
-            !wat.contains("lib.geo.Point"),
-            "the file prefix must NOT leak into the WAT method name; WAT:\n{wat}"
+            !wat.contains("(func $Point."),
+            "no method may keep the unqualified `Struct.method` form; WAT:\n{wat}"
         );
         let (mut store, instance) = instantiate(&wasm);
         assert_eq!(call_i32(&mut store, &instance, "run"), 8);
@@ -310,49 +333,54 @@ mod multi_file_golden_codegen_tests {
         }
     }
 
-    /// FIXME: a cross-file `T_app` symbol does not resolve against the module
-    /// the compiler emits, so no multi-file program whose specification calls a
-    /// function in another file can be translated to Rocq at all.
+    /// A specification may call a function defined in another file: the
+    /// obligation's `T_app` symbol resolves against the module the compiler
+    /// emits.
     ///
-    /// The obligation writes `FnKey::Display` (`lib.checks.lib_value`), while
-    /// the name section records the item's bare name (`lib_value`) — the two
-    /// producers agree only for the entry file, whose `module_path` is empty.
-    /// `resolve_app_symbols` looks the symbol up verbatim and fails closed, so
-    /// the failure is loud rather than a wrong resolution.
+    /// The obligation names its function by `FnKey::Display`
+    /// (`lib.checks.lib_value`) and the name section now records the same
+    /// file-qualified symbol, so `resolve_app_symbols`' verbatim lookup finds
+    /// exactly the one function that carries it. While the section held the
+    /// bare `lib_value` the two producers agreed only for the entry file, whose
+    /// `module_path` is empty, and every cross-file obligation failed closed.
     ///
-    /// This asserts the defect rather than the behavior anyone wants, so that
-    /// it runs: an ignored aspirational test states the goal but pins nothing,
-    /// and would not notice the failure mode moving. **When this starts
-    /// failing, the defect is fixed — invert it.** Fixing it means changing
-    /// what code generation writes into the name section, which moves every
-    /// multi-file `.wasm` golden and needs a collision rule for the qualified
-    /// namespace: a change of its own, not a fix in passing.
-    ///
-    /// A *linked external* is the one cross-file symbol that does resolve,
-    /// because the linker writes its merged name into the same name section the
-    /// obligation reads.
+    /// The assertion is on the resolved **index**, not merely on translation
+    /// succeeding: the entry file's obligation resolved before this change too,
+    /// so a test that only checked for an `Ok` would also pass with the
+    /// imported file's claim silently pointing at the entry's function.
     #[test]
-    fn cross_file_obligation_symbols_do_not_resolve_yet() {
+    fn cross_file_obligation_symbols_resolve() {
         let wasm = proof_wasm_codegen_project(module_path!(), "proof_specs");
-        let error = inference::wasm_to_v(
+        let rocq = inference::wasm_to_v(
             "proof_specs",
             &wasm,
             &inference::FxHashMap::default(),
             &inference::HSpecMap::default(),
         )
-        .expect_err(
-            "cross-file obligation symbols now resolve — the defect this pins is \
-             fixed; invert this test",
+        .expect("a cross-file obligation symbol resolves against the name section");
+
+        // `T_app` indexes `mod_funcs`, so pin the order the indices are read
+        // against before reading them.
+        assert!(
+            rocq.contains(
+                "  mod_funcs :=\n    entry_value ::\n    main ::\n    \
+                 lib_checks_lib_value ::\n    nil;"
+            ),
+            "the module must list entry_value=0, main=1, lib_checks_lib_value=2; \
+             .v was:\n{rocq}"
+        );
+
+        // Each spec claims a property of *its own* file's function: the entry's
+        // `entry_value` returns 1 and the imported `lib_value` returns 2, so a
+        // symbol resolved to the wrong file would state the other file's claim.
+        assert!(
+            obligation_block(&rocq, "output__EntrySpec_hspec1").contains("T_app 0 nil"),
+            "the entry spec must apply `entry_value` (index 0); .v was:\n{rocq}"
         );
         assert!(
-            error
-                .to_string()
-                .contains("obligation applies function symbol `lib.checks.lib_value`")
-                && error
-                    .to_string()
-                    .contains("no defined function in the module carries"),
-            "the defect moved: it is still unresolvable, but for a different \
-             reason than the name-section mismatch this pins — {error}"
+            obligation_block(&rocq, "output__lib_checks_LibSpec_hspec1").contains("T_app 2 nil"),
+            "the imported file's spec must apply that file's own `lib_value` \
+             (index 2), not the entry's function; .v was:\n{rocq}"
         );
     }
 
@@ -434,6 +462,15 @@ mod multi_file_golden_codegen_tests {
             }
             other => panic!("the entry must be unique-kind, got {other:?}"),
         }
+    }
+
+    /// The blank-line-delimited block of emitted Rocq that defines `name`, so a
+    /// test can read one obligation's body without matching against the rest of
+    /// the file.
+    fn obligation_block<'a>(rocq: &'a str, name: &str) -> &'a str {
+        rocq.split("\n\n")
+            .find(|block| block.contains(&format!("Definition {name} : hassert :=")))
+            .unwrap_or_else(|| panic!("no `{name}` obligation in the .v:\n{rocq}"))
     }
 
     /// The payload of the named custom section, or `None` when the module

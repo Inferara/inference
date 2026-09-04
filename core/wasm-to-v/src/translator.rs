@@ -186,7 +186,7 @@ use inf_wasmparser::{
     Operator, OperatorsIterator, OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef,
     ValType as wpValType,
 };
-use inference_fn_key::merged_name;
+use inference_fn_key::{MERGED_SEPARATOR, merged_name};
 use inference_hassert::{HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -258,6 +258,15 @@ impl FuncRemap {
     /// (`exists`/`unique`) spec function.
     fn is_retained(&self, abs: u32) -> bool {
         self.retained_abs.binary_search(&abs).is_ok()
+    }
+
+    /// Whether the function at absolute index `abs` is a specification
+    /// function of either kind — omitted (`forall`/plain) or retained
+    /// (`exists`/`unique`). The two sets are disjoint and together are exactly
+    /// what `inference.spec_funcs` listed, so this is the "is a spec function"
+    /// predicate the name-section candidate filter needs.
+    fn is_spec_function(&self, abs: u32) -> bool {
+        self.is_omitted(abs) || self.is_retained(abs)
     }
 
     /// The number of omitted spec functions strictly below `abs`.
@@ -378,6 +387,35 @@ fn visible_locs_list(locs: &[u32]) -> String {
     }
     out.push_str("nil)");
     out
+}
+
+/// The carriers of one applied obligation symbol that could legitimately be its
+/// target, narrowed from every function of that name in the `name` section.
+///
+/// A specification function's name-section symbol is deliberately left
+/// *unqualified* by its defining file — spec membership travels as indices in
+/// `inference.spec_funcs`, and reachability resolution recovers the bare name by
+/// stripping the folded spec prefix — so a spec-inner `fn helper` and the
+/// program's own `fn helper` really do share one string. That coincidence is not
+/// an ambiguity: no obligation may apply a specification function at all (an
+/// omitted one has no body in the emitted module, a retained one is the subject
+/// of its own reachability judgment), so the spec carriers are not candidates
+/// and dropping them leaves the one function the symbol can mean.
+///
+/// When *every* carrier is a specification function the full set is returned
+/// unchanged. There is no legal target either way, but the rejections below
+/// state the real reason — this function is retained, that one is omitted —
+/// which is more use than "nothing carries the name" would be.
+fn applicable_carriers(carriers: &[u32], remap: &FuncRemap) -> Vec<u32> {
+    let applicable: Vec<u32> = carriers
+        .iter()
+        .copied()
+        .filter(|&abs| !remap.is_spec_function(abs))
+        .collect();
+    if applicable.is_empty() {
+        return carriers.to_vec();
+    }
+    applicable
 }
 
 /// Structured representation of a parsed WASM module.
@@ -1058,7 +1096,8 @@ impl WasmParseData<'_> {
     ///
     /// `by_name` is the shared raw name-section inversion built once in
     /// [`Self::translate`]. A `T_app` names exactly one defined function, so
-    /// zero or several matches is a hard error.
+    /// zero or several matches is a hard error — counted over the *applicable*
+    /// carriers of the symbol, which [`applicable_carriers`] narrows.
     ///
     /// Arity is checked here and nowhere else. Downstream there is nothing left
     /// to check it against: the printed `T_app` carries a `seq term`, so an
@@ -1085,16 +1124,18 @@ impl WasmParseData<'_> {
 
         let mut resolved = FxHashMap::default();
         for (sym, arity) in applications {
-            let abs = match by_name.get(sym).map(Vec::as_slice) {
-                Some([one]) => *one,
-                Some(many) if many.len() > 1 => {
+            let carriers = by_name.get(sym).map_or(&[][..], Vec::as_slice);
+            let candidates = applicable_carriers(carriers, remap);
+            let abs = match candidates[..] {
+                [one] => one,
+                [_, _, ..] => {
                     return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(
                         "obligation applies function symbol `{sym}`, which {} defined \
                          functions share; the target is ambiguous",
-                        many.len()
+                        candidates.len()
                     ))));
                 }
-                _ => {
+                [] => {
                     return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(
                         self.unresolved_symbol_message(sym)
                     )));
@@ -1122,22 +1163,47 @@ impl WasmParseData<'_> {
 
     /// Why a symbol resolved to nothing.
     ///
-    /// An obligation about a linked `external fn` names the body the merge
-    /// splices in, which a module that still *imports* that function does not
-    /// have — the commonest way to reach this, and one whose bare "no defined
-    /// function carries it" reads like a compiler defect. Recognizing the
-    /// symbol as one of this module's own function imports turns the dead end
-    /// into the missing step.
+    /// The generic answer — no defined function carries it — reads like a
+    /// compiler defect, so the two situations that have a real repair are named
+    /// instead, and they are told apart by the module's own import section.
+    ///
+    /// **Before the link.** An obligation about a bound `external fn` names the
+    /// body the merge splices in, which a module that still *imports* that
+    /// function does not have. This is the commonest way to reach here, and the
+    /// repair is the missing step: link first.
+    ///
+    /// **After the link.** The merge removes every import, so the branch above
+    /// cannot fire on a linked module and the symbol has no import to be
+    /// recognized against. It is still recognizable by its shape: a merged
+    /// body's name carries [`MERGED_SEPARATOR`], which a compiled Inference
+    /// function's name cannot. The linker clears every applied symbol against
+    /// the module it emits, so a linked module reaching here was not the
+    /// linker's own output — something rewrote or dropped its `name` section
+    /// afterwards, which is what a post-link optimizer does.
     fn unresolved_symbol_message(&self, sym: &str) -> String {
-        let unmerged = self.imports.iter().any(|import| {
-            matches!(import.ty, TypeRef::Func(_))
-                && merged_name::root(import.module, import.name) == sym
-        });
+        let func_imports: Vec<_> = self
+            .imports
+            .iter()
+            .filter(|import| matches!(import.ty, TypeRef::Func(_)))
+            .collect();
+        let unmerged = func_imports
+            .iter()
+            .any(|import| merged_name::root(import.module, import.name) == sym);
         if unmerged {
             return format!(
                 "obligation applies function symbol `{sym}`, which this module imports rather \
                  than defines; the static-merge linker has not run, so the external's body is \
                  not here to be reasoned about. Link the module before translating it"
+            );
+        }
+        if func_imports.is_empty() && sym.contains(MERGED_SEPARATOR) {
+            return format!(
+                "obligation applies function symbol `{sym}`, which names a body the static-merge \
+                 linker splices in, and this module imports nothing — so the merge has already \
+                 run and left no function of that name. The linker resolves every applied symbol \
+                 against the module it emits, so these are not the bytes it produced: a step that \
+                 rewrites or strips the `name` section after the link is the usual cause. \
+                 Translate the linker's own output"
             );
         }
         format!(

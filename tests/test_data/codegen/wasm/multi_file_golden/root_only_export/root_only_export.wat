@@ -5,11 +5,11 @@
   (func $run (;0;) (type 0) (result i32)
     i32.const 2
     i32.const 3
-    call $add
+    call $lib.arith.add
     return
     unreachable
   )
-  (func $add (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
+  (func $lib.arith.add (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
     local.get $a
     local.get $b
     i32.add

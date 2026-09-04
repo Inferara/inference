@@ -209,8 +209,9 @@ mod extern_link_tests {
 
         // The merged `sum` reads as an ordinary named Rocq definition, prefixed
         // with its logical module so two libraries exporting the same field can
-        // never collide in the name section. The linker emits `arith.sum`, which
-        // wasm-to-v sanitizes (every non-alphanumeric to `_`) to `arith_sum`.
+        // never collide in the name section. The linker emits `arith::sum`,
+        // which wasm-to-v sanitizes (every non-alphanumeric to `_`, then `__`
+        // runs collapsed) to `arith_sum`.
         assert!(
             rocq.contains("Definition arith_sum"),
             "merged function must be a module-prefixed named Rocq definition; .v was:\n{rocq}"
@@ -253,7 +254,7 @@ mod extern_link_tests {
             function_imports(&unified)
         );
         // The merged `combine` is prefixed with its `::`-separated logical
-        // module: the linker emits `crypto::adder.combine`, which wasm-to-v
+        // module: the linker emits `crypto::adder::combine`, which wasm-to-v
         // sanitizes (every non-alphanumeric to `_`, then `__` runs collapsed) to
         // `crypto_adder_combine`.
         assert!(
@@ -1022,13 +1023,13 @@ fn touch_array(a: [i32; 2]) -> i32 {
         let lib_dir = TempLibDir::new("c1_spec");
         lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
 
-        // `check` must be translatable to an obligation, so it does not call the
-        // extern (an external call has no verified body — `P005`), and it must
-        // claim something, since an obligation that collapses to `HA_true` is
-        // rejected outright. Its claim is deliberately self-contained: the
-        // cross-call half is what the companion test below adds. `add_three`
-        // (executable) carries the extern call whose operand the omission
-        // renumbers.
+        // `check` must be translatable to an obligation, so it claims something
+        // self-contained rather than calling the extern — the cross-call half,
+        // where a `T_app` resolves through the merged body, is what
+        // `an_obligation_about_a_linked_extern_resolves_to_its_merged_body`
+        // below covers; an obligation that collapses to `HA_true` is rejected
+        // outright. `add_three` (executable) carries the extern call whose
+        // operand the omission renumbers.
         let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
              use { sum } from arith;\n\
              pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
@@ -1114,9 +1115,11 @@ fn touch_array(a: [i32; 2]) -> i32 {
         lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
 
         // `add_three` (executable) carries the extern call the omission renumbers;
-        // `is_prime` (executable, defined) is the obligation's `T_app` target — it
-        // does not call the extern, since a spec obligation cannot reference an
-        // unverified external body (`P005`).
+        // `is_prime` (executable, defined) is the obligation's `T_app` target — a
+        // program-compiled callee, kept distinct from a `T_app` naming the
+        // merged extern body itself, which
+        // `an_obligation_about_a_linked_extern_resolves_to_its_merged_body`
+        // below covers.
         let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
              use { sum } from arith;\n\
              pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
@@ -1210,10 +1213,10 @@ fn touch_array(a: [i32; 2]) -> i32 {
         lib_dir.write_module(Path::new("arith.wasm"), &lib_wasm);
 
         // The exists body claims `is_pos` of its named choice under a filter —
-        // a defined callee (an extern callee would be P005) and a non-vacuous
-        // claim (a collapsed obligation would be P010). `add_three`
-        // (executable) carries the extern call whose operand retention leaves
-        // unshifted.
+        // a program-compiled callee, kept distinct from a `T_app` naming the
+        // merged extern body itself — and a non-vacuous claim (a collapsed
+        // obligation would be P010). `add_three` (executable) carries the
+        // extern call whose operand retention leaves unshifted.
         let main_source = "external fn sum(a: i32, b: i32) -> i32;\n\
              use { sum } from arith;\n\
              pub fn add_three(x: i32) -> i32 { return sum(x, 3); }\n\
@@ -1451,7 +1454,7 @@ fn touch_array(a: [i32; 2]) -> i32 {
         )
         .expect("wasm-to-v succeeds on the linked module");
 
-        // Post-link order is twice=0, merged `mathlib.double`=1.
+        // Post-link order is twice=0, merged `mathlib::double`=1.
         assert!(
             rocq.contains("Definition mathlib_double : module_func"),
             "the merged extern body must be an ordinary definition in the record; \
@@ -1584,7 +1587,7 @@ fn touch_array(a: [i32; 2]) -> i32 {
     /// import, and both calls reach it.
     ///
     /// The two declarations are distinct, but the import they need is the same
-    /// one; the merge folds a single `libA.scale` body in, and neither call is
+    /// one; the merge folds a single `libA::scale` body in, and neither call is
     /// left pointing at a second copy or at nothing.
     #[test]
     fn two_files_binding_one_library_share_a_single_merged_body() {
@@ -1618,7 +1621,7 @@ fn touch_array(a: [i32; 2]) -> i32 {
         assert_eq!(
             defined_function_count(&unified),
             4,
-            "`direct`, `through_sibling`, `via` and one merged `libA.scale`: the \
+            "`direct`, `through_sibling`, `via` and one merged `libA::scale`: the \
              two declarations must share a single import, not merge two copies"
         );
     }

@@ -1,6 +1,6 @@
 // A specification about a linked external. `double` has no body here — it
 // arrives from `spec_linked_extern_mathlib.inf`, compiled separately and spliced
-// in by the static-merge linker under the name section symbol `mathlib.double`,
+// in by the static-merge linker under the name section symbol `mathlib::double`,
 // which is what the obligation applies.
 //
 // Every unlinked fixture applies a function from its own translation unit, so

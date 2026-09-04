@@ -248,7 +248,13 @@ pub enum AnalysisDiagnostic {
     #[error("uzumaki (@) can only appear in variable declarations or as function arguments; reassignment with @ is not allowed")]
     UzumakiInReassignment { location: Location },
 
-    #[error("call to external function `{name}` is not supported in codegen; external functions cannot be compiled to WebAssembly yet")]
+    #[error(
+        "call to external function `{name}`, which no `use ... from` directive binds; an \
+         `external fn` declaration states a signature and nothing else, so no module supplies \
+         a body for this call. Add `use {{ {name} }} from <module>;` at the top level of the \
+         file that declares it — a `use` clause reaches its own file's top-level declarations \
+         only, so an `external fn` declared inside a `spec` must be moved out to be bound"
+    )]
     ExternFunctionCall { name: String, location: Location },
 
     #[error("variable `{name}` must be initialized at declaration; use `let {name}: <type> = <value>;`")]

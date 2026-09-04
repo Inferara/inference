@@ -293,6 +293,93 @@ pub enum LinkError {
          import"
     )]
     DuplicateWriteContract { module: String, field: String },
+
+    /// A proof obligation the main module carries applies a function symbol
+    /// that no function of the merged module is named.
+    ///
+    /// Raised here rather than left to the proof translator because this is the
+    /// last phase that knows what the symbol was meant to name: the merge writes
+    /// no import section, so downstream there is no record of which imports were
+    /// satisfied, from which logical module, or under which export field, and
+    /// the only honest report left is the symbol itself.
+    #[error("{}", render_unresolved_obligation(.symbol, .merged_roots))]
+    UnresolvedObligationSymbol {
+        symbol: String,
+        /// Every `{logical_module}::{export_field}` root the merge produced,
+        /// ascending — what the module does offer, against what was asked for.
+        /// Always recorded; only *rendered* for a symbol in the merged half of
+        /// the name section, because a symbol naming one of the program's own
+        /// functions has no import behind it and listing the satisfied ones
+        /// would point at the wrong place. A caller matching on the variant
+        /// still sees the full list either way.
+        merged_roots: Vec<String>,
+    },
+
+    /// A proof obligation applies a function symbol that more than one function
+    /// of the merged module is named.
+    ///
+    /// The translator resolves an applied symbol by name, so two carriers make
+    /// the obligation describe whichever one the lookup reaches — and a *true*
+    /// obligation about the wrong body is worse than a false one, because it
+    /// discharges. `carriers` says where each came from, which is knowledge the
+    /// merge holds and the translator does not.
+    #[error("{}", render_ambiguous_obligation(.symbol, .carriers))]
+    AmbiguousObligationSymbol {
+        symbol: String,
+        /// One line per carrier, in output-index order.
+        carriers: Vec<String>,
+    },
+}
+
+/// Renders [`LinkError::UnresolvedObligationSymbol`].
+///
+/// The two subspaces of the merged `name` section fail for different reasons and
+/// have different repairs, and the symbol says which one it belongs to: a merged
+/// external body's name carries `::`, which no compiled Inference function's
+/// name can, because every segment of one is an identifier and the joiner is a
+/// dot.
+fn render_unresolved_obligation(symbol: &str, merged_roots: &[String]) -> String {
+    if !symbol.contains(inference_fn_key::MERGED_SEPARATOR) {
+        return format!(
+            "a proof obligation applies function symbol `{symbol}`, which no function of the \
+             merged module carries. The symbol carries no `::`, so it names one of the program's \
+             own functions rather than a merged external body — check it against the name code \
+             generation writes into the name section for that function: a non-entry-file \
+             function's is file-qualified (`lib.arith.add`), and a specification function's is \
+             bare"
+        );
+    }
+    let offered = if merged_roots.is_empty() {
+        "this merge satisfied no imports, so it contributed no external bodies at all".to_string()
+    } else {
+        format!(
+            "this merge satisfied {}",
+            merged_roots
+                .iter()
+                .map(|root| format!("`{root}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "a proof obligation applies function symbol `{symbol}`, which names a merged external \
+         body, and no body this merge produced carries that name — {offered}. The symbol is the \
+         logical module and the export field of a bound `external fn`, so check that the \
+         declaration the obligation was written against is bound from that module under that \
+         field"
+    )
+}
+
+/// Renders [`LinkError::AmbiguousObligationSymbol`].
+fn render_ambiguous_obligation(symbol: &str, carriers: &[String]) -> String {
+    format!(
+        "a proof obligation applies function symbol `{symbol}`, which {} functions of the \
+         merged module carry: {}. An obligation names exactly one body, and nothing downstream \
+         can choose between them — the proof translator sees the symbol, not where each \
+         function came from",
+        carriers.len(),
+        carriers.join("; ")
+    )
 }
 
 /// Renders [`LinkError::UndeclaredExternWrite`], which has to teach a different
@@ -526,6 +613,13 @@ pub fn link_with_warnings(
 /// `mut` ([`LinkError::UndeclaredExternWrite`]), or a merged closure stores and
 /// no entry described its import at all
 /// ([`LinkError::UndescribedExternWrite`]).
+///
+/// A main module carrying proof obligations is additionally held to naming
+/// functions the merged module has: an applied symbol no function of the output
+/// carries is [`LinkError::UnresolvedObligationSymbol`], and one two functions
+/// share is [`LinkError::AmbiguousObligationSymbol`]. Both are checked here
+/// because the merge is the last phase that knows which import supplied which
+/// body.
 pub fn link(
     main_wasm: &[u8],
     externals: &[(&str, &[u8])],

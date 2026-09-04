@@ -226,7 +226,7 @@ enum WalkProblem {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// A `use` path segment is not a usable file/directory name.
+    /// A `use` path segment is not an identifier.
     InvalidSegment {
         referenced_as: String,
         segment: String,
@@ -755,8 +755,7 @@ fn path_form_imports(
 }
 
 /// Resolves a path-form `use` directive's segment identifiers to validated owned
-/// strings, or reports the first segment that is not a usable file/directory
-/// name.
+/// strings, or reports the first segment that is not an identifier.
 fn use_directive_segments(
     arena: &AstArena,
     use_dir: &UseDirective,
@@ -787,13 +786,34 @@ fn is_root_handle(segments: &[String]) -> bool {
     segments.len() == 1 && segments[0] == "root"
 }
 
-/// Whether `segment` is a plain file/directory name usable in a filesystem path.
+/// Whether `segment` is an Inference identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// A module-path segment is minted here and nowhere else, so this is the only
+/// gate on the alphabet of every downstream name derived from one. Two
+/// consumers depend on that alphabet:
+///
+/// - the filesystem, which maps segments to a path — the grammar excludes the
+///   empty string, `.`, `..` and every path separator, so no `use` can name a
+///   directory outside the source root;
+/// - the WASM `name` section, whose program half is the `.`-join of a
+///   function's module path with its name. That section is shared with the
+///   static-merge linker, whose spliced-in external bodies are named with `::`,
+///   and the proof translation tells the two halves apart by exactly that
+///   character. A segment carrying a `:` would put a program function's symbol
+///   into the linker's half of the namespace, where an obligation about the
+///   program could be answered by a linked external's body.
+///
+/// The lexer already produces only identifiers, so nothing a user can write
+/// reaches this predicate and fails it. Checking anyway ties the invariant to
+/// the place segments are created rather than leaving it implied by a grammar
+/// three crates away.
 fn is_valid_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment != "."
-        && segment != ".."
-        && !segment.contains('/')
-        && !segment.contains('\\')
+    let mut bytes = segment.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 /// Whether `location`'s byte range intersects any span in `error_spans`.
@@ -1363,17 +1383,34 @@ mod tests {
     }
 
     #[test]
-    fn segment_validation_rejects_filesystem_traversal() {
+    fn segment_validation_accepts_exactly_the_identifier_grammar() {
         // The lexer only ever produces plain identifiers, so an invalid segment
         // is not reachable from valid source; the predicate is a fail-safe that
-        // keeps a `use` from ever naming `.`, `..`, or a separator-bearing path.
+        // pins the alphabet at the one place segments are minted.
+        assert!(is_valid_segment("arith"));
+        assert!(is_valid_segment("_private"));
+        assert!(is_valid_segment("a1_B2"));
+        assert!(is_valid_segment("_"));
+
+        // Filesystem traversal: a segment is mapped straight to a path component.
         assert!(!is_valid_segment(""));
         assert!(!is_valid_segment("."));
         assert!(!is_valid_segment(".."));
         assert!(!is_valid_segment("a/b"));
         assert!(!is_valid_segment("a\\b"));
-        assert!(is_valid_segment("arith"));
-        assert!(is_valid_segment("_private"));
+
+        // Name-section namespace: the program half of the WASM name section is
+        // the `.`-join of a module path with a function name, and the linker's
+        // merged bodies are told apart from it by carrying `:`. A `:`-bearing
+        // segment would cross a program function into the linker's half.
+        assert!(!is_valid_segment("a:b"));
+        assert!(!is_valid_segment("a::b"));
+        assert!(!is_valid_segment("a.b"));
+
+        // A digit-leading or space-bearing segment is not an identifier either.
+        assert!(!is_valid_segment("1st"));
+        assert!(!is_valid_segment("a b"));
+        assert!(!is_valid_segment("a-b"));
     }
 
     #[test]

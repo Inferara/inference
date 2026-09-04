@@ -774,7 +774,11 @@ pub fn codegen(
 /// ([`LinkError::UndeclaredExternWrite`]), when no contract entry describes a
 /// storing import at all ([`LinkError::UndescribedExternWrite`]), or when
 /// `contracts` holds two entries for one `(module, field)`
-/// ([`LinkError::DuplicateWriteContract`]). The underlying error downcasts to
+/// ([`LinkError::DuplicateWriteContract`]). A main module carrying proof
+/// obligations additionally fails when a function symbol one of them applies is
+/// carried by no function of the merged output
+/// ([`LinkError::UnresolvedObligationSymbol`]) or by more than one
+/// ([`LinkError::AmbiguousObligationSymbol`]). The underlying error downcasts to
 /// [`LinkError`].
 ///
 /// Globals are classified on use, not declaration: a closure that reads or
