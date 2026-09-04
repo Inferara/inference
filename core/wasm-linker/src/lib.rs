@@ -316,13 +316,19 @@ pub enum LinkError {
     },
 
     /// A proof obligation applies a function symbol that more than one function
-    /// of the merged module is named.
+    /// of the merged module answers to.
     ///
     /// The translator resolves an applied symbol by name, so two carriers make
     /// the obligation describe whichever one the lookup reaches — and a *true*
     /// obligation about the wrong body is worse than a false one, because it
     /// discharges. `carriers` says where each came from, which is knowledge the
     /// merge holds and the translator does not.
+    ///
+    /// A carrier is usually a `name` section entry, but not always: one foreign
+    /// body may satisfy several imports and the section holds one name per
+    /// index, so a body can be bound under a field the section could not record.
+    /// A symbol naming such a field *and* a function the section does name has
+    /// two readings and raises this too, even though only one entry spells it.
     #[error("{}", render_ambiguous_obligation(.symbol, .carriers))]
     AmbiguousObligationSymbol {
         symbol: String,
@@ -617,9 +623,9 @@ pub fn link_with_warnings(
 /// A main module carrying proof obligations is additionally held to naming
 /// functions the merged module has: an applied symbol no function of the output
 /// carries is [`LinkError::UnresolvedObligationSymbol`], and one two functions
-/// share is [`LinkError::AmbiguousObligationSymbol`]. Both are checked here
-/// because the merge is the last phase that knows which import supplied which
-/// body.
+/// of the output answer to is [`LinkError::AmbiguousObligationSymbol`]. Both are
+/// checked here because the merge is the last phase that knows which import
+/// supplied which body.
 pub fn link(
     main_wasm: &[u8],
     externals: &[(&str, &[u8])],
