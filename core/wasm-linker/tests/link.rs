@@ -4424,17 +4424,18 @@ fn aliased_export_lib_i32x2() -> Vec<u8> {
     )
 }
 
-/// A program function already named like an unrecorded root alias keeps the
-/// obligation that applies it.
+/// An obligation over a root alias the section could not record, whose string
+/// one of the program's own functions already carries, is rejected.
 ///
-/// The alias rewrite exists to repair a name the merge could not record, and a
-/// name some function *is* recorded under is not that. Rewriting it anyway would
-/// move the obligation onto the merged body and then pass the ambiguity check
-/// with a single carrier — a true claim about a function nobody wrote it about,
-/// at exit 0. `link` takes arbitrary main bytes, so a `::`-joined program name is
-/// reachable even though code generation cannot produce one.
+/// The symbol has two genuine readings — the body the import bound under that
+/// field, and the function the section names — and both silent answers are
+/// wrong in the same way. Rewriting the alias moves the obligation onto the
+/// merged body; leaving it alone lets it resolve against the program function.
+/// Either produces a claim about a body nobody wrote it about, and a *true* one
+/// discharges at exit 0. `link` takes arbitrary main bytes, so a `::`-joined
+/// program name is reachable even though code generation cannot produce one.
 #[test]
-fn an_alias_a_program_function_already_carries_is_not_rewritten() {
+fn an_obligation_over_a_contested_root_alias_is_rejected_as_ambiguous() {
     // `double` and `twice` are two exports of one body, so `mathlib::double`
     // is recorded and `mathlib::twice` is the alias the section drops — and a
     // program function is named exactly that.
@@ -4442,14 +4443,51 @@ fn an_alias_a_program_function_already_carries_is_not_rewritten() {
         &main_with_names(&["double", "twice"], &["mathlib::twice"]),
         &applying("mathlib::twice"),
     );
+    let err = raw_link(&main, &[("mathlib", &aliased_export_lib_i32x2())], None)
+        .expect_err("a symbol naming two bodies at once must not link");
+
+    assert!(
+        matches!(
+            &err,
+            LinkError::AmbiguousObligationSymbol { symbol, carriers }
+                if symbol == "mathlib::twice" && carriers.len() == 2
+        ),
+        "expected the ambiguous-symbol rejection, got {err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("the program's own function at index 0"),
+        "the message must name the program's own function as a carrier; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("the body merged to satisfy `mathlib::twice`, at index 1"),
+        "and the merged body under the contested field, not the alias the section \
+         happened to record; got: {rendered}"
+    );
+}
+
+/// The same collision with no obligation over it links, unchanged.
+///
+/// A name two functions answer to only costs something when an obligation names
+/// it: nothing else in the artifact resolves a function by name. Rejecting the
+/// collision on its own would fail a link whose proof artifact is correct, which
+/// is the over-broad reading of the same rule.
+#[test]
+fn a_contested_root_alias_no_obligation_applies_still_links() {
+    // The collision of the test above, with the obligation moved onto the name
+    // the section does record — so the contested alias is present and unapplied.
+    let main = with_hspecs(
+        &main_with_names(&["double", "twice"], &["mathlib::twice"]),
+        &applying("mathlib::double"),
+    );
     let linked = raw_link(&main, &[("mathlib", &aliased_export_lib_i32x2())], None)
-        .expect("an obligation over the program's own function must link");
+        .expect("a contested alias no obligation applies must not fail the link");
     assert_valid(&linked);
 
     assert_eq!(
         sole_applied_symbol(&linked),
-        "mathlib::twice",
-        "the obligation must keep naming the function the section records it against"
+        "mathlib::double",
+        "the applied symbol is the recorded one and must be left alone"
     );
     let names = function_names(&linked);
     assert!(

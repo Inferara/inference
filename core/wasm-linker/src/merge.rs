@@ -268,7 +268,9 @@ struct Plan {
     root_symbols: BTreeMap<String, u32>,
     /// The main module's obligation payload as the output will carry it: every
     /// applied symbol naming an unrecorded root alias rewritten onto the name
-    /// the output's name section records for that body.
+    /// the output's name section records for that body — bar a contested one,
+    /// which is left as written and rejected by
+    /// [`Self::check_obligation_symbols`] instead.
     ///
     /// Held on the plan rather than re-derived in [`Self::emit`] so the symbols
     /// the post-merge check clears are the symbols the emitted bytes carry.
@@ -276,6 +278,18 @@ struct Plan {
     /// The distinct function symbols [`Self::hspecs`] applies, after that
     /// rewrite — the set [`Self::check_obligation_symbols`] must resolve.
     obligation_symbols: BTreeSet<String>,
+    /// Applied symbols that name a merged root the output's `name` section could
+    /// not record, against the output index of the body that root binds.
+    ///
+    /// A name map holds one name per function index, so a body satisfying
+    /// several imports leaves its other root names off the section. Such a name
+    /// is normally repaired by the alias rewrite in [`Self::build`]; it lands
+    /// here instead when some other function of the output is already named that
+    /// string, which leaves the symbol naming two bodies at once. This is the
+    /// carrier [`Self::check_obligation_symbols`] cannot read off the emitted
+    /// section, and adding it is what turns the collision into a rejection
+    /// rather than a silent choice between the two.
+    contested_root_aliases: BTreeMap<String, u32>,
     /// Per external module: `source_type_idx -> output type idx` for the types
     /// its merged closure references.
     external_type_remap: Vec<BTreeMap<u32, u32>>,
@@ -664,15 +678,30 @@ impl Plan {
         // name the section carries for that body, and collect the symbol set
         // the merged module must answer for.
         //
-        // The rewrite is a repair for a name the merge could not record, so an
-        // alias some function is already named is left out of it. Such a name is
-        // not dangling — it already resolves — and rewriting it would move a
-        // resolvable obligation onto a different body, silently, since the
-        // result then passes the check below with a single carrier. Dropping the
-        // alias instead leaves the symbol to resolve against the section like any
-        // other. `link` takes arbitrary main bytes, so this is reachable even
-        // though code generation cannot give one of the program's own functions
-        // a `::`-joined name.
+        // The rewrite is a repair for a name the merge could not record, and it
+        // applies only where the alias names nothing else. An alias some other
+        // function of the output is already named has two readings that are both
+        // genuine — the body an import bound under that field, and the function
+        // the section records under that string — and neither may be picked
+        // silently: rewriting moves the obligation onto the merged body, dropping
+        // the alias leaves it resolving against the other function, and whichever
+        // is wrong yields a *true* obligation about a body nobody wrote it about,
+        // at exit 0. So a contested alias is neither rewritten nor dropped. It is
+        // recorded against the root it binds, becoming a second carrier of the
+        // symbol, and the check that rejects any other two-carrier symbol rejects
+        // it as ambiguous — which is the one outcome that says what happened
+        // instead of guessing past it.
+        //
+        // Only a contested alias an obligation *applies* is recorded. One nothing
+        // names misresolves nothing, and rejecting it would fail a link whose
+        // proof artifact is correct. The applied set is what the rewrite returns,
+        // and a contested alias is left unrewritten, so a contested name an
+        // obligation applies reaches that set verbatim and no second traversal is
+        // needed to find it.
+        //
+        // `link` takes arbitrary main bytes, so a contested alias is reachable
+        // even though code generation cannot give one of the program's own
+        // functions a `::`-joined name.
         //
         // Re-validating is not ceremony: the payload arrived validated, but the
         // rewrite is this crate's own edit of it, and `encode` *panics* on a map
@@ -683,22 +712,35 @@ impl Plan {
             .map(|(_, name)| name)
             .collect();
         let mut hspecs = main.hspecs.clone();
+        let mut contested_root_aliases: BTreeMap<String, u32> = BTreeMap::new();
         let obligation_symbols = match &mut hspecs {
             Some(map) => {
-                let aliases: BTreeMap<&str, &str> = root_symbols
-                    .iter()
-                    .filter_map(|(root_name, out_idx)| {
-                        let canonical = *canonical_root.get(out_idx)?;
-                        (canonical != root_name && !carried.contains(root_name.as_str()))
-                            .then_some((root_name.as_str(), canonical))
-                    })
-                    .collect();
+                let mut aliases: BTreeMap<&str, &str> = BTreeMap::new();
+                let mut contested: BTreeMap<&str, u32> = BTreeMap::new();
+                for (root_name, out_idx) in &root_symbols {
+                    let Some(&canonical) = canonical_root.get(out_idx) else {
+                        continue;
+                    };
+                    if canonical == root_name.as_str() {
+                        continue;
+                    }
+                    if carried.contains(root_name.as_str()) {
+                        contested.insert(root_name.as_str(), *out_idx);
+                    } else {
+                        aliases.insert(root_name.as_str(), canonical);
+                    }
+                }
                 let symbols = canonicalize_applied_symbols(map, &aliases);
                 inference_hassert::validate(map).map_err(|e| {
                     LinkError::Parse(format!(
                         "inference.hspecs section, after rewriting merged-body aliases: {e}"
                     ))
                 })?;
+                for (root_name, out_idx) in contested {
+                    if symbols.contains(root_name) {
+                        contested_root_aliases.insert(root_name.to_string(), out_idx);
+                    }
+                }
                 symbols
             }
             None => BTreeSet::new(),
@@ -748,6 +790,7 @@ impl Plan {
             root_symbols,
             hspecs,
             obligation_symbols,
+            contested_root_aliases,
             external_type_remap,
             out_globals,
             external_global_remap,
@@ -1076,6 +1119,13 @@ impl Plan {
     /// program it was written about — and a *true* obligation about the wrong
     /// body is the worst outcome, because it discharges.
     ///
+    /// Carriers are read off that section, plus one the section cannot show: a
+    /// contested root alias binds a merged body under a name the section could
+    /// not record, so the symbol reaches that body as well as the function the
+    /// section names it against. [`Self::contested_root_aliases`] holds those,
+    /// and they are weighed here so the collision is reported rather than
+    /// resolved by whichever of the two meanings the lookup happens to reach.
+    ///
     /// The check belongs here rather than in the translator because this is the
     /// last phase that knows what the symbol was supposed to name: which imports
     /// were satisfied, from which logical module, under which export field, and
@@ -1114,11 +1164,19 @@ impl Plan {
         let entries = self.func_name_entries(main);
         let spec_funcs = self.merged_spec_func_indices(main)?;
         for symbol in &self.obligation_symbols {
-            let all: Vec<u32> = entries
+            let mut all: Vec<u32> = entries
                 .iter()
                 .filter(|(_, name)| *name == symbol)
                 .map(|(idx, _)| *idx)
                 .collect();
+            // A root name the section could not record still binds its body: an
+            // import asked the merge for it, so the symbol reaches that body as
+            // much as it reaches the function the section names. Only a contested
+            // one is held here, so this can only ever add a second carrier.
+            if let Some(&idx) = self.contested_root_aliases.get(symbol.as_str()) {
+                all.push(idx);
+                all.sort_unstable();
+            }
             let applicable: Vec<u32> = all
                 .iter()
                 .copied()
@@ -1138,7 +1196,7 @@ impl Plan {
                         symbol: symbol.clone(),
                         carriers: carriers
                             .iter()
-                            .map(|&idx| self.describe_function(main, externals, idx))
+                            .map(|&idx| self.describe_function(main, externals, symbol, idx))
                             .collect(),
                     });
                 }
@@ -1150,17 +1208,28 @@ impl Plan {
     /// Where the output function at `idx` came from, in the terms the user
     /// wrote: their own program, an import they declared, or a private function
     /// of a module they linked against.
+    ///
+    /// A merged body is reported under the import field `symbol` names whenever
+    /// that is one of its roots. A body satisfying several imports has several,
+    /// and describing it under the arbitrary least of them would answer a
+    /// question about one field by naming another.
     fn describe_function(
         &self,
         main: &ParsedModule,
         externals: &[ParsedModule],
+        symbol: &str,
         idx: u32,
     ) -> String {
         let merged_base = self.merged_base(main);
         if idx < merged_base {
             return format!("the program's own function at index {idx}");
         }
-        if let Some((root, _)) = self.root_symbols.iter().find(|(_, out)| **out == idx) {
+        let bound_root = self
+            .root_symbols
+            .iter()
+            .find(|(root, out)| **out == idx && root.as_str() == symbol)
+            .or_else(|| self.root_symbols.iter().find(|(_, out)| **out == idx));
+        if let Some((root, _)) = bound_root {
             return format!("the body merged to satisfy `{root}`, at index {idx}");
         }
         let module = self
