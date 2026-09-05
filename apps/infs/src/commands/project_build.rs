@@ -52,7 +52,7 @@ use std::process::{Command, Stdio};
 use crate::commands::build::{BuildMode, format_wasm_dep_arg};
 use crate::errors::InfsError;
 use crate::project::ProjectContext;
-use crate::project::manifest::{MANIFEST_FILE_NAME, MemoryConfig};
+use crate::project::manifest::{MANIFEST_FILE_NAME, MemoryConfig, VerificationConfig};
 use crate::toolchain::resolver::{ResolutionSource, find_infc_with_source};
 use inference_compiler_interface::{
     COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR, WasmFeatureName, render_feature_list,
@@ -128,6 +128,8 @@ use inference_compiler_interface::{
 /// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - the manifest requests `wasm-features` the resolved `infc` cannot honor
 /// - the manifest declares a `[memory]` table the resolved `infc` cannot honor
+/// - the manifest asks to adopt external specifications on a proof-artifact
+///   build and the resolved `infc` cannot honor the request
 /// - a `[wasm-dependencies]` key is not a well-formed logical module name
 /// - a resolved `[wasm-dependencies]` path is not valid UTF-8
 /// - lib dirs were passed and the current working directory cannot be determined
@@ -197,6 +199,14 @@ pub(crate) fn run_project_build(
     let features = ctx.manifest.build.resolved_wasm_features()?;
     forward_wasm_features(&mut cmd, compat, &features, Some(&manifest_path))?;
     forward_memory_layout(&mut cmd, compat, &ctx.manifest.memory, Some(&manifest_path))?;
+    forward_adopt_external_specs(
+        &mut cmd,
+        compat,
+        &ctx.manifest.verification,
+        generate_v_output,
+        mode,
+        Some(&manifest_path),
+    )?;
 
     let status = cmd
         .stdin(std::process::Stdio::inherit())
@@ -277,6 +287,19 @@ impl CompilerCompat {
     /// asked for.
     pub fn supports_memory_layout(self) -> bool {
         self.supports_abi_minor(3)
+    }
+
+    /// Whether the resolved `infc` is known to support the additive
+    /// `--adopt-external-specs` flag, which landed at ABI minor 4.
+    ///
+    /// The conservative reading matters most here of the four. An `infc` that
+    /// predates the flag cannot carry a library's obligations and cannot say it
+    /// did not, and the difference is which theorems the `.v` states — a missing
+    /// one looks exactly like a proof artifact that was never asked for the
+    /// obligation. Refusing to build beats writing a proof artifact whose
+    /// contents are not the ones the manifest asked for.
+    pub fn supports_adopt_external_specs(self) -> bool {
+        self.supports_abi_minor(4)
     }
 
     /// Whether the resolved `infc` is known to have the additive feature
@@ -405,6 +428,83 @@ pub(crate) fn forward_memory_layout(
     if let Some(stack_size) = memory.stack_size {
         cmd.arg("--stack-size").arg(stack_size.to_string());
     }
+    Ok(())
+}
+
+/// Appends `--adopt-external-specs` to `cmd` when the project asked for it and
+/// the command line being built asks `infc` for a proof artifact in a mode that
+/// can carry one, after confirming the resolved `infc` can honor the request,
+/// and echoes the decision to stdout.
+///
+/// The gate reads the two arguments `infs` itself forwards, which is the only
+/// thing `infs` knows about the build: the flag goes on when `-v` or `--mode
+/// proof` is on the command line, and never when `--mode compile` is. Those two
+/// clauses are not redundant. `-v` alone leaves the mode to `infc`, which
+/// resolves it to proof; an explicit `--mode compile -v` is a supported
+/// spelling that writes a `.v` for the executable module, and `infc` refuses
+/// `--adopt-external-specs` on it outright — so forwarding there would turn a
+/// manifest key into a hard build failure for a command line the user is
+/// entitled to run.
+///
+/// Withholding it is the right answer rather than a concession: a compile-mode
+/// build strips the program's own specification functions and emits no
+/// verification section, so there is nothing for a library's adopted
+/// obligations to join. The request is echoed as *not applied* whenever a `.v`
+/// is being written, because that is the build whose theorems the key asked to
+/// change, and the link's own dropped-obligations warning on it ends by
+/// prescribing the very key the project already set.
+///
+/// It deliberately keys on the wider signal than `[verification] output-dir`
+/// does, and the difference is not an inconsistency. Forwarding `--out-dir`
+/// under `-v`-alone would relocate `out/main.wasm` for every existing project —
+/// a change to where artifacts land — which is why `resolve_out_dir` refuses to.
+/// Forwarding this changes only which theorems the `.v` states, which is
+/// precisely what the key asked for, and withholding it is invisible in the
+/// output.
+///
+/// The mode test lives inside rather than at the call site so no caller can
+/// forward a proof-only flag onto a compile-mode command line: a project that
+/// sets the key must still be able to run a plain `infs build`, and every
+/// spelling of a compile-mode one.
+///
+/// # Errors
+///
+/// Returns a remediation-bearing error when the project asked for adoption on a
+/// proof-artifact build and the resolved `infc` predates the flag. The flag is
+/// never emitted blind.
+pub(crate) fn forward_adopt_external_specs(
+    cmd: &mut Command,
+    compat: CompilerCompat,
+    verification: &VerificationConfig,
+    generate_v_output: bool,
+    mode: Option<BuildMode>,
+    manifest_path: Option<&Path>,
+) -> Result<()> {
+    if !verification.adopt_external_specs {
+        return Ok(());
+    }
+    if mode == Some(BuildMode::Compile) {
+        if generate_v_output {
+            println!("external-spec adoption: not applied to a compile-mode build");
+        }
+        return Ok(());
+    }
+    if !generate_v_output && mode != Some(BuildMode::Proof) {
+        return Ok(());
+    }
+    if !compat.supports_adopt_external_specs() {
+        let manifest = manifest_path.map_or_else(
+            || String::from(MANIFEST_FILE_NAME),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "the resolved infc does not support `--adopt-external-specs` \
+             (requires infc ABI ≥ 1.4); update the toolchain or remove \
+             `adopt-external-specs` from the `[verification]` table in {manifest}."
+        );
+    }
+    println!("external-spec adoption: on");
+    cmd.arg("--adopt-external-specs");
     Ok(())
 }
 
@@ -1030,6 +1130,204 @@ mod project_tests {
             msg.contains(&manifest.display().to_string()),
             "the error must name which manifest to edit — single-file mode may \
              have found one several directories up; got: {msg}"
+        );
+        assert!(
+            args_of(&cmd).is_empty(),
+            "a refused request must leave no flag on the command"
+        );
+    }
+
+    /// A project that asked for adoption on a command line `infc` would not
+    /// resolve to a proof build forwards nothing, and never reaches the ABI
+    /// gate.
+    ///
+    /// This is what keeps `infs build` and `infs run` usable on a project that
+    /// set the key: `infc` refuses the flag outright on a compile-mode command
+    /// line, so forwarding it unconditionally would make the key break every
+    /// non-proof build of the project that declared it.
+    ///
+    /// `--mode compile -v` is the cell that makes the two clauses of the gate
+    /// separately load-bearing. It *is* a proof-artifact request — `infs` puts
+    /// `-v` on the command line — and it is still not a proof build, so a gate
+    /// that read only `generate_v_output` would hand `infc` a flag it rejects
+    /// and turn a manifest key into a failed build.
+    #[test]
+    fn forward_adopt_external_specs_appends_nothing_without_a_proof_request() {
+        let asked = VerificationConfig {
+            adopt_external_specs: true,
+            ..VerificationConfig::default()
+        };
+
+        // An infc that supports the flag: what withholds it is the mode this
+        // command line resolves to, not the toolchain.
+        let supports = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        for (generate_v_output, mode) in [
+            (false, None),
+            (false, Some(BuildMode::Compile)),
+            (true, Some(BuildMode::Compile)),
+        ] {
+            let mut cmd = Command::new("infc");
+            forward_adopt_external_specs(&mut cmd, supports, &asked, generate_v_output, mode, None)
+                .expect("a build that resolves to compile mode asks nothing of the compiler");
+            assert!(
+                args_of(&cmd).is_empty(),
+                "a compile-mode command line must not carry a proof-only flag                  (generate_v_output = {generate_v_output}, mode = {mode:?})"
+            );
+        }
+
+        // And the gate is never reached, so an infc that predates the flag is
+        // not consulted and cannot refuse the build.
+        let predates_the_flag = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 3)),
+        };
+        for (generate_v_output, mode) in [
+            (false, None),
+            (false, Some(BuildMode::Compile)),
+            (true, Some(BuildMode::Compile)),
+        ] {
+            let mut cmd = Command::new("infc");
+            forward_adopt_external_specs(
+                &mut cmd,
+                predates_the_flag,
+                &asked,
+                generate_v_output,
+                mode,
+                None,
+            )
+            .expect("an unforwarded request asks nothing of the compiler");
+            assert!(args_of(&cmd).is_empty());
+        }
+    }
+
+    /// A project that did not ask forwards nothing even on a proof build, and
+    /// so never reaches the ABI gate either.
+    #[test]
+    fn forward_adopt_external_specs_appends_nothing_when_the_project_did_not_ask() {
+        let mut cmd = Command::new("infc");
+        let supports = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        forward_adopt_external_specs(
+            &mut cmd,
+            supports,
+            &VerificationConfig::default(),
+            true,
+            Some(BuildMode::Proof),
+            None,
+        )
+        .expect("a project that asked for nothing asks nothing of the compiler");
+        assert!(
+            args_of(&cmd).is_empty(),
+            "adoption is opt-in; the default must put no flag on the command"
+        );
+
+        // And the ABI gate is never reached, so a project that asked for
+        // nothing still builds against an infc that predates the flag.
+        let mut cmd = Command::new("infc");
+        let predates_the_flag = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 3)),
+        };
+        forward_adopt_external_specs(
+            &mut cmd,
+            predates_the_flag,
+            &VerificationConfig::default(),
+            true,
+            Some(BuildMode::Proof),
+            None,
+        )
+        .expect("an unforwarded request must not consult the toolchain");
+        assert!(args_of(&cmd).is_empty());
+    }
+
+    /// Both spellings of a proof-artifact request forward the flag, and so does
+    /// a same-build `infc` whose ABI was never probed.
+    ///
+    /// `-v` alone counts deliberately: such a build writes a `.v` whose theorems
+    /// are exactly what the key asked to change, and withholding the flag there
+    /// would leave the manifest silently unhonored.
+    #[test]
+    fn forward_adopt_external_specs_appends_on_every_proof_artifact_request() {
+        let asked = VerificationConfig {
+            adopt_external_specs: true,
+            ..VerificationConfig::default()
+        };
+        let supports = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 4)),
+        };
+
+        let mut cmd = Command::new("infc");
+        forward_adopt_external_specs(&mut cmd, supports, &asked, true, None, None)
+            .expect("ABI minor 4 supports the flag");
+        assert_eq!(args_of(&cmd), ["--adopt-external-specs"]);
+
+        let mut cmd = Command::new("infc");
+        forward_adopt_external_specs(
+            &mut cmd,
+            supports,
+            &asked,
+            false,
+            Some(BuildMode::Proof),
+            None,
+        )
+        .expect("ABI minor 4 supports the flag");
+        assert_eq!(args_of(&cmd), ["--adopt-external-specs"]);
+
+        let same_build = CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        };
+        let mut cmd = Command::new("infc");
+        forward_adopt_external_specs(&mut cmd, same_build, &asked, true, None, None)
+            .expect("a same-build infc supports the flag");
+        assert_eq!(args_of(&cmd), ["--adopt-external-specs"]);
+    }
+
+    /// The gate refuses rather than forwards, and leaves the command untouched so
+    /// a caller that mishandled the error could not still spawn with the flag.
+    ///
+    /// Refusing is the whole point: an `infc` that predates the flag would write
+    /// a `.v` missing the theorems the manifest asked for, and nothing in the
+    /// artifact would say a request had been dropped.
+    #[test]
+    fn forward_adopt_external_specs_refuses_an_infc_that_predates_the_flag() {
+        let mut cmd = Command::new("infc");
+        let minor_three = CompilerCompat {
+            commit_matched: false,
+            abi: Some((COMPILER_ABI_MAJOR, 3)),
+        };
+        let manifest = Path::new("/projects/demo").join(MANIFEST_FILE_NAME);
+        let err = forward_adopt_external_specs(
+            &mut cmd,
+            minor_three,
+            &VerificationConfig {
+                adopt_external_specs: true,
+                ..VerificationConfig::default()
+            },
+            true,
+            None,
+            Some(&manifest),
+        )
+        .expect_err("ABI minor 3 predates --adopt-external-specs");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--adopt-external-specs") && msg.contains("1.4"),
+            "the error must name the flag and the required ABI, got: {msg}"
+        );
+        assert!(
+            msg.contains("update the toolchain") && msg.contains("adopt-external-specs")
+                && msg.contains("[verification]"),
+            "the error must offer both remediations, got: {msg}"
+        );
+        assert!(
+            msg.contains(&manifest.display().to_string()),
+            "the error must name which manifest to edit, got: {msg}"
         );
         assert!(
             args_of(&cmd).is_empty(),

@@ -50,6 +50,7 @@
 //! infc example.inf -v           # implies --mode proof → both out/example.wasm and out/example.v
 //! infc example.inf --mode proof # proof mode (keeps specs); implies -v → writes both files
 //! infc example.inf --mode compile -v # opt back into stripped-spec V output
+//! infc example.inf -v --adopt-external-specs # also carry linked libraries' obligations
 //! ```
 //!
 //! Supplying any explicit phase flag overrides the default:
@@ -70,6 +71,21 @@
 //! The `--out-dir <path>` flag overrides the directory (still relative to CWD
 //! unless an absolute path is given); it applies to both the `.wasm` and the
 //! `.v`. The output directory is created automatically if it doesn't exist.
+//!
+//! ## Linked Libraries' Proof Obligations
+//!
+//! A library compiled with `--mode proof` ships the obligations its author
+//! stated about its own code. Linking it folds in only the executable bodies a
+//! satisfied import reaches, so those obligations are not part of the merged
+//! module and a build that writes a `.v` reports that they were left behind.
+//!
+//! `--adopt-external-specs` carries each contributing library's universal
+//! (`forall`) obligations into the program's own verification sections instead,
+//! namespaced under the logical module the library is bound as, and reports the
+//! reachability (`exists`/`unique`) obligations it could not carry. An adopted
+//! obligation is a claim to be re-proved against the merged module, never a
+//! proof imported from the library. The flag requires proof mode; pairing it
+//! with a compile-mode build is an error rather than a silent no-op.
 //!
 //! ## Error Handling
 //!
@@ -154,7 +170,8 @@ use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternals, SearchPath,
 };
 use inference::{
-    AnalysisOptions, analyze_with_options, link_with_warnings, parse_project, type_check, wasm_to_v,
+    AnalysisOptions, ExternalSpecPolicy, LinkOptions, analyze_with_options, link_with_options,
+    parse_project, type_check, wasm_to_v,
 };
 use inference_wasm_codegen::{EmitFeatures, MemoryLayout, MemoryLayoutSource};
 use parser::{Cli, CliMode};
@@ -268,6 +285,38 @@ pub(crate) fn normalize_args(args: &mut Cli) {
     args.mode = Some(effective_mode);
     if matches!(effective_mode, CliMode::Proof) {
         args.generate_v_output = true;
+    }
+}
+
+/// The external-specification policy a build runs the merge under.
+///
+/// The warning is keyed on whether this build writes a proof artifact rather
+/// than on the mode alone, because `--mode compile -v` is explicitly supported
+/// and `.v` generation is gated on `generate_v_output` alone: such a build does
+/// write a `.v` that silently omits a linked library's obligations, which is the
+/// defect this policy exists to retire. A build that writes no `.v` gets
+/// [`ExternalSpecPolicy::Ignore`], because a report about obligations nothing
+/// would have consumed is noise on every compile of every program that links a
+/// proof-mode library.
+///
+/// The compile-mode `adopt` pair is unreachable — [`run`] refuses it before any
+/// phase — and `Ignore` is the fail-safe reading of it regardless, since writing
+/// verification sections into an artifact that carries none of its own is the
+/// one outcome that must not happen by accident. It keeps its own arm rather
+/// than being folded into the catch-all it agrees with today: the two say
+/// different things, and merging them would leave the fail-safe reading of an
+/// unreachable request depending on an unrelated arm's value.
+#[allow(clippy::match_same_arms)]
+fn external_spec_policy(
+    mode: CliMode,
+    generate_v_output: bool,
+    adopt: bool,
+) -> ExternalSpecPolicy {
+    match (mode, adopt) {
+        (CliMode::Proof, true) => ExternalSpecPolicy::Adopt,
+        (CliMode::Compile, true) => ExternalSpecPolicy::Ignore,
+        (_, false) if generate_v_output => ExternalSpecPolicy::Warn,
+        (_, false) => ExternalSpecPolicy::Ignore,
     }
 }
 
@@ -577,6 +626,20 @@ fn run() {
 
     normalize_args(&mut args);
 
+    // Refuse a proof-only request against a compile-mode build here, where the
+    // effective mode is already resolved, so `--adopt-external-specs` with
+    // neither `-v` nor `--mode` is refused exactly like `--mode compile
+    // --adopt-external-specs`. Before any phase runs, so nothing is written.
+    if args.adopt_external_specs && matches!(args.mode, Some(CliMode::Compile)) {
+        eprintln!(
+            "Error: --adopt-external-specs requires proof mode; this build resolves to compile \
+             mode, which strips the program's own specification functions and emits no \
+             verification section for a linked library's obligations to join. Pass -v (or --mode \
+             proof), or drop --adopt-external-specs."
+        );
+        process::exit(1);
+    }
+
     // Resolve the requested instruction set before any phase runs: a misspelled
     // feature is a mistake about the artifact, and reporting it after a full
     // parse and type check would bury it under work the user has to discard
@@ -759,10 +822,16 @@ fn run() {
         // `externals.contracts`, so each merged body is held to what its
         // `external fn` says it may write through — and an import no declaration
         // covers is held to writing nothing at all.
-        let linked = match link_with_warnings(
+        let external_specs = external_spec_policy(
+            args.mode.unwrap_or(CliMode::Compile),
+            args.generate_v_output,
+            args.adopt_external_specs,
+        );
+        let linked = match link_with_options(
             codegen_output.wasm(),
             &external_bytes,
             Some(&externals.contracts),
+            &LinkOptions { external_specs },
         ) {
             Ok(linked) => linked,
             Err(e) => {
@@ -877,9 +946,52 @@ mod tests {
             wasm_features: Vec::new(),
             memory_pages: None,
             stack_size: None,
+            adopt_external_specs: false,
             commit_hash: false,
             abi_version: false,
         }
+    }
+
+    /// Every cell of the external-specification policy, so no arm can be
+    /// widened or narrowed without a failure naming the pairing it changed.
+    ///
+    /// The two `false` rows are the ones that carry the design: the report is
+    /// owed to a build that writes a `.v`, whatever mode produced it, and to no
+    /// other. Keying the policy on the mode instead would silence
+    /// `--mode compile -v`, which does write a `.v` that omits the library's
+    /// obligations, and would report on a plain compile that consumes nothing.
+    #[test]
+    fn external_spec_policy_maps_every_cell() {
+        assert_eq!(
+            external_spec_policy(CliMode::Proof, true, true),
+            ExternalSpecPolicy::Adopt,
+            "a proof build that asked to adopt must adopt"
+        );
+        assert_eq!(
+            external_spec_policy(CliMode::Proof, true, false),
+            ExternalSpecPolicy::Warn,
+            "a proof build that did not ask must be told what it did not get"
+        );
+        assert_eq!(
+            external_spec_policy(CliMode::Compile, true, false),
+            ExternalSpecPolicy::Warn,
+            "`--mode compile -v` writes a .v, so it is owed the same report"
+        );
+        assert_eq!(
+            external_spec_policy(CliMode::Compile, false, false),
+            ExternalSpecPolicy::Ignore,
+            "a build that writes no .v must not report obligations nothing would consume"
+        );
+        assert_eq!(
+            external_spec_policy(CliMode::Proof, false, false),
+            ExternalSpecPolicy::Ignore,
+            "the report follows the artifact, not the mode"
+        );
+        assert_eq!(
+            external_spec_policy(CliMode::Compile, false, true),
+            ExternalSpecPolicy::Ignore,
+            "the unreachable compile-mode adopt pairing must fail safe"
+        );
     }
 
     #[test]

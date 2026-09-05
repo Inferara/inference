@@ -7368,3 +7368,197 @@ fn project_build_rejects_an_unknown_memory_key() {
             .and(predicate::str::contains("stack-size")),
     );
 }
+
+// Adoption of a linked library's proof obligations
+
+/// A `[verification]` table that asks for adoption, for projects whose build
+/// mode the test itself decides.
+const ADOPTING_VERIFICATION: &str = "[verification]\nadopt-external-specs = true\n";
+
+/// A project whose manifest asks for adoption forwards the request as soon as
+/// the command line asks `infc` for a `.v`, even with a compile-mode manifest.
+///
+/// This is the deliberate divergence from `output-dir`, which is honored only
+/// in effective-proof mode: relocating artifacts under `-v` alone would change
+/// where every existing project's files land, while adopting under `-v` alone
+/// changes only which theorems the `.v` states — which is exactly what the key
+/// asked for. The echo is asserted rather than the `.v`, because what is under
+/// test here is the forwarding decision, not the merge.
+#[test]
+fn a_v_only_project_build_forwards_adoption() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        &format!("[build]\nmode = \"compile\"\n\n{ADOPTING_VERIFICATION}"),
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on"));
+}
+
+/// An explicit `--mode compile -v` on an adopting project builds, and says the
+/// request was not applied rather than forwarding a flag `infc` refuses.
+///
+/// `--mode compile -v` is a supported spelling that writes a `.v` for the
+/// executable module, and a compile-mode build strips the program's own
+/// specification functions and emits no verification section — so there is
+/// nothing a library's obligations could join, and `infc` rejects
+/// `--adopt-external-specs` outright. Forwarding it would turn a manifest key
+/// into a build the user cannot run. The note is asserted alongside the exit
+/// code because the link's own dropped-obligations warning on this build ends
+/// by prescribing the key the project already set; without it the user is told
+/// to do a thing they have done.
+#[test]
+fn a_compile_mode_project_build_with_a_v_does_not_forward_adoption() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, ADOPTING_VERIFICATION);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--mode")
+        .arg("compile")
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on").not())
+        .stdout(predicate::str::contains(
+            "external-spec adoption: not applied to a compile-mode build",
+        ));
+    assert!(
+        temp.child("out").child("main.v").path().exists(),
+        "a compile-mode `-v` build must still write the .v it was asked for"
+    );
+}
+
+/// A project that asks for adoption still builds without a proof artifact, and
+/// the request is silently not forwarded.
+///
+/// `infc` refuses the flag on a compile-mode command line, so forwarding it
+/// here would turn the manifest key into a project that cannot run a plain
+/// `infs build` at all. The successful exit is therefore as much of the
+/// assertion as the absent echo.
+#[test]
+fn a_plain_project_build_does_not_forward_adoption() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, ADOPTING_VERIFICATION);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on").not());
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "a project that asked for adoption must still build an executable"
+    );
+}
+
+/// `infs run` never forwards adoption: it forces a compile-mode build with no
+/// proof artifact, so there is nothing for a library's obligations to join.
+#[test]
+fn infs_run_never_forwards_adoption() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, ADOPTING_VERIFICATION);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on").not());
+}
+
+/// A single-file build never reads `[verification]`, so a source path inside an
+/// adopting project neither forwards the flag nor fails.
+///
+/// The table is project-mode only — both of its keys — and a single-file build
+/// that needs adoption passes `infc --adopt-external-specs` directly.
+#[test]
+fn a_single_file_build_never_reads_the_verification_table() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, ADOPTING_VERIFICATION);
+    let entry = temp.child("src").child("main.inf");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(entry.path())
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on").not());
+}
+
+/// A proof-mode project that asks for adoption builds end to end against a real
+/// `infc`, echoing the decision and writing both artifacts.
+///
+/// The whole chain is what is under test: the manifest key, the ABI gate, the
+/// forwarded flag, and an `infc` that accepts it. A gate that forwarded to an
+/// `infc` unable to honor the request would fail here at the spawn.
+#[test]
+fn infs_build_on_an_adopting_project_succeeds_end_to_end() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        &format!("[build]\nmode = \"proof\"\n\n{ADOPTING_VERIFICATION}"),
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("external-spec adoption: on"));
+
+    assert!(
+        temp.child("proofs").child("main.v").path().exists(),
+        "a proof-mode project build must still write its .v"
+    );
+}

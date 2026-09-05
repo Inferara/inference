@@ -83,6 +83,11 @@
 //! `[wasm-dependencies]` is therefore resolved on every compilation path: both
 //! single-file paths through [`manifest_wasm_dependencies`], and both project
 //! paths off the discovered [`ProjectContext`].
+//!
+//! `[verification]` is project-mode only — both keys. A single-file build never
+//! reads the table, so it neither relocates its artifacts nor adopts a linked
+//! library's obligations; a single-file build that needs the latter passes
+//! `infc --adopt-external-specs` directly.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -793,6 +798,7 @@ mod tests {
         // so out/main.wasm is never relocated into proofs/.
         let verification = VerificationConfig {
             output_dir: String::from("artifacts"),
+            ..VerificationConfig::default()
         };
         assert_eq!(resolve_out_dir(None, &verification).unwrap(), None);
         assert_eq!(
@@ -815,6 +821,7 @@ mod tests {
     fn proof_mode_forwards_custom_output_dir() {
         let verification = VerificationConfig {
             output_dir: String::from("artifacts/"),
+            ..VerificationConfig::default()
         };
         assert_eq!(
             resolve_out_dir(Some(BuildMode::Proof), &verification).unwrap(),
@@ -829,6 +836,7 @@ mod tests {
         let abs = if cfg!(windows) { r"C:\x" } else { "/x" };
         let verification = VerificationConfig {
             output_dir: String::from(abs),
+            ..VerificationConfig::default()
         };
         assert!(resolve_out_dir(Some(BuildMode::Proof), &verification).is_err());
         assert!(
