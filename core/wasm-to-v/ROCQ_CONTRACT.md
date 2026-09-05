@@ -913,6 +913,13 @@ static-merge linker carries an `inference.hspecs` section verbatim
 (index-free) precisely so this resolution can happen once, post-link,
 when the final function layout is known.
 
+An **adopted** obligation is resolved twice: once against the library's
+own name section, to find which of its functions the library meant, and
+once — implicitly — against the merged module, because the linker
+rewrites the symbol to the exact string the merged `name` section carries
+for that body and then clears it through the same post-merge check every
+one of the program's own symbols passes.
+
 Two producers write those strings into **one** name section, and an
 obligation may name either. They are held apart by a character the
 Inference identifier grammar cannot produce, so no program can be written
@@ -951,6 +958,17 @@ An obligation about a linked external therefore resolves only against
 the **merged** module. Translating the compiler's direct output instead
 leaves the symbol naming an import, which `resolve_app_symbols` rejects
 with a message naming the missing link step.
+
+A third string shape appears in `inference.hspecs` but never in the name
+section: an **adopted** external specification's own entry symbol, which
+the linker writes as `mathlib::#spec#DoubleSpec.doubles` — a second
+`#spec#` mark after the module prefix. Only universal obligations are
+adopted, and a universal entry's own `fn_symbol` is not resolved against
+the module (only `classify_reachability_targets` resolves an entry
+symbol, and only for `exists`/`unique`), so nothing looks this string up.
+The mark exists so that a later reader cannot mistake it for one of that
+module's merged bodies, and the linker refuses a merge in which the
+string it would write is one the output's name section already carries.
 
 None of these separators survives into the `.v`:
 `sanitize_rocq_identifier` maps every byte outside `[A-Za-z0-9_]` to `_`
@@ -1532,6 +1550,32 @@ therefore establishes type-checking, never truth.
 Two custom sections carry proof-mode metadata through codegen → linker →
 `wasm-to-v`, emitted in that order in `finish_and_take` (`hspecs`
 directly after `spec_funcs`, both after the `name` section):
+
+A **linked library's** sections travel differently from the main module's.
+The static merge does not carry a library's sections at all by default,
+and carries its universal obligations only when the build asked to adopt
+them (`infc --adopt-external-specs`). An adopted specification enters the
+merged module's own sections under
+`<logical module>_<library's spec name>`, with an **empty**
+`inference.spec_funcs` index list — the library's specification function
+did not cross the merge — and with every applied symbol rewritten to the
+merged body's `name`-section string. An empty index list is well-formed
+for both decoders and now has two producers: code generation, for a
+user-authored `spec S { }` with no inner definitions, and the linker, for
+an adopted specification. It is the correct shape for a universal
+obligation: `omitted`/`retained` gain nothing from it, so the applied
+merged body stays in the module record; `sorted_spec_names` still emits
+the spec's `_hspec{k}` / `_specs` / `valid_` grammar from the obligations
+alone; and `ValidSpec` is discharged denotationally without reducing a
+specification body. The cross-invariant below is satisfied by
+construction, because the adopted key is written into both sections at
+once — and the linker checks the *library's* own instance of that
+invariant before adopting from it, so a library whose two sections
+disagree cannot launder its inconsistency into a merged module. Only
+universal obligations are adopted; a reachability obligation resolves its
+`reach_func` through the name section
+(`classify_reachability_targets`) and an adopted one would name a
+function the merged module does not contain.
 
 ### `inference.spec_funcs` (unchanged)
 
