@@ -365,15 +365,15 @@ fn abi_version_flag_prints_and_exits() {
 }
 
 /// Pins the ABI version string to the literal value introduced for the
-/// `--memory-pages` / `--stack-size` flags. The `abi_version_flag_prints_and_exits`
+/// `--adopt-external-specs` flag. The `abi_version_flag_prints_and_exits`
 /// test above checks the binary against the shared constant; this one
-/// additionally asserts the concrete `1.3` so an accidental constant change is
+/// additionally asserts the concrete `1.4` so an accidental constant change is
 /// caught here too.
 ///
 /// Uses an exact trimmed equality (not `contains`) so a near-miss such as
-/// "11.3" or "1.30" — which would satisfy a substring match — cannot pass.
+/// "11.4" or "1.40" — which would satisfy a substring match — cannot pass.
 #[test]
-fn abi_version_is_one_dot_three() {
+fn abi_version_is_one_dot_four() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.arg("--abi-version");
     let assert = cmd.assert().success();
@@ -381,8 +381,8 @@ fn abi_version_is_one_dot_three() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.trim(),
-        "1.3",
-        "ABI version must be exactly 1.3, not merely contain it"
+        "1.4",
+        "ABI version must be exactly 1.4, not merely contain it"
     );
 }
 
@@ -2642,5 +2642,269 @@ fn the_same_external_in_a_single_page_build_merges_without_warning() {
     assert!(
         wat.contains("(memory (;0;) 1 1)"),
         "the silence must come from a one-page reconciled memory:\n{wat}"
+    );
+}
+
+// Adoption of a linked library's own proof obligations.
+//
+// The linker's own suite pins when an obligation is carried, dropped, or
+// refused. What only a real process can show is which policy the driver picks
+// for a given command line, that the refusal happens before anything is
+// written, and that the report and the adopted theorem reach the user through
+// the two channels they actually read: stderr and the emitted `.v`.
+
+/// A program with no external bindings, so a rejection of the flag is
+/// attributable to the flag alone and to nothing about linking.
+const NO_EXTERNALS_SOURCE: &str = "\
+pub fn main() -> i32 {
+    return 7;
+}
+";
+
+/// Stages `spec_adopted_extern.inf` against a proof-mode build of the library
+/// it binds, returning the temp directory, the entry path, and the
+/// `--wasm-dep` value binding `mathlib` to the compiled library.
+///
+/// The library is compiled in proof mode because that is the only build that
+/// carries the verification sections at issue: a compile-mode library ships
+/// neither, so there would be nothing to report and nothing to adopt.
+fn adopting_project() -> (assert_fs::TempDir, std::path::PathBuf, String) {
+    let temp = assert_fs::TempDir::new().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(example_file("spec_adopted_extern_mathlib.inf"))
+        .arg("--mode")
+        .arg("proof")
+        .assert()
+        .success();
+    let lib = temp.child("out").child("spec_adopted_extern_mathlib.wasm");
+    assert!(
+        lib.path().exists(),
+        "the library fixture must build before anything links it"
+    );
+    let dep = format!(
+        "mathlib={}",
+        lib.path().to_str().expect("temp paths are UTF-8")
+    );
+    (temp, example_file("spec_adopted_extern.inf"), dep)
+}
+
+/// The `.v` the entry point writes under a build staged by [`adopting_project`].
+fn adopted_v_text(temp: &assert_fs::TempDir) -> String {
+    let v = temp.child("out").child("spec_adopted_extern.v");
+    assert!(v.path().exists(), "a -v build must write the .v");
+    std::fs::read_to_string(v.path()).expect("the emitted .v is UTF-8")
+}
+
+/// `--adopt-external-specs` on a build that resolves to compile mode is refused
+/// before any phase runs, in all three ways such a build can be spelled.
+///
+/// The absence of `out/` is asserted alongside the exit code because the two
+/// halves fail independently: a check placed after the artifact write would
+/// still exit 1 while leaving a `.wasm` on disk that no verification section
+/// describes.
+#[test]
+fn adopt_external_specs_requires_proof_mode() {
+    for extra in [
+        vec!["--mode", "compile"],
+        vec![],
+        vec!["--parse"],
+    ] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(temp.path(), "main.inf", NO_EXTERNALS_SOURCE);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path())
+            .arg(&entry)
+            .arg("--adopt-external-specs");
+        for arg in &extra {
+            cmd.arg(arg);
+        }
+
+        let assert = cmd.assert().code(1);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("--adopt-external-specs requires proof mode"),
+            "the refusal must name the flag and the requirement ({extra:?}), got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("this build resolves to compile mode"),
+            "the refusal must say what this build resolved to ({extra:?}), got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Pass -v (or --mode proof)"),
+            "the refusal must carry its repair ({extra:?}), got:\n{stderr}"
+        );
+        assert!(
+            !temp.child("out").path().exists(),
+            "the refusal must precede every phase, so no artifact directory exists ({extra:?})"
+        );
+    }
+}
+
+/// The same flag on a build that resolves to proof mode is accepted, whether
+/// the mode was reached through `-v` or named outright.
+///
+/// The `--parse` pairing is accepted deliberately: the rule is about the mode,
+/// not about which phases run, and `normalize_args` already reports that no
+/// `.v` will be written for a parse-only proof build.
+#[test]
+fn adopt_external_specs_is_accepted_in_proof_mode() {
+    for extra in [vec!["-v"], vec!["--mode", "proof", "--parse"]] {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(temp.path(), "main.inf", NO_EXTERNALS_SOURCE);
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path())
+            .arg(&entry)
+            .arg("--adopt-external-specs");
+        for arg in &extra {
+            cmd.arg(arg);
+        }
+        cmd.assert().success();
+    }
+}
+
+/// A proof build that asks for adoption carries the library's own universal
+/// obligation into its `.v`, under a key namespaced by the logical module.
+///
+/// The theorem is asserted, not merely the definition: a `_specs` list nothing
+/// states a `ValidSpec` over would leave the obligation in the artifact and out
+/// of the proof.
+#[test]
+fn a_proof_build_adopts_and_the_v_carries_the_theorem() {
+    let (temp, entry, dep) = adopting_project();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("-v")
+        .arg("--adopt-external-specs")
+        .arg("--wasm-dep")
+        .arg(&dep)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module(s)"));
+
+    let v = adopted_v_text(&temp);
+    assert!(
+        v.contains("mathlib_ScaleSpec_specs"),
+        "the adopted obligation must reach the .v under its namespaced key:\n{v}"
+    );
+    assert!(
+        v.contains("ValidSpec"),
+        "an adopted obligation must be stated as a theorem, not merely listed:\n{v}"
+    );
+}
+
+/// The same inputs without the flag warn on stderr and carry nothing.
+///
+/// This is the partner that makes the test above attributable: a driver that
+/// adopted unconditionally would satisfy it while ignoring the flag entirely.
+#[test]
+fn a_proof_build_without_the_flag_warns_on_stderr() {
+    let (temp, entry, dep) = adopting_project();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("-v")
+        .arg("--wasm-dep")
+        .arg(&dep)
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("linked module `mathlib` ships proof obligations of its own"),
+        "the report must name the library whose obligations were left behind, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--adopt-external-specs"),
+        "the report must carry the opt-in it is telling the reader about, got:\n{stderr}"
+    );
+
+    let v = adopted_v_text(&temp);
+    assert!(
+        !v.contains("mathlib_ScaleSpec"),
+        "without the flag the library's obligation must not be in the .v:\n{v}"
+    );
+}
+
+/// `--mode compile -v` writes a `.v` and is therefore owed the same report.
+///
+/// The policy follows the artifact, not the mode: this build's `.v` omits the
+/// library's obligations exactly as a proof-mode one would, so keying the
+/// report on the mode would silence it for the build that needs it most.
+#[test]
+fn a_compile_mode_v_build_still_warns() {
+    let (temp, entry, dep) = adopting_project();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("--mode")
+        .arg("compile")
+        .arg("-v")
+        .arg("--wasm-dep")
+        .arg(&dep)
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("linked module `mathlib` ships proof obligations of its own"),
+        "a compile-mode build that writes a .v is owed the report too, got:\n{stderr}"
+    );
+    assert!(
+        temp.child("out").child("spec_adopted_extern.v").path().exists(),
+        "the report is owed precisely because this build writes a .v"
+    );
+}
+
+/// A build that writes no `.v` links the same library in silence.
+///
+/// Nothing would have consumed the obligations, so reporting them would put a
+/// warning on every compile of every program that links a proof-mode library.
+#[test]
+fn a_compile_build_without_v_is_silent() {
+    let (temp, entry, dep) = adopting_project();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .current_dir(temp.path())
+        .arg(&entry)
+        .arg("--wasm-dep")
+        .arg(&dep)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked 1 external module(s)"));
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("ships proof obligations"),
+        "a build that writes no .v must link the same library silently, got:\n{stderr}"
+    );
+}
+
+/// `--help` documents the flag, so a user can find the opt-in the warning names.
+///
+/// The help text is whitespace-normalized before matching because clap rewraps
+/// it to the terminal width, which would otherwise make the assertion depend on
+/// where a line happened to break.
+#[test]
+fn help_names_the_adoption_flag() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("infc"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let flowed = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flowed.contains("--adopt-external-specs"),
+        "the flag must appear in --help, got:\n{stdout}"
+    );
+    assert!(
+        flowed.contains("Carry a linked library's own universal proof obligations"),
+        "--help must say what the flag does, got:\n{stdout}"
     );
 }

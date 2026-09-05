@@ -38,6 +38,7 @@
 //!
 //! [verification]
 //! output-dir = "proofs/"  # honored only in proof mode
+//! adopt-external-specs = false    # carry linked libraries' universal obligations
 //! ```
 //!
 //! ## Unknown Keys
@@ -552,21 +553,37 @@ pub struct VerificationConfig {
     /// Output directory for generated Rocq proofs.
     #[serde(default = "default_output_dir", rename = "output-dir")]
     pub output_dir: String,
+
+    /// Carry a linked library's own universal proof obligations into this
+    /// project's proof artifact.
+    ///
+    /// Off by default: a library's obligations describe the library, and a build
+    /// that adopts them is asking to prove them here. Honored only for a build
+    /// that resolves to proof mode (`-v`, or `--mode proof`), and withheld with
+    /// a note from an explicit `--mode compile -v`: a compile-mode build emits
+    /// no verification section for them to join.
+    #[serde(default, rename = "adopt-external-specs")]
+    pub adopt_external_specs: bool,
 }
 
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
             output_dir: default_output_dir(),
+            adopt_external_specs: false,
         }
     }
 }
 
 impl VerificationConfig {
     /// Returns true if this is the default configuration.
+    ///
+    /// Every key belongs in this test, not just the first: it is the
+    /// `skip_serializing_if` for the whole `[verification]` table, so a key left
+    /// out here is a key silently deleted from a manifest on any write path.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.output_dir == default_output_dir()
+        self.output_dir == default_output_dir() && !self.adopt_external_specs
     }
 
     /// Normalizes the configured `output-dir` into a relative [`PathBuf`]
@@ -1004,6 +1021,7 @@ mod tests {
 
         let config = VerificationConfig {
             output_dir: String::from("custom/"),
+            ..VerificationConfig::default()
         };
         assert!(!config.is_default());
     }
@@ -1487,6 +1505,7 @@ mode = "Proof"
     fn normalized_output_dir_strips_trailing_separator() {
         let config = VerificationConfig {
             output_dir: String::from("proofs/"),
+            ..VerificationConfig::default()
         };
         assert_eq!(
             config.normalized_output_dir().unwrap(),
@@ -1498,6 +1517,7 @@ mode = "Proof"
     fn normalized_output_dir_accepts_nested_relative() {
         let config = VerificationConfig {
             output_dir: String::from("build/artifacts"),
+            ..VerificationConfig::default()
         };
         assert_eq!(
             config.normalized_output_dir().unwrap(),
@@ -1518,6 +1538,7 @@ mode = "Proof"
         };
         let config = VerificationConfig {
             output_dir: String::from(abs),
+            ..VerificationConfig::default()
         };
         let err = config.normalized_output_dir().unwrap_err();
         let msg = err.to_string();
@@ -1532,6 +1553,7 @@ mode = "Proof"
     fn normalized_output_dir_rejects_empty() {
         let config = VerificationConfig {
             output_dir: String::from("   "),
+            ..VerificationConfig::default()
         };
         assert!(
             config.normalized_output_dir().is_err(),
@@ -1543,6 +1565,7 @@ mode = "Proof"
     fn normalized_output_dir_accepts_curdir_prefix() {
         let config = VerificationConfig {
             output_dir: String::from("./proofs"),
+            ..VerificationConfig::default()
         };
         assert_eq!(
             config.normalized_output_dir().unwrap(),
@@ -1555,6 +1578,7 @@ mode = "Proof"
     fn normalized_output_dir_rejects_leading_parent_traversal() {
         let config = VerificationConfig {
             output_dir: String::from("../proofs"),
+            ..VerificationConfig::default()
         };
         let err = config.normalized_output_dir().unwrap_err();
         assert!(
@@ -1567,6 +1591,7 @@ mode = "Proof"
     fn normalized_output_dir_rejects_trailing_parent_traversal() {
         let config = VerificationConfig {
             output_dir: String::from("proofs/../.."),
+            ..VerificationConfig::default()
         };
         assert!(
             config.normalized_output_dir().is_err(),
@@ -1580,6 +1605,7 @@ mode = "Proof"
         // rather than resolve it: resolution is symlink-unsound.
         let config = VerificationConfig {
             output_dir: String::from("a/../b"),
+            ..VerificationConfig::default()
         };
         assert!(
             config.normalized_output_dir().is_err(),
@@ -1594,6 +1620,7 @@ mode = "Proof"
         // escapes the project root on Windows: it parses as a Prefix component.
         let config = VerificationConfig {
             output_dir: String::from("C:proofs"),
+            ..VerificationConfig::default()
         };
         let err = config.normalized_output_dir().unwrap_err();
         assert!(
@@ -1607,6 +1634,7 @@ mode = "Proof"
     fn normalized_output_dir_rejects_unc_path() {
         let config = VerificationConfig {
             output_dir: String::from(r"\\server\share\x"),
+            ..VerificationConfig::default()
         };
         assert!(
             config.normalized_output_dir().is_err(),
@@ -1622,6 +1650,7 @@ mode = "Proof"
         // verbatim. This documents the platform difference.
         let config = VerificationConfig {
             output_dir: String::from("C:proofs"),
+            ..VerificationConfig::default()
         };
         assert_eq!(
             config.normalized_output_dir().unwrap(),
@@ -1668,6 +1697,83 @@ output-dir = "custom/"
         assert_eq!(manifest.build.target, "wasm32");
         assert_eq!(manifest.build.optimize, "release");
         assert_eq!(manifest.verification.output_dir, "custom/");
+    }
+
+    /// The adoption key parses, is not the default, and — the part that is easy
+    /// to lose — survives a serialization round trip.
+    ///
+    /// `is_default` is the `skip_serializing_if` for the whole `[verification]`
+    /// table, so a key it does not test is a key silently dropped from any
+    /// manifest `infs` writes back. The round trip is what makes that a
+    /// failure rather than an invisible data loss.
+    #[test]
+    fn from_toml_parses_and_round_trips_adopt_external_specs() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[verification]
+adopt-external-specs = true
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert!(
+            manifest.verification.adopt_external_specs,
+            "the declared key must reach the parsed manifest"
+        );
+        assert!(
+            !manifest.verification.is_default(),
+            "a manifest that asked for adoption is not the default configuration"
+        );
+
+        let rendered = manifest.to_toml().unwrap();
+        assert!(
+            rendered.contains("adopt-external-specs = true"),
+            "a written-back manifest must keep the key it was given:\n{rendered}"
+        );
+        let reparsed = InferenceToml::from_toml(&rendered).unwrap();
+        assert_eq!(
+            reparsed.verification, manifest.verification,
+            "the round trip must preserve the whole table"
+        );
+    }
+
+    /// The key defaults to off, and an unknown `[verification]` key is still a
+    /// hard error: adding a field must not turn the table into a permissive one.
+    #[test]
+    fn verification_table_defaults_off_and_still_rejects_unknown_keys() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[verification]
+output-dir = "proofs/"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert!(
+            !manifest.verification.adopt_external_specs,
+            "an undeclared key must not opt a project into adoption"
+        );
+
+        let unknown = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[verification]
+adopt-extenral-specs = true
+"#;
+        let err = InferenceToml::from_toml(unknown)
+            .expect_err("a misspelled key must be a build error, not a silent no-op");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("adopt-extenral-specs"),
+            "the rejection must name the offending key, got: {msg}"
+        );
     }
 
     #[test]

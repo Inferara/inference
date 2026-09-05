@@ -289,6 +289,25 @@ pub(crate) struct Cli {
     #[clap(long = "stack-size", value_name = "BYTES")]
     pub(crate) stack_size: Option<u32>,
 
+    /// Carry a linked library's own universal proof obligations into this
+    /// program's proof artifact.
+    ///
+    /// A library compiled with `--mode proof` records what its author proved
+    /// about its own code. By default the link reports that those obligations
+    /// are not carried and carries none of them; this flag carries the universal
+    /// (`forall`) ones, namespaced under the logical module the library is bound
+    /// as, and reports any reachability obligations it left behind.
+    ///
+    /// Proof mode only. Pairing it with a compile-mode build is an error rather
+    /// than a no-op: compile mode strips the program's own specification
+    /// functions and emits no verification section at all, so silently accepting
+    /// the flag would leave the author believing the obligations shipped.
+    ///
+    /// `infs build` forwards the project's `[verification] adopt-external-specs`;
+    /// direct `infc` callers pass it by hand.
+    #[clap(long = "adopt-external-specs", action = clap::ArgAction::SetTrue)]
+    pub(crate) adopt_external_specs: bool,
+
     /// Print the git commit hash embedded at build time and exit 0.
     ///
     /// Used by `infs build` to detect version drift between paired `infs` and

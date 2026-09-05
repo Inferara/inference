@@ -79,7 +79,20 @@ pub const COMPILER_ABI_MAJOR: u32 = 1;
 /// not silence but an argument-parser error naming a flag the user never typed;
 /// the gate is what turns that into a message naming the `[memory]` table to
 /// remove or the toolchain to update.
-pub const COMPILER_ABI_MINOR: u32 = 3;
+///
+/// Minor 4 adds the additive `--adopt-external-specs` flag to `infc`, carrying a
+/// linked library's universal proof obligations into the program's proof
+/// artifact. It is backward compatible in the same sense as the minors above:
+/// omitting it yields the artifact every earlier minor produced, in which a
+/// library's obligations are absent. The reverse pairing is the one callers must
+/// gate on, and it is the least visible of the four. A minor-3 `infc` cannot
+/// honor the request and has no way to report that it ignored one, and the
+/// difference the request makes is *which theorems the `.v` states* — a missing
+/// one looks exactly like a proof artifact that was never asked for the
+/// obligation. An `infs` that forwards must therefore confirm the minor it is
+/// talking to and refuse, rather than write a proof artifact whose contents are
+/// not the ones the manifest asked for.
+pub const COMPILER_ABI_MINOR: u32 = 4;
 
 /// A post-MVP WebAssembly proposal that a project may opt into.
 ///
@@ -590,9 +603,9 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one_dot_three() {
+    fn abi_version_is_one_dot_four() {
         assert_eq!(COMPILER_ABI_MAJOR, 1);
-        assert_eq!(COMPILER_ABI_MINOR, 3);
+        assert_eq!(COMPILER_ABI_MINOR, 4);
     }
 
     #[test]
