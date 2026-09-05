@@ -1,0 +1,25 @@
+// A program that declares no specification of its own and links a library that
+// does. Everything in its proof artifact's verification sections therefore came
+// from adoption, which is what makes it the fixture that shows a merge
+// synthesizing both sections rather than extending ones the program already
+// carried.
+//
+// `scale` has no body here — it arrives from
+// `spec_adopted_extern_mathlib.inf` (or, for the tests about obligations a link
+// cannot carry, from `spec_adopted_reach_mathlib.inf`), compiled separately in
+// proof mode and spliced in by the static-merge linker under the name section
+// symbol `mathlib::scale`. The library's own obligation about `scale` is
+// rewritten onto that symbol when the link adopts it.
+//
+// The weight on `b` is a second fingerprint constant, distinct from the one the
+// library carries. It is what makes an assertion that reads a body out of the
+// module record by ordinal discriminating: a merged artifact with one
+// constant-bearing body would satisfy such an assertion no matter which ordinal
+// the obligation named.
+
+external fn scale(x: i32) -> i32;
+use { scale } from mathlib;
+
+pub fn scaled_sum(a: i32, b: i32) -> i32 {
+  return scale(a) + b * 31;
+}

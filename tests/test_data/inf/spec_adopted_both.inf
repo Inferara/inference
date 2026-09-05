@@ -1,0 +1,30 @@
+// A program with a specification of its own that also links a library shipping
+// one. The two must coexist in a single proof artifact: the program's own
+// obligations keep their names and their order, and the library's arrive under a
+// key namespaced by the logical module it was bound as, so neither set can be
+// folded into the other and lost at exit 0.
+//
+// `SumSpec` applies `scaled_sum`, a body this fixture compiles itself; the
+// adopted `ScaleSpec` applies `scale`, a body the linker splices in. Both are
+// universal, so both reach the emitted proof as a `ValidSpec` theorem over a
+// list of their own, and the two lists must name different bodies — which is
+// checkable because the two bodies carry different fingerprint constants.
+//
+// Kept corpus-clean: no data segment, every obligation states a real property so
+// none can collapse to a vacuous assertion, and no frame is needed, so the
+// merged memory stays within what the corpus compiles.
+
+external fn scale(x: i32) -> i32;
+use { scale } from mathlib;
+
+pub fn scaled_sum(a: i32, b: i32) -> i32 {
+  return scale(a) + b * 31;
+}
+
+spec SumSpec {
+  fn sums_the_scaled() forall {
+    let a: i32 = @;
+    let b: i32 = @;
+    assert(scaled_sum(a, b) == scale(a) + b * 31);
+  }
+}

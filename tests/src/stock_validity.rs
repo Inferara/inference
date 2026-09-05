@@ -32,15 +32,16 @@
 //!   resolves those against the source root and reports a missing file before
 //!   parsing; in process there is no project context, so the same clauses are
 //!   reported by the type checker instead. Either way it reaches no module.
-//! - `spec_linked_extern.inf` and `spec_linked_toolchain.inf` bind externals
-//!   the driver resolves to `.wasm` files through `-L` and merges. Resolution is
-//!   a driver step, not a code generation one: the main module compiles and
+//! - `spec_linked_extern.inf`, `spec_linked_toolchain.inf`,
+//!   `spec_adopted_extern.inf` and `spec_adopted_both.inf` bind externals the
+//!   driver resolves to `.wasm` files through `-L` and merges. Resolution is a
+//!   driver step, not a code generation one: the main module compiles and
 //!   validates on its own, with its externals as ordinary WebAssembly imports,
 //!   which is exactly the property this file asserts about it. The *merged*
 //!   artifact is gated by the linked corpus in `rocq_typecheck.rs`.
 //!
-//! So the table's split is 33 valid and 9 rejected, where `infc --mode proof`
-//! run over the same directory reaches 31 modules and refuses 11: the two
+//! So the table's split is 37 valid and 9 rejected, where `infc --mode proof`
+//! run over the same directory reaches 33 modules and refuses 13: the four
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -206,6 +207,30 @@ mod gate {
             expected: StockValid(AlreadyChoiceLowered),
             why: "the corpus producer of the `ValidUniqueSpec` grammar; its only \
                   non-deterministic body is the `unique` one, already choice-lowered",
+        },
+        Fixture {
+            stem: "spec_adopted_both",
+            expected: StockValid(ScalarChoice),
+            why: "a `forall` body drawing two scalars, applying both an own function and a \
+                  linked external; the program half of the specification-adoption pair",
+        },
+        Fixture {
+            stem: "spec_adopted_extern",
+            expected: StockValid(NothingToLower),
+            why: "the program that declares no `spec` at all, so everything its proof artifact \
+                  states was adopted from the library it links",
+        },
+        Fixture {
+            stem: "spec_adopted_extern_mathlib",
+            expected: StockValid(ScalarChoice),
+            why: "the library whose own universal obligation a link adopts; its `forall` body \
+                  draws a scalar",
+        },
+        Fixture {
+            stem: "spec_adopted_reach_mathlib",
+            expected: StockValid(ScalarChoice),
+            why: "the same library shipping a reachability obligation as well; the `exists` body \
+                  was already choice-lowered, so the universal one's draw is the strongest part",
         },
         Fixture {
             stem: "spec_aggregate_values",

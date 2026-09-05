@@ -1,0 +1,32 @@
+// The same library interface as `spec_adopted_extern_mathlib.inf`, shipping
+// obligations of both kinds: `Bounds` holds one universal obligation, which a
+// link adopts, and one reachability obligation, which it cannot.
+//
+// A reachability judgment is evaluated against the frame an execution of its own
+// specification function reaches, and a library's specification functions never
+// cross the merge, so nothing in a merged module could stand in for that body.
+// Carrying the universal half and naming the other half in a warning is what
+// keeps the working half from being discarded along with it.
+//
+// It exports `scale` with the signature `spec_adopted_extern.inf` declares, so
+// the same program links against either library — which is what makes the two
+// fixtures a controlled pair: the only difference a test can observe between
+// linking one and linking the other is the reachability obligation.
+
+pub fn scale(a: i32) -> i32 {
+  return a * 10007;
+}
+
+spec Bounds {
+  fn scales() forall {
+    let x: i32 = @;
+    assert(scale(x) == x * 10007);
+  }
+  fn reaches_zero() exists {
+    let n: i32 = @;
+    assume {
+      assert(n == 0);
+    }
+    assert(scale(n) == 0);
+  }
+}

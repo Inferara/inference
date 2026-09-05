@@ -33,6 +33,7 @@ mod gate {
     };
     use crate::rocq_test_support::{self, generate_v};
     use crate::utils::get_test_data_path;
+    use inference::{ExternalSpecPolicy, LinkOptions};
     use inference_wasm_codegen::CompilationMode;
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::path::{Path, PathBuf};
@@ -157,6 +158,11 @@ mod gate {
             /// the merged body's symbol tracks the binding, not the external's
             /// own name for itself.
             module_name: &'static str,
+            /// How the library itself was compiled. It is a property of the
+            /// library and not of the link: a library compiled for execution
+            /// carries no verification sections at all, so only a proof-mode one
+            /// has obligations of its own for an adopting entry to carry across.
+            mode: CompilationMode,
         },
         /// Read from a committed `.wasm` under `tests/test_data/wasmlib/`, built
         /// by a toolchain that is not this compiler. That directory's `README.md`
@@ -183,11 +189,8 @@ mod gate {
                 ExternalBytes::Fixture {
                     source,
                     module_name,
-                } => rocq_test_support::compile_fixture(
-                    source,
-                    module_name,
-                    CompilationMode::Compile,
-                ),
+                    mode,
+                } => rocq_test_support::compile_fixture(source, module_name, mode),
                 ExternalBytes::Artifact { file } => {
                     let path = get_test_data_path().join("wasmlib").join(file);
                     std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
@@ -197,14 +200,15 @@ mod gate {
     }
 
     /// Corpus fixtures that only type-check once their externals are merged in,
-    /// paired with the module name and the externals to link.
+    /// paired with the module name, the externals to link, and the policy the
+    /// link runs under.
     ///
     /// They are kept apart from [`CORPUS`] because they are a different
     /// pipeline, not a different fixture: a linked entry runs codegen twice and
     /// the linker once, and the module the gate compiles is the merged one.
-    /// Between them the two entries are the only producers of a `T_app` whose
+    /// Between them these entries are the only producers of a `T_app` whose
     /// target is a body the compiler never emitted, and each covers a different
-    /// half of what that means.
+    /// part of what that means.
     ///
     /// `spec_linked_extern.inf` is the minimal shape: one linked `.wasm`, one
     /// `spec` naming it, one obligation applying it. Stated honestly so it is
@@ -223,20 +227,39 @@ mod gate {
     /// clamp and a `BI_loop` carrying a result type, neither of which the
     /// Inference emitter has a way to produce.
     ///
+    /// `spec_adopted_both.inf` is the only entry whose external is compiled in
+    /// proof mode and whose link carries that library's own obligations across.
+    /// It is the one place `coqc` elaborates a specification the compiler never
+    /// generated from source: its `inference.spec_funcs` entry has an *empty*
+    /// index list, because an adopted specification has no specification
+    /// function in the merged module — the list is what makes the translator
+    /// omit a function from the module record, and the merged body the adopted
+    /// obligation applies has to stay in it. An empty index list on its own is
+    /// not the rare part: a method-free `spec S { }` produces one too, and
+    /// `three_specs.inf` in [`CORPUS`] already does. What only a linked entry
+    /// produces is an empty list under a specification that *states*
+    /// obligations, applying a body the compiler never emitted. Its whole point
+    /// is that both it and the program's own specification elaborate side by
+    /// side.
+    ///
     /// [`linked_corpus_carries_a_merged_body`] is the floor that keeps this
     /// block from being deleted unnoticed — `REQUIRED_CONSTRUCTS` cannot serve
     /// as one, because every needle it lists is already produced by a
     /// single-file fixture.
     ///
-    /// Two constraints an entry here inherits, both of which would otherwise
+    /// Three constraints an entry here inherits, all of which would otherwise
     /// surface far from their cause. The corpus-wide checks apply to linked
     /// modules too, and one of them rejects a data segment in any corpus module
     /// — so an external fixture that used a string or array literal would trip
-    /// it, reported against the *main* fixture's name. And a main declares its
+    /// it, reported against the *main* fixture's name. A main declares its
     /// linear memory with a fixed maximum while the merge keeps the larger
     /// minimum, so a main fixture that needs a frame cannot take an external
-    /// declaring more pages than the corpus compiles with.
-    const LINKED_CORPUS: &[(&str, &str, &[LinkedExternal])] = &[
+    /// declaring more pages than the corpus compiles with. And every obligation
+    /// either module states must be non-vacuous and, when it is a reachability
+    /// obligation, true at every entry value — the same rules a single-file
+    /// corpus fixture is held to, now applying to the library as well, since its
+    /// obligations can reach the gated module too.
+    const LINKED_CORPUS: &[(&str, &str, &[LinkedExternal], LinkOptions)] = &[
         (
             "spec_linked_extern.inf",
             "spec_linked_extern",
@@ -245,8 +268,12 @@ mod gate {
                 bytes: ExternalBytes::Fixture {
                     source: "spec_linked_extern_mathlib.inf",
                     module_name: "mathlib_impl",
+                    mode: CompilationMode::Compile,
                 },
             }],
+            LinkOptions {
+                external_specs: ExternalSpecPolicy::Warn,
+            },
         ),
         (
             "spec_linked_toolchain.inf",
@@ -257,6 +284,24 @@ mod gate {
                     file: "rustlib.wasm",
                 },
             }],
+            LinkOptions {
+                external_specs: ExternalSpecPolicy::Warn,
+            },
+        ),
+        (
+            "spec_adopted_both.inf",
+            "spec_adopted_both",
+            &[LinkedExternal {
+                logical_module: "mathlib",
+                bytes: ExternalBytes::Fixture {
+                    source: "spec_adopted_extern_mathlib.inf",
+                    module_name: "mathlib_impl",
+                    mode: CompilationMode::Proof,
+                },
+            }],
+            LinkOptions {
+                external_specs: ExternalSpecPolicy::Adopt,
+            },
         ),
     ];
 
@@ -491,7 +536,18 @@ mod gate {
     /// The merge is what makes an obligation about an `external fn` resolvable
     /// at all: before it the external is an import, and an import carries no
     /// body for the downstream realization obligation to reduce.
-    fn generate_linked_v(file: &str, module_name: &str, externals: &[LinkedExternal]) -> String {
+    ///
+    /// `options` carries what the merge does with the verification sections a
+    /// library ships. It is an entry's own input rather than a constant here
+    /// because it decides what the gated module *contains*: under the default
+    /// the merged module states only the program's own obligations, and under
+    /// adoption it also states the library's, keyed under the logical module.
+    fn generate_linked_v(
+        file: &str,
+        module_name: &str,
+        externals: &[LinkedExternal],
+        options: &LinkOptions,
+    ) -> String {
         let libs: Vec<(&str, Vec<u8>)> = externals
             .iter()
             .map(|external| (external.logical_module, external.wasm()))
@@ -506,8 +562,9 @@ mod gate {
         // clauses, so no declaration-derived contract is in hand. The subject is
         // the emitted `.v`, and a write-set declaration has no representation in
         // it — the merged body has no imports left to describe.
-        let linked = inference::link(&main, &lib_refs, None)
-            .unwrap_or_else(|e| panic!("link failed for {file}: {e}"));
+        let linked = inference::link_with_options(&main, &lib_refs, None, options)
+            .unwrap_or_else(|e| panic!("link failed for {file}: {e}"))
+            .wasm;
         rocq_test_support::translate(file, module_name, &linked)
     }
 
@@ -600,10 +657,10 @@ mod gate {
             .chain(
                 LINKED_CORPUS
                     .iter()
-                    .map(|&(source, module, externals)| GatedModule {
+                    .map(|&(source, module, externals, options)| GatedModule {
                         source,
                         module,
-                        v: generate_linked_v(source, module, externals),
+                        v: generate_linked_v(source, module, externals, &options),
                     }),
             )
             .collect()
@@ -1000,6 +1057,13 @@ mod gate {
     /// whose spec applies a *local* helper satisfies both and carries zero
     /// linked coverage. The merged body's own ordinal is the one thing only a
     /// linked obligation produces.
+    ///
+    /// An entry that links under an adopting policy is held to a second claim:
+    /// the library's own specification has to arrive in the gated module, under
+    /// a key namespaced by the logical module. Nothing else here would notice a
+    /// policy that quietly stopped adopting — the entry would keep linking, keep
+    /// carrying a merged body, and keep passing, while the one shape it was
+    /// added for stopped reaching `coqc`.
     #[test]
     fn linked_corpus_carries_a_merged_body() {
         assert!(
@@ -1007,8 +1071,8 @@ mod gate {
             "the linked corpus is the only place an obligation names a body the \
              compiler did not emit; an empty list silently drops that coverage"
         );
-        for &(source, module, externals) in LINKED_CORPUS {
-            let v = generate_linked_v(source, module, externals);
+        for &(source, module, externals, options) in LINKED_CORPUS {
+            let v = generate_linked_v(source, module, externals, &options);
             let defined = module_func_names(&v);
             for external in externals {
                 // The linker names a merged body `<logical module>::<field>`,
@@ -1036,6 +1100,20 @@ mod gate {
                      coverage it does not have. Defined functions: {defined:?}",
                     external.logical_module
                 );
+                if options.external_specs == ExternalSpecPolicy::Adopt {
+                    // An adopted specification's key is the logical module
+                    // folded onto the library's own name for it, and the
+                    // translator joins the module name onto that with `__`.
+                    let adopted = format!("Definition {module}__{prefix}");
+                    assert!(
+                        v.lines().any(|line| line.starts_with(&adopted)
+                            && line.contains("_specs : list hassert :=")),
+                        "{source}: the link adopts the specifications of `{}`, and none arrived \
+                         — no `{adopted}…_specs` in the gated module, so the entry is compiling \
+                         a proof that states nothing the library claimed",
+                        external.logical_module
+                    );
+                }
             }
         }
     }
@@ -1094,16 +1172,16 @@ mod gate {
     fn the_toolchain_entry_keeps_emitting_the_forms_it_is_credited_with() {
         const FIXTURE: &str = "spec_linked_toolchain.inf";
 
-        let &(source, module, externals) = LINKED_CORPUS
+        let (source, module, externals, options) = LINKED_CORPUS
             .iter()
-            .find(|&&(source, _, _)| source == FIXTURE)
+            .find(|(source, _, _, _)| *source == FIXTURE)
             .unwrap_or_else(|| {
                 panic!(
                     "{FIXTURE} must stay a LINKED_CORPUS entry: it is the only module this \
                      gate compiles whose bodies a compiler other than this one selected"
                 )
             });
-        let v = generate_linked_v(source, module, externals);
+        let v = generate_linked_v(source, module, externals, options);
 
         for (function, needle, what) in [
             (
