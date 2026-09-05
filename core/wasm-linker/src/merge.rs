@@ -24,6 +24,34 @@
 //! whose merged closure reads or writes a global has its whole global section
 //! appended after them. Main's indices being fixed is what leaves its bodies and
 //! its global exports untouched.
+//!
+//! ## Adopted external specifications
+//!
+//! A library compiled in proof mode ships obligations about its own code. They
+//! are not part of the output — a specification function is outside every export
+//! closure — so they are carried into the merged module's own
+//! `inference.spec_funcs` / `inference.hspecs` only when the caller asks for it
+//! ([`crate::ExternalSpecPolicy::Adopt`]), and then only the **universal**
+//! (`forall`) ones.
+//!
+//! An adopted specification is keyed under the logical module the library was
+//! bound from, folded onto the library's own spec name, and every function
+//! symbol its obligations apply is resolved in the *library's* own `name`
+//! section, required to be one of the bodies this merge folded in, and rewritten
+//! to the exact string the output's `name` section carries for that body. The
+//! adopted key's `inference.spec_funcs` entry lists no index, because the
+//! library's specification function did not cross the merge — which is the
+//! correct shape for a universal obligation, whose judgment never reduces a
+//! specification body.
+//!
+//! Adoption carries obligations, never proofs: each arrives downstream as a
+//! `ValidSpec` theorem with an unfilled proof, to be discharged against the
+//! merged module. That is what makes it sound across everything the merge
+//! changes about the library's environment — one shared linear memory, remapped
+//! globals, renumbered calls. Those change *what must be proved*; they cannot
+//! turn a false claim into a discharged one. The one property the merge must
+//! preserve is symbol identity, which is why every check below is about which
+//! body a symbol denotes.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +68,9 @@ use crate::closure;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
 use crate::rewrite::{reencode_body, BodyOrigin, IndexMap};
 use crate::tier::{self, Tier, WriteContract};
-use crate::{ImportWriteSet, LinkError, LinkOutput, LinkWarning};
+use crate::{
+    ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning,
+};
 
 /// Resolves and merges every satisfiable import of `main` from the supplied
 /// external modules, returning the unified module bytes and everything the
@@ -53,10 +83,14 @@ use crate::{ImportWriteSet, LinkError, LinkOutput, LinkWarning};
 /// `None` runs merge mechanics only, `Some(list)` holds every satisfied import
 /// to a declared write set — and one `list` does not mention to the claim that
 /// it writes nothing, which is what declaring nothing about it says.
+///
+/// `options` carries what the merge does with the verification sections a linked
+/// external ships, which is also what decides whether they are decoded at all.
 pub(crate) fn link(
     main_bytes: &[u8],
     externals: &[(&str, &[u8])],
     contracts: Option<&[ImportWriteSet]>,
+    options: &LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
     // The contract list is checked before anything reads a byte: it is a pure
     // property of the caller's argument, says nothing about either module, and
@@ -93,12 +127,15 @@ pub(crate) fn link(
     }
 
     let main = ParsedModule::parse(main_bytes)?;
+    let decode_specs = options.external_specs == ExternalSpecPolicy::Adopt;
     let externals = externals
         .iter()
-        .map(|(logical_module, bytes)| ParsedModule::parse_external(bytes, logical_module))
+        .map(|(logical_module, bytes)| {
+            ParsedModule::parse_external(bytes, logical_module, decode_specs)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let plan = Plan::build(&main, &externals, contracts)?;
+    let plan = Plan::build(&main, &externals, contracts, options)?;
 
     // The obligation symbols are cleared against the module the plan describes,
     // before a byte of it exists. An obligation that names nothing, or names two
@@ -277,7 +314,19 @@ struct Plan {
     hspecs: Option<inference_hassert::HSpecMap>,
     /// The distinct function symbols [`Self::hspecs`] applies, after that
     /// rewrite — the set [`Self::check_obligation_symbols`] must resolve.
+    ///
+    /// Adopted symbols join it, so a library's obligation is held to naming
+    /// exactly one body of the merged module, exactly as the program's own are.
     obligation_symbols: BTreeSet<String>,
+    /// The `inference.spec_funcs` keys minted for adopted external
+    /// specifications, ascending. Empty under every policy but adoption.
+    ///
+    /// Only the keys: an adopted specification has no specification function in
+    /// the output — the library's never crossed the merge — so its entry lists
+    /// no index. The obligations themselves fold into [`Self::hspecs`], because
+    /// the emitted section makes no distinction between an adopted key and one
+    /// the program declared, and neither does the proof translation.
+    adopted_spec_keys: BTreeSet<String>,
     /// Applied symbols that name a merged root the output's `name` section could
     /// not record, against the output index of the body that root binds.
     ///
@@ -318,6 +367,7 @@ impl Plan {
         main: &ParsedModule,
         externals: &[ParsedModule],
         contracts: Option<&[ImportWriteSet]>,
+        options: &LinkOptions,
     ) -> Result<Self, LinkError> {
         // 0. Reject a main module that carries its own data or element segments.
         //    `emit` rebuilds the main module section-by-section and emits no
@@ -702,49 +752,84 @@ impl Plan {
         // `link` takes arbitrary main bytes, so a contested alias is reachable
         // even though code generation cannot give one of the program's own
         // functions a `::`-joined name.
-        //
-        // Re-validating is not ceremony: the payload arrived validated, but the
-        // rewrite is this crate's own edit of it, and `encode` *panics* on a map
-        // its decoder would reject. Checking the edited map turns a producer
-        // defect into a diagnosable link failure.
         let carried: BTreeSet<&str> = name_section_entries(main, main_local_base, &merged)
             .into_iter()
             .map(|(_, name)| name)
             .collect();
         let mut hspecs = main.hspecs.clone();
         let mut contested_root_aliases: BTreeMap<String, u32> = BTreeMap::new();
-        let obligation_symbols = match &mut hspecs {
-            Some(map) => {
-                let mut aliases: BTreeMap<&str, &str> = BTreeMap::new();
-                let mut contested: BTreeMap<&str, u32> = BTreeMap::new();
-                for (root_name, out_idx) in &root_symbols {
-                    let Some(&canonical) = canonical_root.get(out_idx) else {
-                        continue;
-                    };
-                    if canonical == root_name.as_str() {
-                        continue;
-                    }
-                    if carried.contains(root_name.as_str()) {
-                        contested.insert(root_name.as_str(), *out_idx);
-                    } else {
-                        aliases.insert(root_name.as_str(), canonical);
-                    }
+        let mut obligation_symbols: BTreeSet<String> = BTreeSet::new();
+        if let Some(map) = &mut hspecs {
+            let mut aliases: BTreeMap<&str, &str> = BTreeMap::new();
+            let mut contested: BTreeMap<&str, u32> = BTreeMap::new();
+            for (root_name, out_idx) in &root_symbols {
+                let Some(&canonical) = canonical_root.get(out_idx) else {
+                    continue;
+                };
+                if canonical == root_name.as_str() {
+                    continue;
                 }
-                let symbols = canonicalize_applied_symbols(map, &aliases);
-                inference_hassert::validate(map).map_err(|e| {
-                    LinkError::Parse(format!(
-                        "inference.hspecs section, after rewriting merged-body aliases: {e}"
-                    ))
-                })?;
-                for (root_name, out_idx) in contested {
-                    if symbols.contains(root_name) {
-                        contested_root_aliases.insert(root_name.to_string(), out_idx);
-                    }
+                if carried.contains(root_name.as_str()) {
+                    contested.insert(root_name.as_str(), *out_idx);
+                } else {
+                    aliases.insert(root_name.as_str(), canonical);
                 }
-                symbols
             }
-            None => BTreeSet::new(),
-        };
+            obligation_symbols = canonicalize_applied_symbols(map, &aliases);
+            for (root_name, out_idx) in contested {
+                if obligation_symbols.contains(root_name) {
+                    contested_root_aliases.insert(root_name.to_string(), out_idx);
+                }
+            }
+        }
+
+        // Report on, or carry in, the verification sections the linked libraries
+        // ship. Both run only for a library that contributed at least one merged
+        // body: one nothing imports from is not part of the artifact, so nothing
+        // about it was dropped and nothing about it is adoptable.
+        let mut adopted_spec_keys: BTreeSet<String> = BTreeSet::new();
+        let mut policy_warnings: Vec<LinkWarning> = Vec::new();
+        match options.external_specs {
+            ExternalSpecPolicy::Ignore => {}
+            ExternalSpecPolicy::Warn => {
+                policy_warnings.extend(external_spec_warning(externals, &merged_index));
+            }
+            ExternalSpecPolicy::Adopt => {
+                let adopted = adopt_external_specs(
+                    main,
+                    externals,
+                    &merged,
+                    &merged_index,
+                    merged_base,
+                    &carried,
+                )?;
+                if !adopted.specs.is_empty() {
+                    let map = hspecs.get_or_insert_with(inference_hassert::HSpecMap::default);
+                    for (key, entries) in adopted.specs {
+                        map.insert(key.clone(), entries);
+                        adopted_spec_keys.insert(key);
+                    }
+                }
+                obligation_symbols.extend(adopted.symbols);
+                policy_warnings.extend(adopted.warnings);
+            }
+        }
+
+        // Re-validating is not ceremony: the payload arrived validated, but every
+        // edit above — the alias rewrite and the adoption — is this crate's own,
+        // and `encode` *panics* on a map its decoder would reject. Checking the
+        // edited map turns a producer defect into a diagnosable link failure. The
+        // reachable one is a name pushed past the codec's cap by the adopted
+        // symbol's prefix, which is why the message names adoption rather than
+        // only the rewrite it used to be raised for.
+        if let Some(map) = &hspecs {
+            inference_hassert::validate(map).map_err(|e| {
+                LinkError::Parse(format!(
+                    "inference.hspecs section, after rewriting merged-body aliases and \
+                     adopting external obligations: {e}"
+                ))
+            })?;
+        }
 
         // Build the output global space: main's globals keep indices `0..`, and
         // each contributing external's are appended after them.
@@ -790,12 +875,14 @@ impl Plan {
             root_symbols,
             hspecs,
             obligation_symbols,
+            adopted_spec_keys,
             contested_root_aliases,
             external_type_remap,
             out_globals,
             external_global_remap,
             warnings: unbounded_reach_warning(&tier_b_fields, reconciled_memory.as_ref())
                 .into_iter()
+                .chain(policy_warnings)
                 .collect(),
             reconciled_memory,
         })
@@ -976,9 +1063,28 @@ impl Plan {
         // imports); without this rewrite a bare linked `.wasm` would name the
         // wrong functions in its proof obligations (C1), or — were the section
         // simply dropped (H25) — carry no obligations at all.
-        if let Some(spec_funcs) = &main.spec_funcs {
-            let remapped = self.remap_spec_funcs(main, spec_funcs)?;
-            let payload = crate::spec_funcs::encode(&remapped);
+        //
+        // Adopted keys follow main's own entries, ascending, each listing no
+        // index: the library's specification function did not cross the merge,
+        // and a synthetic index naming the merged body the obligation is *about*
+        // would be a lie — that body is not a specification function, and listing
+        // it would drop it from the module record the obligation applies.
+        //
+        // The condition keys on the sections' presence rather than on the
+        // concatenation being non-empty: a main module carrying an *empty*
+        // `inference.spec_funcs` section still re-emits an empty one, because the
+        // section's presence is itself a producer's statement.
+        if main.spec_funcs.is_some() || !self.adopted_spec_keys.is_empty() {
+            let mut entries = match &main.spec_funcs {
+                Some(spec_funcs) => self.remap_spec_funcs(main, spec_funcs)?,
+                None => Vec::new(),
+            };
+            entries.extend(
+                self.adopted_spec_keys
+                    .iter()
+                    .map(|key| (key.clone(), Vec::new())),
+            );
+            let payload = crate::spec_funcs::encode(&entries);
             module.section(&wasm_encoder::CustomSection {
                 name: crate::spec_funcs::SECTION_NAME.into(),
                 data: (&payload[..]).into(),
@@ -1139,13 +1245,10 @@ impl Plan {
     /// translator owns; re-deciding it here would be a second implementation of
     /// that rule, free to disagree with the one that governs.
     ///
-    /// A carrier the merged `inference.spec_funcs` lists is not a candidate, for
-    /// the same reason the translator does not count one: a specification
-    /// function's symbol is deliberately left unqualified by its defining file,
-    /// so a spec-inner `fn helper` and the program's own `fn helper` share one
-    /// string — and no obligation may apply a specification function anyway.
-    /// Counting them would make the link fail on a program the translator
-    /// resolves correctly.
+    /// A carrier the merged `inference.spec_funcs` lists is not a candidate:
+    /// the narrowing is [`applicable_carriers`], the same rule the translator
+    /// applies downstream, so counting one here would fail a link the
+    /// translator resolves correctly.
     ///
     /// When *every* carrier is a specification function the full set stands, so
     /// the count is over specification functions after all: two or more are
@@ -1177,12 +1280,7 @@ impl Plan {
                 all.push(idx);
                 all.sort_unstable();
             }
-            let applicable: Vec<u32> = all
-                .iter()
-                .copied()
-                .filter(|idx| !spec_funcs.contains(idx))
-                .collect();
-            let carriers = if applicable.is_empty() { all } else { applicable };
+            let carriers = applicable_carriers(&all, &spec_funcs);
             match carriers[..] {
                 [_one] => {}
                 [] => {
@@ -1494,8 +1592,14 @@ fn find_export(
 /// An applied symbol is a `T_app`'s or an `HA_app_ok`'s head — the two positions
 /// in which an obligation names a function whose body the module must contain,
 /// and so the two the merge has to answer for. An entry's own `fn_symbol` is
-/// deliberately left alone: it names a specification function of the main
-/// module, which is never a merged body, so no root alias can reach it.
+/// deliberately left alone here: for one of the main module's own entries it
+/// names a specification function of the main module, which is never a merged
+/// body, so no root alias can reach it; an adopted entry's is rewritten by
+/// [`adopt_external_specs`] instead, which is the only producer that has the
+/// logical module in hand.
+///
+/// An empty `aliases` makes this a pure collector, which is how the adoption
+/// step learns what an obligation applies before it can resolve any of it.
 ///
 /// The matches below are exhaustive on purpose. Both languages are a wire
 /// format shared with the proof translator, and a variant added without a case
@@ -1611,6 +1715,479 @@ fn canonicalize_symbol(
         symbol.0 = (*canonical).to_string();
     }
     applied.insert(symbol.0.clone());
+}
+
+/// The `name`-section symbol the output will carry for the merged body of
+/// `(external_idx, source_func_idx)`, or `None` when the merge folded no body in
+/// for that key.
+///
+/// The reader-side counterpart of [`MergedFunc::name`], which is the single
+/// producer of every merged symbol: [`name_section_entries`] enumerates that
+/// field for the encoder and for [`Plan::check_obligation_symbols`], and this
+/// looks the same field up by source key for the adoption rewrite. Neither
+/// formats a name of its own, so a symbol an adopted obligation is pointed at
+/// cannot drift from the symbol the section records.
+///
+/// Every `MergedFunc::name` is `Some` by the time this is reachable — the
+/// anonymous fallback fills the last of them — so a `None` here means the key
+/// names no merged body, never a merged body with no name. The call site maps it
+/// to exactly that fault.
+///
+/// Taken as loose parts rather than a `&Plan` for the same reason
+/// [`name_section_entries`] is: the adoption rewrite runs while the plan is
+/// still being assembled.
+fn merged_output_symbol<'a>(
+    merged: &'a [MergedFunc],
+    merged_index: &BTreeMap<(usize, u32), u32>,
+    merged_base: u32,
+    key: (usize, u32),
+) -> Option<&'a str> {
+    let out_idx = *merged_index.get(&key)?;
+    // Every value in `merged_index` is at or above `merged_base` by
+    // construction, and `link` is reachable from arbitrary caller-supplied
+    // bytes, so the invariant is enforced here rather than trusted.
+    let slot = usize::try_from(out_idx.checked_sub(merged_base)?).ok()?;
+    merged.get(slot).and_then(|m| m.name.as_deref())
+}
+
+/// The `inference.spec_funcs` / `inference.hspecs` key an external's
+/// specification is adopted under: the logical module the external was bound
+/// from, folded onto the specification's own (already file-folded) name.
+///
+/// `mathlib` + `DoubleSpec` → `mathlib_DoubleSpec`;
+/// `a::b` + `DoubleSpec` → `a_b_DoubleSpec`.
+///
+/// The same fold code generation uses for a spec's defining file
+/// (`inference_fn_key::fold_spec_name`), for the same reason: the result has to
+/// be a plain Rocq identifier, so `_` is the only joiner available. That fold is
+/// documented lossy, which is why every collision it admits is refused by the
+/// caller rather than resolved.
+///
+/// An empty `logical_module` is not a case this handles — the fold would emit a
+/// leading `_` and the key would not be namespaced at all — and the caller
+/// refuses it before calling.
+fn adopted_spec_key(logical_module: &str, spec: &str) -> String {
+    let segments: Vec<String> = logical_module
+        .split(inference_fn_key::MERGED_SEPARATOR)
+        .map(str::to_string)
+        .collect();
+    inference_fn_key::fold_spec_name(&segments, spec)
+}
+
+/// Why `name` cannot be a specification name in the emitted proof, or `None`
+/// when it can.
+///
+/// The proof translator turns a spec name into Rocq identifiers
+/// (`<module>__<spec>_specs`, `valid_<module>__<spec>`, …), so a name it cannot
+/// spell has to be refused before the merge mints it. That rule lives in
+/// `wasm-to-v`, which sits *above* this crate, so its structural half is
+/// restated here and pinned to the original by a test.
+///
+/// The Rocq stdlib / keyword denylist is deliberately **not** restated. It is a
+/// list, not a rule: it changes on the translator's schedule, and a second copy
+/// here would drift into admitting a name the translator rejects (a link that
+/// fails one phase later, with a worse message) or into rejecting one it admits
+/// (a link that fails for no reason at all). A key colliding with a reserved
+/// name is still fail-closed — the translator validates every key of the
+/// embedded `inference.spec_funcs` section, in the same `infc -v` invocation,
+/// before any artifact is written — and both directions of that split are pinned
+/// by test so it cannot become a hole silently.
+///
+/// The clauses are checked in the translator's own order, so a name breaking
+/// several rules is reported here under the same clause the translator would
+/// report. The trailing-`_` clause is last, after the length cap, for exactly
+/// that reason; it is owned here alone because the downstream rule that enforces
+/// it is crate-private to `wasm-to-v`, so nothing outside that crate can observe
+/// it.
+///
+/// Each clause is a sentence fragment, lowercase and unpunctuated, so a caller
+/// can set it inside its own message.
+fn spec_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("it is empty".to_string());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_alphabetic() {
+        return Some(format!(
+            "it starts with `{first}`, and a generated identifier must start with an ASCII letter"
+        ));
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Some(format!(
+                "it contains `{c}`, and a generated identifier admits only ASCII letters, \
+                 digits and `_`"
+            ));
+        }
+    }
+    if name.contains("__") {
+        return Some(
+            "it contains a `__` run, which the generated `<module>__<spec>` grammar reserves"
+                .to_string(),
+        );
+    }
+    if name.len() > MAX_SPEC_NAME_BYTES {
+        return Some(format!(
+            "it is {} bytes long, past the {MAX_SPEC_NAME_BYTES}-byte limit on a generated \
+             identifier",
+            name.len()
+        ));
+    }
+    if name.ends_with('_') {
+        return Some(
+            "it ends with `_`, which the generated `<module>__<spec>` grammar reserves"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// The byte length a generated Rocq identifier may not exceed, restated from the
+/// proof translator's own cap and pinned to it by test.
+const MAX_SPEC_NAME_BYTES: usize = 255;
+
+/// What adoption contributes to a plan: the specifications to fold into the
+/// merged module's own sections, the symbols they apply, and what was left
+/// behind.
+struct AdoptedSpecs {
+    /// `(adopted key, universal obligations)` in mint order. Every key is
+    /// distinct; the caller inserts them into the merged obligation map and
+    /// records each key for the `inference.spec_funcs` section.
+    specs: Vec<(String, Vec<inference_hassert::HSpecEntry>)>,
+    /// Every function symbol the adopted obligations apply, after the rewrite
+    /// onto merged bodies — the set the post-merge obligation check must resolve
+    /// alongside the program's own.
+    symbols: BTreeSet<String>,
+    /// One entry per contributing library that shipped reachability obligations,
+    /// ascending by logical module.
+    warnings: Vec<LinkWarning>,
+}
+
+/// Reports every contributing library whose own proof obligations this merge did
+/// not carry into the output.
+///
+/// Keyed on the presence of an `inference.hspecs` section alone: a library
+/// carrying only `inference.spec_funcs` records spec membership — indices of its
+/// own specification functions, which no export closure reaches — and loses
+/// nothing worth reporting. Presence is all this can report, because under this
+/// policy the section is never decoded, and that is the point of the policy.
+///
+/// Scoped to libraries that supplied at least one merged body. One nothing
+/// imports from is not part of the artifact, so nothing about it was dropped in
+/// a sense the reader can act on, and reporting it would fire on every unrelated
+/// dependency of a program that links one.
+fn external_spec_warning(
+    externals: &[ParsedModule],
+    merged_index: &BTreeMap<(usize, u32), u32>,
+) -> Option<LinkWarning> {
+    let modules: BTreeSet<&str> = externals
+        .iter()
+        .enumerate()
+        .filter(|(ext_idx, external)| {
+            external.carries_hspecs && contributes_a_body(*ext_idx, merged_index)
+        })
+        .map(|(_, external)| external.logical_module.as_str())
+        .collect();
+    if modules.is_empty() {
+        return None;
+    }
+    Some(LinkWarning::ExternalSpecsDropped {
+        modules: modules.into_iter().map(str::to_string).collect(),
+    })
+}
+
+/// Whether the merge folded at least one body in from the external at
+/// `ext_idx`.
+fn contributes_a_body(ext_idx: usize, merged_index: &BTreeMap<(usize, u32), u32>) -> bool {
+    merged_index.keys().any(|(idx, _)| *idx == ext_idx)
+}
+
+/// The carriers of an applied obligation symbol that could legitimately be its
+/// target, narrowed from every function of that name in a module's `name`
+/// section by dropping the ones `spec_funcs` records as specification
+/// functions.
+///
+/// A specification function's name-section symbol is deliberately left
+/// *unqualified* by its defining file — spec membership travels as indices in
+/// `inference.spec_funcs` — so a spec-inner `fn helper` and the module's own
+/// `fn helper` really do share one string. That coincidence is not an
+/// ambiguity: no obligation may apply a specification function at all, so the
+/// spec carriers are not candidates and dropping them leaves the one function
+/// the symbol can mean. When *every* carrier is a specification function the
+/// full set stands, so the rejection downstream reports the real count rather
+/// than "nothing carries the name".
+///
+/// This is the same rule the proof translator applies to the merged module's
+/// own obligations (`applicable_carriers` in `core/wasm-to-v/src/translator.rs`,
+/// over its `FuncRemap`), reached here over a library's own decoded section
+/// because a library's obligations are resolved before the translator ever
+/// sees them. The two cannot be allowed to drift: this pass hands the
+/// translator a symbol already rewritten onto a merged body, so a narrowing
+/// only one of them performed would either reject a library the translator
+/// resolves correctly, or resolve one it would refuse.
+fn applicable_carriers(named: &[u32], spec_funcs: &BTreeSet<u32>) -> Vec<u32> {
+    let applicable: Vec<u32> = named
+        .iter()
+        .copied()
+        .filter(|idx| !spec_funcs.contains(idx))
+        .collect();
+    if applicable.is_empty() {
+        return named.to_vec();
+    }
+    applicable
+}
+
+/// Carries each contributing library's **universal** obligations into the merged
+/// module's own verification sections, resolving every symbol they apply onto
+/// the merged body it names.
+///
+/// An applied symbol is resolved against the library's whole `name` section
+/// narrowed by [`applicable_carriers`], which is the translator's rule: a
+/// library's specification functions carry unqualified names, so a library that
+/// declares `fn scale` and states a specification whose inner function is also
+/// named `scale` names two functions `scale` and only one of them is a body an
+/// obligation can be about. The type checker permits that pair whenever the two
+/// live in different files of the library, so it is reachable from ordinary
+/// source rather than only from hand-built bytes.
+///
+/// Two ordering facts this relies on, both established by its caller:
+///
+/// * it runs **after** the anonymous-name fallback, because
+///   [`merged_output_symbol`] reads final `MergedFunc::name` values;
+/// * it runs **before** the post-merge obligation check, because the symbols it
+///   returns must be in that check's input.
+///
+/// An adopted symbol is not a candidate for the contested-alias treatment. A
+/// contested alias is a string whose *intended* referent (the body an import
+/// bound under that field) differs from the string's *resolvable* referent (the
+/// function the name section records under it); the ambiguity is a property of a
+/// human-written obligation naming an export field. An adopted symbol has no
+/// such gap: it is not written by anyone, it is produced by
+/// [`merged_output_symbol`] from the exact `MergedFunc::name` the section will
+/// carry, so its intended referent *is* its resolvable referent by construction.
+/// Recording a contested alias for it would add a second carrier to a symbol
+/// that names exactly one body, rejecting a link the translator resolves
+/// correctly. What genuinely is dangerous — two merged bodies carrying one
+/// name-section string — is caught anyway, because the post-merge check counts
+/// every name-section entry matching the symbol.
+///
+/// Entries are partitioned by kind **first**, and the key is computed only if a
+/// universal entry survives. Doing it the other way round would let a
+/// specification this pass declines to adopt hard-fail a link on an invalid or
+/// colliding key that would never be minted.
+///
+/// # Errors
+///
+/// Every way an adoption can be refused, each naming the library and the
+/// specification: the library's own two sections disagreeing, a key the proof
+/// translation cannot spell or that is already claimed, an applied symbol the
+/// library's own `name` section carries on no function or on several, an
+/// obligation over a body this merge did not fold in, and an adopted
+/// specification symbol the merged output already carries.
+fn adopt_external_specs(
+    main: &ParsedModule,
+    externals: &[ParsedModule],
+    merged: &[MergedFunc],
+    merged_index: &BTreeMap<(usize, u32), u32>,
+    merged_base: u32,
+    carried: &BTreeSet<&str>,
+) -> Result<AdoptedSpecs, LinkError> {
+    let mut claimed: BTreeSet<&str> = BTreeSet::new();
+    if let Some(spec_funcs) = &main.spec_funcs {
+        claimed.extend(spec_funcs.iter().map(|(name, _)| name.as_str()));
+    }
+    if let Some(hspecs) = &main.hspecs {
+        claimed.extend(hspecs.keys().map(String::as_str));
+    }
+
+    let mut adopted = AdoptedSpecs {
+        specs: Vec::new(),
+        symbols: BTreeSet::new(),
+        warnings: Vec::new(),
+    };
+    // `key -> the logical module that minted it`, so a second library folding to
+    // the same key can name the first in its rejection.
+    let mut minted_by: BTreeMap<String, String> = BTreeMap::new();
+    // `(module, specs adopted from it, obligations left behind)`. The count is
+    // what tells a partial adoption from one that carried nothing at all, which
+    // the report has to say out loud: a library whose every obligation is a
+    // reachability obligation mints no key, and a reader told only what was left
+    // behind would read the rest as having been adopted.
+    let mut left_behind: Vec<(&str, usize, Vec<String>)> = Vec::new();
+
+    for (ext_idx, external) in externals.iter().enumerate() {
+        if !contributes_a_body(ext_idx, merged_index) {
+            continue;
+        }
+        let Some(hspecs) = &external.hspecs else {
+            continue;
+        };
+        let module = external.logical_module.as_str();
+        let listed: BTreeSet<&str> = external
+            .spec_funcs
+            .iter()
+            .flatten()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let library_spec_funcs: BTreeSet<u32> = external
+            .spec_funcs
+            .iter()
+            .flatten()
+            .flat_map(|(_, indices)| indices.iter().copied())
+            .collect();
+        let mut dropped: Vec<String> = Vec::new();
+        let already_adopted = adopted.specs.len();
+
+        // The obligation map is an `FxHashMap`, so the walk is sorted
+        // explicitly: every diagnostic and every warning must be reproducible.
+        let mut spec_names: Vec<&String> = hspecs.keys().collect();
+        spec_names.sort_unstable();
+        for spec in spec_names {
+            if !listed.contains(spec.as_str()) {
+                return Err(LinkError::AdoptedSpecUnlisted {
+                    module: module.to_string(),
+                    spec: spec.clone(),
+                });
+            }
+            let mut universal: Vec<inference_hassert::HSpecEntry> = Vec::new();
+            for entry in &hspecs[spec] {
+                let kind = match entry.kind {
+                    inference_hassert::SpecKind::Forall => {
+                        universal.push(entry.clone());
+                        continue;
+                    }
+                    inference_hassert::SpecKind::Exists(_) => "exists",
+                    inference_hassert::SpecKind::Unique(_) => "unique",
+                };
+                dropped.push(format!("`{spec}` / `{}` ({kind})", entry.fn_symbol.0));
+            }
+            if universal.is_empty() {
+                // A specification whose obligations are all reachability
+                // obligations mints no key at all. The alternative is a
+                // `ValidSpec` over an empty list, a theorem trivially true of
+                // every module and stating nothing about the program; a vacuous
+                // obligation that discharges is worse than an absent one.
+                continue;
+            }
+
+            if module.is_empty() {
+                return Err(LinkError::AdoptedSpecNameInvalid {
+                    module: module.to_string(),
+                    spec: spec.clone(),
+                    key: spec.clone(),
+                    reason: "the external was bound under an empty logical module, so its \
+                             specifications cannot be namespaced apart from the program's own"
+                        .to_string(),
+                });
+            }
+            let key = adopted_spec_key(module, spec);
+            if let Some(reason) = spec_name_problem(&key) {
+                return Err(LinkError::AdoptedSpecNameInvalid {
+                    module: module.to_string(),
+                    spec: spec.clone(),
+                    key,
+                    reason,
+                });
+            }
+            if claimed.contains(key.as_str()) {
+                return Err(LinkError::AdoptedSpecNameCollision {
+                    spec: key,
+                    module: module.to_string(),
+                    contender: None,
+                });
+            }
+            if let Some(first) = minted_by.get(&key) {
+                return Err(LinkError::AdoptedSpecNameCollision {
+                    spec: key.clone(),
+                    module: first.clone(),
+                    contender: Some(module.to_string()),
+                });
+            }
+
+            for entry in &mut universal {
+                let symbol = inference_fn_key::merged_name::adopted_spec(module, &entry.fn_symbol.0);
+                if carried.contains(symbol.as_str()) {
+                    return Err(LinkError::AdoptedSpecSymbolCollision {
+                        module: module.to_string(),
+                        spec: spec.clone(),
+                        symbol,
+                    });
+                }
+                entry.fn_symbol = HFnRef(symbol);
+            }
+
+            let mut pending = HSpecMap::default();
+            pending.insert(key.clone(), universal);
+            // Two passes over the same walker rather than a second traversal of
+            // the same two languages: an empty alias map collects what the
+            // obligations apply, resolution happens between the passes in
+            // ordinary control flow, and the second pass rewrites.
+            let applied = canonicalize_applied_symbols(&mut pending, &BTreeMap::new());
+            let mut aliases: BTreeMap<&str, &str> = BTreeMap::new();
+            for symbol in &applied {
+                let named: Vec<u32> = external
+                    .func_names
+                    .iter()
+                    .filter(|(_, name)| name.as_str() == symbol.as_str())
+                    .map(|(idx, _)| *idx)
+                    .collect();
+                let carriers = applicable_carriers(&named, &library_spec_funcs);
+                let [src_idx] = carriers[..] else {
+                    if carriers.is_empty() {
+                        return Err(LinkError::AdoptedObligationSymbolUnresolved {
+                            module: module.to_string(),
+                            spec: spec.clone(),
+                            symbol: symbol.clone(),
+                        });
+                    }
+                    return Err(LinkError::AdoptedObligationSymbolAmbiguous {
+                        module: module.to_string(),
+                        spec: spec.clone(),
+                        symbol: symbol.clone(),
+                        carriers,
+                    });
+                };
+                let Some(output) =
+                    merged_output_symbol(merged, merged_index, merged_base, (ext_idx, src_idx))
+                else {
+                    return Err(LinkError::AdoptedObligationUnmergedSymbol {
+                        module: module.to_string(),
+                        spec: spec.clone(),
+                        symbol: symbol.clone(),
+                        imported: src_idx < external.local_func_base(),
+                    });
+                };
+                aliases.insert(symbol.as_str(), output);
+            }
+            adopted
+                .symbols
+                .extend(canonicalize_applied_symbols(&mut pending, &aliases));
+
+            let entries = pending
+                .remove(&key)
+                .expect("the pending map holds exactly the key just inserted");
+            minted_by.insert(key.clone(), module.to_string());
+            adopted.specs.push((key, entries));
+        }
+
+        if !dropped.is_empty() {
+            left_behind.push((module, adopted.specs.len() - already_adopted, dropped));
+        }
+    }
+
+    left_behind.sort_by_key(|(module, _, _)| *module);
+    adopted.warnings = left_behind
+        .into_iter()
+        .map(
+            |(module, count, obligations)| LinkWarning::ReachabilityObligationsNotAdopted {
+                module: module.to_string(),
+                adopted: count,
+                obligations,
+            },
+        )
+        .collect();
+    Ok(adopted)
 }
 
 /// Collects the type indices a body references through function-typed
@@ -2314,5 +2891,262 @@ mod tests {
             "expected an UnsupportedConstruct naming v128, got {err:?}"
         );
         assert!(out_types.is_empty(), "no signature is committed on rejection");
+    }
+    /// The table the three identifier-rule pins share: names the linker admits,
+    /// one name per structural clause it refuses, and the reserved names whose
+    /// treatment is the documented carve-out.
+    fn identifier_pin_table() -> Vec<&'static str> {
+        vec![
+            // Admitted by both rules.
+            "mathlib_DoubleSpec",
+            "a_b_S",
+            "S",
+            "Spec2",
+            // One per structural clause.
+            "",
+            "_leading",
+            "9leading",
+            "has.dot",
+            "a__b",
+            "trailing_",
+            // The carve-out: syntactically legal, refused by the translator's
+            // stdlib/keyword denylist alone.
+            "eq_refl",
+            "well_founded",
+            "nat",
+            "Qed",
+            // Legal, and *not* denylisted — the neighbourhood of `Spec_` without
+            // its trailing underscore.
+            "Spec",
+        ]
+    }
+
+    /// The pin that matters: the linker must never mint a key the proof
+    /// translation refuses for a **structural** reason. The linker's rule is a
+    /// restatement of the translator's, so an implication in this direction is
+    /// what keeps the restatement honest; the reverse direction is the
+    /// deliberate carve-out below.
+    #[test]
+    fn every_key_the_linker_admits_wasm_to_v_admits() {
+        use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
+        use inference_wasm_to_v_translator::rocq_names::validate_rocq_identifier;
+
+        for name in identifier_pin_table() {
+            if spec_name_problem(name).is_some() {
+                continue;
+            }
+            match validate_rocq_identifier(name) {
+                Ok(()) => {}
+                Err(WasmToVError::RocqStdlibShadow { .. })
+                | Err(WasmToVError::InvalidRocqIdentifier {
+                    reason: InvalidIdentifierReason::ReservedKeyword,
+                    ..
+                }) => {}
+                Err(other) => panic!(
+                    "the linker admits `{name}` for a structural reason the translator refuses: \
+                     {other}"
+                ),
+            }
+        }
+    }
+
+    /// The carve-out, pinned in both directions so it cannot widen silently: the
+    /// linker deliberately does not restate the translator's stdlib/keyword
+    /// denylist, and the only errors that split the two rules are those two.
+    #[test]
+    fn reserved_names_pass_the_linker_rule_and_fail_the_translator_rule() {
+        use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
+        use inference_wasm_to_v_translator::rocq_names::validate_rocq_identifier;
+
+        for name in ["eq_refl", "well_founded", "nat", "Qed"] {
+            assert_eq!(
+                spec_name_problem(name),
+                None,
+                "the linker's rule is structural only and must admit `{name}`"
+            );
+            let err = validate_rocq_identifier(name)
+                .expect_err("the translator's denylist must refuse `{name}`");
+            assert!(
+                matches!(
+                    err,
+                    WasmToVError::RocqStdlibShadow { .. }
+                        | WasmToVError::InvalidRocqIdentifier {
+                            reason: InvalidIdentifierReason::ReservedKeyword,
+                            ..
+                        }
+                ),
+                "the deferred half of the rule is the denylist alone, got {err} for `{name}`"
+            );
+        }
+    }
+
+    /// A trailing `_` is the one clause the linker owns outright: the
+    /// translator's identifier rule admits it, and the rule that does refuse it
+    /// downstream is crate-private there, so no test outside that crate can
+    /// observe it. Refusing at the link is also what lets the message name the
+    /// library and the specification, which the translator's cannot.
+    #[test]
+    fn a_trailing_underscore_key_is_rejected_here_though_the_identifier_rule_admits_it() {
+        use inference_wasm_to_v_translator::rocq_names::validate_rocq_identifier;
+
+        assert!(
+            validate_rocq_identifier("mathlib_Double_").is_ok(),
+            "the translator's identifier rule has no trailing-underscore clause"
+        );
+        let reason = spec_name_problem("mathlib_Double_")
+            .expect("the linker must refuse a key ending in `_`");
+        assert!(
+            reason.contains("ends with `_`"),
+            "the clause must name the defect, got {reason}"
+        );
+    }
+
+    /// Each clause's own text, not merely that something was refused: the clause
+    /// is set verbatim inside a user-facing rejection, and the order is the
+    /// translator's, so a name breaking several rules is reported under the
+    /// clause the translator would report.
+    #[test]
+    fn spec_name_problem_names_each_structural_defect() {
+        assert_eq!(spec_name_problem(""), Some("it is empty".to_string()));
+        assert_eq!(
+            spec_name_problem("_leading"),
+            Some(
+                "it starts with `_`, and a generated identifier must start with an ASCII letter"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            spec_name_problem("has.dot"),
+            Some(
+                "it contains `.`, and a generated identifier admits only ASCII letters, digits \
+                 and `_`"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            spec_name_problem("a__b"),
+            Some(
+                "it contains a `__` run, which the generated `<module>__<spec>` grammar reserves"
+                    .to_string()
+            )
+        );
+        let over_long = "a".repeat(MAX_SPEC_NAME_BYTES + 1);
+        assert_eq!(
+            spec_name_problem(&over_long),
+            Some(format!(
+                "it is {} bytes long, past the 255-byte limit on a generated identifier",
+                MAX_SPEC_NAME_BYTES + 1
+            ))
+        );
+        assert_eq!(
+            spec_name_problem("trailing_"),
+            Some(
+                "it ends with `_`, which the generated `<module>__<spec>` grammar reserves"
+                    .to_string()
+            )
+        );
+        // The cap is checked before the trailing-`_` clause, so an over-long name
+        // ending in `_` reports the clause the translator would.
+        let over_long_underscore = format!("{}_", "a".repeat(MAX_SPEC_NAME_BYTES));
+        assert!(
+            spec_name_problem(&over_long_underscore)
+                .expect("refused")
+                .contains("bytes long"),
+            "the length cap must be reported ahead of the trailing-underscore clause"
+        );
+        assert_eq!(spec_name_problem("mathlib_DoubleSpec"), None);
+    }
+
+    /// The `name` section is one field, `MergedFunc::name`, written by the plan
+    /// and read by the encoder. The adoption rewrite must read that same field,
+    /// so a symbol an adopted obligation is pointed at cannot drift from the
+    /// symbol the section records. All three producers are covered: a canonical
+    /// root, a marked inner callee, and the index-derived fallback.
+    #[test]
+    fn merged_output_symbol_reads_the_name_the_section_will_carry() {
+        let main = ParsedModule::default();
+        let merged = vec![
+            MergedFunc {
+                external_idx: 0,
+                source_func_idx: 4,
+                out_type_idx: 0,
+                name: Some(inference_fn_key::merged_name::root("mathlib", "double")),
+            },
+            MergedFunc {
+                external_idx: 0,
+                source_func_idx: 5,
+                out_type_idx: 0,
+                name: Some(inference_fn_key::merged_name::callee("mathlib", "helper")),
+            },
+            MergedFunc {
+                external_idx: 1,
+                source_func_idx: 2,
+                out_type_idx: 0,
+                name: Some(inference_fn_key::merged_name::anonymous("crypto", 2)),
+            },
+        ];
+        let merged_base = 0;
+        let merged_index: BTreeMap<(usize, u32), u32> =
+            [((0, 4), 0), ((0, 5), 1), ((1, 2), 2)].into_iter().collect();
+
+        let section = name_section_entries(&main, merged_base, &merged);
+        for (key, out_idx) in &merged_index {
+            let recorded = section
+                .iter()
+                .find(|(idx, _)| idx == out_idx)
+                .map(|(_, name)| *name)
+                .expect("every merged body is named by the time this runs");
+            assert_eq!(
+                merged_output_symbol(&merged, &merged_index, merged_base, *key),
+                Some(recorded),
+                "the lookup must agree with the section for {key:?}"
+            );
+        }
+    }
+
+    /// `None` means the key names no merged body, never a merged body with no
+    /// name — which is the single fault the adoption call site reports. The
+    /// below-base key additionally exercises the guard that keeps an index the
+    /// caller supplied from underflowing into a wrong slot.
+    #[test]
+    fn merged_output_symbol_is_none_for_a_key_outside_the_merge() {
+        let merged = vec![MergedFunc {
+            external_idx: 0,
+            source_func_idx: 4,
+            out_type_idx: 0,
+            name: Some(inference_fn_key::merged_name::root("mathlib", "double")),
+        }];
+        let merged_base = 7;
+        let merged_index: BTreeMap<(usize, u32), u32> =
+            [((0, 4), 7), ((0, 9), 3)].into_iter().collect();
+
+        assert_eq!(
+            merged_output_symbol(&merged, &merged_index, merged_base, (0, 3)),
+            None,
+            "a key the merge folded nothing in for names no body"
+        );
+        assert_eq!(
+            merged_output_symbol(&merged, &merged_index, merged_base, (0, 9)),
+            None,
+            "an output index below the merged base cannot address a merged slot"
+        );
+        assert_eq!(
+            merged_output_symbol(&merged, &merged_index, merged_base, (0, 4)),
+            Some("mathlib::double")
+        );
+    }
+
+    /// The adopted key namespaces a library's specification under the logical
+    /// module the program bound it as, and a `::`-joined module contributes each
+    /// of its segments — the same fold code generation applies to a spec's
+    /// defining file, so both reach a plain Rocq identifier the same way.
+    #[test]
+    fn adopted_spec_key_folds_the_logical_module_segments() {
+        assert_eq!(
+            adopted_spec_key("mathlib", "DoubleSpec"),
+            "mathlib_DoubleSpec"
+        );
+        assert_eq!(adopted_spec_key("a::b", "S"), "a_b_S");
+        assert_eq!(adopted_spec_key("a::b::c", "S"), "a_b_c_S");
     }
 }

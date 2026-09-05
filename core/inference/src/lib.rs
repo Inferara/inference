@@ -327,6 +327,12 @@ pub use inference_wasm_linker::LinkError;
 /// direct dependency on `inference-wasm-linker`.
 pub use inference_wasm_linker::{LinkOutput, LinkWarning};
 
+/// Re-export of the static-merge linker's policy inputs, so a caller of
+/// [`link_with_options`] can say what the merge should do with the verification
+/// sections a linked library ships without taking a direct dependency on
+/// `inference-wasm-linker`.
+pub use inference_wasm_linker::{ExternalSpecPolicy, LinkOptions};
+
 /// Re-export of the linker's write-set contract, which
 /// [`wasm_link::resolve_external_modules`] produces and [`link`] consumes, so a
 /// caller can carry one to the other without a direct dependency on
@@ -832,6 +838,30 @@ pub fn link_with_warnings(
     externals: &[(&str, &[u8])],
     contracts: Option<&[ImportWriteSet]>,
 ) -> anyhow::Result<LinkOutput> {
+    link_with_options(main_wasm, externals, contracts, &LinkOptions::default())
+}
+
+/// Folds external `.wasm` modules into the codegen output under the given policy
+/// inputs, reporting what the completed link owes the user.
+///
+/// Identical to [`link_with_warnings`], of which it is the general form: that is
+/// this with [`LinkOptions::default`], whose external-specification policy is
+/// [`ExternalSpecPolicy::Warn`]. Everything documented there — the
+/// byte-identical no-op path for a program without externs, the two `contracts`
+/// modes, and the entry-point divergence from
+/// [`inference_wasm_linker::link_with_warnings`] — applies here unchanged.
+///
+/// # Errors
+///
+/// The same conditions as [`link`], plus — under
+/// [`ExternalSpecPolicy::Adopt`] alone — every way an adoption can be refused;
+/// see [`inference_wasm_linker::link_with_options`].
+pub fn link_with_options(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
+    options: &LinkOptions,
+) -> anyhow::Result<LinkOutput> {
     // Byte-identical fast path *only* for a module that is provably import-free —
     // it is already the self-contained artifact this step would produce. A module
     // that still carries imports (e.g. a caller that passed no resolved externals
@@ -849,14 +879,18 @@ pub fn link_with_warnings(
     // owes the user, so a variant about the reconciled memory or about main's own
     // shape would be dropped here with nothing failing. Adding one means deciding
     // whether it can arise with no externals, and moving this return if it can.
+    // The same premise is what keeps this path equivalent under every
+    // external-specification policy: both of the variants that policy raises are
+    // raised only for an external that contributed at least one merged body, and
+    // this path is taken only when there is no external at all.
     if externals.is_empty() && module_is_import_free(main_wasm) {
         return Ok(LinkOutput {
             wasm: main_wasm.to_vec(),
             warnings: Vec::new(),
         });
     }
-    Ok(inference_wasm_linker::link_with_warnings(
-        main_wasm, externals, contracts,
+    Ok(inference_wasm_linker::link_with_options(
+        main_wasm, externals, contracts, options,
     )?)
 }
 

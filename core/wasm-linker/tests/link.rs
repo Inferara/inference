@@ -7,8 +7,9 @@
 
 use inf_wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
 use inference_wasm_linker::{
-    link as raw_link, link_with_warnings as raw_link_with_warnings, LinkError, LinkOutput,
-    LinkWarning,
+    link as raw_link, link_with_options as raw_link_with_options,
+    link_with_warnings as raw_link_with_warnings, ExternalSpecPolicy, LinkError, LinkOptions,
+    LinkOutput, LinkWarning,
 };
 
 /// Assembles a `.wasm` binary from WAT source, panicking with the WAT on error.
@@ -3791,11 +3792,12 @@ fn main_hspecs_section_survives_the_merge_byte_for_byte() {
     );
 }
 
-/// An external's `inference.hspecs` section is verification-only scaffolding for
-/// a module never emitted whole; building an executable must strip it, never
-/// merge it into the output.
+/// A library's `inference.hspecs` section records what its author proved about
+/// its own code. Only the executable closure of a satisfied export crosses the
+/// merge, so those obligations are not part of the output — but the default
+/// policy says so rather than dropping them in silence.
 #[test]
-fn external_hspecs_section_is_stripped_when_building_an_executable() {
+fn an_external_carrying_obligations_warns_by_default() {
     use wasm_encoder::{
         CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
         Instruction, Module, TypeSection, ValType,
@@ -3831,13 +3833,20 @@ fn external_hspecs_section_is_stripped_when_building_an_executable() {
     };
 
     let main = main_importing_sum();
-    let linked =
-        link(&main, &[&lib]).expect("an external carrying an hspecs section must still link");
-    assert_valid(&linked);
-    assert!(function_imports(&linked).is_empty());
+    let out = link_with_warnings(&main, &[&lib])
+        .expect("an external carrying an hspecs section must still link");
+    assert_valid(&out.wasm);
+    assert!(function_imports(&out.wasm).is_empty());
     assert!(
-        custom_section_data(&linked, inference_hassert::HSPECS_SECTION_NAME).is_none(),
+        custom_section_data(&out.wasm, inference_hassert::HSPECS_SECTION_NAME).is_none(),
         "an external's hspecs section must not be merged into the executable output"
+    );
+    assert_eq!(
+        out.warnings,
+        vec![LinkWarning::ExternalSpecsDropped {
+            modules: vec!["mathlib".to_string()],
+        }],
+        "the default policy must name the library whose obligations the output does not carry"
     );
 }
 
@@ -7737,4 +7746,1400 @@ mod declared_write_sets {
             "the message must teach the name-it-first fix; got: {rendered}"
         );
     }
+}
+
+// -- External specification policy -------------------------------------------
+
+/// Links `main` against libraries bound under the given logical modules, under
+/// an explicit external-specification policy.
+///
+/// The pairs are spelled out rather than derived from `main`'s imports (as
+/// [`link`] does) because these fixtures deliberately bind two libraries under
+/// different logical modules, and one of them under none at all.
+fn link_under(
+    main: &[u8],
+    libs: &[(&str, &[u8])],
+    policy: ExternalSpecPolicy,
+) -> Result<LinkOutput, LinkError> {
+    raw_link_with_options(
+        main,
+        libs,
+        None,
+        &LinkOptions {
+            external_specs: policy,
+        },
+    )
+}
+
+/// Appends `value` as an unsigned LEB128.
+fn push_leb(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+/// Encodes an `inference.spec_funcs` payload, mirroring [`decode_spec_funcs`].
+fn encode_spec_funcs(entries: &[(&str, Vec<u32>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_leb(&mut out, 1);
+    push_leb(&mut out, entries.len() as u32);
+    for (name, indices) in entries {
+        push_leb(&mut out, name.len() as u32);
+        out.extend_from_slice(name.as_bytes());
+        push_leb(&mut out, indices.len() as u32);
+        for &idx in indices {
+            push_leb(&mut out, idx);
+        }
+    }
+    out
+}
+
+/// The two verification sections a proof-mode library ships, in the order a
+/// producer writes them, ready to hand to [`adoption_library`] or
+/// [`adoption_main`].
+fn verification_sections(
+    spec_funcs: &[(&str, Vec<u32>)],
+    hspecs: &inference_hassert::HSpecMap,
+) -> Vec<(String, Vec<u8>)> {
+    vec![
+        (
+            "inference.spec_funcs".to_string(),
+            encode_spec_funcs(spec_funcs),
+        ),
+        (
+            inference_hassert::HSPECS_SECTION_NAME.to_string(),
+            inference_hassert::encode(hspecs),
+        ),
+    ]
+}
+
+/// The three defined functions [`adoption_library`] names, in index order.
+const LIBRARY_NAMES: [&str; 3] = ["double", "helper", "spare"];
+
+/// The `mathlib`-shaped library the adoption tests link against.
+///
+/// The first defined function is exported as `export_fields` and calls the
+/// second, so a merge that satisfies an import of it folds both bodies in; the
+/// third is reached by nothing, so the merge folds no body in for it. All three
+/// carry `names` in the `name` section, which is what an adopted obligation
+/// resolves its applied symbols against. With `host_import` set the library
+/// additionally imports `host::log` at index 0, shifting every defined function
+/// up one and giving an obligation a symbol no static merge could supply a body
+/// for.
+///
+/// `sections` are appended verbatim, so a test can attach a well-formed pair of
+/// verification sections, a malformed one, or two of the same.
+fn adoption_library(
+    export_fields: &[&str],
+    host_import: bool,
+    names: &[&str; 3],
+    sections: &[(String, Vec<u8>)],
+) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, CustomSection, EntityType, ExportKind, ExportSection, Function,
+        FunctionSection, ImportSection, Instruction, Module, NameMap, NameSection, TypeSection,
+        ValType,
+    };
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], [ValType::I32]);
+    module.section(&types);
+
+    let base = if host_import {
+        let mut imports = ImportSection::new();
+        imports.import("host", "log", EntityType::Function(0));
+        module.section(&imports);
+        1
+    } else {
+        0
+    };
+
+    let mut funcs = FunctionSection::new();
+    for _ in 0..3 {
+        funcs.function(0);
+    }
+    module.section(&funcs);
+
+    let mut exports = ExportSection::new();
+    for field in export_fields {
+        exports.export(field, ExportKind::Func, base);
+    }
+    module.section(&exports);
+
+    let mut code = CodeSection::new();
+    let mut root = Function::new([]);
+    root.instruction(&Instruction::LocalGet(0));
+    root.instruction(&Instruction::Call(base + 1));
+    root.instruction(&Instruction::End);
+    code.function(&root);
+    let mut inner = Function::new([]);
+    inner.instruction(&Instruction::LocalGet(0));
+    inner.instruction(&Instruction::LocalGet(0));
+    inner.instruction(&Instruction::I32Add);
+    inner.instruction(&Instruction::End);
+    code.function(&inner);
+    let mut spare = Function::new([]);
+    spare.instruction(&Instruction::LocalGet(0));
+    spare.instruction(&Instruction::End);
+    code.function(&spare);
+    module.section(&code);
+
+    let mut name_section = NameSection::new();
+    name_section.module("mathlib");
+    let mut func_names = NameMap::new();
+    if host_import {
+        func_names.append(0, "host_log");
+    }
+    for (offset, name) in names.iter().enumerate() {
+        func_names.append(base + offset as u32, name);
+    }
+    name_section.functions(&func_names);
+    module.section(&name_section);
+
+    for (name, data) in sections {
+        module.section(&CustomSection {
+            name: name.as_str().into(),
+            data: data[..].into(),
+        });
+    }
+    module.finish()
+}
+
+/// The library every well-formed adoption test uses: exports `double`, names its
+/// three functions conventionally, and carries whichever sections are supplied.
+fn plain_library(sections: &[(String, Vec<u8>)]) -> Vec<u8> {
+    adoption_library(&["double"], false, &LIBRARY_NAMES, sections)
+}
+
+/// A main module importing one `double` per named logical module, exporting a
+/// local `compute` that calls the first, and carrying whichever custom sections
+/// the caller supplies.
+///
+/// Post-link, `compute` occupies output index 0 (every import is removed) and
+/// the merged bodies follow in import order.
+fn adoption_main_importing(imports: &[(&str, &str)], sections: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, CustomSection, EntityType, ExportKind, ExportSection, Function,
+        FunctionSection, ImportSection, Instruction, Module, NameMap, NameSection, TypeSection,
+        ValType,
+    };
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([ValType::I32], [ValType::I32]);
+    module.section(&types);
+
+    let mut import_section = ImportSection::new();
+    for (module_name, field) in imports {
+        import_section.import(module_name, field, EntityType::Function(0));
+    }
+    module.section(&import_section);
+
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+
+    let local_idx = imports.len() as u32;
+    let mut exports = ExportSection::new();
+    exports.export("compute", ExportKind::Func, local_idx);
+    module.section(&exports);
+
+    let mut code = CodeSection::new();
+    let mut compute = Function::new([]);
+    compute.instruction(&Instruction::LocalGet(0));
+    compute.instruction(&Instruction::Call(0));
+    compute.instruction(&Instruction::End);
+    code.function(&compute);
+    module.section(&code);
+
+    let mut name_section = NameSection::new();
+    name_section.module("main");
+    let mut func_names = NameMap::new();
+    func_names.append(local_idx, "compute");
+    name_section.functions(&func_names);
+    module.section(&name_section);
+
+    for (name, data) in sections {
+        module.section(&CustomSection {
+            name: name.as_str().into(),
+            data: data[..].into(),
+        });
+    }
+    module.finish()
+}
+
+/// [`adoption_main_importing`] against the single `mathlib::double` import every
+/// straightforward adoption test uses.
+fn adoption_main(sections: &[(String, Vec<u8>)]) -> Vec<u8> {
+    adoption_main_importing(&[("mathlib", "double")], sections)
+}
+
+/// One universal obligation under `spec`, owned by `owner` and applying
+/// `applied` to the single parameter — the shape a library's `forall` assertion
+/// about one of its own functions takes.
+fn universal(spec: &str, owner: &str, applied: &str) -> inference_hassert::HSpecMap {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
+    let mut map = HSpecMap::default();
+    map.insert(
+        spec.to_string(),
+        vec![HSpecEntry::new(
+            HFnRef(owner.to_string()),
+            HAssert::nz(HTerm::App(
+                HFnRef(applied.to_string()),
+                vec![HTerm::Local(0)],
+            )),
+            SpecKind::Forall,
+        )],
+    );
+    map
+}
+
+/// One reachability obligation, owned by `owner`. Its assertion applies nothing,
+/// so it can never be the reason a test fails for an unrelated symbol.
+fn reachability_entry(owner: &str, exists: bool) -> inference_hassert::HSpecEntry {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, ReachMeta, SpecKind};
+    let meta = ReachMeta {
+        entry_arity: 1,
+        visible_locs: vec![0],
+    };
+    let kind = if exists {
+        SpecKind::Exists(meta)
+    } else {
+        SpecKind::Unique(meta)
+    };
+    HSpecEntry::new(HFnRef(owner.to_string()), HAssert::True, kind)
+}
+
+/// The obligation map the linked module carries, decoded from its own bytes.
+fn linked_hspecs(bytes: &[u8]) -> Option<inference_hassert::HSpecMap> {
+    let data = custom_section_data(bytes, inference_hassert::HSPECS_SECTION_NAME)?;
+    Some(inference_hassert::decode(&data).expect("the emitted hspecs payload must decode"))
+}
+
+/// The `(spec_name, [func_idx])` entries the linked module's
+/// `inference.spec_funcs` section carries.
+fn linked_spec_funcs(bytes: &[u8]) -> Option<Vec<(String, Vec<u32>)>> {
+    custom_section_data(bytes, "inference.spec_funcs").map(|data| decode_spec_funcs(&data))
+}
+
+/// The module's sections as `(id, custom-section name, payload)` triples, in
+/// order.
+///
+/// Read off the raw bytes rather than through a payload reader, so a comparison
+/// between two links can be made on the emitted bytes of every section without
+/// re-encoding any of them.
+fn raw_sections(bytes: &[u8]) -> Vec<(u8, String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut cursor = 8; // magic + version
+    while cursor < bytes.len() {
+        let id = bytes[cursor];
+        cursor += 1;
+        let mut size = 0u32;
+        let mut shift = 0;
+        loop {
+            let byte = bytes[cursor];
+            cursor += 1;
+            size |= u32::from(byte & 0x7f) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let payload = &bytes[cursor..cursor + size as usize];
+        cursor += size as usize;
+        let name = if id == 0 {
+            let mut reader = inf_wasmparser::BinaryReader::new(payload, 0);
+            reader.read_string().unwrap_or_default().to_string()
+        } else {
+            String::new()
+        };
+        out.push((id, name, payload.to_vec()));
+    }
+    out
+}
+
+/// The name a merged function carries at `out_idx` in the emitted `name`
+/// section — read off the artifact, so an assertion about where an adopted
+/// symbol points is an assertion about the bytes and not about the plan.
+fn name_at(bytes: &[u8], out_idx: u32) -> String {
+    function_names(bytes)
+        .into_iter()
+        .find(|(idx, _)| *idx == out_idx)
+        .unwrap_or_else(|| panic!("no name-section entry at index {out_idx}"))
+        .1
+}
+
+/// The single applied symbol of the sole adopted obligation under `spec`.
+fn adopted_applied_symbol(map: &inference_hassert::HSpecMap, spec: &str) -> String {
+    use inference_hassert::{HAssert, HTerm};
+    let entries = map
+        .get(spec)
+        .unwrap_or_else(|| panic!("no obligations under `{spec}`, got {:?}", map.keys()));
+    assert_eq!(entries.len(), 1, "expected exactly one obligation");
+    let HAssert::Not(inner) = &entries[0].hassert else {
+        panic!("expected the `nz` shape, got {:?}", entries[0].hassert);
+    };
+    let HAssert::TermEq(left, _) = inner.as_ref() else {
+        panic!("expected the `nz` shape, got {inner:?}");
+    };
+    let HTerm::App(symbol, _) = left else {
+        panic!("expected an application, got {left:?}");
+    };
+    symbol.0.clone()
+}
+
+/// A library records spec *membership* in `inference.spec_funcs` — indices of
+/// its own specification functions, which no export closure reaches. Nothing is
+/// lost by not carrying that, so it is not what the report keys on.
+#[test]
+fn a_spec_funcs_only_external_raises_no_warning() {
+    let lib = plain_library(&[(
+        "inference.spec_funcs".to_string(),
+        encode_spec_funcs(&[("DoubleSpec", vec![2])]),
+    )]);
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn)
+        .expect("a spec_funcs-only library must link");
+    assert!(
+        out.warnings.is_empty(),
+        "the report keys on the obligation carrier alone, got {:?}",
+        out.warnings
+    );
+}
+
+/// A library nothing imports from is not part of the artifact: its obligations
+/// were not dropped by the merge, they were never in scope.
+#[test]
+fn an_external_that_satisfied_no_import_raises_no_warning() {
+    let bare = plain_library(&[]);
+    let unused = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(
+        &main,
+        &[("mathlib", &bare), ("otherlib", &unused)],
+        ExternalSpecPolicy::Warn,
+    )
+    .expect("an unused external must not block the link");
+    assert!(
+        out.warnings.is_empty(),
+        "a library that supplied no merged body has nothing the reader can act on, got {:?}",
+        out.warnings
+    );
+}
+
+/// One report per link, not per library: the modules are gathered, deduplicated
+/// and ordered, so the same inputs always produce the same sentence.
+#[test]
+fn several_externals_are_named_in_one_ascending_warning() {
+    let sections = verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    );
+    let double_lib = adoption_library(&["double"], false, &LIBRARY_NAMES, &sections);
+    let triple_lib = adoption_library(&["triple"], false, &LIBRARY_NAMES, &sections);
+    let crypto_lib = plain_library(&sections);
+    let main = adoption_main_importing(
+        &[
+            ("mathlib", "double"),
+            ("mathlib", "triple"),
+            ("crypto::digest", "double"),
+        ],
+        &[],
+    );
+
+    let out = link_under(
+        &main,
+        &[
+            ("mathlib", &double_lib),
+            ("mathlib", &triple_lib),
+            ("crypto::digest", &crypto_lib),
+        ],
+        ExternalSpecPolicy::Warn,
+    )
+    .expect("three contributing libraries must link");
+    assert_eq!(
+        out.warnings,
+        vec![LinkWarning::ExternalSpecsDropped {
+            modules: vec!["crypto::digest".to_string(), "mathlib".to_string()],
+        }],
+        "one warning, modules ascending and deduplicated"
+    );
+}
+
+/// The policy decides what is *said*, not what is written. This is the property
+/// that makes `Warn` a safe default: no caller's artifact changes.
+#[test]
+fn ignore_is_silent_and_byte_identical_to_warn() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let warned = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn).expect("warn");
+    let ignored =
+        link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Ignore).expect("ignore");
+
+    assert_eq!(warned.wasm, ignored.wasm, "the two policies emit one artifact");
+    assert!(ignored.warnings.is_empty(), "`Ignore` says nothing");
+    assert_eq!(warned.warnings.len(), 1, "`Warn` says it once");
+}
+
+/// The warning-discarding entry point is the defaulting one with its warnings
+/// dropped, so it must still produce the very same bytes — and the defaulting
+/// one must be the policy that reports, or every caller that never chose would
+/// keep the old silence.
+///
+/// The library carries obligations on purpose: with a section-free one the three
+/// policies agree on the bytes *and* on the empty warning list, so the fixture
+/// could not tell a wrong default from the right one.
+#[test]
+fn link_equals_link_with_options_default_byte_for_byte() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let plain = raw_link(&main, &[("mathlib", &lib)], None).expect("link");
+    let defaulted =
+        raw_link_with_options(&main, &[("mathlib", &lib)], None, &LinkOptions::default())
+            .expect("link_with_options");
+    assert_eq!(plain, defaulted.wasm);
+    assert_eq!(
+        defaulted.warnings,
+        vec![LinkWarning::ExternalSpecsDropped {
+            modules: vec!["mathlib".to_string()],
+        }],
+        "the defaulting wrapper must run the reporting policy"
+    );
+}
+
+/// Asking to adopt from libraries that ship nothing to adopt must not invent a
+/// section: a self-contained merge is byte-identical to the one every other
+/// policy produces.
+#[test]
+fn adopt_over_section_free_externals_is_byte_identical_to_warn() {
+    let lib = plain_library(&[]);
+    let main = adoption_main(&[]);
+
+    let warned = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn).expect("warn");
+    let adopted = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+
+    assert_eq!(warned.wasm, adopted.wasm);
+    assert!(adopted.warnings.is_empty());
+    assert_eq!(linked_spec_funcs(&adopted.wasm), None);
+    assert_eq!(linked_hspecs(&adopted.wasm), None);
+}
+
+/// An *empty* `inference.spec_funcs` section is itself a producer's statement,
+/// so it is re-emitted under every policy. The emission condition therefore has
+/// to key on the section's presence, never on the entry list being non-empty.
+#[test]
+fn a_main_carrying_an_empty_spec_funcs_section_re_emits_it_under_every_policy() {
+    let main = adoption_main(&[(
+        "inference.spec_funcs".to_string(),
+        encode_spec_funcs(&[]),
+    )]);
+    let lib = plain_library(&[]);
+
+    for policy in [
+        ExternalSpecPolicy::Ignore,
+        ExternalSpecPolicy::Warn,
+        ExternalSpecPolicy::Adopt,
+    ] {
+        let out = link_under(&main, &[("mathlib", &lib)], policy).expect("link");
+        assert_eq!(
+            linked_spec_funcs(&out.wasm),
+            Some(Vec::new()),
+            "an empty spec_funcs section must survive under {policy:?}"
+        );
+    }
+}
+
+/// Adoption writes the specification into both of the merged module's own
+/// verification sections at once, with no index in the `spec_funcs` half: the
+/// library's specification function never crossed the merge.
+#[test]
+fn adoption_carries_a_universal_obligation_into_both_merged_sections() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    assert_valid(&out.wasm);
+    assert_eq!(
+        linked_spec_funcs(&out.wasm),
+        Some(vec![("mathlib_DoubleSpec".to_string(), vec![])]),
+        "the adopted key must be listed with no index"
+    );
+    let hspecs = linked_hspecs(&out.wasm).expect("the output must carry an hspecs section");
+    assert!(
+        hspecs.contains_key("mathlib_DoubleSpec"),
+        "the adopted key must carry the library's obligations, got {:?}",
+        hspecs.keys()
+    );
+}
+
+/// The adopted obligation must apply the merged body its author wrote it about,
+/// under the exact string the emitted `name` section records for that body.
+#[test]
+fn an_adopted_applied_symbol_is_rewritten_to_the_merged_name() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    // Output index 0 is main's own `compute`; the merged root follows it.
+    assert_eq!(
+        adopted_applied_symbol(&hspecs, "mathlib_DoubleSpec"),
+        name_at(&out.wasm, 1),
+        "the adopted symbol must be the name the emitted section carries for the merged root"
+    );
+    assert_eq!(name_at(&out.wasm, 1), "mathlib::double");
+}
+
+/// A library's obligation may be about one of its private functions, which the
+/// merge names under the internal mark rather than under any import field.
+#[test]
+fn an_adopted_symbol_naming_an_inner_callee_lands_on_the_hash_marked_name() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "helper"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    assert_eq!(
+        adopted_applied_symbol(&hspecs, "mathlib_DoubleSpec"),
+        name_at(&out.wasm, 2),
+        "the adopted symbol must name the merged inner callee"
+    );
+    assert_eq!(name_at(&out.wasm, 2), "mathlib::#helper");
+}
+
+/// An adopted entry's own symbol names a specification function of the library,
+/// which is never a merged body. It moves into a namespace of its own so it
+/// cannot coincide with a symbol something does resolve.
+#[test]
+fn an_adopted_entry_fn_symbol_moves_into_the_adopted_spec_namespace() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    let entries = &hspecs["mathlib_DoubleSpec"];
+    assert_eq!(
+        entries[0].fn_symbol.0, "mathlib::#spec#DoubleSpec.doubles",
+        "the adopted entry's own symbol must carry the library and the spec mark"
+    );
+    assert!(
+        !function_names(&out.wasm)
+            .iter()
+            .any(|(_, name)| name == &entries[0].fn_symbol.0),
+        "the adopted symbol must name no function of the merged module"
+    );
+}
+
+/// A program with no verification section of its own still gets both, because
+/// the obligations it adopted have to live somewhere and the two sections are a
+/// pair.
+#[test]
+fn adoption_synthesizes_both_sections_for_a_main_that_carries_none() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    assert!(
+        linked_spec_funcs(&out.wasm).is_some(),
+        "the merged module must gain a spec_funcs section it did not have"
+    );
+    assert!(
+        linked_hspecs(&out.wasm).is_some(),
+        "the merged module must gain an hspecs section it did not have"
+    );
+}
+
+/// The program's own specifications keep their entries and their order; the
+/// adopted keys follow, ascending. Reordering main's would change which
+/// `Definition` a downstream proof imports.
+#[test]
+fn adoption_preserves_mains_own_spec_funcs_order_and_appends_the_adopted_key() {
+    let main = adoption_main(&[(
+        "inference.spec_funcs".to_string(),
+        encode_spec_funcs(&[("Zeta", vec![1]), ("Alpha", vec![1])]),
+    )]);
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    assert_eq!(
+        linked_spec_funcs(&out.wasm),
+        Some(vec![
+            ("Zeta".to_string(), vec![0]),
+            ("Alpha".to_string(), vec![0]),
+            ("mathlib_DoubleSpec".to_string(), vec![]),
+        ]),
+        "main's entries keep their order and their remapped indices"
+    );
+}
+
+/// Adoption is confined to the two `inference.*` custom sections. Everything the
+/// module executes — types, functions, exports, code, and the `name` section the
+/// obligations resolve against — must come out byte-identical to a link that
+/// adopted nothing.
+#[test]
+fn adoption_leaves_every_other_section_byte_identical() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let ignored =
+        link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Ignore).expect("ignore");
+    let adopted = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+
+    let executable = |bytes: &[u8]| -> Vec<(u8, String, Vec<u8>)> {
+        raw_sections(bytes)
+            .into_iter()
+            .filter(|(_, name, _)| !name.starts_with("inference."))
+            .collect()
+    };
+    assert_eq!(
+        executable(&ignored.wasm),
+        executable(&adopted.wasm),
+        "adoption must touch nothing but the two verification sections"
+    );
+    assert!(
+        raw_sections(&adopted.wasm)
+            .iter()
+            .any(|(_, name, _)| name.starts_with("inference.")),
+        "the comparison is only meaningful if adoption did write those sections"
+    );
+}
+
+/// A specification whose obligations are all reachability obligations mints no
+/// key at all. A `ValidSpec` over an empty list is true of every module and
+/// states nothing about the program; a vacuous obligation that discharges is
+/// worse than an absent one.
+#[test]
+fn a_spec_whose_obligations_are_all_reachability_mints_no_key() {
+    use inference_hassert::HSpecMap;
+    let mut map = HSpecMap::default();
+    map.insert(
+        "PickSpec".to_string(),
+        vec![reachability_entry("PickSpec.ex_pick", true)],
+    );
+    let lib = plain_library(&verification_sections(&[("PickSpec", vec![])], &map));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    assert_eq!(
+        linked_spec_funcs(&out.wasm),
+        None,
+        "no key means no section at all for a program that declares none"
+    );
+    assert_eq!(linked_hspecs(&out.wasm), None);
+    assert_eq!(
+        out.warnings,
+        vec![LinkWarning::ReachabilityObligationsNotAdopted {
+            module: "mathlib".to_string(),
+            adopted: 0,
+            obligations: vec!["`PickSpec` / `PickSpec.ex_pick` (exists)".to_string()],
+        }],
+        "the warning is the only record of what was left behind"
+    );
+}
+
+/// An adopted symbol is held to naming exactly one body, exactly as the
+/// program's own are. Two libraries bound under one logical module, each with a
+/// private `helper` in a merged closure, both reach `mathlib::#helper` — and an
+/// obligation over it names two bodies, which nothing may resolve silently.
+#[test]
+fn an_adopted_symbol_is_cleared_by_the_post_merge_obligation_check() {
+    let double_lib = adoption_library(
+        &["double"],
+        false,
+        &LIBRARY_NAMES,
+        &verification_sections(
+            &[("DoubleSpec", vec![])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "helper"),
+        ),
+    );
+    let triple_lib = adoption_library(&["triple"], false, &LIBRARY_NAMES, &[]);
+    let main = adoption_main_importing(&[("mathlib", "double"), ("mathlib", "triple")], &[]);
+
+    let err = link_under(
+        &main,
+        &[("mathlib", &double_lib), ("mathlib", &triple_lib)],
+        ExternalSpecPolicy::Adopt,
+    )
+    .expect_err("an adopted symbol two merged bodies carry must be refused");
+    assert!(
+        matches!(&err, LinkError::AmbiguousObligationSymbol { symbol, .. }
+            if symbol == "mathlib::#helper"),
+        "expected the post-merge obligation check to reject, got {err:?}"
+    );
+}
+
+/// An adopted symbol is not a candidate for the contested-alias treatment. It is
+/// produced from the exact `MergedFunc::name` the section will carry, so its
+/// intended referent *is* its resolvable referent; recording a contested alias
+/// for it would add a second carrier to a symbol that names exactly one body and
+/// reject a link the proof translation resolves correctly.
+///
+/// The fixture makes the coincidence real: one library body is exported under
+/// two fields, so its second root name is one the `name` section cannot record,
+/// and that name is chosen to be exactly the marked name a *different* merged
+/// body carries.
+#[test]
+fn an_adopted_symbol_equal_to_an_unrecorded_root_alias_resolves_to_the_body_it_names() {
+    let lib = adoption_library(
+        &["!zero", "#helper"],
+        false,
+        &LIBRARY_NAMES,
+        &verification_sections(
+            &[("DoubleSpec", vec![])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "helper"),
+        ),
+    );
+    let main = adoption_main_importing(&[("mathlib", "!zero"), ("mathlib", "#helper")], &[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect("the adopted symbol names one body, so the link must succeed");
+    assert_eq!(
+        name_at(&out.wasm, 1),
+        "mathlib::!zero",
+        "the doubly-rooted body records the least of its two root names"
+    );
+    assert_eq!(
+        name_at(&out.wasm, 2),
+        "mathlib::#helper",
+        "and the inner callee carries the string the unrecorded alias also spells"
+    );
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    assert_eq!(
+        adopted_applied_symbol(&hspecs, "mathlib_DoubleSpec"),
+        name_at(&out.wasm, 2),
+        "the adopted obligation resolves to the body the rewrite targeted"
+    );
+}
+
+/// The universal half is adopted and the reachability half is reported, never
+/// dropped in silence — the program author cannot repair someone else's library,
+/// so a rejection would only cost them the half that adopted fine.
+#[test]
+fn adoption_reports_the_reachability_obligations_it_left_behind() {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
+    let mut map = HSpecMap::default();
+    map.insert(
+        "MixedSpec".to_string(),
+        vec![
+            HSpecEntry::new(
+                HFnRef("MixedSpec.doubles".to_string()),
+                HAssert::nz(HTerm::App(
+                    HFnRef("double".to_string()),
+                    vec![HTerm::Local(0)],
+                )),
+                SpecKind::Forall,
+            ),
+            reachability_entry("MixedSpec.ex_pick", true),
+            reachability_entry("MixedSpec.uq_sort", false),
+        ],
+    );
+    let lib = plain_library(&verification_sections(&[("MixedSpec", vec![])], &map));
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt).expect("adopt");
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    assert_eq!(
+        hspecs["mathlib_MixedSpec"].len(),
+        1,
+        "only the universal obligation is carried"
+    );
+    assert_eq!(
+        out.warnings,
+        vec![LinkWarning::ReachabilityObligationsNotAdopted {
+            module: "mathlib".to_string(),
+            adopted: 1,
+            obligations: vec![
+                "`MixedSpec` / `MixedSpec.ex_pick` (exists)".to_string(),
+                "`MixedSpec` / `MixedSpec.uq_sort` (unique)".to_string(),
+            ],
+        }]
+    );
+}
+
+/// Two sets of obligations would become one entry in the merged proof artifact
+/// and one of them would be lost at exit 0, so the collision is refused rather
+/// than resolved.
+#[test]
+fn an_adopted_key_colliding_with_a_program_spec_funcs_name_is_refused() {
+    let main = adoption_main(&[(
+        "inference.spec_funcs".to_string(),
+        encode_spec_funcs(&[("mathlib_DoubleSpec", vec![1])]),
+    )]);
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a key the program already declares must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecNameCollision { spec, contender: None, .. }
+            if spec == "mathlib_DoubleSpec"),
+        "expected a collision against the program's own specification, got {err:?}"
+    );
+}
+
+/// The merged obligation map starts as the program's own, so a key equal to one
+/// of *its* `hspecs` keys would overwrite the program's obligations even when
+/// its `spec_funcs` section never mentions that key. Checking only `spec_funcs`
+/// would leave exactly that path open.
+#[test]
+fn an_adopted_key_colliding_with_a_program_hspecs_only_name_is_refused() {
+    let main = adoption_main(&[(
+        inference_hassert::HSPECS_SECTION_NAME.to_string(),
+        inference_hassert::encode(&universal("mathlib_DoubleSpec", "own.spec", "compute")),
+    )]);
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a key equal to one of the program's own obligation keys must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecNameCollision { spec, contender: None, .. }
+            if spec == "mathlib_DoubleSpec"),
+        "expected a collision against the program's own obligations, got {err:?}"
+    );
+}
+
+/// The fold that names an adopted specification is not injective, so two
+/// libraries can reach one name — and gathering their obligations into a single
+/// list would leave nothing able to tell which came from where.
+#[test]
+fn two_libraries_folding_to_one_adopted_key_are_refused() {
+    let sections = verification_sections(
+        &[("Double", vec![])],
+        &universal("Double", "Double.doubles", "double"),
+    );
+    let first = adoption_library(&["double"], false, &LIBRARY_NAMES, &sections);
+    let second = adoption_library(&["triple"], false, &LIBRARY_NAMES, &sections);
+    let main =
+        adoption_main_importing(&[("math_lib", "double"), ("math::lib", "triple")], &[]);
+
+    let err = link_under(
+        &main,
+        &[("math_lib", &first), ("math::lib", &second)],
+        ExternalSpecPolicy::Adopt,
+    )
+    .expect_err("two libraries folding to one key must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecNameCollision { spec, module, contender: Some(other) }
+            if spec == "math_lib_Double" && module == "math_lib" && other == "math::lib"),
+        "expected a collision naming both libraries, got {err:?}"
+    );
+}
+
+/// Two libraries bound under *one* logical module reach the same key too, and
+/// there the report must not read as two modules of the same name: the repair is
+/// to separate the two bindings, not to rename either module.
+#[test]
+fn two_libraries_under_one_logical_module_folding_to_one_key_are_refused() {
+    let first = adoption_library(
+        &["double"],
+        false,
+        &LIBRARY_NAMES,
+        &verification_sections(
+            &[("Double", vec![])],
+            &universal("Double", "Double.doubles", "double"),
+        ),
+    );
+    let second = adoption_library(
+        &["triple"],
+        false,
+        &["triple", "helper_b", "spare_b"],
+        &verification_sections(
+            &[("Double", vec![])],
+            &universal("Double", "Double.triples", "triple"),
+        ),
+    );
+    let main = adoption_main_importing(&[("mathlib", "double"), ("mathlib", "triple")], &[]);
+
+    let err = link_under(
+        &main,
+        &[("mathlib", &first), ("mathlib", &second)],
+        ExternalSpecPolicy::Adopt,
+    )
+    .expect_err("two libraries under one logical module folding to one key must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecNameCollision { spec, module, contender: Some(other) }
+            if spec == "mathlib_Double" && module == "mathlib" && other == "mathlib"),
+        "expected a collision whose two contenders are the one logical module, got {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("two libraries bound under the logical module `mathlib`"),
+        "the message must say the two libraries share one binding rather than print one \
+         module name as though it were two, got: {message}"
+    );
+    assert!(
+        !message.contains("`mathlib` and `mathlib`"),
+        "the message must not name one logical module twice, got: {message}"
+    );
+    assert!(
+        message.contains("Bind one of the two libraries under a logical module of its own"),
+        "the repair must be to separate the bindings, not to rename a module that is already \
+         the only one, got: {message}"
+    );
+}
+
+/// The name an adopted specification would take has to be one the proof
+/// translation can spell, and it is fixed by the logical module and the
+/// library's own specification name — so it is refused at the link, where both
+/// are still known, rather than one phase later.
+#[test]
+fn an_adopted_key_that_is_not_a_legal_rocq_identifier_is_refused() {
+    let lib = plain_library(&verification_sections(
+        &[("Double", vec![])],
+        &universal("Double", "Double.doubles", "double"),
+    ));
+    let main = adoption_main_importing(&[("mathlib_", "double")], &[]);
+
+    let err = link_under(&main, &[("mathlib_", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a key carrying a reserved `__` run must be refused");
+    let LinkError::AdoptedSpecNameInvalid { key, reason, .. } = &err else {
+        panic!("expected AdoptedSpecNameInvalid, got {err:?}");
+    };
+    assert_eq!(key, "mathlib__Double");
+    assert!(
+        reason.contains("`__` run"),
+        "the reason must name the clause, got {reason}"
+    );
+    assert!(
+        err.to_string().contains("mathlib__Double"),
+        "the rendered message must show the key it would have minted"
+    );
+}
+
+/// A key that is only the library's own specification name is not namespaced
+/// apart from the program's at all, which defeats the point of the key — so an
+/// external bound under no logical module cannot be adopted from.
+#[test]
+fn an_external_bound_under_an_empty_logical_module_cannot_be_adopted_from() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main_importing(&[("", "double")], &[]);
+
+    let err = link_under(&main, &[("", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("an unnamespaceable key must be refused");
+    let LinkError::AdoptedSpecNameInvalid { reason, .. } = &err else {
+        panic!("expected AdoptedSpecNameInvalid, got {err:?}");
+    };
+    assert!(
+        reason.contains("empty logical module"),
+        "the reason must be the guard's own, got {reason}"
+    );
+}
+
+/// An adopted obligation is resolved against the library's own `name` section
+/// before it is pointed at a merged body. Leaving an unresolvable symbol as
+/// written would let it resolve against a function of the *program* that happens
+/// to share the name — a true obligation about the wrong body.
+#[test]
+fn an_adopted_obligation_naming_no_function_of_its_module_is_refused() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "ghost"),
+    ));
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a symbol the library does not name cannot be pointed anywhere");
+    assert!(
+        matches!(&err, LinkError::AdoptedObligationSymbolUnresolved { module, spec, symbol }
+            if module == "mathlib" && spec == "DoubleSpec" && symbol == "ghost"),
+        "expected AdoptedObligationSymbolUnresolved, got {err:?}"
+    );
+}
+
+/// An obligation names exactly one body, and nothing here can choose between two
+/// functions of the library that carry the symbol: the rewrite would pick one
+/// silently, and a *true* obligation about the wrong body discharges.
+#[test]
+fn an_adopted_obligation_naming_two_functions_of_its_module_is_refused() {
+    let lib = adoption_library(
+        &["double"],
+        false,
+        &["double", "helper", "helper"],
+        &verification_sections(
+            &[("DoubleSpec", vec![])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "helper"),
+        ),
+    );
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a symbol two of the library's functions carry must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedObligationSymbolAmbiguous { symbol, carriers, .. }
+            if symbol == "helper" && carriers == &vec![1, 2]),
+        "expected AdoptedObligationSymbolAmbiguous naming both carriers, got {err:?}"
+    );
+}
+
+/// A library's specification functions carry unqualified names, so one whose
+/// `spec` declares an inner `fn helper` beside its own private `fn helper` names
+/// two functions `helper` — and only one of them is a body an obligation can be
+/// about. The specification function is not a candidate, exactly as the proof
+/// translator treats the merged module's own, so the symbol resolves rather than
+/// being reported ambiguous.
+///
+/// The type checker permits that pair whenever the two live in different files
+/// of the library, so this is a shape ordinary proof-mode source reaches: a
+/// library that could not be adopted from would be one compiled the normal way.
+#[test]
+fn a_specification_function_sharing_an_applied_symbol_is_not_a_carrier() {
+    let lib = adoption_library(
+        &["double"],
+        false,
+        &["double", "helper", "helper"],
+        &verification_sections(
+            // Index 2 is the library's own specification function, which its
+            // `inference.spec_funcs` section is what records.
+            &[("DoubleSpec", vec![2])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "helper"),
+        ),
+    );
+    let main = adoption_main(&[]);
+
+    let out = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect("a specification function is not a second carrier of the name it shares");
+    let hspecs = linked_hspecs(&out.wasm).expect("hspecs");
+    assert_eq!(
+        adopted_applied_symbol(&hspecs, "mathlib_DoubleSpec"),
+        name_at(&out.wasm, 2),
+        "the adopted symbol must name the merged inner callee, not the specification function"
+    );
+    assert_eq!(name_at(&out.wasm, 2), "mathlib::#helper");
+}
+
+/// The narrowing drops specification functions; it does not invent a target.
+/// When every carrier is one, the full set stands and the count is reported as
+/// it is — two specification functions of one name are still ambiguous.
+#[test]
+fn an_applied_symbol_carried_only_by_specification_functions_is_still_ambiguous() {
+    let lib = adoption_library(
+        &["double"],
+        false,
+        &["double", "ghost", "ghost"],
+        &verification_sections(
+            &[("DoubleSpec", vec![1, 2])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "ghost"),
+        ),
+    );
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a symbol only specification functions carry resolves to no body");
+    assert!(
+        matches!(&err, LinkError::AdoptedObligationSymbolAmbiguous { symbol, carriers, .. }
+            if symbol == "ghost" && carriers == &vec![1, 2]),
+        "expected AdoptedObligationSymbolAmbiguous naming both carriers, got {err:?}"
+    );
+}
+
+/// Only the bodies a satisfied import transitively reaches cross the merge, so
+/// an obligation about a function outside that closure would state a claim over
+/// something the artifact does not contain.
+#[test]
+fn an_adopted_obligation_over_an_unmerged_defined_function_is_refused() {
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "spare"),
+    ));
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("an obligation over an unmerged body must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedObligationUnmergedSymbol { symbol, imported: false, .. }
+            if symbol == "spare"),
+        "expected AdoptedObligationUnmergedSymbol over a defined function, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("Import a function of `mathlib`"),
+        "the repair for an unreached body is to import something that reaches it"
+    );
+}
+
+/// A static merge has no body to splice in for a library's *own* import, so the
+/// repair is not the one an unreached defined function gets — which is why the
+/// two are told apart.
+#[test]
+fn an_adopted_obligation_over_one_of_the_librarys_imports_is_refused() {
+    let lib = adoption_library(
+        &["double"],
+        true,
+        &LIBRARY_NAMES,
+        &verification_sections(
+            &[("DoubleSpec", vec![])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "host_log"),
+        ),
+    );
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("an obligation over the library's own import must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedObligationUnmergedSymbol { symbol, imported: true, .. }
+            if symbol == "host_log"),
+        "expected AdoptedObligationUnmergedSymbol over an import, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("is an import of that module"),
+        "the message must say why no body can be spliced in"
+    );
+}
+
+/// A library whose two verification sections disagree is an artifact its own
+/// producer wrote inconsistently. Adopting from it would carry a claim the
+/// producer never recorded into a merged module that satisfies the invariant
+/// only because the adopted key is written into both sections at once.
+#[test]
+fn an_hspecs_key_absent_from_the_externals_own_spec_funcs_is_refused() {
+    let lib = plain_library(&verification_sections(
+        &[("OtherSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("a library whose sections disagree must not be adopted from");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecUnlisted { module, spec }
+            if module == "mathlib" && spec == "DoubleSpec"),
+        "expected AdoptedSpecUnlisted, got {err:?}"
+    );
+}
+
+/// The adopted specification symbol is separated from a merged inner callee's
+/// only by convention, because a library's private name is unconstrained. The
+/// convention makes an accidental collision impossible; this check makes a
+/// deliberate one fail closed.
+#[test]
+fn an_external_whose_inner_callee_is_named_like_an_adopted_spec_symbol_is_refused() {
+    let lib = adoption_library(
+        &["double"],
+        false,
+        &["double", "spec#DoubleSpec.doubles", "spare"],
+        &verification_sections(
+            &[("DoubleSpec", vec![])],
+            &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+        ),
+    );
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("an adopted symbol a merged body already carries must be refused");
+    assert!(
+        matches!(&err, LinkError::AdoptedSpecSymbolCollision { symbol, .. }
+            if symbol == "mathlib::#spec#DoubleSpec.doubles"),
+        "expected AdoptedSpecSymbolCollision, got {err:?}"
+    );
+}
+
+/// A corrupt verification section in a library nothing needed cannot fail a
+/// default link, because nothing reads it. Asking to adopt from that library is
+/// what makes its payload the merge's business.
+#[test]
+fn a_malformed_external_hspecs_section_is_refused_only_under_adopt() {
+    // Version byte 3 is past the codec's supported version, so a decoder rejects
+    // these bytes outright.
+    let lib = plain_library(&[
+        (
+            "inference.spec_funcs".to_string(),
+            encode_spec_funcs(&[("DoubleSpec", vec![])]),
+        ),
+        (
+            inference_hassert::HSPECS_SECTION_NAME.to_string(),
+            vec![3u8, 0, 0],
+        ),
+    ]);
+    let main = adoption_main(&[]);
+
+    let warned = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Warn)
+        .expect("a malformed section nothing reads must not fail the link");
+    assert_eq!(warned.warnings.len(), 1, "the section's presence is still noted");
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("adopting from a malformed section must be refused");
+    let LinkError::Parse(message) = &err else {
+        panic!("expected a Parse rejection, got {err:?}");
+    };
+    assert!(
+        message.contains("mathlib") && message.contains("inference.hspecs"),
+        "the rejection must name the library and the section, got {message}"
+    );
+}
+
+/// The decode an adopting link performs is not scoped to the libraries adoption
+/// will read: every supplied external's sections are decoded at parse time, so a
+/// corrupt one in a dependency nothing imports from fails the link too.
+///
+/// This is what the "a malformed section in a library nothing needed cannot fail
+/// the link" property of the default policies does *not* extend to, and the
+/// README says so — pinned here because the two halves of the sentence sit in
+/// different places in the code and neither would go red on its own.
+#[test]
+fn a_corrupt_section_in_a_non_contributing_external_fails_an_adopting_link() {
+    let good = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", "DoubleSpec.doubles", "double"),
+    ));
+    // Version byte 3 is past the codec's supported version.
+    let junk = plain_library(&[(
+        inference_hassert::HSPECS_SECTION_NAME.to_string(),
+        vec![3u8, 0, 0],
+    )]);
+    // Nothing is imported from `unused`, so it contributes no merged body and
+    // adoption never reaches it.
+    let main = adoption_main(&[]);
+
+    link_under(
+        &main,
+        &[("mathlib", &good), ("unused", &junk)],
+        ExternalSpecPolicy::Warn,
+    )
+    .expect("under the default policy the unread section's bytes are never touched");
+
+    let err = link_under(
+        &main,
+        &[("mathlib", &good), ("unused", &junk)],
+        ExternalSpecPolicy::Adopt,
+    )
+    .expect_err("an adopting link decodes every external, contributing or not");
+    let LinkError::Parse(message) = &err else {
+        panic!("expected a Parse rejection, got {err:?}");
+    };
+    assert!(
+        message.contains("unused") && message.contains("inference.hspecs"),
+        "the rejection must name the library whose bytes were rejected, got {message}"
+    );
+}
+
+/// A duplicated verification section would silently drop the first one's
+/// contents under a last-wins assignment. Refused on the path that reads them,
+/// and — like every other defect in a section nothing reads — invisible on the
+/// path that does not.
+#[test]
+fn a_duplicate_external_verification_section_is_refused_only_under_adopt() {
+    let obligations = universal("DoubleSpec", "DoubleSpec.doubles", "double");
+    let duplicated_spec_funcs = plain_library(&[
+        (
+            "inference.spec_funcs".to_string(),
+            encode_spec_funcs(&[("DoubleSpec", vec![])]),
+        ),
+        (
+            "inference.spec_funcs".to_string(),
+            encode_spec_funcs(&[("OtherSpec", vec![])]),
+        ),
+        (
+            inference_hassert::HSPECS_SECTION_NAME.to_string(),
+            inference_hassert::encode(&obligations),
+        ),
+    ]);
+    let duplicated_hspecs = plain_library(&[
+        (
+            "inference.spec_funcs".to_string(),
+            encode_spec_funcs(&[("DoubleSpec", vec![])]),
+        ),
+        (
+            inference_hassert::HSPECS_SECTION_NAME.to_string(),
+            inference_hassert::encode(&obligations),
+        ),
+        (
+            inference_hassert::HSPECS_SECTION_NAME.to_string(),
+            inference_hassert::encode(&obligations),
+        ),
+    ]);
+    let main = adoption_main(&[]);
+
+    for (label, lib) in [
+        ("inference.spec_funcs", &duplicated_spec_funcs),
+        ("inference.hspecs", &duplicated_hspecs),
+    ] {
+        link_under(&main, &[("mathlib", lib)], ExternalSpecPolicy::Warn)
+            .unwrap_or_else(|e| panic!("a duplicated {label} nothing reads must link, got {e:?}"));
+
+        let Err(err) = link_under(&main, &[("mathlib", lib)], ExternalSpecPolicy::Adopt) else {
+            panic!("adopting from a library declaring two {label} sections must be refused");
+        };
+        let LinkError::Parse(message) = &err else {
+            panic!("expected a Parse rejection for {label}, got {err:?}");
+        };
+        assert!(
+            message.contains("mathlib") && message.contains(label),
+            "the rejection must name the library and the section, got {message}"
+        );
+    }
+}
+
+/// The obligation payload is re-validated after every edit this crate makes to
+/// it, because the encoder panics on a map its own decoder would reject. The
+/// reachable defect is a symbol the adoption prefix pushes past the codec's name
+/// cap, so the message has to name adoption rather than only the alias rewrite
+/// it used to be raised for.
+#[test]
+fn an_adopted_symbol_pushed_past_the_name_cap_reports_adoption() {
+    let owner = "d".repeat(1020);
+    let lib = plain_library(&verification_sections(
+        &[("DoubleSpec", vec![])],
+        &universal("DoubleSpec", &owner, "double"),
+    ));
+    let main = adoption_main(&[]);
+
+    let err = link_under(&main, &[("mathlib", &lib)], ExternalSpecPolicy::Adopt)
+        .expect_err("an over-long adopted symbol must be a clean rejection");
+    let LinkError::Parse(message) = &err else {
+        panic!("expected a Parse rejection, got {err:?}");
+    };
+    assert!(
+        message.contains("adopting external obligations"),
+        "the message must name the edit that caused it, got {message}"
+    );
 }

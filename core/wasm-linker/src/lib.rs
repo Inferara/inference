@@ -58,9 +58,29 @@
 //!
 //! ## Entry point
 //!
-//! [`link`] takes the main module bytes and the external module bytes and
-//! returns the unified module bytes. [`link_with_warnings`] is the same merge
-//! with the [`LinkWarning`]s it raised, for callers that report them.
+//! [`link_with_options`] takes the main module bytes, the external module bytes
+//! and the policy inputs, and returns the unified module together with the
+//! [`LinkWarning`]s the merge raised. [`link_with_warnings`] is that with the
+//! default options, and [`link`] is that with the warnings discarded.
+//!
+//! ## A linked library's own proof obligations
+//!
+//! A library compiled in proof mode ships `inference.spec_funcs` and
+//! `inference.hspecs` sections describing **its own** code. Only the executable
+//! closure of a satisfied export crosses the merge, and a library's
+//! specification functions are never in it, so those sections describe a module
+//! the output is not. What the merge does about that is an explicit input,
+//! [`LinkOptions::external_specs`], with three settings:
+//!
+//! - [`ExternalSpecPolicy::Warn`] (the default) — neither section is decoded and
+//!   a [`LinkWarning::ExternalSpecsDropped`] names each contributing library
+//!   whose obligations the output does not carry.
+//! - [`ExternalSpecPolicy::Ignore`] — the same bytes, and nothing said.
+//! - [`ExternalSpecPolicy::Adopt`] — each contributing library's sections are
+//!   decoded and its **universal** (`forall`) obligations are written into the
+//!   merged module's own sections, keyed under the logical module the library
+//!   was bound from, with every applied symbol rewritten onto the merged body it
+//!   names. Reachability obligations are reported and left behind.
 
 mod closure;
 mod merge;
@@ -335,6 +355,221 @@ pub enum LinkError {
         /// One line per carrier, in output-index order.
         carriers: Vec<String>,
     },
+
+    /// Adoption only: the library ships obligations under a specification its
+    /// own `inference.spec_funcs` section does not list, so its two verification
+    /// sections disagree with each other.
+    ///
+    /// Refused rather than adopted, because the merged module would satisfy the
+    /// same cross-invariant only by construction — the adopted key is written
+    /// into both sections at once — which is exactly the laundering of a
+    /// producer defect a link must not perform.
+    #[error(
+        "linked module `{module}` ships obligations under specification `{spec}`, which its own \
+         `inference.spec_funcs` section does not list. A library's two verification sections must \
+         agree — the obligations are a subset of the specifications — so this artifact is \
+         inconsistent as its own producer wrote it, and the proof translation rejects such a \
+         module outright. Adopting from it would carry a claim its producer did not record, into \
+         a merged module that satisfies the invariant only because the adopted key is written \
+         into both sections at once. Rebuild the library, or link without adopting its \
+         specifications"
+    )]
+    AdoptedSpecUnlisted { module: String, spec: String },
+
+    /// Adoption only: the name an adopted specification would take is not one
+    /// the proof translation can spell as an identifier.
+    ///
+    /// `reason` is the structural clause, a lowercase unpunctuated sentence
+    /// fragment set inside the message.
+    #[error(
+        "adopting the specifications of linked module `{module}` would name one of them \
+         `{key}`, which the proof translation cannot use as an identifier: {reason}. An adopted \
+         specification's name is the logical module the library is bound under, underscore-joined \
+         onto the name the library gave the specification, so it is fixed by those two — rename \
+         the specification in the library, bind the library under a different logical module, or \
+         link without adopting its specifications"
+    )]
+    AdoptedSpecNameInvalid {
+        module: String,
+        spec: String,
+        key: String,
+        reason: String,
+    },
+
+    /// Adoption only: the name an adopted specification would take is already
+    /// claimed — by a specification the program declares (`contender: None`) or
+    /// by another library's adopted specification.
+    ///
+    /// One variant for both because the fault is one fault: two sets of
+    /// obligations would become one entry in the merged proof artifact. The
+    /// repairs differ, which is why the rendering branches.
+    #[error("{}", render_adopted_name_collision(.spec, .module, .contender.as_deref()))]
+    AdoptedSpecNameCollision {
+        /// The adopted key both would take.
+        spec: String,
+        /// The library whose specification would take it.
+        module: String,
+        /// The other library that reaches the same key, or `None` when the
+        /// contender is the program's own specification.
+        contender: Option<String>,
+    },
+
+    /// Adoption only: an adopted obligation applies a symbol no function of its
+    /// own library's `name` section carries.
+    #[error(
+        "the obligation linked module `{module}` ships under specification `{spec}` applies \
+         function symbol `{symbol}`, which no function of that module's `name` section carries. \
+         An adopted obligation is resolved against the library's own name section before it is \
+         pointed at a merged body, so a symbol the library does not name cannot be pointed \
+         anywhere — leaving it as written would let it resolve against a function of the program \
+         that happens to share the name, which is a true obligation about the wrong body. \
+         Rebuild the library with its `name` section intact, or link without adopting its \
+         specifications"
+    )]
+    AdoptedObligationSymbolUnresolved {
+        module: String,
+        spec: String,
+        symbol: String,
+    },
+
+    /// Adoption only: several functions of the library carry the symbol an
+    /// adopted obligation applies, so nothing can say which body it is about.
+    #[error("{}", render_adopted_symbol_ambiguous(.module, .spec, .symbol, .carriers))]
+    AdoptedObligationSymbolAmbiguous {
+        module: String,
+        spec: String,
+        symbol: String,
+        /// The library's own function indices carrying the symbol, ascending.
+        carriers: Vec<u32>,
+    },
+
+    /// Adoption only: an adopted obligation applies a function of its library
+    /// that this merge did not fold in — one outside the export closure
+    /// (`imported: false`) or one of the library's own imports
+    /// (`imported: true`).
+    ///
+    /// One variant with a branching render rather than two, because the fault is
+    /// the same one (the merged module holds no body for the obligation to be
+    /// about) and only the repair differs.
+    #[error("{}", render_adopted_unmerged_symbol(.module, .spec, .symbol, *.imported))]
+    AdoptedObligationUnmergedSymbol {
+        module: String,
+        spec: String,
+        symbol: String,
+        /// Whether the symbol names one of the library's own imports rather than
+        /// a function it defines.
+        imported: bool,
+    },
+
+    /// Adoption only: the merged-namespace symbol an adopted specification
+    /// function would take is one a function of the merged output already
+    /// carries.
+    #[error(
+        "adopting the obligation linked module `{module}` ships under specification `{spec}` \
+         would record its specification function as `{symbol}`, a name a function of the merged \
+         module already carries. A universal obligation's own symbol is not resolved by the proof \
+         translation today, so the collision changes nothing yet — which is exactly why it is \
+         refused here rather than left for the day something does resolve it, when the obligation \
+         would silently describe that function instead. Rebuild the library with a different \
+         specification function name, or link without adopting its specifications"
+    )]
+    AdoptedSpecSymbolCollision {
+        module: String,
+        spec: String,
+        symbol: String,
+    },
+}
+
+/// Renders [`LinkError::AdoptedSpecNameCollision`], whose contenders lead to
+/// different repairs: the program's own specification can be renamed by the
+/// person reading this, and another library's cannot.
+///
+/// Two externals may legitimately be bound under one logical module — only an
+/// ambiguous `(module, field)` pair is refused — so the contender can be the
+/// module itself. Naming it twice and prescribing a different logical module
+/// would print one name as though it were two and ask for a change that is
+/// already true, so that case gets a rendering of its own.
+fn render_adopted_name_collision(spec: &str, module: &str, contender: Option<&str>) -> String {
+    match contender {
+        None => format!(
+            "adopting the specifications of linked module `{module}` would name one of them \
+             `{spec}`, which is already the name of a specification this program declares. The \
+             two would become one entry in the merged proof artifact and one set of obligations \
+             would be lost at exit 0, so the adoption is refused rather than resolved — rename \
+             the program's own specification, or bind the library under a different logical module"
+        ),
+        Some(contender) if contender == module => format!(
+            "two libraries bound under the logical module `{module}` each ship a specification \
+             that would be adopted as `{spec}`. An adopted specification's name folds the \
+             logical module onto the specification's own name with `_`, so two libraries under \
+             one logical module reach one name whenever they name a specification alike — and \
+             gathering their obligations into a single `ValidSpec` list would leave nothing \
+             downstream able to tell which came from where. Bind one of the two libraries under \
+             a logical module of its own"
+        ),
+        Some(contender) => format!(
+            "adopting the specifications of linked modules `{module}` and `{contender}` would \
+             name one of each `{spec}`. An adopted specification's name folds the logical module \
+             onto the specification's own name with `_`, a join that is not injective, so two \
+             libraries can reach one name — and gathering their obligations into a single \
+             `ValidSpec` list would leave nothing downstream able to tell which came from where. \
+             Bind one of the two libraries under a different logical module"
+        ),
+    }
+}
+
+/// Renders [`LinkError::AdoptedObligationSymbolAmbiguous`].
+fn render_adopted_symbol_ambiguous(
+    module: &str,
+    spec: &str,
+    symbol: &str,
+    carriers: &[u32],
+) -> String {
+    let indices = carriers
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "the obligation linked module `{module}` ships under specification `{spec}` applies \
+         function symbol `{symbol}`, which {} functions of that module carry `name`-section \
+         entries for (indices {indices}). An obligation names exactly one body, and nothing here \
+         can choose between them — the rewrite onto the merged output would pick one silently, \
+         and a *true* obligation about the wrong body is worse than a false one, because it \
+         discharges. Rebuild the library with distinct function names, or link without adopting \
+         its specifications",
+        carriers.len()
+    )
+}
+
+/// Renders [`LinkError::AdoptedObligationUnmergedSymbol`]. A function the
+/// closure did not reach can be brought in by importing something that reaches
+/// it; a library's own import can never be brought in at all, so the two say
+/// different things.
+fn render_adopted_unmerged_symbol(
+    module: &str,
+    spec: &str,
+    symbol: &str,
+    imported: bool,
+) -> String {
+    if imported {
+        return format!(
+            "the obligation linked module `{module}` ships under specification `{spec}` applies \
+             function symbol `{symbol}`, which is an import of that module rather than one of its \
+             own functions. A static merge has no body to splice in for a library's own import, \
+             so the merged module holds nothing the obligation could be about. Link without \
+             adopting its specifications"
+        );
+    }
+    format!(
+        "the obligation linked module `{module}` ships under specification `{spec}` applies its \
+         own function `{symbol}`, which this merge did not fold in: only the bodies a satisfied \
+         import transitively reaches cross the merge, and nothing this program imports from \
+         `{module}` reaches `{symbol}`. The merged module holds no body for the obligation to be \
+         about, so adopting it would state a claim over a function the artifact does not contain. \
+         Import a function of `{module}` whose closure reaches `{symbol}`, or link without \
+         adopting its specifications"
+    )
 }
 
 /// Renders [`LinkError::UnresolvedObligationSymbol`].
@@ -485,6 +720,47 @@ pub enum LinkWarning {
     /// `fields` names the satisfied import fields, which is how the user knows
     /// these functions.
     TierBInMultiPageMemory { fields: Vec<String>, pages: u64 },
+
+    /// One or more linked libraries ship proof obligations of their own that
+    /// this merge did not carry into the output.
+    ///
+    /// Keyed on `inference.hspecs` alone. A library carrying only
+    /// `inference.spec_funcs` records spec *membership* — indices of its own
+    /// specification functions, which are outside every export closure and so
+    /// name nothing the output contains — and loses nothing worth reporting.
+    ///
+    /// `modules` names only libraries that supplied at least one merged body:
+    /// one nothing imports from contributes nothing to the artifact, so nothing
+    /// about it was dropped in a sense the reader can act on. That scope is what
+    /// keeps this variant inside the promise this type's own documentation makes
+    /// and `core/inference`'s no-externals fast path rests on.
+    ///
+    /// The message states presence and never a count: under this policy the
+    /// section is not decoded, and reporting a number would mean decoding on the
+    /// path that exists precisely so it does not have to. Precision follows
+    /// decoding.
+    ExternalSpecsDropped { modules: Vec<String> },
+
+    /// Adoption carried a library's universal obligations and left its
+    /// reachability (`exists` / `unique`) obligations behind.
+    ///
+    /// One instance per contributing library. Each `obligations` entry names the
+    /// library's own specification and the obligation's own function symbol,
+    /// with its kind.
+    ///
+    /// A warning rather than a hard error because the program author cannot
+    /// repair a reachability obligation in someone else's library: the only
+    /// user-side response to a rejection would be turning adoption off
+    /// entirely, throwing away the universal half that adopted fine.
+    ReachabilityObligationsNotAdopted {
+        module: String,
+        /// How many of that library's specifications this link did adopt. Zero
+        /// when every obligation it ships is a reachability obligation, which
+        /// is the case the closing clause must not describe as a partial
+        /// success.
+        adopted: usize,
+        obligations: Vec<String>,
+    },
 }
 
 impl fmt::Display for LinkWarning {
@@ -513,8 +789,132 @@ impl fmt::Display for LinkWarning {
                      merged code; issue #420 tracks the containment analysis that would close it."
                 )
             }
+            LinkWarning::ExternalSpecsDropped { modules } => {
+                let names = modules
+                    .iter()
+                    .map(|module| format!("`{module}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let opening = if modules.len() == 1 {
+                    format!(
+                        "linked module {names} ships proof obligations of its own (an \
+                         `inference.hspecs` section)"
+                    )
+                } else {
+                    format!(
+                        "linked modules {names} ship proof obligations of their own (an \
+                         `inference.hspecs` section each)"
+                    )
+                };
+                write!(
+                    f,
+                    "{opening}, and this link carried none of them into the merged module: the \
+                     merge folds in only the executable bodies a satisfied import reaches, so the \
+                     library's own assertions are absent from the merged module's own \
+                     verification sections. Nothing about the merged code changed — the \
+                     obligations were never part of it — and this is not a fault found in the \
+                     library. To carry the library's universal (`forall`) obligations into this \
+                     program's proof artifact, pass `--adopt-external-specs` to a proof-mode \
+                     `infc` build (`-v`, or `--mode proof`), or set `[verification] \
+                     adopt-external-specs = true` in Inference.toml. That build reports every \
+                     obligation it could not carry, including the case where the library ships \
+                     no universal obligation at all and adoption therefore carries nothing."
+                )
+            }
+            LinkWarning::ReachabilityObligationsNotAdopted {
+                module,
+                adopted,
+                obligations,
+            } => {
+                let count = obligations.len();
+                let left_behind = if count == 1 {
+                    "1 reachability obligation was".to_string()
+                } else {
+                    format!("{count} reachability obligations were")
+                };
+                let opening = if *adopted == 0 {
+                    format!(
+                        "adopting the specifications of linked module `{module}` carried nothing: \
+                         {left_behind} left behind, and it ships no universal (`forall`) \
+                         obligation to carry in their place"
+                    )
+                } else {
+                    format!(
+                        "adopting the specifications of linked module `{module}` carried its \
+                         universal (`forall`) obligations only; {left_behind} left behind"
+                    )
+                };
+                let closing = if *adopted == 0 {
+                    "Nothing from this library reached the proof artifact, and nothing was found \
+                     wrong with the library."
+                } else {
+                    "The universal obligations were adopted and are unaffected; nothing was \
+                     found wrong with the library."
+                };
+                write!(
+                    f,
+                    "{opening}: {}. An `exists` or `unique` judgment is evaluated against the \
+                     frame an execution of its specification function reaches, and a \
+                     specification function never crosses the merge — only the executable \
+                     closure of a satisfied import does — so an adopted reachability obligation \
+                     would name a function this module does not contain, and the proof \
+                     translation would reject the artifact outright. {closing}",
+                    obligations.join(", ")
+                )
+            }
         }
     }
+}
+
+/// What a link does with the verification sections a linked external carries.
+///
+/// A library compiled in proof mode ships `inference.spec_funcs` and
+/// `inference.hspecs` describing *its own* code. Only the executable closure of
+/// a satisfied export crosses the merge, so those sections describe a module the
+/// output is not, and the merge has never carried them. This says what it does
+/// about that instead — and it is an explicit input rather than something the
+/// linker infers from the bytes, because "is this build going to state proof
+/// obligations" is a fact about the caller's intent that no module carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalSpecPolicy {
+    /// Drop them without a word. For a build that writes no proof artifact,
+    /// where a report about obligations nothing would have consumed is noise on
+    /// every compile of every program that links a proof-mode library.
+    Ignore,
+    /// Drop them and say so, once per link. The default.
+    ///
+    /// The bytes a merge emits are **identical** under [`Self::Ignore`] and this
+    /// — the policy decides only what is *said*. So defaulting here cannot
+    /// change any caller's artifact, while defaulting to [`Self::Ignore`] would
+    /// preserve today's silence forever for every caller that never learns the
+    /// option exists. The default is the one that fails loud, at zero cost to
+    /// output stability. A caller that has decided the drop is uninteresting
+    /// says so with [`Self::Ignore`]; a caller that has decided nothing must not
+    /// be the one that suppresses the notice.
+    #[default]
+    Warn,
+    /// Carry each contributing library's **universal** (`forall`) obligations
+    /// into the merged module's own `inference.spec_funcs` /
+    /// `inference.hspecs`, keyed under the logical module it was bound from,
+    /// with every applied symbol rewritten onto the merged body it names.
+    /// Reachability (`exists`/`unique`) obligations are not adoptable and are
+    /// reported dropped.
+    Adopt,
+}
+
+/// The policy inputs a merge takes beyond its modules and its write-set
+/// contract.
+///
+/// Deliberately **not** `#[non_exhaustive]`: a field added here governs what
+/// enters a proof artifact, and a struct literal that stops compiling is the
+/// loud notice that decision deserves. `#[non_exhaustive]` would instead let
+/// every existing caller keep compiling with the new field silently defaulted —
+/// the same argument the exhaustive matches in the merge pass are written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkOptions {
+    /// What the merge does with the verification sections a linked external
+    /// carries.
+    pub external_specs: ExternalSpecPolicy,
 }
 
 /// A completed merge: the unified module bytes and every [`LinkWarning`] the
@@ -532,6 +932,43 @@ pub struct LinkOutput {
     pub warnings: Vec<LinkWarning>,
 }
 
+/// Merges the satisfiable imports of `main_wasm` from `externals` under the
+/// given policy inputs, returning the unified module together with every warning
+/// the merge raised.
+///
+/// The one entry point: [`link_with_warnings`] is this with
+/// [`LinkOptions::default`], and [`link`] is that with the warnings discarded.
+/// See [`link`] for the resolution rules, the fail-closed contract, the two
+/// `contracts` modes, and the error conditions.
+///
+/// `options` is taken by reference although the struct is `Copy` today, so a
+/// later field that is not `Copy` does not churn four signatures.
+///
+/// # Errors
+///
+/// The same conditions as [`link`], plus — under
+/// [`ExternalSpecPolicy::Adopt`] alone — every way an adoption can be refused:
+/// a library whose two verification sections disagree
+/// ([`LinkError::AdoptedSpecUnlisted`]), a key the proof translation cannot
+/// spell ([`LinkError::AdoptedSpecNameInvalid`]) or that is already claimed
+/// ([`LinkError::AdoptedSpecNameCollision`]), an applied symbol the library's
+/// own `name` section carries on no function
+/// ([`LinkError::AdoptedObligationSymbolUnresolved`]) or on several
+/// ([`LinkError::AdoptedObligationSymbolAmbiguous`]), an obligation over a body
+/// this merge did not fold in ([`LinkError::AdoptedObligationUnmergedSymbol`]),
+/// an adopted specification symbol the merged output already carries
+/// ([`LinkError::AdoptedSpecSymbolCollision`]), and a malformed or duplicated
+/// external verification section ([`LinkError::Parse`], naming the logical
+/// module).
+pub fn link_with_options(
+    main_wasm: &[u8],
+    externals: &[(&str, &[u8])],
+    contracts: Option<&[ImportWriteSet]>,
+    options: &LinkOptions,
+) -> Result<LinkOutput, LinkError> {
+    merge::link(main_wasm, externals, contracts, options)
+}
+
 /// Merges the satisfiable imports of `main_wasm` from `externals`, returning the
 /// unified module together with every warning the merge raised.
 ///
@@ -539,6 +976,13 @@ pub struct LinkOutput {
 /// the resolution rules, the fail-closed contract, the two `contracts` modes,
 /// and the error conditions. Use this form wherever the warnings can reach the
 /// user.
+///
+/// The defaulting form of [`link_with_options`]: the external-specification
+/// policy is [`ExternalSpecPolicy::Warn`], which emits byte-for-byte what
+/// [`ExternalSpecPolicy::Ignore`] emits and additionally reports each linked
+/// library whose own proof obligations the output does not carry. A caller that
+/// has decided that report is uninteresting says so through
+/// [`link_with_options`].
 ///
 /// # Errors
 ///
@@ -548,7 +992,7 @@ pub fn link_with_warnings(
     externals: &[(&str, &[u8])],
     contracts: Option<&[ImportWriteSet]>,
 ) -> Result<LinkOutput, LinkError> {
-    merge::link(main_wasm, externals, contracts)
+    link_with_options(main_wasm, externals, contracts, &LinkOptions::default())
 }
 
 /// Merges the satisfiable imports of `main_wasm` from `externals`, returning a
@@ -659,4 +1103,92 @@ pub fn link(
 /// supported subset.
 pub fn validate_external(logical_module: &str, bytes: &[u8]) -> Result<(), LinkError> {
     merge::validate_external(logical_module, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default policy decides what every caller that never chose hears. It
+    /// is `Warn` rather than `Ignore` because the two emit identical bytes, so
+    /// defaulting to the loud one cannot change an artifact while defaulting to
+    /// the quiet one would preserve the old silence for every such caller.
+    #[test]
+    fn link_options_default_is_warn() {
+        assert_eq!(
+            LinkOptions::default().external_specs,
+            ExternalSpecPolicy::Warn
+        );
+        assert_eq!(ExternalSpecPolicy::default(), ExternalSpecPolicy::Warn);
+    }
+
+    /// The dropped-obligations report prescribes an opt-in, and the outcome it
+    /// promises is not one the undecoded section can be held to: a library
+    /// shipping only reachability obligations produces a follow-up build that
+    /// adopts nothing. The sentence has to leave room for that rather than
+    /// promise the obligations will arrive.
+    #[test]
+    fn the_dropped_report_does_not_promise_an_outcome_it_cannot_support() {
+        let message = LinkWarning::ExternalSpecsDropped {
+            modules: vec!["mathlib".to_string()],
+        }
+        .to_string();
+        assert!(
+            message.contains("--adopt-external-specs")
+                && message.contains("[verification] adopt-external-specs = true"),
+            "both spellings of the opt-in must stay in the report, got: {message}"
+        );
+        assert!(
+            message.contains("reports every obligation it could not carry"),
+            "the report must say the follow-up build accounts for what it cannot carry, rather \
+             than promise the obligations arrive, got: {message}"
+        );
+    }
+
+    /// A library whose every obligation is a reachability obligation mints no
+    /// key at all, so the report about it must not close by saying the
+    /// universal obligations were adopted: there were none, and the reader who
+    /// asked for adoption would otherwise have to read the `.v` to find out.
+    #[test]
+    fn the_reachability_report_says_whether_anything_was_adopted() {
+        let carried_nothing = LinkWarning::ReachabilityObligationsNotAdopted {
+            module: "mathlib".to_string(),
+            adopted: 0,
+            obligations: vec!["`OnlyReach` / `OnlyReach.reaches_zero` (exists)".to_string()],
+        }
+        .to_string();
+        assert!(
+            carried_nothing.contains("carried nothing")
+                && carried_nothing.contains("Nothing from this library reached the proof artifact"),
+            "a link that adopted nothing must say so, got: {carried_nothing}"
+        );
+        assert!(
+            !carried_nothing.contains("The universal obligations were adopted"),
+            "the partial-success clause must not appear when nothing was adopted, got: \
+             {carried_nothing}"
+        );
+
+        let carried_some = LinkWarning::ReachabilityObligationsNotAdopted {
+            module: "mathlib".to_string(),
+            adopted: 1,
+            obligations: vec!["`Bounds` / `Bounds.reaches_zero` (exists)".to_string()],
+        }
+        .to_string();
+        assert!(
+            carried_some.contains("carried its universal (`forall`) obligations only")
+                && carried_some.contains("The universal obligations were adopted and are \
+                                          unaffected"),
+            "a partial adoption keeps the clause that says the working half survived, got: \
+             {carried_some}"
+        );
+
+        // Both renders describe the same left-behind obligation, so what differs
+        // between them is the count and nothing else about the input.
+        for message in [&carried_nothing, &carried_some] {
+            assert!(
+                message.contains("1 reachability obligation was left behind"),
+                "every render names what it left behind, got: {message}"
+            );
+        }
+    }
 }
