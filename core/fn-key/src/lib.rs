@@ -145,7 +145,7 @@ pub fn fold_spec_name(module_path: &[String], spec: &str) -> String {
 /// namespace, and collocating its producers is what keeps the argument that
 /// they cannot collide in one place.
 ///
-/// Three separations, each closing a distinct way two bodies could meet:
+/// Four separations, each closing a distinct way two bodies could meet:
 ///
 /// - every name carries [`MERGED_SEPARATOR`], which a compiled function's
 ///   symbol cannot contain, so the merged half and the program half are
@@ -155,7 +155,16 @@ pub fn fold_spec_name(module_path: &[String], spec: &str) -> String {
 ///   may export, and internally call, the same name;
 /// - the inner bodies carry a `#` mark after that prefix, so a foreign
 ///   module's private callee cannot be named the same as one of that
-///   module's own roots.
+///   module's own roots;
+/// - an adopted external specification's own symbol carries a second `#spec#`
+///   mark, so it cannot be read as one of that module's merged bodies. This
+///   last one is a separation **by convention plus a link-time check**, not by
+///   construction: [`merged_name::adopted_spec`] and [`merged_name::callee`]
+///   both build on an unconstrained foreign name, so a library whose private
+///   callee is literally named `spec#DoubleSpec.doubles` reaches the same
+///   string. The linker therefore refuses a merge in which an adopted symbol
+///   is one the output's `name` section already carries, which is what turns a
+///   deliberate collision into a rejection rather than a silent coincidence.
 ///
 /// A `logical_module` is itself a `::`-joined identifier path (`crypto::digest`
 /// from `use { hash } from crypto::digest;`), so the prefix is not a single
@@ -214,6 +223,35 @@ pub mod merged_name {
         format!(
             "{logical_module}{}{}func_{out_func_idx}",
             super::MERGED_SEPARATOR,
+            super::MERGED_INTERNAL_MARK
+        )
+    }
+
+    /// The symbol recorded for a **specification function of a linked external**
+    /// whose obligation the merge adopted.
+    ///
+    /// `mathlib` + `DoubleSpec.doubles` → `mathlib::#spec#DoubleSpec.doubles`.
+    ///
+    /// Such a function is never merged — a library's specification functions are
+    /// outside every export closure — so this names no body of the output, and
+    /// nothing resolves it: a universal obligation's own symbol is not looked up
+    /// by the proof translation (only an `exists`/`unique` entry's is, and those
+    /// are not adoptable). It exists so the symbol cannot *coincide* with one
+    /// that is resolved.
+    ///
+    /// It is separated from [`root`] by construction — a root's export field is
+    /// an Inference identifier and cannot begin with `#` — but only by
+    /// convention from [`callee`], whose source name comes from a foreign module
+    /// and is unconstrained. The linker therefore additionally refuses a merge in
+    /// which this string is one the output's `name` section carries; the
+    /// convention makes an accidental collision impossible and the check makes a
+    /// deliberate one fail closed.
+    #[must_use = "returns the adopted specification's name-section symbol"]
+    pub fn adopted_spec(logical_module: &str, source_symbol: &str) -> String {
+        format!(
+            "{logical_module}{}{}spec{}{source_symbol}",
+            super::MERGED_SEPARATOR,
+            super::MERGED_INTERNAL_MARK,
             super::MERGED_INTERNAL_MARK
         )
     }
@@ -681,6 +719,39 @@ mod tests {
         assert_eq!(merged_name::root("mathlib", "double"), "mathlib::double");
         assert_eq!(merged_name::callee("mathlib", "helper"), "mathlib::#helper");
         assert_eq!(merged_name::anonymous("mathlib", 7), "mathlib::#func_7");
+        assert_eq!(
+            merged_name::adopted_spec("mathlib", "DoubleSpec.doubles"),
+            "mathlib::#spec#DoubleSpec.doubles"
+        );
+    }
+
+    /// An adopted specification's symbol must not be a string any other producer
+    /// of this namespace can reach from the same inputs. It shares the module
+    /// prefix and the internal mark with the two inner-body producers, so the
+    /// `spec` marker is the whole of the separation, and a change that let it
+    /// delegate to one of them would hand the adopted symbol the name of a body
+    /// the merge may actually contain.
+    #[test]
+    fn an_adopted_spec_symbol_is_distinct_from_every_other_merged_producer() {
+        let source = "DoubleSpec.doubles";
+        let adopted = merged_name::adopted_spec("mathlib", source);
+
+        assert_ne!(adopted, merged_name::root("mathlib", source));
+        assert_ne!(adopted, merged_name::callee("mathlib", source));
+        assert_ne!(adopted, merged_name::anonymous("mathlib", 3));
+        assert!(
+            adopted.contains(MERGED_SEPARATOR),
+            "`{adopted}` must stay in the merged half of the name section"
+        );
+
+        // The mark is what holds the two apart, so a library's own inner callee
+        // reaches this string only by being named `#spec#…` itself — the
+        // deliberate collision the linker's own check refuses.
+        assert_eq!(
+            merged_name::callee("mathlib", &format!("spec#{source}")),
+            adopted,
+            "the two producers agree only on a source name that already carries the mark"
+        );
     }
 
     /// A logical module is a `::`-joined identifier path, so it carries the

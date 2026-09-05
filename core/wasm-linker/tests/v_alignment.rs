@@ -828,3 +828,289 @@ fn main_body_past_the_control_depth_cap_is_rejected_before_translation() {
         other => panic!("expected UnsupportedConstruct, got {other:?}"),
     }
 }
+
+// -- Adopted external specifications -----------------------------------------
+//
+// A library's own universal obligations reach the emitted `.v` only when the
+// caller asks for them, and the whole point of adoption is *which body* each one
+// applies. These tests carry that from a link to the emitted Rocq: an adopted
+// obligation must name the merged body at its post-link `mod_funcs` ordinal, and
+// the two ways a key can be refused — by the linker, and by the translator whose
+// denylist the linker deliberately does not restate — must each happen at the
+// phase that owns them.
+
+/// Appends `value` as an unsigned LEB128.
+fn push_leb(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+/// Encodes an `inference.spec_funcs` payload: version, pair count, then a name
+/// and an index list per pair.
+fn encode_spec_funcs(entries: &[(&str, Vec<u32>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_leb(&mut out, 1);
+    push_leb(&mut out, entries.len() as u32);
+    for (name, indices) in entries {
+        push_leb(&mut out, name.len() as u32);
+        out.extend_from_slice(name.as_bytes());
+        push_leb(&mut out, indices.len() as u32);
+        for &idx in indices {
+            push_leb(&mut out, idx);
+        }
+    }
+    out
+}
+
+/// A proof-mode `mathlib`: `sum` is exported and calls the private `helper`,
+/// both are named in the `name` section, and the two verification sections
+/// record one universal obligation about `sum` under `spec`.
+///
+/// Built through `wasm_encoder` rather than WAT because the `name` section is
+/// what an adopted obligation resolves its applied symbol against, and the two
+/// custom sections are what makes this a library a proof-mode build produced.
+fn proof_mode_library(spec: &str) -> Vec<u8> {
+    use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
+    use wasm_encoder::{
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        Instruction, Module, NameMap, NameSection, TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    module.section(&types);
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    funcs.function(0);
+    module.section(&funcs);
+    let mut exports = ExportSection::new();
+    exports.export("sum", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut root = Function::new([]);
+    root.instruction(&Instruction::LocalGet(0));
+    root.instruction(&Instruction::LocalGet(1));
+    root.instruction(&Instruction::Call(1));
+    root.instruction(&Instruction::End);
+    code.function(&root);
+    let mut inner = Function::new([]);
+    inner.instruction(&Instruction::LocalGet(0));
+    inner.instruction(&Instruction::LocalGet(1));
+    inner.instruction(&Instruction::I32Add);
+    inner.instruction(&Instruction::End);
+    code.function(&inner);
+    module.section(&code);
+
+    let mut names = NameSection::new();
+    names.module("mathlib");
+    let mut func_names = NameMap::new();
+    func_names.append(0, "sum");
+    func_names.append(1, "helper");
+    names.functions(&func_names);
+    module.section(&names);
+
+    module.section(&CustomSection {
+        name: "inference.spec_funcs".into(),
+        data: (&encode_spec_funcs(&[(spec, vec![])])[..]).into(),
+    });
+    let mut map = HSpecMap::default();
+    map.insert(
+        spec.to_string(),
+        vec![HSpecEntry::new(
+            HFnRef(format!("{spec}.sums")),
+            HAssert::nz(HTerm::App(
+                HFnRef("sum".to_string()),
+                vec![HTerm::Local(0), HTerm::Local(1)],
+            )),
+            SpecKind::Forall,
+        )],
+    );
+    module.section(&CustomSection {
+        name: inference_hassert::HSPECS_SECTION_NAME.into(),
+        data: (&inference_hassert::encode(&map)[..]).into(),
+    });
+    module.finish()
+}
+
+/// A main module importing `sum` from `logical_module` and exporting a local
+/// `compute` that calls it. It carries no verification section of its own, so
+/// everything the emitted proof states about specifications is adopted.
+fn main_importing_sum_from(logical_module: &str) -> Vec<u8> {
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "{logical_module}" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#
+    ))
+}
+
+/// Links `main` against a `proof_mode_library` bound under `logical_module`,
+/// adopting its obligations.
+fn link_adopting(
+    logical_module: &str,
+    main: &[u8],
+    lib: &[u8],
+) -> Result<Vec<u8>, inference_wasm_linker::LinkError> {
+    inference_wasm_linker::link_with_options(
+        main,
+        &[(logical_module, lib)],
+        None,
+        &inference_wasm_linker::LinkOptions {
+            external_specs: inference_wasm_linker::ExternalSpecPolicy::Adopt,
+        },
+    )
+    .map(|out| out.wasm)
+}
+
+/// Translates `linked` to Rocq under the same empty explicit maps the CLI passes
+/// for a linked artifact, so the module's embedded sections are the only source
+/// of what the proof states.
+fn translate_linked(linked: &[u8]) -> String {
+    let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    let empty_hspecs = inference_hassert::HSpecMap::default();
+    translate_bytes("Prog", linked, &empty, &empty_hspecs)
+        .unwrap_or_else(|e| panic!("the adopted artifact must translate, got {e}"))
+}
+
+/// The 0-based position of the `module_func` named `name` in the emitted
+/// module's `mod_funcs` list — the ordinal a `T_app` has to carry to name that
+/// body.
+fn mod_funcs_ordinal(rocq: &str, name: &str) -> usize {
+    let list = rocq
+        .split_once("mod_funcs :=")
+        .expect("the emitted module must declare mod_funcs")
+        .1;
+    let list = list.split_once("mod_tables").expect("mod_tables follows").0;
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "nil;")
+        .position(|line| line.trim_end_matches(" ::") == name)
+        .unwrap_or_else(|| panic!("`{name}` is not one of the module's functions:\n{list}"))
+}
+
+/// An adopted specification reaches the emitted proof as a specification of the
+/// merged module's own: a `_specs` list and a `ValidSpec` theorem over it,
+/// namespaced under the logical module the library was bound as.
+#[test]
+fn an_adopted_spec_reaches_the_emitted_proof() {
+    let lib = proof_mode_library("S");
+    let main = main_importing_sum_from("mathlib");
+    let linked = link_adopting("mathlib", &main, &lib).expect("the link must adopt");
+
+    let rocq = translate_linked(&linked);
+    assert!(
+        rocq.contains("Definition Prog__mathlib_S_specs : list hassert"),
+        "the emitted proof must declare the adopted specification's list:\n{rocq}"
+    );
+    assert!(
+        rocq.contains("Theorem valid_Prog__mathlib_S : ValidSpec Prog Prog__mathlib_S_specs."),
+        "and state a ValidSpec obligation over it:\n{rocq}"
+    );
+}
+
+/// The whole point of the rewrite: the adopted obligation applies the merged
+/// body its author wrote it about, at that body's post-link `mod_funcs` ordinal.
+///
+/// Asserted on the ordinal and the module record rather than on the sanitized
+/// `Definition` name, because the translator resolves an applied symbol by the
+/// raw `name`-section string and then prints a name with every separator
+/// collapsed — two different merged bodies can sanitize to one `Definition`
+/// name, and the ordinal cannot.
+#[test]
+fn an_adopted_application_names_the_merged_body_by_index() {
+    let lib = proof_mode_library("S");
+    let main = main_importing_sum_from("mathlib");
+    let linked = link_adopting("mathlib", &main, &lib).expect("the link must adopt");
+
+    let rocq = translate_linked(&linked);
+    let ordinal = mod_funcs_ordinal(&rocq, "mathlib_sum");
+    let obligation = rocq
+        .split_once("Definition Prog__mathlib_S_hspec1 : hassert :=")
+        .expect("the adopted obligation must be emitted")
+        .1
+        .split_once("\nDefinition")
+        .expect("another definition follows")
+        .0;
+    assert!(
+        obligation.contains(&format!("T_app {ordinal} ")),
+        "the adopted obligation must apply the merged body at ordinal {ordinal}:\n{obligation}"
+    );
+    assert_ne!(
+        ordinal,
+        mod_funcs_ordinal(&rocq, "mathlib_helper"),
+        "the fixture is only meaningful while the two merged bodies sit at different ordinals"
+    );
+}
+
+/// The documented carve-out, proven rather than argued: the linker restates the
+/// translator's *structural* identifier rule and not its stdlib/keyword
+/// denylist, so a key that shadows a Rocq stdlib name links and is refused one
+/// phase later — before any artifact is written.
+///
+/// `eq` + `refl` is the reachable instance: two denylist entries contain `_`, so
+/// the fold can reach one.
+#[test]
+fn an_adopted_key_that_is_a_rocq_keyword_links_and_is_refused_by_the_translator() {
+    use inference_wasm_to_v_translator::errors::WasmToVError;
+
+    let lib = proof_mode_library("refl");
+    let main = main_importing_sum_from("eq");
+    let linked = link_adopting("eq", &main, &lib)
+        .expect("the linker's rule is structural, so it must admit `eq_refl`");
+
+    let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    let empty_hspecs = inference_hassert::HSpecMap::default();
+    let err = translate_bytes("Prog", &linked, &empty, &empty_hspecs)
+        .expect_err("the translator's denylist must refuse it");
+    let downcast = err
+        .downcast_ref::<WasmToVError>()
+        .unwrap_or_else(|| panic!("expected a typed translator error, got {err}"));
+    assert!(
+        matches!(downcast, WasmToVError::RocqStdlibShadow { name } if name == "eq_refl"),
+        "expected the stdlib-shadow rejection naming the key, got {downcast}"
+    );
+}
+
+/// The other half of the split: a trailing `_` is a rule the linker owns
+/// outright, and refusing at the link is what lets the message name the library
+/// the key came from. Translation would also refuse such a key, but only by the
+/// identifier it fabricated, with no way back to the dependency that supplied
+/// it.
+#[test]
+fn a_trailing_underscore_key_is_refused_by_the_linker_before_translation() {
+    use inference_wasm_linker::LinkError;
+
+    let lib = proof_mode_library("Double_");
+    let main = main_importing_sum_from("mathlib");
+
+    let err = link_adopting("mathlib", &main, &lib)
+        .expect_err("the linker must refuse a key ending in `_`");
+    let LinkError::AdoptedSpecNameInvalid { module, key, .. } = &err else {
+        panic!("expected AdoptedSpecNameInvalid, got {err:?}");
+    };
+    assert_eq!(module, "mathlib");
+    assert_eq!(key, "mathlib_Double_");
+    let message = err.to_string();
+    assert!(
+        message.contains("mathlib") && message.contains("Double_"),
+        "the rejection must name the library and the specification it came from, got {message}"
+    );
+}

@@ -92,14 +92,23 @@ pub(crate) enum GlobalInit {
 }
 
 /// Whether a parsed module is the main module being linked or an external
-/// dependency merged into it. Controls whether the `inference.spec_funcs`
-/// custom section is decoded: the main module's drives proof-mode translation
-/// and is re-emitted, while an external's is verification-only scaffolding that
-/// the merge strips, so it is skipped (and never fails the link if malformed).
+/// dependency merged into it.
+///
+/// This is what decides whether the two verification custom sections are
+/// decoded. The main module's drive proof-mode translation and are re-emitted,
+/// so they are decoded and a malformed one is a hard error. An external's
+/// describe a module the output is not — only the executable closure of a
+/// satisfied export crosses the merge — so they are decoded only when the
+/// caller asked to adopt the library's obligations, and are otherwise merely
+/// noted, which is what keeps a malformed section in a library nothing needed
+/// from failing a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleRole {
     Main,
-    External,
+    /// An external, carrying whether the caller asked to adopt its verification
+    /// sections — which is what decides whether they are decoded or merely
+    /// noted.
+    External { decode_specs: bool },
 }
 
 /// The subset of a WASM module the static-merge linker manipulates.
@@ -147,18 +156,37 @@ pub(crate) struct ParsedModule {
     /// [func_idx]` in the *pre-link* index space. The merge rewrites each index
     /// into the output space and re-emits the section, so a bare linked `.wasm`
     /// still names the correct spec functions (the input to formal verification).
-    /// Only the main module carries one; externals never do.
+    ///
+    /// An external's is decoded only when the caller asked to adopt the
+    /// library's obligations, and then only so the library's own
+    /// obligations-are-a-subset-of-specifications invariant can be checked
+    /// before anything is adopted from it. Its indices name the library's own
+    /// specification functions, which no export closure reaches, so they are
+    /// never remapped and never re-emitted.
     pub spec_funcs: Option<Vec<(String, Vec<u32>)>>,
     /// The decoded `inference.hspecs` custom section: per-spec `hassert`
     /// obligations keyed by folded spec name. Unlike `spec_funcs`, the payload
     /// references functions by symbolic name, not index, so no index remap
-    /// applies; the merge edits it in exactly one way, pointing a symbol that
-    /// names a root alias the output's name section could not record at the
-    /// name it did record. Decoded (validated) here so a corrupt main section
-    /// fails the link; the merge re-validates after that edit and re-encodes
-    /// canonically. Only the main module carries one; an external's is
-    /// stripped.
+    /// applies. Decoded (validated) here so a corrupt main section fails the
+    /// link; the merge edits the map — pointing a symbol that names a root alias
+    /// the output's name section could not record at the name it did record, and
+    /// folding in whatever it adopts from a library — then re-validates and
+    /// re-encodes canonically.
+    ///
+    /// An external's is decoded only when the caller asked to adopt the
+    /// library's obligations. Under every other policy the section is noted
+    /// through [`Self::carries_hspecs`] and never read, which is what keeps a
+    /// malformed one in a library nothing needed from failing a link.
     pub hspecs: Option<inference_hassert::HSpecMap>,
+    /// Whether the module carries an `inference.hspecs` section, recorded even
+    /// when the section is not decoded.
+    ///
+    /// This is the obligation carrier. A `spec_funcs` section without one
+    /// describes specifications that state nothing, so a report about dropped
+    /// obligations keys on this flag alone. Under a non-adopting policy an
+    /// external's section is not decoded, so presence is all the merge can
+    /// honestly report.
+    pub carries_hspecs: bool,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.
     /// The merge matches each main-module import's recorded `(module, field)`
@@ -204,32 +232,51 @@ impl ParsedModule {
     }
 
     /// Parses `bytes` into the owned representation, recording `logical_module`
-    /// as the logical name the module was bound under (empty for the main
-    /// module). The merge uses it to disambiguate two externals that export the
-    /// same field but were bound from different logical modules.
+    /// as the logical name the module was bound under. The merge uses it to
+    /// disambiguate two externals that export the same field but were bound from
+    /// different logical modules.
     ///
-    /// An external module's `inference.spec_funcs` custom section — and any spec
-    /// functions it names — are *not* merged into the executable output: only
-    /// the executable closure of the satisfied export crosses the merge. So the
-    /// section is skipped here rather than decoded, and a malformed one in an
-    /// external never fails the link (the section is irrelevant to the merge).
-    pub(crate) fn parse_external(bytes: &[u8], logical_module: &str) -> Result<Self, LinkError> {
-        let mut module = Self::parse_with_role(bytes, ModuleRole::External)?;
-        module.logical_module = logical_module.to_string();
-        Ok(module)
+    /// An external module's specification functions are *not* merged into the
+    /// executable output: only the executable closure of the satisfied export
+    /// crosses the merge. So its two verification sections describe a module the
+    /// output is not, and `decode_specs` says what to do about that. With it
+    /// clear the sections are noted and never read, so a malformed one in an
+    /// external cannot fail the link. With it set — the caller asked to adopt
+    /// the library's universal obligations — both are decoded and validated, and
+    /// a malformed or duplicated one is a hard [`LinkError`] naming the logical
+    /// module.
+    pub(crate) fn parse_external(
+        bytes: &[u8],
+        logical_module: &str,
+        decode_specs: bool,
+    ) -> Result<Self, LinkError> {
+        Self::parse_with_role(bytes, ModuleRole::External { decode_specs }, logical_module)
     }
 
-    /// Parses the main module's `bytes`, decoding its `inference.spec_funcs`
-    /// section (a verification deliverable the merge re-emits, re-indexed).
+    /// Parses the main module's `bytes`, decoding its `inference.spec_funcs` and
+    /// `inference.hspecs` sections (verification deliverables the merge
+    /// re-emits, the first re-indexed).
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, LinkError> {
-        Self::parse_with_role(bytes, ModuleRole::Main)
+        Self::parse_with_role(bytes, ModuleRole::Main, "")
     }
 
     /// Parses `bytes` into the owned representation under the given `role`, which
-    /// decides whether the `inference.spec_funcs` custom section is decoded (main
-    /// module) or skipped (external module).
-    fn parse_with_role(bytes: &[u8], role: ModuleRole) -> Result<Self, LinkError> {
-        let mut module = ParsedModule::default();
+    /// decides whether the `inference.spec_funcs` and `inference.hspecs` custom
+    /// sections are decoded.
+    ///
+    /// `logical_module` is recorded before the walk rather than after it, so a
+    /// rejection raised while decoding an external's verification section can
+    /// name the module the caller bound it under. It is empty for the main
+    /// module, which needs no such qualifier.
+    fn parse_with_role(
+        bytes: &[u8],
+        role: ModuleRole,
+        logical_module: &str,
+    ) -> Result<Self, LinkError> {
+        let mut module = ParsedModule {
+            logical_module: logical_module.to_string(),
+            ..ParsedModule::default()
+        };
 
         // Running cursor into `local_funcs` for code-section assignment. Code
         // bodies arrive in function-declaration order, so the i-th body fills
@@ -328,60 +375,71 @@ fn collect_types(group: &RecGroup, out: &mut Vec<TypeEntry>) {
 }
 
 /// Mines a custom section for everything the merge must carry through: the
-/// `name` section's module/function/local subsections, and (for the main module
-/// only) the `inference.spec_funcs` and `inference.hspecs` sections that drive
-/// proof-mode translation.
+/// `name` section's module/function/local subsections, and the
+/// `inference.spec_funcs` and `inference.hspecs` sections that drive proof-mode
+/// translation.
 ///
 /// The `name` subsections are best-effort (an unparseable one is skipped). The
-/// main module's `inference.spec_funcs`/`inference.hspecs` payloads, by contrast,
-/// are verification deliverables: a malformed one is a hard [`LinkError`], never
-/// silently dropped. An external module's verification sections are
-/// verification-only scaffolding the merge strips, so they are skipped here
-/// without decoding — their presence never fails the link, and a malformed one
-/// in an irrelevant external cannot block the merge.
+/// verification payloads, by contrast, are deliverables: where they are decoded
+/// at all, a malformed or duplicated one is a hard [`LinkError`], never silently
+/// dropped.
+///
+/// Where they are decoded depends on the `role`. The main module's always are.
+/// An external's are only when the caller asked to adopt the library's
+/// obligations, because otherwise nothing reads them — the merge mines an
+/// external for the executable closure of a satisfied export and nothing else —
+/// and decoding them would let a corrupt section in a library nothing needed
+/// fail the link. Presence of `inference.hspecs` is recorded under every role,
+/// since that is what a report about dropped obligations keys on and it costs
+/// no decoding.
 fn collect_custom_section(
     custom: &CustomSectionReader,
     module: &mut ParsedModule,
     role: ModuleRole,
 ) -> Result<(), LinkError> {
     if custom.name() == crate::spec_funcs::SECTION_NAME {
-        if role == ModuleRole::External {
+        if !decodes_verification_sections(role) {
             return Ok(());
         }
         // A second spec_funcs section would silently discard the first under a
         // last-wins assignment, dropping its proof obligations. Since the section
         // is a verification deliverable, reject the duplicate with a clean error
-        // rather than vanish the earlier obligations.
+        // rather than vanish the earlier specifications.
         if module.spec_funcs.is_some() {
-            return Err(LinkError::Parse(
-                "main module declares more than one inference.spec_funcs section; \
-                 its proof obligations would be silently dropped"
-                    .into(),
+            return Err(duplicate_section_error(
+                role,
+                &module.logical_module,
+                "inference.spec_funcs",
+                "specifications",
             ));
         }
-        let decoded = crate::spec_funcs::decode(custom.data())?;
+        let decoded = crate::spec_funcs::decode(custom.data())
+            .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
         module.spec_funcs = Some(decoded);
         return Ok(());
     }
 
     if custom.name() == inference_hassert::HSPECS_SECTION_NAME {
-        if role == ModuleRole::External {
+        module.carries_hspecs = true;
+        if !decodes_verification_sections(role) {
             return Ok(());
         }
         // As with `spec_funcs`, a duplicate would silently drop the first
         // section's obligations. Reject it rather than overwrite.
         if module.hspecs.is_some() {
-            return Err(LinkError::Parse(
-                "main module declares more than one inference.hspecs section; \
-                 its proof obligations would be silently dropped"
-                    .into(),
+            return Err(duplicate_section_error(
+                role,
+                &module.logical_module,
+                "inference.hspecs",
+                "obligations",
             ));
         }
         // Decode to validate: a corrupt payload is a hard error here rather than
         // a corrupt artifact the Rocq translator chokes on later. The merge
         // re-encodes the decoded map canonically.
         let decoded = inference_hassert::decode(custom.data())
-            .map_err(|e| LinkError::Parse(format!("inference.hspecs section: {e}")))?;
+            .map_err(|e| LinkError::Parse(format!("inference.hspecs section: {e}")))
+            .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
         module.hspecs = Some(decoded);
         return Ok(());
     }
@@ -424,6 +482,58 @@ fn collect_custom_section(
         }
     }
     Ok(())
+}
+
+/// Whether this role reads the two verification custom sections at all.
+///
+/// The main module's are deliverables it re-emits. An external's describe a
+/// module the output is not, so they are read only when the caller asked to
+/// adopt the library's universal obligations — which is what keeps a corrupt
+/// section in a library nothing needed from failing a link.
+fn decodes_verification_sections(role: ModuleRole) -> bool {
+    match role {
+        ModuleRole::Main => true,
+        ModuleRole::External { decode_specs } => decode_specs,
+    }
+}
+
+/// The rejection for a module declaring one verification section twice, whose
+/// repair differs by role: the main module's producer emitted a program it must
+/// fix, while a library's is only ever read to adopt from, so the message says
+/// what adopting would have lost.
+fn duplicate_section_error(
+    role: ModuleRole,
+    logical_module: &str,
+    section: &str,
+    contents: &str,
+) -> LinkError {
+    match role {
+        ModuleRole::Main => LinkError::Parse(format!(
+            "main module declares more than one {section} section; \
+             its proof obligations would be silently dropped"
+        )),
+        ModuleRole::External { .. } => LinkError::Parse(format!(
+            "linked module `{logical_module}` declares more than one {section} section; \
+             adopting from it would silently drop the first section's {contents}"
+        )),
+    }
+}
+
+/// Prefixes a verification-section rejection with the library it was raised
+/// for, leaving the main module's own diagnostics as they were.
+///
+/// There is one main module, so naming it adds nothing. An external's section is
+/// read only under adoption, and which library was being adopted from is the
+/// first thing the reader needs — the section name alone would leave them
+/// searching every dependency for a payload the merge never even reports on by
+/// default.
+fn qualify_external_error(role: ModuleRole, logical_module: &str, err: LinkError) -> LinkError {
+    match (role, err) {
+        (ModuleRole::External { .. }, LinkError::Parse(detail)) => {
+            LinkError::Parse(format!("linked module `{logical_module}`: {detail}"))
+        }
+        (_, err) => err,
+    }
 }
 
 fn collect_import(import: &Import, module: &mut ParsedModule) {
@@ -699,8 +809,8 @@ mod tests {
     #[test]
     fn main_decodes_the_spec_section_external_skips_it() {
         // The main module's spec section is a verification deliverable: decode it.
-        // An external's is verification-only scaffolding the merge strips: skip
-        // it so the external never even materialises a `spec_funcs` field.
+        // A non-adopting external's describes a module the output is not: skip it
+        // so the external never even materialises a `spec_funcs` field.
         // version=1, count=1, name_len=1 'S', idx_count=1, idx=0.
         let payload = [1u8, 1, 1, b'S', 1, 0];
         let bytes = module_with_spec_section(&payload);
@@ -712,18 +822,18 @@ mod tests {
             "the main module must decode its spec section"
         );
 
-        let external = ParsedModule::parse_external(&bytes, "lib").expect("external parse");
+        let external = ParsedModule::parse_external(&bytes, "lib", false).expect("external parse");
         assert_eq!(
             external.spec_funcs, None,
-            "an external's spec section must be skipped, not decoded"
+            "a non-adopting external's spec section must be skipped, not decoded"
         );
     }
 
     #[test]
     fn a_malformed_spec_section_fails_main_but_not_external() {
         // A malformed spec section (version byte 0xff) is a hard error for the
-        // main module (a verification deliverable), but for an external — which
-        // strips it — it must not fail the parse at all.
+        // main module (a verification deliverable), but for an external nothing
+        // reads it must not fail the parse at all.
         let bytes = module_with_spec_section(&[0xffu8, 0xff, 0xff]);
 
         assert!(
@@ -731,8 +841,112 @@ mod tests {
             "a malformed main spec section must be a hard parse error"
         );
         assert!(
-            ParsedModule::parse_external(&bytes, "lib").is_ok(),
+            ParsedModule::parse_external(&bytes, "lib", false).is_ok(),
             "a malformed external spec section must not fail the parse"
+        );
+    }
+
+    /// A minimal one-function module carrying both verification custom sections
+    /// with the given payloads, in the order the encoder writes them.
+    fn module_with_verification_sections(spec_funcs: &[u8], hspecs: &[u8]) -> Vec<u8> {
+        use wasm_encoder::{CustomSection, Section as _};
+        let mut bytes = module_with_spec_section(spec_funcs);
+        CustomSection {
+            name: inference_hassert::HSPECS_SECTION_NAME.into(),
+            data: hspecs.into(),
+        }
+        .append_to(&mut bytes);
+        bytes
+    }
+
+    /// One universal obligation under spec `S`, owned by and applying `f`.
+    fn one_obligation() -> inference_hassert::HSpecMap {
+        use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, HTerm, SpecKind};
+        let mut map = HSpecMap::default();
+        map.insert(
+            "S".to_string(),
+            vec![HSpecEntry::new(
+                HFnRef("f".to_string()),
+                HAssert::nz(HTerm::App(HFnRef("f".to_string()), vec![])),
+                SpecKind::Forall,
+            )],
+        );
+        map
+    }
+
+    /// A report about a library's dropped obligations keys on the presence of
+    /// its `inference.hspecs` section, and the whole point of the non-adopting
+    /// path is that presence is learned without reading the payload.
+    #[test]
+    fn an_external_records_its_hspecs_presence_without_decoding() {
+        let spec_funcs = [1u8, 1, 1, b'S', 0];
+        let payload = inference_hassert::encode(&one_obligation());
+        let bytes = module_with_verification_sections(&spec_funcs, &payload);
+
+        let external = ParsedModule::parse_external(&bytes, "lib", false).expect("external parse");
+        assert!(
+            external.carries_hspecs,
+            "the presence of an hspecs section must be recorded under every policy"
+        );
+        assert_eq!(
+            external.hspecs, None,
+            "a non-adopting parse must not decode the section it merely noted"
+        );
+    }
+
+    /// The floor the default path stands on: a corrupt verification section in a
+    /// library nothing needed cannot fail a link, because nothing reads it.
+    #[test]
+    fn a_malformed_external_hspecs_section_still_parses_when_not_adopting() {
+        // Version byte 3 is past the codec's supported version, so a decoder
+        // would reject these bytes outright.
+        let bytes = module_with_verification_sections(&[1u8, 0], &[3u8, 0, 0]);
+
+        let external = ParsedModule::parse_external(&bytes, "lib", false)
+            .expect("a malformed external hspecs section must not fail a non-adopting parse");
+        assert!(external.carries_hspecs);
+        assert_eq!(external.hspecs, None);
+    }
+
+    /// Adoption needs both sections: the obligations to carry, and the
+    /// specification list to check the library's own subset invariant against
+    /// before carrying anything.
+    #[test]
+    fn an_adopting_parse_decodes_both_external_verification_sections() {
+        let spec_funcs = [1u8, 1, 1, b'S', 0];
+        let map = one_obligation();
+        let payload = inference_hassert::encode(&map);
+        let bytes = module_with_verification_sections(&spec_funcs, &payload);
+
+        let external = ParsedModule::parse_external(&bytes, "lib", true).expect("external parse");
+        assert_eq!(
+            external.spec_funcs,
+            Some(vec![("S".to_string(), vec![])]),
+            "an adopting parse must decode the external's spec_funcs section"
+        );
+        assert_eq!(
+            external.hspecs,
+            Some(map),
+            "an adopting parse must decode the external's hspecs section"
+        );
+        assert!(external.carries_hspecs);
+    }
+
+    /// A rejection raised while adopting has to name the library it came from:
+    /// the section name alone would leave the reader searching every dependency
+    /// for a payload the merge does not otherwise report on.
+    #[test]
+    fn an_adopting_parse_names_the_library_in_a_section_rejection() {
+        let bytes = module_with_verification_sections(&[1u8, 0], &[3u8, 0, 0]);
+
+        let err = ParsedModule::parse_external(&bytes, "crypto::digest", true)
+            .expect_err("an adopting parse must reject a malformed hspecs section");
+        let LinkError::Parse(message) = &err else {
+            panic!("expected a Parse rejection, got {err:?}");
+        };
+        assert!(
+            message.contains("crypto::digest") && message.contains("inference.hspecs"),
+            "the rejection must name the library and the section, got {message}"
         );
     }
 }
