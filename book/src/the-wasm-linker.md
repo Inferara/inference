@@ -500,7 +500,7 @@ scheme removes the common cases rather than every possible one.
 
 | Error | Trigger |
 |-------|---------|
-| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM, or a module that passed structural validation contains a malformed section (over-declared locals count, invalid LEB128, etc.) |
+| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM, or a module that passed structural validation contains a malformed section (over-declared locals count, invalid LEB128, etc.). Under adoption it also covers a malformed or duplicated `inference.spec_funcs`/`inference.hspecs` section in a *linked library*, with the logical module named; under the other two settings those bytes are not read at all |
 | `LinkError::UnsatisfiedImport { field }` | No external module tagged with the right logical module name exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists each signal (e.g. "defines or initializes its own static data segments") |
@@ -514,6 +514,13 @@ scheme removes the common cases rather than every possible one.
 | `LinkError::DuplicateWriteContract { module, field }` | The checked-mode contract list holds more than one entry for the same `(module, field)` import; the linker has no basis to choose which one governs |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
 | `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
+| `LinkError::AdoptedSpecUnlisted { module, spec }` | Adoption only: the library ships obligations under a specification its own `inference.spec_funcs` section does not list, so its two verification sections disagree with each other |
+| `LinkError::AdoptedSpecNameInvalid { module, spec, key, reason }` | Adoption only: the name an adopted specification would take is not one the proof translation can spell as an identifier; `reason` is the structural clause that rules it out |
+| `LinkError::AdoptedSpecNameCollision { spec, module, contender }` | Adoption only: the name an adopted specification would take is already claimed — by a specification the program declares (`contender: None`) or by another library's adopted specification |
+| `LinkError::AdoptedObligationSymbolUnresolved { module, spec, symbol }` | Adoption only: an adopted obligation applies a function symbol no function of its own library's `name` section carries |
+| `LinkError::AdoptedObligationSymbolAmbiguous { module, spec, symbol, carriers }` | Adoption only: several functions of the library carry the symbol an adopted obligation applies; `carriers` lists their indices in the library |
+| `LinkError::AdoptedObligationUnmergedSymbol { module, spec, symbol, imported }` | Adoption only: an adopted obligation applies a function of its library this merge did not fold in — one outside the export closure (`imported: false`) or one of the library's own imports (`imported: true`) |
+| `LinkError::AdoptedSpecSymbolCollision { module, spec, symbol }` | Adoption only: the merged-namespace symbol an adopted specification function would take is one a function of the merged output already carries |
 
 ## Supported WASM Subset
 
@@ -569,16 +576,59 @@ them differently because their payloads are shaped differently:
   `LinkError::AmbiguousObligationSymbol` in the [Error Reference](#error-reference)
   below.
 
-Both of the above describe the **main module's own** sections only. An
-**external** module's `inference.spec_funcs` and `inference.hspecs` — the spec
-membership and `hassert` obligations a linked *library* recorded about its own
-code — are not decoded at all: `ParsedModule::parse_external` skips
-both sections unconditionally (`src/parse.rs`), and a malformed one never fails
-the link, because the merge only ever mines an external for the executable
-closure of a satisfied export. A library's own proof obligations are
-therefore **dropped, silently**, at the link step today — there is no warning,
-and no way to opt a library's obligations into the main module's proof. Only
-the compiled program's own specs and assertions survive linking.
+Both of the above describe the **main module's own** sections. An **external**
+module's `inference.spec_funcs` and `inference.hspecs` — the spec membership
+and `hassert` obligations a linked *library* recorded about its own code —
+describe a module the output is not: only the executable closure of a satisfied
+export crosses the merge, and a library's specification functions are never in
+it. What the link does with them is an explicit input,
+`LinkOptions::external_specs`, with three settings:
+
+- **`Warn`** (the default, and what a build that writes a `.v` uses). Neither
+  section is decoded — a malformed one in a library nothing needed still cannot
+  fail a link — and a `LinkWarning` names each library whose `inference.hspecs`
+  the output does not carry, together with both spellings of the opt-in. The
+  emitted bytes are exactly what they were.
+- **`Ignore`**. The same bytes, and nothing said. A build that writes no `.v`
+  uses it: no proof artifact exists for the obligations to reach, and the
+  report would fire on every compile of every program that links a proof-mode
+  library.
+- **`Adopt`** (`infc --adopt-external-specs`, or `adopt-external-specs = true`
+  under the manifest's `[verification]` table). Each contributing library's
+  verification sections are decoded and its **universal** (`forall`)
+  obligations are written into the merged module's own sections under
+  `<logical module>_<library's spec name>` — `mathlib` plus `DoubleSpec` gives
+  `mathlib_DoubleSpec`, and `a::b` gives `a_b_DoubleSpec`. Every function
+  symbol such an obligation applies is resolved in the *library's own* `name`
+  section, required to be one of the bodies this merge actually folded in, and
+  rewritten to the exact string the output's `name` section carries for that
+  body — so an adopted obligation names the body its author wrote it about, and
+  never a same-named function of the program. The adopted spec has no
+  specification function of its own in the output, so its
+  `inference.spec_funcs` entry lists no index, which is what a universal
+  obligation needs: `ValidSpec` is discharged denotationally and never reduces
+  a spec body.
+
+`exists` and `unique` obligations are **not** adopted under any setting, and
+adoption reports each one it left behind. Their judgments are evaluated against
+the frame an execution of the specification function reaches, and that function
+is precisely what does not cross the merge. A library whose obligations are all
+reachability obligations contributes no spec at all rather than an empty one: a
+`ValidSpec` over an empty list is true of every module and would state nothing
+about the program.
+
+Adoption fails closed. A spec name colliding with one the program declares or
+with another library's, a name the proof translation cannot spell as an
+identifier, a symbol the library's own name section carries on no function or
+on several, an obligation over a function this merge did not need, and a
+library whose two verification sections disagree with each other are each a
+hard `LinkError` naming the library, the specification and the symbol — see the
+[Error Reference](#error-reference).
+
+Adoption carries obligations, not proofs: each arrives as a `ValidSpec` theorem
+with an unfilled proof, to be discharged against the merged module. That is
+what makes it sound across everything the merge changes about the library's
+environment — one shared linear memory, remapped globals, renumbered calls.
 
 ## Comparison with Traditional Linkers
 

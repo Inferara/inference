@@ -83,7 +83,7 @@ named `Definition`s rather than opaque `func_<uuid>` placeholders:
     form: `mathlib::#func_<idx>`.
 - If no function carries a name, the name section is omitted entirely.
 
-Three separations keep that half of the section unambiguous:
+Four separations keep that half of the section unambiguous:
 
 - `::` is the boundary against the **program** half. A compiled function's
   name-section symbol is built from Inference identifiers joined by `.`, so it
@@ -99,6 +99,14 @@ Three separations keep that half of the section unambiguous:
   A root is named after an import field, which is an Inference identifier; an
   inner callee keeps the debug name its foreign module gave it, which is
   unconstrained and may be exactly that field.
+- A **second `#spec#` mark** separates an adopted external specification's own
+  symbol from every merged body of the same module (see
+  [External specification adoption](#external-specification-adoption)). This one
+  is a separation by convention plus a link-time check rather than by
+  construction: both forms build on an unconstrained foreign name, so a library
+  whose private callee is literally named `spec#DoubleSpec.doubles` produces the
+  same `mathlib::#spec#DoubleSpec.doubles` string, and the merge refuses that
+  link rather than letting the coincidence stand.
 
 A WASM name map holds one name per function index, so when one foreign body
 satisfies several imports — an export bound under two fields — only the least of
@@ -127,14 +135,26 @@ link: `inference.spec_funcs` (per-spec WASM function indices) and
 `inference.hspecs` (per-spec `hassert` verification obligations, decoded via
 the shared `inference-hassert` crate — the same codec `wasm-codegen` writes
 and `wasm-to-v` reads). Both are handled identically at a high level, driven
-by the parsed module's role:
+by the parsed module's role and — for an external — by the caller's
+external-specification policy:
 
-- **External modules never decode either section.** `ParsedModule::parse_with_role`
-  skips both at the custom-section dispatch point for `ModuleRole::External`,
-  without even attempting to decode them — a malformed one in an irrelevant
-  external can never fail the link, because only the executable closure of the
-  satisfied export crosses the merge; an external's own spec obligations are
-  never part of the output.
+- **An external's verification sections are decoded only when the caller asks
+  for adoption** (`LinkOptions::external_specs == ExternalSpecPolicy::Adopt`).
+  Under `Ignore` and `Warn` the `inference.hspecs` section's *presence* is
+  recorded in `ParsedModule::carries_hspecs` and neither section's bytes are
+  read, so under those two policies a malformed one in a library nothing needed
+  cannot fail the link — the merge only ever mines an external for the
+  executable closure of a satisfied export. That is a property of the two
+  default policies and not of the link: `Adopt` decodes every supplied
+  external's sections, contributing or not (see
+  [External specification adoption](#external-specification-adoption)).
+- **`Warn` is the default and says so.** It raises
+  `LinkWarning::ExternalSpecsDropped` naming each contributing library whose
+  obligations the output does not carry, together with both spellings of the
+  opt-in. It emits byte-for-byte what `Ignore` emits: the policy decides what is
+  *said*, not what is written. Under `Adopt` a malformed or duplicate payload is
+  a `LinkError::Parse` naming the logical module — see
+  [External specification adoption](#external-specification-adoption).
 - **The main module decodes and validates both up front.** A malformed
   payload, or a **second** `inference.spec_funcs`/`inference.hspecs` section
   in the main module, is a hard `LinkError::Parse` rather than a silent
@@ -156,11 +176,82 @@ by the parsed module's role:
   own function names survive the rebuilt name section verbatim (only merged
   external names are synthesized), so nothing in the payload needs updating.
 
-Both sections are emitted only when the main module actually carried one — a
-self-contained module (or one with no `spec` blocks at all) produces neither
-`inference.*` section in the linked output, matching the executable-code-only
-output of a plain merge. When present, they are emitted in that order,
-directly after the rebuilt `name` section.
+`inference.spec_funcs` is emitted when the main module carried one **or** when
+anything was adopted; `inference.hspecs` likewise. A self-contained module with
+no `spec` blocks, linked without adoption, still produces neither `inference.*`
+section — the executable-code-only output of a plain merge, byte-identical to
+before this policy existed. When present they are emitted in that order,
+directly after the rebuilt `name` section. A main module carrying an *empty*
+`inference.spec_funcs` section still re-emits an empty one, because the
+section's presence is itself a producer's statement.
+
+### External specification adoption
+
+Under `ExternalSpecPolicy::Adopt` — `infc --adopt-external-specs`, or
+`adopt-external-specs = true` under the manifest's `[verification]` table — each
+contributing library's verification sections are decoded and its **universal**
+(`forall`) obligations are written into the merged module's own sections, keyed
+under `<logical module>_<library's spec name>`: `mathlib` plus `DoubleSpec`
+gives `mathlib_DoubleSpec`, and `a::b` gives `a_b_DoubleSpec`. Every function
+symbol such an obligation applies is resolved in the *library's own* `name`
+section, required to be one of the bodies this merge actually folded in, and
+rewritten to the exact string the output's `name` section carries for that body
+— read out of the same `MergedFunc::name` field the encoder reads, not
+reformatted, so the symbol an adopted obligation is pointed at cannot drift from
+the symbol the section records. An adopted obligation therefore names the body
+its author wrote it about, and never a same-named function of the program. The
+adopted spec has no specification function of its own in the output, so its
+`inference.spec_funcs` entry lists no index, which is what a universal
+obligation needs: `ValidSpec` is discharged denotationally and never reduces a
+spec body.
+
+`exists` and `unique` obligations are **not** adopted, and each one left behind
+is reported through `LinkWarning::ReachabilityObligationsNotAdopted`. Their
+judgments are evaluated against the frame an execution of the specification
+function reaches, and that function is precisely what does not cross the merge.
+A library whose obligations are all reachability obligations contributes no spec
+at all rather than an empty one: a `ValidSpec` over an empty list is true of
+every module and would state nothing about the program.
+
+Turning adoption on widens what a link reads. Every supplied external's two
+sections are decoded at parse time, whether or not it contributed a merged body,
+while adoption itself is scoped to the ones that did — so a corrupt or duplicate
+section in a dependency nothing imports from fails an adopting link even though
+nothing would have adopted from it. The decode is unconditional because a
+library's bytes are either well-formed or they are not, and a build that has
+asked to carry obligations should not have that answer depend on which of its
+dependencies happened to be reached.
+
+Adoption fails closed. A spec name colliding with one the program declares or
+with another library's, a name the proof translation cannot spell as an
+identifier, a symbol the library's own name section carries on no function or on
+several, an obligation over a function this merge did not need, an adopted
+specification symbol the merged output already carries, and a library whose two
+verification sections disagree with each other are each a hard `LinkError`
+naming the library, the specification and the symbol — see the
+[Error Reference](#error-reference).
+
+Adoption carries obligations, not proofs: each arrives as a `ValidSpec` theorem
+with an unfilled proof, to be discharged against the merged module. That is what
+makes it sound across everything the merge changes about the library's
+environment — one shared linear memory, remapped globals, renumbered calls.
+
+The linker restates the translator's **structural** identifier rule
+(`spec_name_problem`) but not its Rocq stdlib/keyword denylist, which it would
+have to track by hand. A name the linker admits and the translator refuses fails
+at translation in the same `infc -v` invocation, before any artifact is written,
+and a test in this crate pins that the denylist is the only thing in that
+direction — in both directions, so the deferral cannot widen silently. Two
+denylist entries contain `_` (`eq_refl`, `well_founded`), so the gap is
+reachable: a library spec named `refl` bound under logical module `eq` folds to
+`eq_refl`. The cost is a message that names the identifier but not the library.
+
+The other direction has one entry of its own: the linker refuses a key ending in
+`_`, which `validate_rocq_identifier` admits. The translator enforces that
+downstream in its crate-private `validate_spec_join_boundary`, where no test
+outside that crate can observe it, so the linker states the clause itself — and
+gets to name the library and the specification in the rejection, which the
+translator's message cannot.
 
 ## Feasibility Tiers
 
@@ -514,10 +605,10 @@ merged closure reaches a transitive host import, a closure is Tier C, or — in
 the checked mode — a Tier-B closure's write set is not covered by its
 declaration (`LinkError::UndeclaredExternWrite`).
 
-`contracts` is an explicit mode rather than an optional slice, because `link`
-and `link_with_warnings` are the *only* entry point — every caller passes
-through one of them — so an empty slice would have to mean two different
-things at once:
+`contracts` is an explicit mode rather than an optional slice, because `link`,
+`link_with_warnings` and `link_with_options` are the *only* entry points — every
+caller passes through one of them — so an empty slice would have to mean two
+different things at once:
 
 - **`None`** — merge mechanics only; [Declared Write-Set Check](#declared-write-set-check)
   does not run. The mode for a caller with no Inference declaration behind the
@@ -529,15 +620,22 @@ things at once:
   driver builds from every bound `external fn` declaration in the program and
   passes for the `infc`/`infs` pipeline.
 
-`link_with_warnings` is the same merge, returning a `LinkOutput` that keeps the
-`LinkWarning`s the merge raised alongside the bytes. `link` is its
-warning-discarding form. A warning is never a defect found in the merged
-program: it states where the merge's own proofs stop, at a point where the
-emitted artifact makes that limit reachable — today, a Tier-B external merged
-into a memory of more than one page, where an address past the caller's buffer
-lands in valid memory instead of trapping (see
+`link_with_options` is the one entry point; `link_with_warnings` is it with the
+default options, and `link` is that with the warnings discarded.
+`LinkOptions::external_specs` decides what the merge does with a linked
+library's own verification sections and defaults to `Warn`, which changes no
+emitted byte relative to `Ignore` — so the default is the one that cannot
+silently lose a proof obligation for a caller who never chose.
+
+`link_with_warnings` and `link_with_options` return a `LinkOutput` that keeps
+the `LinkWarning`s the merge raised alongside the bytes. A warning is never a
+defect found in the merged program: it states where the merge's own reach stops,
+at a point where the emitted artifact makes that limit visible — a Tier-B
+external merged into a memory of more than one page, where an address past the
+caller's buffer lands in valid memory instead of trapping (see
 [What Tier B guarantees — and what it does not](#what-tier-b-guarantees--and-what-it-does-not),
-and issue #420).
+and issue #420); a linked library whose own proof obligations the output does
+not carry; and a library whose reachability obligations adoption left behind.
 
 Every import in the main module must be satisfiable by one of the supplied
 external modules. The match is by **both** the logical module name and the export
@@ -550,7 +648,7 @@ to a same-named `sum` exported by a different module.
 
 | Error | Meaning |
 |-------|---------|
-| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section (both are never even decoded for an external) |
+| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section. An external's two sections are decoded **only** when adoption is requested, in which case a malformed or duplicate one is reported here with the logical module named; under every other policy they are not decoded at all and cannot fail a link |
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
@@ -559,6 +657,13 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
 | `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
+| `LinkError::AdoptedSpecUnlisted { module, spec }` | Adoption only: the library ships obligations under a specification its own `inference.spec_funcs` section does not list, so its two verification sections disagree |
+| `LinkError::AdoptedSpecNameInvalid { module, spec, key, reason }` | Adoption only: the name an adopted specification would take is not one the proof translation can spell as an identifier; `reason` is the structural clause. The Rocq stdlib/keyword denylist is not restated here — see [External specification adoption](#external-specification-adoption) |
+| `LinkError::AdoptedSpecNameCollision { spec, module, contender }` | Adoption only: the name an adopted specification would take is already claimed by a specification the program declares (`contender: None`) or by another library's adopted specification |
+| `LinkError::AdoptedObligationSymbolUnresolved { module, spec, symbol }` | Adoption only: an adopted obligation applies a symbol no function of its own library's `name` section carries |
+| `LinkError::AdoptedObligationSymbolAmbiguous { module, spec, symbol, carriers }` | Adoption only: several functions of the library carry the symbol an adopted obligation applies; `carriers` lists their indices in the library |
+| `LinkError::AdoptedObligationUnmergedSymbol { module, spec, symbol, imported }` | Adoption only: an adopted obligation applies a function of its library that this merge did not fold in — one outside the export closure (`imported: false`) or one of the library's own imports (`imported: true`) |
+| `LinkError::AdoptedSpecSymbolCollision { module, spec, symbol }` | Adoption only: the merged-namespace symbol an adopted specification function would take is one a function of the merged output already carries |
 
 ## Supported Subset
 
@@ -598,18 +703,21 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
   them; the guards apply to hand-built or third-party main modules fed to the public `link()`.
 - One `.wasm` library version per logical name. Multi-version resolution is
   deferred to the manifest layer (issue #96).
+- Adoption carries a library's universal obligations only. `exists`/`unique`
+  obligations are reported and left behind, because the specification function
+  their judgment reduces never crosses the merge.
 
 ## Module Organization
 
 | File | Responsibility |
 |------|---------------|
-| `src/lib.rs` | Public API (`link`, `LinkError`), crate-level documentation |
-| `src/parse.rs` | `ParsedModule` — section-by-section owned representation; `ParsedModule::parse` |
+| `src/lib.rs` | Public API (`link`, `link_with_warnings`, `link_with_options`, `LinkOptions`, `ExternalSpecPolicy`, `LinkError`, `LinkWarning`), crate-level documentation |
+| `src/parse.rs` | `ParsedModule` — section-by-section owned representation; `ParsedModule::parse`, and `ParsedModule::parse_external`, which decodes a library's verification sections only when adoption asks for them |
 | `src/closure.rs` | `compute` — transitive closure via BFS; `ClosureEffects` for tier classification |
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
 | `src/provenance.rs` | `verify_param_addressing` — the address-provenance abstract interpretation proving Tier-B addresses are parameter-derived; also runs the root write-set attribution and returns it |
 | `src/provenance/attribution.rs` | `root_write_set` — the forward least-fixpoint pass computing, for a memory-touching closure, which of the *root export's* parameters each `Store` access's address may be attributed to |
-| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode |
+| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
 | `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space |
 | `src/spec_funcs.rs` | Codec for the `inference.spec_funcs` custom section — mirrors `inference_wasm_codegen`'s encoder as a self-contained copy rather than a cross-crate dependency (the sibling `inference.hspecs` section, by contrast, shares its codec via the `inference-hassert` crate) |
 | `tests/link.rs` | Integration tests: Tier A, Tier B, Tier C rejection, transitive closure, type dedup, name section, multiple externals, diamond closure |
@@ -665,6 +773,23 @@ Test coverage includes:
   "name it first" message are all pinned; the unchecked (`None`) mode is shown
   to admit what the checked mode rejects on identical bytes, so the two modes
   are distinguishable rather than a nullable spelling of one
+- **External-specification policy** — a library carrying obligations is warned
+  about by default and silent under `Ignore`, with identical bytes either way;
+  a `spec_funcs`-only library and one that satisfied no import raise nothing;
+  several contributing libraries are named in one ascending warning; and a
+  malformed or duplicated external verification section fails the link only
+  under `Adopt`
+- **Adoption** — a universal obligation reaches both merged sections with its
+  applied symbol rewritten onto the merged body's name, main's own `spec_funcs`
+  order preserved and the adopted key appended, and every other section
+  byte-identical; a spec whose obligations are all reachability obligations
+  mints no key and is reported instead; and each refusal is pinned — an
+  `hspecs` key absent from the library's own `spec_funcs`, a key that is not a
+  legal identifier or that collides with the program's or another library's, an
+  external bound under an empty logical module, an applied symbol carried by no
+  function or by two of the library's, a target outside the merged closure or
+  one of the library's own imports, and a specification symbol the output
+  already carries
 
 ## Fuzzing
 
