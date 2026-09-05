@@ -25,6 +25,7 @@ mod export_narrow_params;
 mod expr_deep_nesting;
 mod extern_import;
 mod extern_link;
+mod extern_link_adopt;
 mod extern_link_exec;
 mod extern_link_toolchain;
 mod inference_wrapper;

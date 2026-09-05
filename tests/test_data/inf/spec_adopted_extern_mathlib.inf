@@ -1,0 +1,36 @@
+// A library that ships a specification of its own: the external `.wasm` behind
+// `spec_adopted_extern.inf` and `spec_adopted_both.inf`, compiled on its own in
+// proof mode so it carries the `inference.spec_funcs` and `inference.hspecs`
+// sections recording what its author proved about it. A library compiled for
+// execution carries neither, so only a proof-mode one has anything to adopt.
+//
+// `ScaleSpec` is universal, which is the only kind a link can adopt: an
+// `exists` or `unique` judgment reduces its own specification function's body,
+// and a specification function is outside every export closure and so never
+// crosses the merge.
+//
+// The obligation applies `scale`, the one function a program importing this
+// library pulls across the merge, so an adopted copy of it names a body the
+// merged module actually contains.
+//
+// The scale factor is a five-digit prime rather than a round number because the
+// end-to-end tests identify the merged body by it: they read the ordinal the
+// adopted obligation applies out of the emitted proof and then confirm the body
+// at that ordinal is this one, by a literal no other body in the artifact
+// carries. A `Definition` name cannot serve, since the translator sanitizes the
+// merged symbol's separators away.
+//
+// No data segment: the merged module built from this one is compiled by `coqc`,
+// and the corpus rejects a data segment in any module it gates — reported
+// against the main fixture's name rather than this one.
+
+pub fn scale(a: i32) -> i32 {
+  return a * 10007;
+}
+
+spec ScaleSpec {
+  fn scales() forall {
+    let x: i32 = @;
+    assert(scale(x) == x * 10007);
+  }
+}
