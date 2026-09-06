@@ -320,14 +320,67 @@ mod drift {
         }
         // Git's own words are the diagnosis: "fetch the pinned revision" is
         // the repair for a missing commit, and the wrong one for a checkout git
-        // refuses to read at all (dubious ownership, not a repository) — which
-        // this message would otherwise describe identically.
+        // refuses to read at all (dubious ownership, not a repository) or for
+        // one whose object of that name is not the commit this repository
+        // knows (a replace ref, a promisor remote that could not supply the
+        // tree). Those are told apart only by what the checkout itself says,
+        // and the checkout is on a machine the person reading this may not be
+        // able to reach, so it is asked here.
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
-            "{} has no {path} at {revision}; fetch the pinned revision (git: {})",
+            "{} has no {path} at {revision}; fetch the pinned revision (git: {})\n{}",
             repo.display(),
-            stderr.trim()
+            stderr.trim(),
+            describe_checkout(repo, revision)
         ))
+    }
+
+    /// What a checkout is, in the terms that decide whether a pinned revision
+    /// can be read from it: its toplevel, its remotes, whether it is a partial
+    /// clone, whether the revision is replaced, and the top of the tree the
+    /// revision names. Every probe is best-effort; a probe that fails reports
+    /// its own failure rather than hiding the others.
+    fn describe_checkout(repo: &Path, revision: &str) -> String {
+        let probe = |args: &[&str]| -> String {
+            let output = Command::new("git").arg("-C").arg(repo).args(args).output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    let lines: Vec<&str> = text.lines().take(8).collect();
+                    if lines.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        lines.join(" | ")
+                    }
+                }
+                // `git config --get` of an absent key exits 1 and says nothing;
+                // that is an answer, not a failure.
+                Ok(out) if out.stderr.is_empty() => "(unset)".to_string(),
+                Ok(out) => format!(
+                    "(failed: {})",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => format!("(could not run git: {e})"),
+            }
+        };
+        [
+            ("toplevel", probe(&["rev-parse", "--show-toplevel"])),
+            ("remotes", probe(&["remote", "-v"])),
+            (
+                "partial clone filter",
+                probe(&["config", "--get", "remote.origin.partialclonefilter"]),
+            ),
+            ("replace refs", probe(&["replace", "-l"])),
+            (
+                "revision",
+                probe(&["log", "-1", "--format=%H %T %s", revision]),
+            ),
+            ("tree top", probe(&["ls-tree", "--name-only", revision])),
+        ]
+        .into_iter()
+        .map(|(what, said)| format!("  {what}: {said}"))
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 
     // ------------------------------------------------------- reading a `.v`
