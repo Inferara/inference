@@ -1263,36 +1263,103 @@ pub(crate) fn assert_function_returns_simple_type(
     }
 }
 
-/// Core try-codegen pipeline: parse, type-check, optionally analyze, then attempt codegen
-/// while catching panics.
-fn try_codegen_impl(
+/// What a code generation attempt did.
+///
+/// The distinction [`try_codegen`]'s `Result<_, String>` deliberately cannot
+/// draw: a backstop test has to assert that code generation *refused*, and a
+/// test that only checks `is_err()` passes just as well when the compiler
+/// panicked. Every negative codegen test that exists to pin a diagnostic should
+/// match on this rather than on a `Result`.
+pub(crate) enum CodegenAttempt {
+    /// A module was produced. Boxed because [`inference_wasm_codegen::CodegenOutput`]
+    /// is far larger than the two message variants.
+    Ok(Box<inference_wasm_codegen::CodegenOutput>),
+    /// Some phase reported a diagnostic. Carries the rendered message.
+    Rejected(String),
+    /// Some phase aborted the process. Carries the panic payload.
+    Panicked(String),
+}
+
+/// Runs parse, type checking, optionally analysis, and code generation, and
+/// reports which of the three outcomes happened.
+///
+/// Unlike [`try_codegen`], an analysis failure is reported as
+/// [`CodegenAttempt::Rejected`] rather than unwrapped: a helper that panics the
+/// *test* on a rule-rejected program cannot be used to check what code
+/// generation would have done with it.
+pub(crate) fn codegen_attempt(source_code: &str, analysis: AnalysisMode) -> CodegenAttempt {
+    codegen_attempt_with_mode(
+        source_code,
+        analysis,
+        inference_wasm_codegen::CompilationMode::default(),
+    )
+}
+
+/// [`codegen_attempt`] under an explicit compilation mode.
+///
+/// Proof mode is the only one that runs choice lowering and the obligation
+/// translation, so a shape whose slot numbering or obligation payload could
+/// break is only observable through this entry point.
+pub(crate) fn codegen_attempt_with_mode(
     source_code: &str,
     analysis: AnalysisMode,
-) -> Result<inference_wasm_codegen::CodegenOutput, String> {
+    mode: inference_wasm_codegen::CompilationMode,
+) -> CodegenAttempt {
+    // Parsing and type checking stay outside the guard, so a fixture that stops
+    // failing to parse or to type-check still fails its test loudly rather than
+    // being reported as a code generation refusal it never reached.
     let arena = build_ast(source_code.to_string());
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    if let AnalysisMode::Run = analysis {
-        let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
+    if let AnalysisMode::Run = analysis
+        && let Err(errors) = inference_analysis::analyze(&typed_context)
+    {
+        return CodegenAttempt::Rejected(errors.to_string());
     }
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         inference_wasm_codegen::codegen(
             &typed_context,
             "output",
-            inference_wasm_codegen::CodegenOptions::default(),
+            inference_wasm_codegen::CodegenOptions {
+                mode,
+                ..Default::default()
+            },
         )
-    }))
-    .map_err(|panic| {
-        if let Some(s) = panic.downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = panic.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_string()
-        }
-    })?
-    .map_err(|e| e.to_string())
+    }));
+    match outcome {
+        Ok(Ok(output)) => CodegenAttempt::Ok(Box::new(output)),
+        Ok(Err(error)) => CodegenAttempt::Rejected(error.to_string()),
+        Err(panic) => CodegenAttempt::Panicked(panic_message(&*panic)),
+    }
+}
+
+/// Renders a caught panic payload as a string, for the two shapes
+/// `std::panic` produces.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+/// Core try-codegen pipeline: parse, type-check, optionally analyze, then attempt codegen
+/// while catching panics.
+///
+/// A fold over [`codegen_attempt`] that collapses a refusal and a panic back into
+/// one `Err`. Behaviour is unchanged for its callers except that an analysis
+/// failure now returns `Err` instead of panicking the test.
+fn try_codegen_impl(
+    source_code: &str,
+    analysis: AnalysisMode,
+) -> Result<inference_wasm_codegen::CodegenOutput, String> {
+    match codegen_attempt(source_code, analysis) {
+        CodegenAttempt::Ok(output) => Ok(*output),
+        CodegenAttempt::Rejected(message) | CodegenAttempt::Panicked(message) => Err(message),
+    }
 }
 
 /// Attempts the full compilation pipeline, catching panics.

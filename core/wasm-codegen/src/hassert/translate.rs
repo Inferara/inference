@@ -776,6 +776,18 @@ impl<'a> SpecFnTranslator<'a> {
                 ArgKind::Ignored { ty } => {
                     let _ = self.parameter_binding(arg.location, *ty, mode, "_");
                 }
+                // Neither spelling consumes a payload slot, and the two silences
+                // are not the same fact. A receiver is a parameter this payload
+                // deliberately does not number: the obligation denotes over the
+                // declared arguments, and the receiver is not one of them.
+                //
+                // A parameter declared by its type alone never reaches an emitted
+                // obligation at all. A050 owns the front-end rejection, but it is
+                // not what stops the analysis-free path: specification bodies are
+                // compiled before this pass runs, and the parameter loop in
+                // `visit_function_definition_body` refuses the form there, so code
+                // generation has already failed by the time an obligation would be
+                // built. Skipping the slot here is therefore inert either way.
                 ArgKind::SelfRef { .. } | ArgKind::TypeOnly(_) => {}
             }
         }
@@ -784,7 +796,12 @@ impl<'a> SpecFnTranslator<'a> {
     /// Consumes the slots a parameter occupies and, under universal
     /// quantification, records the typing guards its readers depend on. An
     /// ignored parameter is guarded like a named one: the guard is inert for a
-    /// slot the payload never reads, and uniformity beats a use analysis.
+    /// slot the payload never reads, and uniformity beats a use analysis. The
+    /// third spelling, a parameter declared by its type alone, never reaches an
+    /// emitted obligation — A050 rejects it on a defined function, and on the
+    /// analysis-free path code generation refuses it while compiling the body,
+    /// which happens first — so the alignment below is stated over the two
+    /// spellings that do arrive.
     ///
     /// A scalar takes one slot. A supported-shape aggregate (scalar arrays of
     /// any rank; flat structs with scalar or 1-D scalar-array fields) takes

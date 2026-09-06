@@ -408,6 +408,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a048(source), 0);
+        assert!(
+            compiles(source),
+            "a body-level alias is erased just as an item-level one is"
+        );
     }
 
     /// A `self` receiver spells no type of its own, so the receiver arm is never

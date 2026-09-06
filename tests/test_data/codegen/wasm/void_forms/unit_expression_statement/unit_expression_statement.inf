@@ -1,0 +1,8 @@
+// A bare `();` statement. The expression produces nothing, and the type checker
+// stamps the node as unit, so the statement emits neither a value nor the `drop`
+// a value-producing expression statement would need.
+
+pub fn main() -> i32 {
+    ();
+    return 7;
+}

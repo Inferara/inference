@@ -41,4 +41,6 @@ mod negative;
 mod param_by_ref;
 mod self_extern_escape;
 mod short_circuit;
+mod unnamed_params;
 mod validation;
+mod void_forms;

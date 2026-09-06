@@ -1,0 +1,19 @@
+// `return;` on one arm of an `if`, inside a function that owns a frame. The
+// early return has to restore the stack pointer before it leaves, so this pins
+// the epilogue-and-`return` pair in a framed void function as well as a
+// frameless one.
+
+fn helper(early: bool) {
+    let mut a: [i32; 2] = [1, 2];
+    if early {
+        return;
+    }
+    a[1] = a[0];
+    return;
+}
+
+pub fn main() -> i32 {
+    helper(true);
+    helper(false);
+    return 3;
+}

@@ -62,6 +62,7 @@ mod choice;
 mod choice_lowering_tests;
 mod compiler;
 mod errors;
+pub use errors::NAMED_ANALYSIS_RULES;
 mod hassert;
 mod hspecs_section;
 mod memory;

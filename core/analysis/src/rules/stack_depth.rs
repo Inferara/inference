@@ -307,7 +307,13 @@ fn params_frame_bytes(
                     ));
                 }
             }
-            _ => {}
+            // A parameter with no name is charged nothing, and that matches
+            // code generation rather than merely under-counting by omission:
+            // nothing can read an unnamed parameter, so it is passed by
+            // reference and given no frame slot there either. Written as an
+            // explicit arm so a new `ArgKind` has to be considered here rather
+            // than silently costing zero bytes.
+            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
         }
     }
     bytes

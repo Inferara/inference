@@ -264,6 +264,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a050(source), 0);
+        assert!(
+            compiles(source),
+            "`_: T` is the spelling this rule leaves standing, so it must compile"
+        );
     }
 
     /// Repeats of `_` stay legal: the type checker deliberately does not treat
@@ -275,6 +279,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a050(source), 0);
+        assert!(
+            compiles(source),
+            "`_: T` is the spelling this rule leaves standing, so it must compile"
+        );
     }
 
     #[test]
@@ -284,6 +292,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a050(source), 0);
+        assert!(
+            compiles(source),
+            "`_: T` is the spelling this rule leaves standing, so it must compile"
+        );
     }
 
     /// A `self` receiver is not an unnamed parameter; it is a parameter that

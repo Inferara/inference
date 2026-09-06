@@ -1,0 +1,12 @@
+// An unnamed compound parameter earns no frame slot and forces no linear memory:
+// a by-reference parameter's copy-on-entry exists so the body can read its own
+// data, and an unnamed parameter has no reads. The module this fixture generates
+// declares no memory at all, which is what pins the decision.
+
+pub fn taking(_: [i32; 4], b: i32) -> i32 {
+    return b;
+}
+
+pub fn main() -> i32 {
+    return 5;
+}

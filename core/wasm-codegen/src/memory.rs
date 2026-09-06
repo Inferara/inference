@@ -410,10 +410,18 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => 2,
         TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_, _) => 4,
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => 8,
-        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
-        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
-        // struct/string array elements are supported, this will need to be extended.
-        _ => todo!("Unsupported type for byte-size computation: {kind:?}"),
+        // The scalar widths above are exactly what the two layout wrappers,
+        // [`type_byte_size`] and [`natural_alignment_for_type`], delegate here
+        // for. Those wrappers are exhaustive over `TypeInfoKind`: they size a
+        // struct, a `::`-qualified nominal type and an array themselves, and they
+        // refuse `string`, `()`, and the generic, function and spec types outright.
+        // So every kind that can reach this arm was admitted by a layout pass that
+        // should have refused it.
+        _ => unreachable!(
+            "`{kind:?}` has no element size; the layout wrappers size compounds themselves \
+             and refuse every kind that describes no bytes, so nothing that reaches a \
+             layout can be one"
+        ),
     }
 }
 
@@ -436,6 +444,29 @@ pub(crate) fn type_byte_size(
     type_byte_size_with_visited(kind, ctx, module_path, &mut visited)
 }
 
+/// Whether a nominal type carrier names an enum rather than a struct.
+///
+/// The bare-name and `::`-qualified carriers resolve through different lookups,
+/// so a layout that admits one must ask the matching question for the other or a
+/// qualified enum would be reported as a missing struct.
+fn resolves_to_enum(kind: &TypeInfoKind, ctx: &TypedContext, module_path: &[String]) -> bool {
+    match kind {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+            ctx.lookup_enum_in(name, module_path).is_some()
+        }
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => ctx
+            .lookup_enum_by_qualified_path(&split_qualified_path(path), module_path)
+            .is_some(),
+        _ => false,
+    }
+}
+
+/// The size boundary. Deliberately exhaustive over [`TypeInfoKind`]: every kind
+/// either has a width this returns, or is refused here with the rule that owns
+/// the located diagnostic. That exhaustiveness is what lets [`element_size`],
+/// [`store_instruction`] and [`load_instruction`] treat a width-less kind as
+/// unreachable, and it is why a new `TypeInfoKind` variant fails to compile here
+/// rather than silently acquiring a scalar width.
 fn type_byte_size_with_visited(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
@@ -443,7 +474,13 @@ fn type_byte_size_with_visited(
     visited: &mut FxHashSet<String>,
 ) -> Result<u32, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+        // The four nominal carriers share one resolution: a bare name, a
+        // canonical-keyed struct and a `::`-qualified path all denote a struct or
+        // an enum, and which spelling the annotation used is not a layout fact.
+        TypeInfoKind::Struct(name, _)
+        | TypeInfoKind::Custom(name)
+        | TypeInfoKind::Qualified(name)
+        | TypeInfoKind::QualifiedName(name) => {
             if !visited.insert(name.clone()) {
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
@@ -457,7 +494,7 @@ fn type_byte_size_with_visited(
                     visited,
                 )?;
                 Ok(total_size)
-            } else if ctx.lookup_enum_in(name, module_path).is_some() {
+            } else if resolves_to_enum(kind, ctx, module_path) {
                 Ok(element_size(&TypeInfoKind::Enum(name.clone(), name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
@@ -469,7 +506,33 @@ fn type_byte_size_with_visited(
                 .checked_mul(*length)
                 .expect("Array byte count overflow: element size * length exceeds u32::MAX"))
         }
-        _ => Ok(element_size(kind)),
+        TypeInfoKind::Bool | TypeInfoKind::Number(_) | TypeInfoKind::Enum(_, _) => {
+            Ok(element_size(kind))
+        }
+        // The kinds with no representation in linear memory are refused here
+        // rather than at the leaf, because this is the boundary every layout path
+        // crosses: a local's frame slot, a struct field, an array element and an
+        // indexed access all ask this question. Refusing at the leaf instead
+        // would put the check behind twenty infallible call sites.
+        TypeInfoKind::String => Err(CodegenError::UnsupportedConstruct {
+            construct: "a `string` value in memory".to_string(),
+            rule: "A048",
+            location: None,
+        }),
+        TypeInfoKind::Unit => Err(CodegenError::UnsupportedConstruct {
+            construct: "a unit value in memory".to_string(),
+            rule: "A049",
+            location: None,
+        }),
+        // A generic type is never instantiated (#320), a function type has no
+        // value, and a spec type names a proof-only item. None of them describes
+        // bytes, and none is owned by an analysis rule, so the refusal names the
+        // type rather than a rule.
+        TypeInfoKind::Generic(_) | TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => {
+            Err(CodegenError::UnsupportedType {
+                rendered: kind.to_string(),
+            })
+        }
     }
 }
 
@@ -528,6 +591,10 @@ fn field_slot_alignment(slot: &StructFieldSlot) -> u32 {
     }
 }
 
+/// The alignment boundary, exhaustive over [`TypeInfoKind`] for the same reason
+/// [`type_byte_size_with_visited`] is, and admitting and refusing exactly the same
+/// kinds: a layout asks both questions, so the two must agree on which types
+/// describe bytes whichever it asks first.
 fn natural_alignment_with_visited(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
@@ -535,7 +602,10 @@ fn natural_alignment_with_visited(
     visited: &mut FxHashSet<String>,
 ) -> Result<u32, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _)
+        | TypeInfoKind::Custom(name)
+        | TypeInfoKind::Qualified(name)
+        | TypeInfoKind::QualifiedName(name) => {
             if !visited.insert(name.clone()) {
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
@@ -555,7 +625,7 @@ fn natural_alignment_with_visited(
                     }
                 }
                 Ok(max_align)
-            } else if ctx.lookup_enum_in(name, module_path).is_some() {
+            } else if resolves_to_enum(kind, ctx, module_path) {
                 Ok(element_size(&TypeInfoKind::Enum(name.clone(), name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
@@ -564,7 +634,24 @@ fn natural_alignment_with_visited(
         TypeInfoKind::Array(elem_type, _) => {
             natural_alignment_with_visited(&elem_type.kind, ctx, module_path, visited)
         }
-        _ => Ok(element_size(kind)),
+        TypeInfoKind::Bool | TypeInfoKind::Number(_) | TypeInfoKind::Enum(_, _) => {
+            Ok(element_size(kind))
+        }
+        TypeInfoKind::String => Err(CodegenError::UnsupportedConstruct {
+            construct: "a `string` value in memory".to_string(),
+            rule: "A048",
+            location: None,
+        }),
+        TypeInfoKind::Unit => Err(CodegenError::UnsupportedConstruct {
+            construct: "a unit value in memory".to_string(),
+            rule: "A049",
+            location: None,
+        }),
+        TypeInfoKind::Generic(_) | TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => {
+            Err(CodegenError::UnsupportedType {
+                rendered: kind.to_string(),
+            })
+        }
     }
 }
 
@@ -610,10 +697,16 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
             Instruction::I32Store(memarg)
         }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Store(memarg),
-        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
-        // i32, u32, i64, u64, and enums. This arm is unreachable for valid programs.
-        // When struct/string array elements are supported, this will need to be extended.
-        _ => todo!("Unsupported array element type for store: {elem_type:?}"),
+        // A compound element is copied as a byte region rather than stored, so it
+        // never reaches here. Every other kind that describes no bytes — `string`,
+        // `()`, and the generic, function and spec types — is refused by the two
+        // exhaustive layout wrappers, [`type_byte_size`] and
+        // [`natural_alignment_for_type`], while the layout that owns this element
+        // is computed, which happens before any instruction is emitted.
+        _ => unreachable!(
+            "`{elem_type:?}` has no store width; the layout wrappers refuse every kind that \
+             describes no bytes before emission, so no element that reaches a store can be one"
+        ),
     }
 }
 
@@ -638,10 +731,16 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
             Instruction::I32Load(memarg)
         }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Load(memarg),
-        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
-        // i32, u32, i64, u64, and enums. This arm is unreachable for valid programs.
-        // When struct/string array elements are supported, this will need to be extended.
-        _ => todo!("Unsupported array element type for load: {elem_type:?}"),
+        // A compound element is read through its own pointer rather than loaded,
+        // so it never reaches here. Every other kind that describes no bytes —
+        // `string`, `()`, and the generic, function and spec types — is refused by
+        // the two exhaustive layout wrappers, [`type_byte_size`] and
+        // [`natural_alignment_for_type`], while the layout that owns this element
+        // is computed, which happens before any instruction is emitted.
+        _ => unreachable!(
+            "`{elem_type:?}` has no load width; the layout wrappers refuse every kind that \
+             describes no bytes before emission, so no element that reaches a load can be one"
+        ),
     }
 }
 

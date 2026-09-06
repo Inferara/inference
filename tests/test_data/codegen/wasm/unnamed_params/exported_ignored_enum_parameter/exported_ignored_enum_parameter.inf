@@ -1,0 +1,13 @@
+// The enum half of the same boundary. Only the tags 0..N-1 name a variant, and
+// every other value names nothing under any convention, so an exported
+// function's enum slot is guarded whether or not the body reads it.
+
+pub enum Color { Red, Green, Blue }
+
+pub fn pick(_: Color, n: i32) -> i32 {
+    return n;
+}
+
+pub fn main() -> i32 {
+    return pick(Color::Green, 11);
+}

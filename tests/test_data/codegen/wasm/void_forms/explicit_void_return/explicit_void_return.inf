@@ -1,0 +1,12 @@
+// A bare `return;` in a void function. The parser synthesizes a unit literal for
+// the missing expression, and the unit value occupies no operand stack slot, so
+// the statement lowers to the epilogue and `return` alone.
+
+fn helper() {
+    return;
+}
+
+pub fn main() -> i32 {
+    helper();
+    return 7;
+}

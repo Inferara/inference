@@ -361,6 +361,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     /// An explicit `()` return type is the one place unit means something, and
@@ -372,6 +376,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     #[test]
@@ -381,6 +389,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     #[test]
@@ -390,6 +402,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     #[test]
@@ -399,6 +415,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     /// The exemption peels parentheses, so a redundant pair does not turn a
@@ -412,6 +432,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     #[test]
@@ -421,6 +445,10 @@ mod analysis_rules_tests {
             pub fn main() -> i32 { return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     /// A call to a void function as a statement produces no unit literal at
@@ -432,6 +460,10 @@ mod analysis_rules_tests {
             pub fn f() -> i32 { v(); return 0; }
         "#;
         assert_eq!(count_a049(source), 0);
+        assert!(
+            compiles(source),
+            "an exempt unit form must reach a generated module"
+        );
     }
 
     #[test]

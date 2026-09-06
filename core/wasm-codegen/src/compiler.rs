@@ -76,7 +76,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgData, ArgKind, BlockKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
+    ArgData, ArgKind, BlockKind, Def, Expr, Location, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
     UnaryOperatorKind,
     Visibility,
 };
@@ -498,6 +498,48 @@ pub(crate) struct Compiler {
     /// one past the last eagerly declared local. Rebuilt per function alongside
     /// `func`, whose local indices it hands out.
     region_emit: RegionEmit,
+    /// The first refusal raised by a lowering arm that has no way to report one,
+    /// because the body-lowering recursion is infallible. Set through
+    /// [`Self::poison`] (first error wins) and returned by
+    /// [`Self::visit_function_definition_body`] as soon as the body walk unwinds.
+    ///
+    /// # Invariant
+    ///
+    /// A poisoning arm emits nothing further, and no later arm observes
+    /// half-built state: the four lowering entry points every other path funnels
+    /// through — [`Self::lower_statement`], [`Self::lower_block`],
+    /// [`Self::lower_expression`] and [`Self::lower_assign_statement`] — return
+    /// immediately while this is set. Some arms poison an error a *callee* raised
+    /// after that callee had already emitted (an sret return, a call lowering, an
+    /// indexed access), so the body can hold a partial sequence; and the
+    /// *enclosing* helpers still run their tails, so
+    /// [`Self::lower_named_binding_init`] still emits its `LocalSet` and a loop
+    /// lowering still closes its block.
+    ///
+    /// Both leave the body operand-stack-inconsistent, which is harmless and
+    /// deliberately not guarded against a second time: `wasm_encoder::Function`
+    /// does not validate, and the early `Err` return sits ahead of both the
+    /// epilogue and [`Self::take_completed_function`], so the truncated body is
+    /// discarded rather than assembled.
+    ///
+    /// Reset per function alongside the rest of the per-function state.
+    poisoned: Option<CodegenError>,
+    /// Whether the function being compiled leaves a value on the operand stack
+    /// when it returns — an sret pointer counts, a unit return does not. Read by
+    /// the `return` lowering to refuse a unit expression in a function that
+    /// declares a result, a shape the type checker reports as a type mismatch and
+    /// which would otherwise emit `return` on an empty stack. Reset per function.
+    current_fn_returns_value: bool,
+    /// The `(slot, declared type)` of each parameter written `_: T` in the
+    /// function being compiled, in declaration order.
+    ///
+    /// An unnamed parameter takes no `locals_map` entry — nothing can read it, so
+    /// no synthetic name is invented for it and A041's one-name-one-local
+    /// invariant keeps exactly the names the source wrote. The export prologue
+    /// still has to reach it, because the WebAssembly ABI contract is a property
+    /// of the slot rather than of the binding, so the slot is recorded here
+    /// instead. Reset per function.
+    unnamed_params: Vec<(u32, TypeId)>,
 }
 
 /// The nested blocks a statement introduces, classified by how a frame-layout
@@ -708,6 +750,41 @@ impl Compiler {
             emit_features: EmitFeatures::default(),
             memory_layout: MemoryLayout::default(),
             region_emit: RegionEmit::new(0, EmitFeatures::default()),
+            poisoned: None,
+            current_fn_returns_value: false,
+            unnamed_params: Vec::new(),
+        }
+    }
+
+    /// Records a refusal raised where the lowering recursion cannot return one.
+    ///
+    /// The first error wins: once set, every lowering entry point returns without
+    /// emitting, so a later arm reporting a consequence of the first refusal
+    /// cannot displace the cause. See [`Self::poisoned`] for the invariant that
+    /// makes continuing safe.
+    fn poison(&mut self, error: CodegenError) {
+        let _ = self.poisoned.get_or_insert(error);
+    }
+
+    /// Attaches `location` to a refusal that was raised against a type rather
+    /// than a node, leaving one that already carries a position alone.
+    ///
+    /// The layout and signature helpers are handed a type and have no source
+    /// position to report, but their callers usually do — a parameter knows where
+    /// it was written. Filling it in at the call site is what makes
+    /// `pub fn f(s: string)` report a line and column instead of a bare sentence.
+    fn at(error: CodegenError, location: Location) -> CodegenError {
+        match error {
+            CodegenError::UnsupportedConstruct {
+                construct,
+                rule,
+                location: None,
+            } => CodegenError::UnsupportedConstruct {
+                construct,
+                rule,
+                location: Some(location),
+            },
+            other => other,
         }
     }
 
@@ -1243,9 +1320,17 @@ impl Compiler {
 
     /// Maps an Inference type to the corresponding WASM `ValType`.
     ///
-    /// Returns `None` for unit types because unit functions produce no WASM value.
-    /// Struct types (identified via `TypeNode::Custom` resolved against `TypedContext`)
-    /// are represented as `ValType::I32` pointers into linear memory.
+    /// `Ok(None)` is the *empty* value type, and it means different things at the
+    /// two positions this is asked about. A unit **return** is the empty result
+    /// list, which is what a void function declares. A unit **parameter** has no
+    /// argument slot at all, and there is no such thing as a WebAssembly
+    /// parameter that occupies none — so the parameter loop turns `None` into a
+    /// refusal rather than skipping the slot, which would silently renumber every
+    /// later parameter.
+    ///
+    /// Struct and enum types (named by `TypeNode::Custom` or a `::`-qualified
+    /// path, resolved against `TypedContext`) are `ValType::I32` pointers into
+    /// linear memory.
     fn val_type_from_type_id(
         arena: &AstArena,
         ty_id: TypeId,
@@ -1265,8 +1350,19 @@ impl Compiler {
             )
             | TypeNode::Array { .. } => Ok(Some(ValType::I32)),
             TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(ValType::I64)),
-            TypeNode::Generic { .. } => todo!(),
-            TypeNode::Function { .. } => todo!(),
+            // Generics are not implemented (#320): no type argument is ever
+            // substituted, so a generic type names no layout to choose a value
+            // type from. A function type has no value representation either —
+            // there are no first-class functions in the language.
+            TypeNode::Generic { base, params } => Err(CodegenError::UnsupportedType {
+                rendered: std::iter::once(arena[*base].name.clone())
+                    .chain(params.iter().map(|p| format!("{}'", arena[*p].name)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            }),
+            TypeNode::Function { .. } => Err(CodegenError::UnsupportedType {
+                rendered: "a function type".to_string(),
+            }),
             // `TypeQualifiedName` is the dead AST variant; the parser produces
             // `Qualified` for every `::`-qualified type. It stays an error rather
             // than a panic for defense-in-depth.
@@ -1290,6 +1386,27 @@ impl Compiler {
             }
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
+                // `unit`, `string` and `String` are spelled as ordinary type
+                // *names*, so the parser hands them over as `Custom` rather than
+                // as a `Simple` kind: `-> unit` and `-> ()` reach here by
+                // different routes and must answer alike. They are resolved ahead
+                // of the struct/enum lookup because they are the type checker's
+                // own reserved names — nothing a user declares can carry one —
+                // and falling through would report a builtin as an unknown type.
+                // `bool` is a keyword and always arrives as
+                // `TypeNode::Simple(SimpleTypeKind::Bool)`, so it needs no arm
+                // here even though the type checker lists it beside these three.
+                match name.as_str() {
+                    "unit" => return Ok(None),
+                    "string" | "String" => {
+                        return Err(CodegenError::UnsupportedConstruct {
+                            construct: "a `string` value".to_string(),
+                            rule: "A048",
+                            location: None,
+                        });
+                    }
+                    _ => {}
+                }
                 if ctx.lookup_struct_in(name, module_path).is_some()
                     || ctx.lookup_enum_in(name, module_path).is_some()
                 {
@@ -1374,6 +1491,9 @@ impl Compiler {
         self.choice_suffix_base = 0;
         self.nondet_block_opcodes = 0;
         self.uzumaki_draw_opcodes = 0;
+        self.poisoned = None;
+        self.current_fn_returns_value = false;
+        self.unnamed_params.clear();
 
         let raw_name = arena[fn_name_id].name.clone();
         // Record which file this function belongs to so struct/enum metadata
@@ -1452,10 +1572,18 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty, ctx, module_path)?
-                        .expect("Function parameter type must not be unit");
-                    params.push(vt);
                     let arg_name = arena[*name].name.clone();
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx, module_path)
+                        .map_err(|e| Self::at(e, arg.location))?
+                        .ok_or_else(|| {
+                            cov_mark::hit!(wasm_codegen_unit_parameter_rejected);
+                            CodegenError::UnsupportedConstruct {
+                                construct: format!("the unit-typed parameter `{arg_name}`"),
+                                rule: "A049",
+                                location: Some(arg.location),
+                            }
+                        })?;
+                    params.push(vt);
                     let prev = self.locals_map.insert(arg_name.clone(), (local_idx, vt));
                     assert!(
                         prev.is_none(),
@@ -1508,11 +1636,51 @@ impl Compiler {
                     self.compound_params.insert("self".to_string());
                     self.has_memory = true;
                 }
-                ArgKind::Ignored { .. } => {
-                    todo!("Ignore arguments are not yet supported in WASM codegen")
+                // A parameter written `_: T` still occupies an ABI slot: the call
+                // site pushes an argument for it and the declared signature
+                // counts it. So it takes a WebAssembly parameter and advances the
+                // slot counter, keeping every later parameter's index where
+                // declaration order puts it.
+                //
+                // It takes no `locals_map` entry, because nothing can read it and
+                // inventing a key would put a name in the map the source never
+                // wrote. It earns no frame slot either: a compound parameter's
+                // copy-on-entry exists so the body can read its own data, and an
+                // unnamed one has no reads, so `compound_param_is_by_reference`
+                // classifies it as by reference. For the same reason it does not
+                // set `has_memory`: a module whose only would-be memory user is a
+                // parameter nothing loads from needs no memory.
+                ArgKind::Ignored { ty } => {
+                    cov_mark::hit!(wasm_codegen_emit_unnamed_param);
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx, module_path)
+                        .map_err(|e| Self::at(e, arg.location))?
+                        .ok_or_else(|| {
+                            cov_mark::hit!(wasm_codegen_unit_ignored_parameter_rejected);
+                            CodegenError::UnsupportedConstruct {
+                                construct: "a unit-typed parameter written `_`".to_string(),
+                                rule: "A049",
+                                location: Some(arg.location),
+                            }
+                        })?;
+                    params.push(vt);
+                    self.unnamed_params.push((local_idx, *ty));
+                    local_idx += 1;
                 }
-                ArgKind::TypeOnly(_) => {
-                    todo!("Type arguments are not yet supported in WASM codegen")
+                // A parameter declared by its type alone binds no name and labels
+                // no argument, and `_: T` already says everything it says. A050
+                // rejects the form on a defined function with a source location;
+                // an `external fn` keeps it, and takes a different registration
+                // path that never reaches here.
+                ArgKind::TypeOnly(ty) => {
+                    cov_mark::hit!(wasm_codegen_bare_type_param_rejected);
+                    return Err(CodegenError::UnsupportedConstruct {
+                        construct: format!(
+                            "a parameter declared by its type alone (`{}`)",
+                            Self::render_source_type(&TypeInfo::from_type_id(arena, *ty).kind)
+                        ),
+                        rule: "A050",
+                        location: Some(arg.location),
+                    });
                 }
             }
         }
@@ -1572,6 +1740,7 @@ impl Compiler {
 
         let param_count = local_idx;
         let has_return_value = is_sret || !results.is_empty();
+        self.current_fn_returns_value = has_return_value;
 
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
@@ -1724,22 +1893,39 @@ impl Compiler {
         // every narrow scalar parameter before anything else executes so the body
         // only ever sees in-domain values. See memory::emit_entry_param_normalization.
         if is_exportable_position {
+            // The unnamed parameters, in the same declaration order the loop
+            // below walks, so each one is matched with the slot it was given.
+            let mut unnamed_slots = std::mem::take(&mut self.unnamed_params).into_iter();
             for arg in &args {
-                if let ArgKind::Named { name, ty, .. } = &arg.kind {
-                    let arg_name = &arena[*name].name;
-                    let param_local = self
-                        .locals_map
-                        .get(arg_name)
-                        .expect("named parameter was inserted into locals_map above")
-                        .0;
-                    let ti = TypeInfo::from_type_id(arena, *ty);
-                    if memory::emit_entry_param_normalization(self.func(), &ti.kind, param_local) {
-                        cov_mark::hit!(wasm_codegen_entry_param_normalization);
-                    } else if let Some(enum_info) =
-                        Self::resolve_param_enum(ctx, &ti.kind, module_path)
-                    {
-                        self.emit_entry_enum_tag_guard(param_local, enum_info.variants.len());
+                let (param_local, ty) = match &arg.kind {
+                    ArgKind::Named { name, ty, .. } => {
+                        let arg_name = &arena[*name].name;
+                        let param_local = self
+                            .locals_map
+                            .get(arg_name)
+                            .expect("named parameter was inserted into locals_map above")
+                            .0;
+                        (param_local, *ty)
                     }
+                    // An unnamed parameter is canonicalized and tag-guarded
+                    // exactly like a named one: the ABI contract is a property of
+                    // the slot, so a host passing an out-of-domain value for
+                    // `pub fn f(_: Color)` is refused as it would be for
+                    // `pub fn f(c: Color)`. It has no `locals_map` entry to key
+                    // on, so it is found by the slot recorded above.
+                    ArgKind::Ignored { .. } => unnamed_slots
+                        .next()
+                        .expect("one slot was recorded per unnamed parameter above"),
+                    // A receiver is never at an export boundary — a method is not
+                    // exportable — and a bare-type parameter was refused above.
+                    ArgKind::SelfRef { .. } | ArgKind::TypeOnly(_) => continue,
+                };
+                let ti = TypeInfo::from_type_id(arena, ty);
+                if memory::emit_entry_param_normalization(self.func(), &ti.kind, param_local) {
+                    cov_mark::hit!(wasm_codegen_entry_param_normalization);
+                } else if let Some(enum_info) = Self::resolve_param_enum(ctx, &ti.kind, module_path)
+                {
+                    self.emit_entry_enum_tag_guard(param_local, enum_info.variants.len());
                 }
             }
         }
@@ -1870,6 +2056,14 @@ impl Compiler {
             self.emit_nondet_block_end();
         }
 
+        // A lowering arm that had no way to report a refusal recorded it here
+        // instead. Returning it now — ahead of the epilogue, the trailing `End`,
+        // the vanilla-contract assertion and the body's assembly — is what makes
+        // the truncated body harmless: nothing reads it after this point.
+        if let Some(error) = self.poisoned.take() {
+            return Err(error);
+        }
+
         if has_return_value {
             // All non-void paths exit via explicit `return` which emits its own epilogue.
             // The trailing epilogue would be dead code. Keep only `unreachable` so that WASM
@@ -1933,6 +2127,7 @@ impl Compiler {
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
         self.compound_params.clear();
+        self.unnamed_params.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -2513,6 +2708,13 @@ impl Compiler {
     /// slot and — when nothing else in the function needs a frame — the whole
     /// prologue, epilogue and `__stack_pointer` mutation are dropped.
     ///
+    /// A parameter with no name is by reference without asking either question:
+    /// nothing can read it, so nothing can write it either, and there is no name
+    /// a slot could be keyed by. Answering that here rather than leaving it to
+    /// the slot collector is what keeps this function the single authority — the
+    /// caller's `continue` and the collector's silence must not be two different
+    /// ways of arriving at "no slot".
+    ///
     /// The declaration is what makes the second clause decidable here. Reaching
     /// an external is not by itself a write: a declaration marking nothing `mut`
     /// links only against a merged body that records no store at all, so nothing
@@ -2545,7 +2747,12 @@ impl Compiler {
                 (input.arena[*name].name.as_str(), *is_mut)
             }
             ArgKind::SelfRef { is_mut } => ("self", *is_mut),
-            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return Ok(false),
+            // An unnamed parameter is by reference by construction: nothing can
+            // read it, so the callee never needs a copy of its own, and it earns
+            // no frame slot. Answering `true` — rather than `false` and relying on
+            // the collector below having no arm for it — is what keeps this
+            // function the single authority on slot presence.
+            ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => return Ok(true),
         };
 
         let written = Self::param_is_written(input.arena, input.block_id, param_name);
@@ -3116,6 +3323,36 @@ impl Compiler {
         Ok(())
     }
 
+    /// Renders a type the way the source spells it, for a diagnostic whose fix
+    /// is a type the reader has to be able to write down.
+    ///
+    /// A builtin uses its source name rather than the type checker's capitalized
+    /// `Display`, and an array is rebuilt from its element so the same holds at
+    /// every depth. Everything else keeps `Display`, which names a struct or enum
+    /// by its canonical key.
+    fn render_source_type(kind: &TypeInfoKind) -> String {
+        if let Some(builtin) = kind.as_builtin_str() {
+            return builtin.to_string();
+        }
+        match kind {
+            TypeInfoKind::Array(elem, length) => {
+                format!("[{}; {length}]", Self::render_source_type(&elem.kind))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    /// Strips redundant parentheses, returning the expression they wrap.
+    ///
+    /// `(())` and `()` denote the same value, so a check that keys on an
+    /// expression's shape must not be defeated by a spelling.
+    fn peel_parenthesized(arena: &AstArena, mut expr_id: ExprId) -> ExprId {
+        while let Expr::Parenthesized { expr } = &arena[expr_id].kind {
+            expr_id = *expr;
+        }
+        expr_id
+    }
+
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
     fn lower_statement(
@@ -3125,6 +3362,9 @@ impl Compiler {
         ctx: &TypedContext,
         fn_name: &str,
     ) {
+        if self.poisoned.is_some() {
+            return;
+        }
         let stmt_kind = arena[stmt_id].kind.clone();
         match stmt_kind {
             Stmt::Block(block_id) => {
@@ -3155,10 +3395,31 @@ impl Compiler {
                 self.lower_assign_statement(arena, left, right, ctx);
             }
             Stmt::Return { expr } => {
+                // A unit expression produces nothing, so returning one from a
+                // function that declares a result would emit `return` on an empty
+                // operand stack — a malformed body rather than a diagnostic. The
+                // type checker reports the shape as a type mismatch; this is the
+                // defense for a caller that ignored it.
+                if self.current_fn_returns_value
+                    && matches!(
+                        arena[Self::peel_parenthesized(arena, expr)].kind,
+                        Expr::UnitLiteral
+                    )
+                {
+                    cov_mark::hit!(wasm_codegen_unit_return_from_value_fn_rejected);
+                    self.poison(CodegenError::UnsupportedConstruct {
+                        construct: "a unit value returned from a function that declares a result"
+                            .to_string(),
+                        rule: "the type checker",
+                        location: Some(arena[stmt_id].location),
+                    });
+                    return;
+                }
                 let sret_local = self.locals_map.get("sret").map(|(idx, _)| *idx);
                 if let Some(sret_idx) = sret_local {
                     if let Err(e) = self.lower_sret_return(arena, expr, sret_idx, ctx, fn_name) {
-                        panic!("sret return lowering failed: {e}");
+                        self.poison(e);
+                        return;
                     }
                 } else {
                     self.lower_expression(arena, expr, ctx, None);
@@ -3193,7 +3454,14 @@ impl Compiler {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
                 let var_name = arena[name].name.clone();
                 match value {
-                    None => todo!("Uninitialized variable definitions are not supported"),
+                    None => {
+                        cov_mark::hit!(wasm_codegen_uninitialized_binding_rejected);
+                        self.poison(CodegenError::UnsupportedConstruct {
+                            construct: format!("the uninitialized binding `{var_name}`"),
+                            rule: "A025",
+                            location: Some(arena[stmt_id].location),
+                        });
+                    }
                     Some(val_expr_id) => {
                         self.lower_named_binding_init(
                             arena,
@@ -3205,7 +3473,12 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::TypeDef { .. } => todo!(),
+            // A type alias is nominal and introduces no value, so it contributes
+            // no instruction: the type checker resolved every use of the alias,
+            // and a use in value position is a type error there rather than a
+            // node here. A file-level `Def::TypeAlias` is erased the same way, so
+            // a body-local alias and a top-level one agree.
+            Stmt::TypeDef { .. } => {}
             Stmt::Assert { expr } => {
                 self.lower_assert_statement(arena, expr, ctx);
             }
@@ -3240,6 +3513,25 @@ impl Compiler {
 
         cov_mark::hit!(wasm_codegen_const_typeinfo_lookup);
         let type_info = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id));
+
+        // A unit-typed binding has nothing to store: the initializer leaves the
+        // operand stack empty, so the `LocalSet` below would consume a value that
+        // was never pushed. `pre_scan_locals` gives every non-i64 binding an i32
+        // local through its catch-all, so the local exists and the malformed body
+        // would assemble silently. Refuse instead.
+        if matches!(
+            type_info.as_ref().map(|ti| &ti.kind),
+            Some(TypeInfoKind::Unit)
+        ) {
+            cov_mark::hit!(wasm_codegen_unit_binding_rejected);
+            self.poison(CodegenError::UnsupportedConstruct {
+                construct: format!("the unit-typed binding `{name}`"),
+                rule: "A049",
+                location: Some(arena[stmt_id].location),
+            });
+            return;
+        }
+
         let is_array_type = matches!(
             type_info.as_ref().map(|ti| &ti.kind),
             Some(TypeInfoKind::Array(_, _))
@@ -3491,6 +3783,9 @@ impl Compiler {
         ctx: &TypedContext,
         fn_name: &str,
     ) {
+        if self.poisoned.is_some() {
+            return;
+        }
         let block = &arena[block_id];
         let mut opcode = match block.block_kind {
             BlockKind::Forall => Some(FORALL_OPCODE),
@@ -3546,6 +3841,9 @@ impl Compiler {
         ctx: &TypedContext,
         enclosing_var_name: Option<&str>,
     ) {
+        if self.poisoned.is_some() {
+            return;
+        }
         let expr_kind = arena[expr_id].kind.clone();
         match expr_kind {
             Expr::ArrayIndexAccess { array, index } => {
@@ -3587,10 +3885,12 @@ impl Compiler {
                 } else {
                     let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
                         .unwrap_or_else(|| "<qualified>".to_string());
-                    todo!(
-                        "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
-                         is not yet supported in wasm codegen"
-                    );
+                    cov_mark::hit!(wasm_codegen_non_enum_type_member_rejected);
+                    self.poison(CodegenError::UnsupportedConstruct {
+                        construct: format!("`{type_name}::{variant_name}` on a non-enum type"),
+                        rule: "the type checker",
+                        location: Some(arena[expr_id].location),
+                    });
                 }
             }
             Expr::FunctionCall { function, args, .. } => {
@@ -3613,29 +3913,18 @@ impl Compiler {
                     Some(ResolvedCallee::AssociatedFunction { key, .. }) => {
                         self.lower_associated_function_call(arena, &key, &args, ctx, None);
                     }
+                    // Call lowering already reports its failures as typed errors,
+                    // each naming the type-checker guarantee it rests on, so the
+                    // error value itself is what gets recorded — folding them into
+                    // one message would lose the distinctions they draw.
                     Some(ResolvedCallee::Function(ref name)) => {
-                        match self.lower_function_call(arena, name, &args, ctx) {
-                            Ok(()) => {}
-                            Err(CodegenError::UnknownFunction(name)) => {
-                                panic!(
-                                    "Function '{name}' not found in name-to-index map; \
-                                     the type-checker should have caught undefined functions"
-                                )
-                            }
-                            Err(e) => panic!("function call lowering failed: {e}"),
+                        if let Err(e) = self.lower_function_call(arena, name, &args, ctx) {
+                            self.poison(e);
                         }
                     }
                     Some(ResolvedCallee::QualifiedFunction(ref key)) => {
-                        match self.lower_qualified_function_call(arena, key, &args, ctx) {
-                            Ok(()) => {}
-                            Err(CodegenError::UnknownFunction(key)) => {
-                                panic!(
-                                    "Function '{key}' not found in name-to-index map; \
-                                     the type-checker should have caught this — a qualified \
-                                     path to a proof-only spec function is rejected there"
-                                )
-                            }
-                            Err(e) => panic!("qualified function call lowering failed: {e}"),
+                        if let Err(e) = self.lower_qualified_function_call(arena, key, &args, ctx) {
+                            self.poison(e);
                         }
                     }
                     None => {
@@ -3645,22 +3934,36 @@ impl Compiler {
                         // `spec`-inner function or `spec`-inner-struct associated
                         // function, which has no executable index. Higher-order
                         // calls are not a language feature, so this is never valid
-                        // input; fail loudly rather than emit a malformed module.
-                        panic!(
-                            "function call callee did not resolve to a lowerable form; \
-                             the type-checker should have rejected this call (a qualified \
-                             path to a proof-only spec function is rejected there)"
-                        )
+                        // input; refuse rather than emit a malformed module.
+                        cov_mark::hit!(wasm_codegen_unresolved_callee_rejected);
+                        self.poison(CodegenError::UnsupportedConstruct {
+                            construct: "a call whose callee resolves to no lowerable form (a \
+                                        qualified path to a proof-only specification function \
+                                        has no executable index)"
+                                .to_string(),
+                            rule: "the type checker",
+                            location: Some(arena[expr_id].location),
+                        });
                     }
                 }
             }
             Expr::StructLiteral { name: _, fields } => {
                 cov_mark::hit!(wasm_codegen_emit_struct_literal);
-                let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    unreachable!(
-                        "struct literal in unsupported position should have been caught by type checker"
-                    )
-                });
+                // A struct literal is written into a frame slot field by field,
+                // and the slot is keyed by the binding that owns it, so there is
+                // nothing to write where no binding names one. A012 rejects the
+                // argument position and A015 every other unsupported one, both
+                // with a source location.
+                let Some(var_name) = enclosing_var_name else {
+                    cov_mark::hit!(wasm_codegen_slotless_struct_literal_rejected);
+                    self.poison(CodegenError::UnsupportedConstruct {
+                        construct: "a struct literal in a position that binds no variable"
+                            .to_string(),
+                        rule: "the compound-literal-position family (A012, A015)",
+                        location: Some(arena[expr_id].location),
+                    });
+                    return;
+                };
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
                 self.lower_struct_literal(arena, &fields, var_name, ctx);
             }
@@ -3673,11 +3976,20 @@ impl Compiler {
             }
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
-                let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    unreachable!(
-                        "array literal in unsupported position should have been caught by type checker"
-                    )
-                });
+                // The same slot argument as the struct literal above: elements
+                // are stored into the owning binding's frame slot, so a position
+                // that names no binding has no destination. A012 and A015 own
+                // the located rejections.
+                let Some(var_name) = enclosing_var_name else {
+                    cov_mark::hit!(wasm_codegen_slotless_array_literal_rejected);
+                    self.poison(CodegenError::UnsupportedConstruct {
+                        construct: "an array literal in a position that binds no variable"
+                            .to_string(),
+                        rule: "the compound-literal-position family (A012, A015)",
+                        location: Some(arena[expr_id].location),
+                    });
+                    return;
+                };
                 let elements = elements.clone();
                 self.lower_array_literal(arena, expr_id, &elements, var_name, ctx);
             }
@@ -3685,19 +3997,50 @@ impl Compiler {
                 self.func()
                     .instruction(&Instruction::I32Const(i32::from(value)));
             }
-            Expr::StringLiteral { .. } => todo!(),
+            Expr::StringLiteral { .. } => {
+                cov_mark::hit!(wasm_codegen_string_literal_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: "a string literal".to_string(),
+                    rule: "A048",
+                    location: Some(arena[expr_id].location),
+                });
+            }
             Expr::NumberLiteral { ref value } => {
                 let value = value.clone();
-                self.lower_number_literal(expr_id, &value, ctx);
+                self.lower_number_literal(arena, expr_id, &value, ctx);
             }
-            Expr::UnitLiteral => todo!(),
+            // The unit value occupies no operand stack slot, so producing it is
+            // producing nothing. The parser allocates this node for a bare
+            // `return;` and for a literal `()`; both consuming positions take a
+            // value of unit type, which is the empty operand sequence. `return`
+            // emits the epilogue and `Return` on an empty stack, valid for a
+            // function with no results, and an expression statement of unit type
+            // emits no `Drop`.
+            //
+            // Every position where a unit value would have to be *stored* fails
+            // earlier instead: a unit-typed binding in `lower_named_binding_init`,
+            // a unit parameter and a unit field or array element in the frame
+            // layout.
+            Expr::UnitLiteral => {
+                cov_mark::hit!(wasm_codegen_emit_unit_literal);
+            }
             Expr::Identifier(ident_id) => {
                 let name = &arena[ident_id].name;
                 let (local_idx, _) = self.locals_map.get(name).expect("Variable not found");
                 let local_idx = *local_idx;
                 self.func().instruction(&Instruction::LocalGet(local_idx));
             }
-            Expr::Type(_) => todo!(),
+            // `Name<T>` in expression position. Generics are not implemented
+            // (#320): no type argument is ever substituted, so there is no
+            // instantiated definition to emit a call or a value for.
+            Expr::Type(_) => {
+                cov_mark::hit!(wasm_codegen_generic_type_expression_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: "a generic type in expression position".to_string(),
+                    rule: "generics are unimplemented (#320) and no earlier phase",
+                    location: Some(arena[expr_id].location),
+                });
+            }
             Expr::Uzumaki => {
                 let node_id = NodeId::Expr(expr_id);
                 let type_info = ctx
@@ -3772,11 +4115,20 @@ impl Compiler {
                         cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
                         let length = *length;
                         let elem_type = elem_type.clone();
-                        let var_name = enclosing_var_name.unwrap_or_else(|| {
-                            panic!(
-                                "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
-                            )
-                        });
+                        // A compound draw fills a frame slot leaf by leaf, and the
+                        // slot is keyed by the binding that owns it, so there is
+                        // nothing to fill where no binding names one. The rules
+                        // below reject every such position with a source location.
+                        let Some(var_name) = enclosing_var_name else {
+                            cov_mark::hit!(wasm_codegen_slotless_array_uzumaki_rejected);
+                            self.poison(CodegenError::UnsupportedConstruct {
+                                construct: "an array `@` in a position that binds no variable"
+                                    .to_string(),
+                                rule: "the uzumaki-position family (A014, A038, A039, A040)",
+                                location: Some(arena[expr_id].location),
+                            });
+                            return;
+                        };
                         if let Err(e) = self.lower_array_uzumaki(
                             arena,
                             &elem_type,
@@ -3785,23 +4137,51 @@ impl Compiler {
                             ctx,
                             &mut cursor,
                         ) {
-                            panic!("array uzumaki lowering failed: {e}");
+                            self.poison(e);
+                            return;
                         }
                     }
                     TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                         cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
                         let name = name.clone();
-                        let var_name = enclosing_var_name.unwrap_or_else(|| {
-                            panic!(
-                                "Struct uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
-                            )
-                        });
+                        let Some(var_name) = enclosing_var_name else {
+                            cov_mark::hit!(wasm_codegen_slotless_struct_uzumaki_rejected);
+                            self.poison(CodegenError::UnsupportedConstruct {
+                                construct: "a struct `@` in a position that binds no variable"
+                                    .to_string(),
+                                rule: "the uzumaki-position family (A014, A038, A039, A040)",
+                                location: Some(arena[expr_id].location),
+                            });
+                            return;
+                        };
                         if let Err(e) = self.lower_struct_uzumaki(ctx, &name, var_name, &mut cursor)
                         {
-                            panic!("struct uzumaki lowering failed: {e}");
+                            self.poison(e);
+                            return;
                         }
                     }
-                    _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
+                    // The remaining kinds have no value a draw could produce:
+                    // `string` and `()` have no representation in memory at all,
+                    // and a generic, function or spec type names no layout. A048
+                    // and A049 reject the first two with a source location; the
+                    // type checker rejects a draw at any of the rest.
+                    ref other => {
+                        cov_mark::hit!(wasm_codegen_undrawable_uzumaki_rejected);
+                        let rule = match other {
+                            TypeInfoKind::String => "A048",
+                            TypeInfoKind::Unit => "A049",
+                            _ => "the type checker",
+                        };
+                        self.poison(CodegenError::UnsupportedConstruct {
+                            construct: format!(
+                                "an `@` over `{}`, a type with no value representation",
+                                Self::render_source_type(other)
+                            ),
+                            rule,
+                            location: Some(arena[expr_id].location),
+                        });
+                        return;
+                    }
                 }
                 if let Some(cursor) = cursor {
                     cursor.finish();
@@ -4235,32 +4615,43 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_instance_method_call);
 
-        let fn_key = self
-            .resolve_method_fn_key(arena, receiver_expr_id, method_name_id, ctx)
-            .unwrap_or_else(|| {
-                let method_name = &arena[method_name_id].name;
-                panic!(
-                    "Instance method call: could not resolve mangled name for method \
-                     '{method_name}' (receiver has no type info or non-struct type)"
-                )
+        let Some(fn_key) =
+            self.resolve_method_fn_key(arena, receiver_expr_id, method_name_id, ctx)
+        else {
+            let method_name = arena[method_name_id].name.clone();
+            self.poison(CodegenError::UnsupportedConstruct {
+                construct: format!(
+                    "a call to method `{method_name}` on a receiver with no type info or a \
+                     non-struct type"
+                ),
+                rule: "the type checker",
+                location: Some(arena[receiver_expr_id].location),
             });
+            return;
+        };
 
         let is_sret = self.is_sret_by_key(&fn_key);
 
-        let func_idx = self.resolve_idx_by_key(&fn_key).unwrap_or_else(|| {
-            panic!("Method '{fn_key}' not found in func_name_to_idx")
-        });
+        let Some(func_idx) = self.resolve_idx_by_key(&fn_key) else {
+            self.poison(CodegenError::UnknownFunction(fn_key.to_string()));
+            return;
+        };
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_instance_method_sret);
-            let sret_idx = sret_local.unwrap_or_else(|| {
-                panic!(
-                    "Instance method call to compound-returning method '{fn_key}' \
-                     in expression position without sret destination. \
-                     Compound-returning calls are only supported in variable initialization \
-                     and return positions."
-                )
-            });
+            let Some(sret_idx) = sret_local else {
+                cov_mark::hit!(wasm_codegen_slotless_compound_method_call_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: format!(
+                        "a call to the compound-returning method `{fn_key}` in a position with \
+                         no destination to write the result into (only a variable \
+                         initializer and a `return` provide one)"
+                    ),
+                    rule: "the compound-return position family (A016, A017, A018)",
+                    location: Some(arena[receiver_expr_id].location),
+                });
+                return;
+            };
             self.func().instruction(&Instruction::LocalGet(sret_idx));
         }
 
@@ -4335,20 +4726,26 @@ impl Compiler {
 
         let is_sret = self.is_sret_by_key(fn_key);
 
-        let func_idx = self.resolve_idx_by_key(fn_key).unwrap_or_else(|| {
-            panic!("Method '{fn_key}' not found in func_name_to_idx")
-        });
+        let Some(func_idx) = self.resolve_idx_by_key(fn_key) else {
+            self.poison(CodegenError::UnknownFunction(fn_key.to_string()));
+            return;
+        };
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_associated_function_sret);
-            let sret_idx = sret_local.unwrap_or_else(|| {
-                panic!(
-                    "Associated function call to compound-returning method '{fn_key}' \
-                     in expression position without sret destination. \
-                     Compound-returning calls are only supported in variable initialization \
-                     and return positions."
-                )
-            });
+            let Some(sret_idx) = sret_local else {
+                cov_mark::hit!(wasm_codegen_slotless_compound_associated_call_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: format!(
+                        "a call to the compound-returning associated function `{fn_key}` in a \
+                         position with no destination to write the result into (only a \
+                         variable initializer and a `return` provide one)"
+                    ),
+                    rule: "the compound-return position family (A016, A017, A018)",
+                    location: None,
+                });
+                return;
+            };
             self.func().instruction(&Instruction::LocalGet(sret_idx));
         }
 
@@ -4395,6 +4792,9 @@ impl Compiler {
         right: ExprId,
         ctx: &TypedContext,
     ) {
+        if self.poisoned.is_some() {
+            return;
+        }
         self.assert_assign_target_has_slot(arena, left);
         match &arena[left].kind {
             Expr::Identifier(ident_id) => {
@@ -4475,7 +4875,19 @@ impl Compiler {
                 let name = *name;
                 self.lower_member_access_write(arena, expr, name, right, ctx);
             }
-            _ => todo!("Assignment to non-identifier targets not yet supported"),
+            // The type checker admits exactly an identifier, an index access and
+            // a member access as assignment targets, and each has an arm above;
+            // anything else is `InvalidAssignmentTarget` there.
+            _ => {
+                cov_mark::hit!(wasm_codegen_unsupported_assign_target_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: "an assignment to a target that is not a variable, an array \
+                                element or a field"
+                        .to_string(),
+                    rule: "the type checker",
+                    location: Some(arena[left].location),
+                });
+            }
         }
     }
 
@@ -4824,9 +5236,13 @@ impl Compiler {
         );
 
         let array_len = Self::array_length(array_expr_id, ctx);
-        let elem_sz = self
-            .array_index_elem_size(&elem_type_info.kind, ctx)
-            .expect("array index write: element size unavailable for a typed access node");
+        let elem_sz = match self.array_index_elem_size(&elem_type_info.kind, ctx) {
+            Ok(size) => size,
+            Err(e) => {
+                self.poison(e);
+                return;
+            }
+        };
 
         if is_compound_element {
             // dest: array_base + index * struct_size
@@ -4989,9 +5405,13 @@ impl Compiler {
             TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
-        let elem_sz = self
-            .array_index_elem_size(&elem_type_info.kind, ctx)
-            .expect("array index access: element size unavailable for a typed access node");
+        let elem_sz = match self.array_index_elem_size(&elem_type_info.kind, ctx) {
+            Ok(size) => size,
+            Err(e) => {
+                self.poison(e);
+                return;
+            }
+        };
 
         let array_len = Self::array_length(array_expr_id, ctx);
 
@@ -5014,34 +5434,25 @@ impl Compiler {
     /// agree with emission about whether an index folds must ask this rather
     /// than assume a width.
     ///
-    /// Returns `Err` only for a compound element whose layout cannot be
-    /// computed — a cycle, or a struct the type context does not hold. That is a
-    /// compiler bug, and the error is typed so the emission sites can name which
-    /// one; a caller merely *predicting* whether a guard will be emitted may
-    /// read it as "no guard", since emission aborts on it first either way.
+    /// Returns `Err` for a compound element whose layout cannot be computed — a
+    /// cycle, or a struct the type context does not hold — and for a scalar
+    /// element with no representation in linear memory (`string`, `()`). Both go
+    /// through the same layout wrappers the frame layout uses, so an element this
+    /// accepts is one emission can store and load. A caller merely *predicting*
+    /// whether a guard will be emitted may read an `Err` as "no guard", since
+    /// emission refuses on it first either way.
     ///
-    /// A *scalar* element outside the widths [`memory::element_size`] knows
-    /// panics there rather than returning here — its `_` arm is a `todo!`. The
-    /// type checker admits only those widths as array elements, so no source
-    /// reaches it, but the panic is now also reachable from
-    /// [`Self::body_has_dynamic_array_index`], which asks this question for
-    /// every indexed access in every body code generation drives. That moves the
-    /// panic earlier in a build that would have hit it at emission anyway, and
-    /// only in a build with the guard enabled — the scan is short-circuited
-    /// behind `emit_bounds_checks`.
+    /// A scalar is routed through the same wrapper as a compound, rather than
+    /// straight to the leaf width, so that an array parameter passed by
+    /// reference — which owns no frame slot and was therefore never laid out — is
+    /// held to the same element rule as one that is. The wrapper answers a
+    /// scalar's width with the leaf, so accepted elements keep their sizes.
     fn array_index_elem_size(
         &self,
         elem_kind: &TypeInfoKind,
         ctx: &TypedContext,
     ) -> Result<u32, CodegenError> {
-        if matches!(
-            elem_kind,
-            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
-        ) {
-            type_byte_size(elem_kind, ctx, &self.current_module_path)
-        } else {
-            Ok(memory::element_size(elem_kind))
-        }
+        type_byte_size(elem_kind, ctx, &self.current_module_path)
     }
 
     /// Returns the length of the array that `array_expr_id` evaluates to, when
@@ -5338,7 +5749,7 @@ impl Compiler {
         let frame_ptr_local = layout.frame_ptr_local;
 
         let leaf_kind = leaf_scalar_type(&elem_type.kind);
-        let leaf_size = memory::element_size(leaf_kind);
+        let leaf_size = self.array_index_elem_size(leaf_kind, ctx)?;
         let uzumaki_opcode = if Self::is_i64_type(leaf_kind) {
             UZUMAKI_I64_OPCODE
         } else {
@@ -5575,12 +5986,20 @@ impl Compiler {
                     self.func().instruction(&store_instr);
                 }
             }
+            // A draw fills one leaf per store, and a field that is itself a
+            // struct has no single leaf to fill: it would need the whole
+            // field-wise walk again, one level down. A027 rejects the draw with
+            // a source location.
             CompoundFieldLayout::NestedStruct { .. } => {
-                unreachable!(
-                    "emit_struct_field_uzumaki called for nested struct field '{}'; \
-                     analysis rule A027 should have rejected uzumaki on structs with nested struct fields",
-                    field.name
-                );
+                cov_mark::hit!(wasm_codegen_nested_struct_field_uzumaki_rejected);
+                return Err(CodegenError::UnsupportedConstruct {
+                    construct: format!(
+                        "an `@` over a struct whose field `{}` is itself a struct",
+                        field.name
+                    ),
+                    rule: "A027",
+                    location: None,
+                });
             }
         }
         Ok(())
@@ -5668,7 +6087,7 @@ impl Compiler {
     fn lower_binary_expression(
         &mut self,
         arena: &AstArena,
-        _expr_id: ExprId,
+        expr_id: ExprId,
         left: ExprId,
         right: ExprId,
         op: OperatorKind,
@@ -5808,11 +6227,18 @@ impl Compiler {
                 (false, true) => Instruction::I32ShrU,
                 (false, false) => Instruction::I32ShrS,
             },
+            // There is no WebAssembly instruction for exponentiation and no
+            // expansion of one either, so this operator has never had a
+            // lowering. The type checker refuses every use of it
+            // (`PowOperatorNotSupported`) with a source location.
             OperatorKind::Pow => {
-                unreachable!(
-                    "`**` (power) has no lowering; the type checker rejects every use of \
-                     `**` (PowOperatorNotSupported), so codegen never sees this operator"
-                )
+                cov_mark::hit!(wasm_codegen_pow_operator_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: "the `**` operator".to_string(),
+                    rule: "the type checker",
+                    location: Some(arena[expr_id].location),
+                });
+                return;
             }
         };
 
@@ -5963,54 +6389,99 @@ impl Compiler {
     }
 
     /// Lowers a number literal to WASM constant instructions.
-    fn lower_number_literal(&mut self, expr_id: ExprId, value: &str, ctx: &TypedContext) {
-        let type_info = ctx
-            .get_node_typeinfo(NodeId::Expr(expr_id))
-            .expect("Number literal must have type info");
+    ///
+    /// Every refusal here rests on the same guarantee: the literal's text fits
+    /// the width the type checker recorded on the node. A005's companion rule
+    /// A022 reports an out-of-range literal with its source location, so a text
+    /// that does not parse at its own recorded width means analysis was skipped
+    /// or its diagnostics ignored.
+    fn lower_number_literal(
+        &mut self,
+        arena: &AstArena,
+        expr_id: ExprId,
+        value: &str,
+        ctx: &TypedContext,
+    ) {
+        let location = Some(arena[expr_id].location);
+        let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) else {
+            self.poison(CodegenError::UnsupportedConstruct {
+                construct: format!("the number literal `{value}`, which carries no recorded type"),
+                rule: "the type checker",
+                location,
+            });
+            return;
+        };
+        // Parses `value` at the recorded width, recording a refusal and reporting
+        // `None` when the text does not fit it.
+        macro_rules! parse_at_width {
+            ($ty:ty, $width:literal) => {
+                match value.parse::<$ty>() {
+                    Ok(parsed) => Some(parsed),
+                    Err(_) => {
+                        cov_mark::hit!(wasm_codegen_number_literal_rejected);
+                        self.poison(CodegenError::UnsupportedConstruct {
+                            construct: format!(
+                                "the number literal `{value}`, whose text does not fit the \
+                                 {} it is typed at",
+                                $width
+                            ),
+                            rule: "A022",
+                            location,
+                        });
+                        None
+                    }
+                }
+            };
+        }
         match type_info.kind {
             TypeInfoKind::Number(NumberType::I8 | NumberType::I16 | NumberType::I32) => {
-                let val = value
-                    .parse::<i32>()
-                    .expect("Failed to parse signed 32-bit integer literal");
+                let Some(val) = parse_at_width!(i32, "signed 32-bit width") else {
+                    return;
+                };
                 self.func().instruction(&Instruction::I32Const(val));
             }
             TypeInfoKind::Number(NumberType::U8) => {
-                let val = i32::from(
-                    value
-                        .parse::<u8>()
-                        .expect("Failed to parse unsigned 8-bit integer literal"),
-                );
-                self.func().instruction(&Instruction::I32Const(val));
+                let Some(val) = parse_at_width!(u8, "unsigned 8-bit width") else {
+                    return;
+                };
+                self.func()
+                    .instruction(&Instruction::I32Const(i32::from(val)));
             }
             TypeInfoKind::Number(NumberType::U16) => {
-                let val = i32::from(
-                    value
-                        .parse::<u16>()
-                        .expect("Failed to parse unsigned 16-bit integer literal"),
-                );
-                self.func().instruction(&Instruction::I32Const(val));
+                let Some(val) = parse_at_width!(u16, "unsigned 16-bit width") else {
+                    return;
+                };
+                self.func()
+                    .instruction(&Instruction::I32Const(i32::from(val)));
             }
             TypeInfoKind::Number(NumberType::U32) => {
-                let val = value
-                    .parse::<u32>()
-                    .expect("Failed to parse unsigned 32-bit integer literal")
-                    .cast_signed();
-                self.func().instruction(&Instruction::I32Const(val));
+                let Some(val) = parse_at_width!(u32, "unsigned 32-bit width") else {
+                    return;
+                };
+                self.func()
+                    .instruction(&Instruction::I32Const(val.cast_signed()));
             }
             TypeInfoKind::Number(NumberType::I64) => {
-                let val = value
-                    .parse::<i64>()
-                    .expect("Failed to parse signed 64-bit integer literal");
+                let Some(val) = parse_at_width!(i64, "signed 64-bit width") else {
+                    return;
+                };
                 self.func().instruction(&Instruction::I64Const(val));
             }
             TypeInfoKind::Number(NumberType::U64) => {
-                let val = value
-                    .parse::<u64>()
-                    .expect("Failed to parse unsigned 64-bit integer literal")
-                    .cast_signed();
-                self.func().instruction(&Instruction::I64Const(val));
+                let Some(val) = parse_at_width!(u64, "unsigned 64-bit width") else {
+                    return;
+                };
+                self.func()
+                    .instruction(&Instruction::I64Const(val.cast_signed()));
             }
-            _ => panic!("Unsupported number literal type: {:?}", type_info.kind),
+            ref other => {
+                cov_mark::hit!(wasm_codegen_number_literal_rejected);
+                self.poison(CodegenError::UnsupportedConstruct {
+                    construct: format!("the number literal `{value}`, typed as `{other}`"),
+                    rule: "the type checker",
+                    location,
+                });
+            }
         }
     }
 
@@ -6645,7 +7116,14 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_member_access_read);
 
-        let field = self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let field = match self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx)
+        {
+            Ok(field) => field,
+            Err(e) => {
+                self.poison(e);
+                return;
+            }
+        };
 
         self.lower_expression(arena, struct_expr_id, ctx, None);
 
@@ -6686,7 +7164,14 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_member_access_write);
 
-        let field = self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let field = match self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx)
+        {
+            Ok(field) => field,
+            Err(e) => {
+                self.poison(e);
+                return;
+            }
+        };
 
         if field.layout.is_compound() {
             let compound_size = field.layout.byte_size();
@@ -6728,13 +7213,16 @@ impl Compiler {
     ///
     /// The returned [`ResolvedField`] allows callers to decide whether to emit a
     /// load instruction (scalar) or push a pointer (compound field).
+    ///
+    /// Fails when the accessed expression is not of a struct type, which only a
+    /// caller that reached code generation with type errors can produce.
     fn resolve_struct_field_offset(
         &self,
         arena: &AstArena,
         struct_expr_id: ExprId,
         field_name_id: IdentId,
         ctx: &TypedContext,
-    ) -> ResolvedField {
+    ) -> Result<ResolvedField, CodegenError> {
         let field_name = &arena[field_name_id].name;
 
         if let Some(ref layout) = self.frame_layout
@@ -6749,11 +7237,11 @@ impl Compiler {
                     .unwrap_or_else(|| {
                         panic!("Field '{field_name}' not found in cached layout for '{var_name}'")
                     });
-                return ResolvedField {
+                return Ok(ResolvedField {
                     offset: field_slot.offset,
                     type_kind: field_slot.type_kind.clone(),
                     layout: field_slot.layout.clone(),
-                };
+                });
             }
         }
 
@@ -6761,13 +7249,23 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(struct_expr_id))
             .expect("MemberAccess: struct expression must have type info");
 
+        // Only a struct has fields to resolve an offset in. A scalar, an array
+        // or an enum reaching here means the accessed expression was never
+        // typed as a struct, which the type checker refuses with a source
+        // location; nothing has been emitted yet, so refuse rather than resolve
+        // an offset into a layout that does not exist.
         let (TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name)) =
             &struct_type.kind
         else {
-            panic!(
-                "MemberAccess: struct expression has non-struct type: {:?}",
-                struct_type.kind
-            )
+            cov_mark::hit!(wasm_codegen_member_access_on_non_struct_rejected);
+            return Err(CodegenError::UnsupportedConstruct {
+                construct: format!(
+                    "a field access on `{}`, a type with no fields",
+                    Self::render_source_type(&struct_type.kind)
+                ),
+                rule: "the type checker",
+                location: Some(arena[struct_expr_id].location),
+            });
         };
 
         // The receiver's type carries the file-qualified canonical key of its
@@ -6794,11 +7292,11 @@ impl Compiler {
                 panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
             });
 
-        ResolvedField {
+        Ok(ResolvedField {
             offset: field_slot.offset,
             type_kind: field_slot.type_kind.clone(),
             layout: field_slot.layout.clone(),
-        }
+        })
     }
 
     /// One of the crate's exactly two `0xfc` write sites; the counter it bumps
