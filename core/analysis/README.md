@@ -81,8 +81,8 @@ These rules cover constructs that are valid in the type system but cannot yet be
 
 | ID | Struct | Severity | What it checks |
 |----|--------|----------|----------------|
-| A012 | `ArrayLiteralAsArgument` | error | array literal passed directly as a function argument |
-| A013 | `StructLiteralAsArgument` | error | struct literal passed directly as a function argument |
+| A012 | `CompoundLiteralAsArgument` | error | compound literal (array or struct) passed directly as a function argument |
+| A013 | *(merged into A012)* | — | *(array and struct literal arguments are one rule)* |
 | A014 | `ArrayUzumakiAsArgument` | error | array uzumaki (`@`) passed directly as a function argument |
 | A015 | `CompoundLiteralPosition` | error | compound literal (array or struct) in an unsupported expression position |
 | A016 | `CompoundReturnCallPosition` | error | compound-returning function call in a general expression position |
