@@ -889,7 +889,7 @@ local.get $sret     ;; pass our sret as inner's sret arg
 call $inner
 ```
 
-This works correctly only when `inner` is also an sret function (returns an array of the same type). A non-sret callee in this position causes a compile-time panic.
+This works correctly only when `inner` is also an sret function (returns an array of the same type). A non-sret callee in this position is refused with `CodegenError::UnsupportedSretReturnExpression`, which names the three forms the position accepts — an identifier, an array literal, or a call to another array-returning function. The refusal is recorded in the compiler's poison slot and returned as the function's compilation error rather than aborting the process (see [Fail-Closed Code Generation](type-checker-guarded-panics.md)).
 
 ### Standalone sret Calls
 

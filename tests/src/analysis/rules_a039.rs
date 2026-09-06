@@ -3,7 +3,8 @@
 /// - A039: StructUzumakiAsArgument — a struct-typed (or custom non-enum) `@`
 ///   passed directly as a function argument is rejected. Codegen lowers a
 ///   struct-typed `@` by filling a named frame slot, and a call argument has no
-///   such name, so it reaches codegen with no enclosing variable and panics. This
+///   such name, so it reaches codegen with no enclosing variable and is refused
+///   there. This
 ///   is the struct sibling of A014 (the array case in the same argument
 ///   position); arrays stay with A014, scalars and enums need no slot and are
 ///   allowed.
@@ -73,8 +74,9 @@ mod analysis_rules_tests {
     // ---------------------------------------------------------------------
 
     /// THE regression guard: a struct-typed `@` passed as a free-function
-    /// argument. This exact program panicked codegen
-    /// ("Struct uzumaki ... has no enclosing variable name") before A039.
+    /// argument. This exact program aborted code generation ("Struct uzumaki ...
+    /// has no enclosing variable name") before A039; that abort is now a
+    /// refusal, and A039 reports the shape with a source location first.
     #[test]
     fn a039_struct_uzumaki_as_argument_rejected() {
         let source = r#"
@@ -424,7 +426,7 @@ mod analysis_rules_tests {
     // fields are used (`member access requires a struct type, found `P``), so no
     // well-typed program reaches A039 with an unresolved `Custom` struct
     // argument. The arm is a defensive guard matching codegen (which treats a
-    // `Custom` non-enum `@` as struct-like and panics on the missing slot) and
+    // `Custom` non-enum `@` as struct-like and refuses the missing slot) and
     // mirroring A038's predicate; its enum-exemption branch is covered by
     // `a039_enum_uzumaki_argument_accepted`.
 }

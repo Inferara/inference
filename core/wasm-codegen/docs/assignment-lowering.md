@@ -92,7 +92,7 @@ fn lower_assign_statement(
    - Emit `Instruction::LocalSet(local_idx)`
 3. **Array index path** - If the target is an `Expression::ArrayIndexAccess`: compute element address (base + index * elem_size) and emit a store instruction via `lower_array_index_write`
 4. **Member access path** - If the target is an `Expression::MemberAccess`: compute field address (struct_ptr + field_offset) and emit a store instruction via `lower_member_access_write`
-5. **Unsupported paths** - Any other target form → `todo!()`
+5. **Unsupported paths** - Any other target form is refused, not lowered: `lower_assign_statement` records `CodegenError::UnsupportedConstruct` naming "an assignment to a target that is not a variable, an array element or a field" and stops. The type checker admits exactly the three shapes above and reports anything else as an invalid assignment target, so this is the backstop for a caller that skipped it (see [Fail-Closed Code Generation](type-checker-guarded-panics.md))
 
 ### Local Index Resolution
 
@@ -102,9 +102,13 @@ Variable names are globally collected during `pre_scan_locals`. This means:
 - A mutable local declared inside a `forall { }` or `if { }` block shares the same index pool
 - An assignment target must refer to a variable that was declared in a previous `let mut` or function parameter
 
-If a variable is not found in `locals_map`, the code calls `expect()`, which panics with a
-diagnostic message. This is a compile-time safety check (the type-checker should have verified
-the variable exists and is mutable).
+If a variable is not found in `locals_map`, the code calls `expect()`, which panics. That
+stays a panic deliberately: `pre_scan_locals` walks the whole body and enters every binding
+before any instruction is emitted, so a miss is a divergence between the pre-scan and the
+emission pass rather than a property of the source. There is nothing to tell a user, and a
+refusal would report a compiler bug as a source-level diagnostic. Refusals are reserved for
+statements about the *program*; see [Fail-Closed Code Generation](type-checker-guarded-panics.md)
+for the distinction.
 
 ### Type Information
 

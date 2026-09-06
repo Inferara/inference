@@ -324,19 +324,29 @@ let p = Point::new(1, 2);
 // Supported: instance method call
 let result = p.translate(5, 10);
 
-// Not yet supported: higher-order / function pointer
+// Not supported: higher-order / function pointer
 let f = foo;
-f(1);               // → todo!()
+f(1);               // → refused: the callee resolves to no lowerable form
 ```
 
-The `CodegenError` enum in `errors.rs` covers the remaining error cases:
+Higher-order calls are not a language feature, so a callee that resolves to nothing is never
+valid input. Call lowering refuses it rather than emitting a malformed module: the arm records
+`CodegenError::UnsupportedConstruct` naming "a call whose callee resolves to no lowerable form"
+in the compiler's poison slot, and the function's compilation returns that error. The same arm
+catches the one shape a well-formed program can reach it through — a qualified path to a
+proof-only `spec`-inner function, which has no executable index.
 
-```rust
-pub(crate) enum CodegenError {
-    UnknownFunction(String),           // → panic!() (type-checker inconsistency)
-    UnsupportedSretReturnExpression,   // → panic!() (unexpected sret return form)
-}
-```
+Two other `CodegenError` variants belong to this path, and both are refusals as well:
+
+| Variant | Raised when | Guaranteed away by |
+|---|---|---|
+| `UnknownFunction(name)` | a resolved callee is absent from the pre-built index map | the type checker, which rejects an undefined function |
+| `UnsupportedSretReturnExpression` | an sret return or a forwarded sret call is not an identifier, an array literal, or a call to another sret function | analysis rule A031, which rejects an unsupported return-expression form in a compound-returning function |
+
+Both are typed errors, so a helper that already returns `Result` returns them and an
+infallible lowering arm poisons them. Neither aborts the process. See
+[Fail-Closed Code Generation](type-checker-guarded-panics.md) for the mechanism and for the
+invariants that deliberately stay panics.
 
 ## Method Name Mangling
 

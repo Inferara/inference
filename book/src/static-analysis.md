@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Forty-four rules are registered in `all_rules()`. Thirty-nine are
+Forty-seven rules are registered in `all_rules()`. Forty-two are
 error-severity — they block compilation — and five are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A047. The tables below group the rules by the invariant family they
+A001 to A050. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -410,6 +410,9 @@ of its scope, the same statically-known-literal boundary A022 draws.
 | A042 | non-deterministic constructs (`forall`/`exists`/`assume`/`unique`) are only valid inside a `spec` declaration |
 | A043 | an entry-file top-level `pub fn` may not use a reserved export name (`memory`, `__stack_pointer`) |
 | A046 | a unary minus applied to a numeric literal must be written glued to the digits (`-42`, never `- 42`) |
+| A048 | `string` has no value representation: no string literal, and no `string`/`String` as the type of a binding, parameter, return, or struct field |
+| A049 | the unit type has no value representation: no `()`/`unit` as the type of a binding, parameter, or struct field, and no unit literal outside `return;`, `return ();` and a bare `();` |
+| A050 | a parameter of a function with a body must be written `name: T` or `_: T`, never as a bare positional type |
 
 These are honesty rules: each rejects, with a named diagnostic, a construct
 the pipeline does not (or does not yet) support — rather than letting it fail
@@ -425,6 +428,31 @@ fail on a space (`- 100` fits `i8`, `- 128` does not, though `-128` is a valid
 `i8`). Rejecting the separated spelling is what keeps whitespace out of the
 meaning of a program, in the same spirit as A033's ban on combined unary
 operators.
+
+A048 and A049 belong to the not-yet-supported half, and each replaces an abort
+rather than an obscure failure. `string` and `String` are registered as builtin
+type names, so every annotation that spells one type-checks — and nothing after
+the type checker can act on it: there is no layout for a string in linear
+memory, no WebAssembly type to pass one in, and no term for a proof to describe
+one with. A049 draws a narrower line, between the *absence* of a value and a
+*value of nothing*. The first is what the unit type is for and is fully
+implemented, so `-> ()`, `-> unit` and an omitted return type all stay legal,
+as do `return;`, `return ();` and a bare `();` statement. The second — a unit
+binding, parameter, struct field or array element — is a declaration the
+compiler cannot honour, because a unit value occupies no bytes and has no
+WebAssembly type, so there is no slot for it to arrive in and nothing for a
+binding to store. Both rules look through array nesting at any depth, and both
+descend into `spec` bodies, which proof mode lowers to real WebAssembly
+functions. Each is deleted the day its feature lands.
+
+A050 is permanent, and its argument is the one A033 and A046 make: a concept
+should have one spelling. The grammar admits `name: T`, `_: T` and a bare `T`,
+and on a function with a body the third says strictly less than the second
+while occupying the same slot — it binds no name for the body to read, labels
+no argument at a call site, and where `_: T` deliberately declares a present
+and unused parameter, a bare `T` states nothing at all. `external fn` keeps the
+bare form, because an extern declares an ABI signature with no body to read a
+parameter in, so a positional type is a complete statement of it.
 
 ### External function write-through
 

@@ -2,8 +2,9 @@
 ///
 /// - A040: UzumakiOnCompoundArrayElement — in an array literal, `@` may be a
 ///   scalar element (bool/number/enum) but not a struct- or array-typed element.
-///   A compound element's `@` reaches codegen with no enclosing variable name and
-///   panics; the rule rejects it at the analysis phase instead. This is the
+///   A compound element's `@` reaches codegen with no enclosing variable name,
+///   which code generation refuses; the rule rejects it at the analysis phase
+///   instead, with a source location. This is the
 ///   array-element analogue of A038 (uzumaki on a compound struct-literal field)
 ///   and A014 (array uzumaki as a function argument).
 ///
@@ -79,7 +80,8 @@ mod analysis_rules_tests {
 
     /// A struct-typed array element initialized with `@` (`[Point { .. }, @]`)
     /// is rejected: the element position has no variable name, so a struct `@`
-    /// there panics codegen ("Struct uzumaki ... has no enclosing variable name").
+    /// there is refused by code generation ("a struct `@` in a position that
+    /// binds no variable").
     #[test]
     fn a040_struct_element_in_vardef_rejected() {
         let source = r#"
@@ -97,7 +99,7 @@ mod analysis_rules_tests {
     }
 
     /// The same struct-element case inside a spec obligation (the proof-mode path
-    /// that originally panicked): the walker visits spec bodies just as it does
+    /// that originally aborted): the walker visits spec bodies just as it does
     /// free-function bodies.
     #[test]
     fn a040_struct_element_in_spec_rejected() {
@@ -259,7 +261,7 @@ mod analysis_rules_tests {
     /// walker reaches `const` initializers via `Stmt::ConstDef` -- a distinct
     /// branch from `let` -- so this guards that the const-init type-checker path
     /// threads the element type onto the `@` (without which the element would
-    /// arrive untyped and codegen would panic rather than A040 firing).
+    /// arrive untyped and codegen would refuse it rather than A040 firing).
     #[test]
     fn a040_compound_element_in_const_initializer_rejected() {
         let source = r#"

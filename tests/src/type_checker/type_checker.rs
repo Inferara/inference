@@ -414,6 +414,10 @@ mod type_inference_tests {
             }
         }
 
+        /// The parameter's `String` type is recorded, which is all this test
+        /// checks. It is not a program that compiles: `string` and `String` are
+        /// builtin type names with no value representation, so analysis rule
+        /// A048 rejects the parameter before code generation runs.
         #[test]
         fn test_ignore_argument_with_string_type() {
             let source = r#"fn test(_: String) -> i32 { return 1; }"#;
