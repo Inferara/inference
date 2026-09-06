@@ -1,0 +1,39 @@
+// A realization claim about a linked external. `double` has no body here — it
+// arrives from `spec_linked_extern_mathlib.inf`, spliced in by the static-merge
+// linker under the name section symbol `mathlib::double`.
+//
+// A bare statement call in a specification body emits `HA_app_ok`, the atom
+// that claims the application is *realized*: a total-correctness judgment whose
+// conclusion requires the callee's body to reduce to a value stack, so a body
+// that trapped would falsify it. `spec_bounds_realization.inf` produces that
+// atom over bodies this compiler emitted; here the body whose totality is
+// claimed is one the linker produced, at its post-merge ordinal. Nothing else
+// in the corpus states a realization claim about foreign code, which is the
+// half of the linker envelope a `T_app` alone does not reach — an application
+// says what the body computes, `HA_app_ok` says that it computes at all.
+//
+// The two atoms are emitted together and are both meant: the bare call carries
+// the realization claim, and the `assert` keeps the obligation non-vacuous, so
+// nothing collapses to the vacuous `HA_true` that P010 rejects.
+//
+// The claim is true because `double` is total — it is straight-line
+// arithmetic with no trap site — which is exactly the property the merged body
+// has to keep for this obligation to stay dischargeable.
+//
+// No data segment: the merged module built from this one is compiled by `coqc`,
+// and the corpus rejects a data segment in any module it gates.
+
+external fn double(x: i32) -> i32;
+use { double } from mathlib;
+
+pub fn twice(x: i32) -> i32 {
+  return double(x);
+}
+
+spec RealizedExtern {
+  fn calling_is_realized() forall {
+    let x: i32 = @;
+    double(x);
+    assert(double(x) == x + x);
+  }
+}

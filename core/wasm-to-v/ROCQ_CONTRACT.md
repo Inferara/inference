@@ -71,7 +71,7 @@ collapsed:
    every normal generated theorem skeleton contains `Admitted.`, so even a
    false statement can elaborate.
 3. **Exact-artifact discharge** is the stronger, narrowly scoped claim for the
-   five artifacts below. It requires fresh producer output to equal its
+   six artifacts below. It requires fresh producer output to equal its
    committed golden byte-for-byte, compiles those unchanged bytes as
    `DischargeCase.Raw`, proves or refutes the exact generated theorem types in
    verifier-owned companions, rebinds those types to closed `Qed` endpoints,
@@ -79,13 +79,19 @@ collapsed:
    assumptions. No generated definition, theorem statement, scope key, or
    other raw byte may be spliced into or rewritten in the proof companion.
 
-Inference now pins the independent companions, manifest, discharger, and
-Docker adapters at wasm-verifier B
-(`181cd676662453182b9753d1b19ca933c68770c3`). The configured CI lane therefore
-establishes the five-case exact-artifact claim rather than merely the Phase-A
-producer protocol: exactly eleven endpoints are proved and the false fixture's
-positive endpoint is refuted. Absence of the configured executable is reported
-as `Selected-artifact dischargeability: SKIPPED`, never as proof success.
+Inference pins the independent companions, manifest, discharger, and Docker
+adapters at wasm-verifier B (`181cd676662453182b9753d1b19ca933c68770c3`), which
+certifies the first five cases: eleven proved endpoints and the false fixture's
+refuted one. `linked-extern` is published by this repository *ahead* of its
+companion. The request, the receipt validator, and the CI lane's success marker
+already require six cases and thirteen proved endpoints, and B at the pinned
+revision carries no companion, manifest entry, or `Rebind.v` endpoint for
+`spec_linked_extern.v` — so the configured lane fails closed on the six-case
+marker and is expected red until a second A -> B -> C round lands, where B
+proves the new artifact against these exact bytes and a final Inference commit
+C bumps `wasm-verifier-pin.txt` to it. Nothing certifies thirteen endpoints
+before that bump. Absence of the configured executable is reported as
+`Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
 The initial ordered floor is exact:
 
@@ -96,19 +102,32 @@ The initial ordered floor is exact:
 | `unique` | `rocq_unique_spec.v` | `valid_rocq_unique_spec` -> `checked_valid_module`; `valid_rocq_unique_spec__UniqueParity` -> `checked_valid_spec`; `valid_unique_rocq_unique_spec__UniqueParity` -> `checked_valid_unique_spec` | 3 proved, 0 refuted |
 | `narrow-domain` | `spec_narrow_discharge.v` | `valid_spec_narrow_discharge` -> `checked_valid_module`; `valid_spec_narrow_discharge__NarrowDischarge` -> `checked_valid_spec` | 2 proved, 0 refuted |
 | `false-spec` | `rocq_false_certificate.v` | `valid_rocq_false_certificate` -> `checked_valid_module`; `valid_rocq_false_certificate__FalseCertificate` -> `checked_valid_spec_is_false` | 1 proved, 1 refuted |
+| `linked-extern` | `spec_linked_extern.v` | `valid_spec_linked_extern` -> `checked_valid_module`; `valid_spec_linked_extern__DoubleSpec` -> `checked_valid_spec` | 2 proved, 0 refuted |
 
-The aggregate is exactly five cases, eleven proved endpoints, one refuted
-endpoint, and twelve audited rebound endpoints. The false companion's endpoint
-name is exactly `checked_valid_spec_is_false`; the manifest names it directly,
-and `Rebind.v` uses that name directly. There is no compatibility alias and no
-thirteenth endpoint. The historical `rocq_prime_example.inf` source and
-`rocq_prime_example.v` golden remain byte-identical, outside this manifest, and
-uncertified. They are a preserved regression artifact, not the negative case;
-the explicit `assert(false)` artifact is the negative certificate.
+The aggregate is exactly six cases, thirteen proved endpoints, one refuted
+endpoint, and fourteen audited rebound endpoints. The false companion's
+endpoint name is exactly `checked_valid_spec_is_false`; the manifest names it
+directly, and `Rebind.v` uses that name directly. There is no compatibility
+alias and no fifteenth endpoint. The historical `rocq_prime_example.inf`
+source and `rocq_prime_example.v` golden remain byte-identical, outside this
+manifest, and uncertified. They are a preserved regression artifact, not the
+negative case; the explicit `assert(false)` artifact is the negative
+certificate.
+
+`linked-extern` is appended rather than ordered by shape, because the case
+list is a wire order the receipts and the request are keyed by, and inserting
+a case anywhere but the end renames what every earlier position means. It is
+also the only case whose raw bytes are not the output of one compilation: its
+producer compiles `spec_linked_extern.inf` and `spec_linked_extern_mathlib.inf`
+separately, merges them with `core/wasm-linker`, and translates the merged
+module. So it is the only endpoint in this table proved over a body the
+compiler never emitted — `valid_spec_linked_extern__DoubleSpec` applies
+`mathlib_double`, spliced in at its post-merge `mod_funcs` ordinal — which is
+the claim the five compiled cases cannot make at all.
 
 Phase A's export accepts a new empty absolute exchange directory, freshly
-generates the five artifacts in the order above, requires byte identity with
-the five committed goldens, and publishes exactly `request.json` plus `raw/`.
+generates the six artifacts in the order above, requires byte identity with
+the six committed goldens, and publishes exactly `request.json` plus `raw/`.
 The protocol-1 request is strict JSON: duplicate and unknown keys fail. It
 contains the pinned wasm-verifier revision, `coq_wasm_tag`, canonical
 `coq_wasm_revision`, `coq_series`, the assumption-allowlist ceiling, exact
@@ -132,7 +151,7 @@ shell wrapper owns the directory/file identity evidence and requires each
 receipt to remain a regular nonsymlink, single-link `0600` file. Rust
 independently requires the exact nonsymlink regular-file set, strictly parses
 each receipt, rejects duplicate and unknown JSON keys, checks every
-raw/pin/count/audit/result field, and requires the aggregate five/eleven/one
+raw/pin/count/audit/result field, and requires the aggregate six/thirteen/one
 floor. Receipt `coq_version` accepts only the whole-string grammar
 `major.minor`, `major.minor.<numeric-patch>`, or
 `major.minor+<nonempty-safe-suffix>`, and its parsed major/minor must be `8.20`;
@@ -166,7 +185,7 @@ test offline and locked with networking disabled. The ignored checkout-root
 `Cargo.lock` is neither read nor accepted as evidence. Opaque copying uses
 `busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0`.
 The wrapper exposes `batch`, `single`, and `both` adapter modes, with `both` as
-the verification default. Fresh export, five-golden equality, the selected
+the verification default. Fresh export, six-golden equality, the selected
 adapter path, and receipt verification always run; `--full` only adds focused
 tests and the complete `inference-tests` crate suite, not the full workspace.
 The explicitly authorized host-Rust evidence lane used during implementation
@@ -178,7 +197,10 @@ producer, fixtures, strict request/receipt validator, and Docker wrapper but
 does not enable a live lane and still names the pre-B verifier revision. B pins
 A, reads A's goldens with `git show A:<path>`, and constructs its own request
 for clean B rather than consuming A's stale request. C pins B and only then
-enables live fresh-output discharge through B's single-case adapter.
+enables live fresh-output discharge through B's single-case adapter. Adding a
+selected artifact re-enters that sequence at A: the `linked-extern` case above
+is such an A, so `wasm-verifier-pin.txt` still names the previous B and the
+live lane cannot pass until its own C.
 
 ## Required Rocq context
 
@@ -1032,6 +1054,17 @@ existed every module elaborating one was hand-assembled. An obligation applying 
 merged function's own index — is what makes the claim about it a claim
 about the bytes that will run.
 
+`T_app` is not the only channel that reaches a merged body, and the
+corpus keeps all three open. `spec_linked_extern.inf` applies one in a
+universal obligation, `spec_linked_app_ok.inf` states `HA_app_ok` over
+one — the realization claim, which is what forces the merged body to be
+trap-free rather than merely to compute a value — and
+`spec_linked_exists.inf`/`spec_linked_unique.inf` put a merged ordinal
+inside a `reach_payload`, where a reachability obligation is denoted
+against the retained function's real frame. The four differ in what they
+claim about the same kind of body, and each is emitted by its own path,
+so a regression in one is invisible to the others.
+
 A declared **write set** — `mut` on an `external fn` parameter, checked by
 `core/wasm-linker` against the merged bytes before the merge is allowed to
 happen — is a link-time gate with no representation anywhere in this
@@ -1241,12 +1274,16 @@ the whole theorem is **false**, not narrowed. A spec author must write
 entry (e.g. `n >= lo` admits the witness `n := lo` everywhere, where a
 strict `n > lo` has no witness at `lo = i32::MAX`; a claim `f(@) >= lo`
 over an even-valued `f` fails at `lo = i32::MAX` even without filters,
-where `f(@) == 0` does not). Both corpus fixtures were redesigned to
+where `f(@) == 0` does not). The two single-file corpus fixtures,
+`rocq_exists_spec.inf` and `rocq_unique_spec.inf`, were redesigned to
 satisfy this after their original obligations were formally refuted at
 boundary entries — and both corrected obligations (`ValidExistsSpec`
 and `ValidUniqueSpec`) were then discharged end to end against the
 real verifier with `Qed`, which is what fixed the constraint's exact
-shape.
+shape. The linked pair `spec_linked_exists.inf` and
+`spec_linked_unique.inf` satisfies the same rule by construction, their
+bodies taking no entry parameter for a filter to reject; they are
+elaborated by the `coqc` gate and are not discharged.
 
 ### Obligations only an import-free module can discharge
 
@@ -1258,6 +1295,15 @@ imports and one `exists`/`unique` obligation gets a well-formed but
 undischargeable theorem. The linked pipeline's always-link invariant
 removes imports before `-v` runs, so the normal path is unaffected; it
 bites only direct translation of pre-link or third-party modules.
+
+`spec_linked_exists.inf` and `spec_linked_unique.inf` are where the
+`coqc` corpus holds that invariant to something. Each states a
+reachability obligation whose payload applies a merged body, so the
+module the gate elaborates is one the linker produced and its import
+list is empty because the merge emptied it. A reachability fixture that
+compiles on its own can never reach this shape, and a linked fixture
+whose obligations are all universal never needs the runtime, so the
+constraint has a witness only where the two meet.
 
 ### The name section is load-bearing for reachability
 

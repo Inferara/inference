@@ -671,8 +671,8 @@ mod tests {
                 "coq_wasm_revision": pin.coq_wasm_revision(),
                 "coq_series": pin.coq_series(),
                 "assumption_allowlist_count": pin.assumption_allowlist_count(),
-                "expected_case_count": 5,
-                "expected_proved_endpoints": 11,
+                "expected_case_count": 6,
+                "expected_proved_endpoints": 13,
                 "expected_refuted_endpoints": 1,
                 "cases": request_cases,
             });
@@ -879,9 +879,9 @@ mod tests {
                 "wrong-allowlist-ceiling" => {
                     fixture.request["assumption_allowlist_count"] = json!(11);
                 }
-                "wrong-aggregate-cases" => fixture.request["expected_case_count"] = json!(4),
+                "wrong-aggregate-cases" => fixture.request["expected_case_count"] = json!(5),
                 "wrong-aggregate-proved" => {
-                    fixture.request["expected_proved_endpoints"] = json!(10);
+                    fixture.request["expected_proved_endpoints"] = json!(12);
                 }
                 "wrong-aggregate-refuted" => {
                     fixture.request["expected_refuted_endpoints"] = json!(0);

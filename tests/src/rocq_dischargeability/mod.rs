@@ -8,7 +8,7 @@ mod direct;
 mod pin;
 mod protocol;
 
-const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=5 proved=11 refuted=1";
+const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=6 proved=13 refuted=1";
 
 pub fn export_cli(exchange: &Path) -> Result<()> {
     export(exchange)?;
@@ -20,12 +20,35 @@ pub fn verify_cli(exchange: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Freshly generates every selected artifact and publishes the exchange.
+///
+/// A case naming externals goes through the linked generator, which is the same
+/// one the `coqc` corpus gate uses: the fixture and its libraries are compiled
+/// separately, statically merged, and the *merged* module is translated. The
+/// merge policy is the case's own rather than the crate default, because the
+/// policy decides which obligations the merged module states and so how many
+/// theorems the raw artifact carries — the number the case's expected
+/// proved/refuted counts describe. Every case today links under
+/// `ExternalSpecPolicy::Warn`, under which the merged module states exactly
+/// the program's own obligations; adopting a library's would add theorems the
+/// counts do not account for, so a case that wanted them would have to say so
+/// as well as carry a different floor.
 fn export(exchange: &Path) -> Result<protocol::Request> {
     export_with_generator(exchange, |case| {
-        Ok(
-            crate::rocq_test_support::generate_v(case.source_name(), case.module_name())
-                .into_bytes(),
-        )
+        let generated = match case.linkage() {
+            cases::Linkage::SingleFile => {
+                crate::rocq_test_support::generate_v(case.source_name(), case.module_name())
+            }
+            cases::Linkage::Merged { externals, options } => {
+                crate::rocq_test_support::generate_linked_v(
+                    case.source_name(),
+                    case.module_name(),
+                    externals,
+                    options,
+                )
+            }
+        };
+        Ok(generated.into_bytes())
     })
 }
 
@@ -760,7 +783,7 @@ mod tests {
             std::fs::read_dir(exchange.path().join("raw"))
                 .expect("read raw directory")
                 .count(),
-            5
+            6
         );
     }
 

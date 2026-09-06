@@ -1,0 +1,45 @@
+// A `unique`-bodied spec whose claim is about a linked external. `double` has no
+// body here — it arrives from `spec_linked_extern_mathlib.inf`, spliced in by
+// the static-merge linker under the name section symbol `mathlib::double`.
+//
+// It is the `unique` counterpart of `spec_linked_exists.inf` and not a
+// duplicate of it: the two kinds are gathered into different partitions and
+// consumed by different predicates, so a merged ordinal reaching a
+// `ValidExistsSpec` payload says nothing about one reaching a
+// `ValidUniqueSpec` payload.
+//
+// Shaped the way it is because the corpus runs parse → type-check → codegen
+// with NO analysis, so every constraint is carried by the fixture itself:
+// the obligation is non-vacuous (P010 rejects a body whose claims collapse to
+// the vacuous `HA_true`); the body neither declares a return type nor contains
+// `return` (the verifier reduces the retained body without an enclosing
+// activation frame); and the single `@` is NAMED — `unique` compares
+// source-visible exit states, so an anonymous choice, which no
+// `reach_visible_locs` slot could carry, is rejected as P012.
+//
+// The obligation must also be TRUE at EVERY entry: `unique_spec_holds_at`
+// demands a non-empty singleton observation set for every typed entry value.
+// The body is parameterless, so that quantifier is discharged trivially, and
+// the filter pins the named choice to exactly one value — the shape whose
+// obligation `ValidUniqueSpec` is designed to state. `double(3)` is `6`, so the
+// one surviving choice satisfies the claim.
+//
+// No data segment: the merged module built from this one is compiled by `coqc`,
+// and the corpus rejects a data segment in any module it gates.
+
+external fn double(x: i32) -> i32;
+use { double } from mathlib;
+
+pub fn twice(x: i32) -> i32 {
+  return double(x);
+}
+
+spec UniqueExtern {
+  fn one_choice() unique {
+    let x: i32 = @;
+    assume {
+      assert(x == 3);
+    }
+    assert(double(x) == 6);
+  }
+}

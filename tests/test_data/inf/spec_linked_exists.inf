@@ -1,0 +1,45 @@
+// An `exists`-bodied spec whose claim is about a linked external. `double` has
+// no body here — it arrives from `spec_linked_extern_mathlib.inf`, spliced in by
+// the static-merge linker under the name section symbol `mathlib::double`.
+//
+// `rocq_exists_spec.inf` is the corpus producer of the `ValidExistsSpec`
+// grammar, but every application in its payload names a function from its own
+// translation unit. This is the only fixture whose reachability payload applies
+// a body the compiler never emitted: the merged ordinal shows up inside the
+// `reach_payload`, where a single-file fixture can never put it.
+//
+// Shaped the way it is because the corpus runs parse → type-check → codegen
+// with NO analysis, so every constraint is carried by the fixture itself:
+// the obligation is non-vacuous (the `assert` states a real property, so
+// nothing collapses to the vacuous `HA_true` — P010 rejects the collapse); and
+// the body neither declares a return type nor contains `return` (the verifier
+// reduces the retained body without an enclosing activation frame, so a
+// `return` could never take a step — the pre-scan rejects both shapes).
+//
+// The obligation must also be TRUE, and the verifier's contract quantifies the
+// entry parameters universally: `exists_spec_holds_at` demands a successful
+// choice vector for EVERY typed entry value. The body is therefore
+// parameterless, which discharges that quantifier trivially — an `assume` over
+// an entry parameter cannot carve out entries, it can only falsify the spec at
+// the ones it rejects. The single filter pins the named choice to `3`, and
+// `double(3)` is `6`, so the surviving choice satisfies the claim.
+//
+// No data segment: the merged module built from this one is compiled by `coqc`,
+// and the corpus rejects a data segment in any module it gates.
+
+external fn double(x: i32) -> i32;
+use { double } from mathlib;
+
+pub fn twice(x: i32) -> i32 {
+  return double(x);
+}
+
+spec ReachableExtern {
+  fn reaches_six() exists {
+    let x: i32 = @;
+    assume {
+      assert(x == 3);
+    }
+    assert(double(x) == 6);
+  }
+}

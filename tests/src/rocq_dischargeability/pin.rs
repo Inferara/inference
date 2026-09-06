@@ -153,7 +153,20 @@ mod tests {
 
     const VERIFIER_B: &str = "181cd676662453182b9753d1b19ca933c68770c3";
     const PROTECTED_CHECKOUT: &str = "actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
-    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=5 proved=11 refuted=1";
+    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=6 proved=13 refuted=1";
+
+    /// The marker this module asserts the workflow contains is the one the
+    /// harness prints.
+    ///
+    /// [`assert_workflow_contract`] holds the protected lane to grepping for
+    /// `SUCCESS_LINE`, but a literal here would let the workflow and the
+    /// harness agree on a line nothing emits — the lane would then grep for a
+    /// marker that never appears and count zero, reported as a discharge
+    /// failure long after the drift.
+    #[test]
+    fn the_asserted_marker_is_the_one_the_harness_prints() {
+        assert_eq!(SUCCESS_LINE, super::super::SUCCESS_LINE);
+    }
 
     #[test]
     fn pin_supplies_every_discharge_protocol_value() {

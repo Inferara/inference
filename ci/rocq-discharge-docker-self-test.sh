@@ -465,15 +465,16 @@ if [ "$1" = run ]; then
             printf 'unique\n' >"$directory/raw/rocq_unique_spec.v"
             printf 'narrow\n' >"$directory/raw/spec_narrow_discharge.v"
             printf 'false\n' >"$directory/raw/rocq_false_certificate.v"
+            printf 'linked\n' >"$directory/raw/spec_linked_extern.v"
             event "export $exchange"
         elif has_arg verify "$@"; then
             [ -n "$exchange" ] || { echo 'fake docker: verify lacks exchange mount' >&2; exit 86; }
             [ "$(mount_count /exchange "$@")" -eq 1 ] && [ "$exchange_spec" = "type=volume,src=$exchange,dst=/exchange,readonly" ] || { echo 'fake docker: verify exchange mount is not exact readonly' >&2; exit 89; }
             directory=$state/volumes/$exchange/receipts
-            for case_id in prime-bounded exists unique narrow-domain false-spec; do [ -f "$directory/$case_id.json" ] || exit 87; done
+            for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern; do [ -f "$directory/$case_id.json" ] || exit 87; done
             verify_number=$(cat "$state/verify-counter" 2>/dev/null || echo 0); verify_number=$((verify_number + 1)); printf '%s\n' "$verify_number" >"$state/verify-counter"
             cat "$directory/prime-bounded.json" >"$state/verify-$verify_number"
-            printf 'rocq-discharge: result=pass cases=5 proved=11 refuted=1\n'
+            printf 'rocq-discharge: result=pass cases=6 proved=13 refuted=1\n'
             if [ "${FAKE_MUTATE_EXCHANGE_ON_VERIFY:-0}" = 1 ]; then
                 printf 'verify-time mutation\n' >"$state/volumes/$exchange/request.json"
             fi
@@ -544,6 +545,7 @@ if [ "$1" = run ]; then
                 printf 'raw/rocq_unique_spec.v\000'; cat "$directory/raw/rocq_unique_spec.v"
                 printf 'raw/spec_narrow_discharge.v\000'; cat "$directory/raw/spec_narrow_discharge.v"
                 printf 'raw/rocq_false_certificate.v\000'; cat "$directory/raw/rocq_false_certificate.v"
+                printf 'raw/spec_linked_extern.v\000'; cat "$directory/raw/spec_linked_extern.v"
             } | sha256sum | cut -d ' ' -f 1)
             printf '%s\n' "$digest"
             event fingerprint
@@ -555,7 +557,7 @@ if [ "$1" = run ]; then
         *task4-copy-raw*)
             for raw_file in \
                 rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
-                spec_narrow_discharge.v rocq_false_certificate.v
+                spec_narrow_discharge.v rocq_false_certificate.v spec_linked_extern.v
             do
                 printf '%s\n' "$script" | grep -F "cat /exchange/raw/$raw_file > /staging/raw/$raw_file" >/dev/null || exit 64
             done
@@ -565,7 +567,7 @@ if [ "$1" = run ]; then
                 [ "$(host_mode "$staging/raw")" = 755 ] || exit 61
                 for raw_file in \
                     rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
-                    spec_narrow_discharge.v rocq_false_certificate.v
+                    spec_narrow_discharge.v rocq_false_certificate.v spec_linked_extern.v
                 do
                     [ -f "$staging/raw/$raw_file" ] && [ "$(host_mode "$staging/raw/$raw_file")" = 666 ] || exit 61
                 done
@@ -574,7 +576,7 @@ if [ "$1" = run ]; then
             mkdir -p "$staging/raw"
             for raw_file in \
                 rocq_prime_bounded_example.v rocq_exists_spec.v rocq_unique_spec.v \
-                spec_narrow_discharge.v rocq_false_certificate.v
+                spec_narrow_discharge.v rocq_false_certificate.v spec_linked_extern.v
             do
                 cat "$state/volumes/$exchange/raw/$raw_file" >"$staging/raw/$raw_file"
             done
@@ -593,7 +595,7 @@ if [ "$1" = run ]; then
             receipt_root=$state/volumes/$exchange/receipts
             regular_count=$(find "$receipt_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
             total_count=$(find "$receipt_root" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')
-            if [ "$regular_count" -ne 5 ] || [ "$total_count" -ne 5 ]; then
+            if [ "$regular_count" -ne 6 ] || [ "$total_count" -ne 6 ]; then
                 find "$receipt_root" -mindepth 1 -maxdepth 1 -print | sort >"$state/rejected-batch-layout"
                 exit 43
             fi
@@ -603,14 +605,14 @@ if [ "$1" = run ]; then
             if [ "${FAKE_REQUIRE_LINUX_STAGING:-0}" = 1 ]; then
                 [ "$(host_mode "$staging")" = 755 ] || exit 63
                 [ "$(host_mode "$staging/receipts")" = 755 ] || exit 63
-                for case_id in prime-bounded exists unique narrow-domain false-spec; do
+                for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern; do
                     [ "$(host_mode "$staging/receipts/$case_id")" = 755 ] || exit 63
                     [ "$(host_mode "$staging/receipts/$case_id/$case_id.json")" = 644 ] || exit 63
                 done
                 : >"$state/linux-copy-receipt-modes"
             fi
             mkdir "$state/volumes/$exchange/receipts"
-            for case_id in prime-bounded exists unique narrow-domain false-spec; do cp "$staging/receipts/$case_id/$case_id.json" "$state/volumes/$exchange/receipts/"; done
+            for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern; do cp "$staging/receipts/$case_id/$case_id.json" "$state/volumes/$exchange/receipts/"; done
             ;;
         *) : ;;
     esac
@@ -702,7 +704,7 @@ if [ -n "${FAKE_REPLACE_FULL_LOG:-}" ]; then
     esac
 fi
 mkdir "$state/volumes/$volume/receipts"
-for case_id in prime-bounded exists unique narrow-domain false-spec; do printf 'batch-%s\n' "$case_id" >"$state/volumes/$volume/receipts/$case_id.json"; done
+for case_id in prime-bounded exists unique narrow-domain false-spec linked-extern; do printf 'batch-%s\n' "$case_id" >"$state/volumes/$volume/receipts/$case_id.json"; done
 if [ "${FAKE_BATCH_EXTRA:-0}" = 1 ]; then mkdir "$state/volumes/$volume/receipts/extra"; fi
 if [ "${FAKE_BRIDGE_MUTATE:-0}" = 1 ]; then
     printf 'coherently replaced request\n' >"$state/volumes/$volume/request.json"
@@ -731,7 +733,7 @@ set -eu
 case_id=$6; raw=$7; receipt_dir=${INFERENCE_WASM_VERIFIER_RECEIPT_DIR:?}; state=${FAKE_STATE:?}
 [ "${DOCKER:?}" = "${FAKE_DOCKER_PATH:?}" ] || exit 89
 case "$case_id:$raw" in
-    prime-bounded:*/rocq_prime_bounded_example.v|exists:*/rocq_exists_spec.v|unique:*/rocq_unique_spec.v|narrow-domain:*/spec_narrow_discharge.v|false-spec:*/rocq_false_certificate.v) : ;;
+    prime-bounded:*/rocq_prime_bounded_example.v|exists:*/rocq_exists_spec.v|unique:*/rocq_unique_spec.v|narrow-domain:*/spec_narrow_discharge.v|false-spec:*/rocq_false_certificate.v|linked-extern:*/spec_linked_extern.v) : ;;
     *) exit 97 ;;
 esac
 [ -f "$raw" ] && [ -d "$receipt_dir" ] && [ -z "$(find "$receipt_dir" -mindepth 1 -print -quit)" ] || exit 98
@@ -952,24 +954,26 @@ reset_state
 # shellcheck disable=SC2086
 run_wrapper $base_args >"$work/default.out"
 grep -F 'batch <--exchange-volume>' "$state/bridge-calls" >/dev/null
-[ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ]
+[ "$(grep -c '^case ' "$state/bridge-calls")" -eq 6 ]
 observed_case_order=$(sed -n 's/^case <[^>]*> <[^>]*> <[^>]*> <[^>]*> <[^>]*> <\([^>]*\)> .*/\1/p' "$state/bridge-calls")
 expected_case_order='prime-bounded
 exists
 unique
 narrow-domain
-false-spec'
+false-spec
+linked-extern'
 [ "$observed_case_order" = "$expected_case_order" ]
 observed_basename_order=$(sed -n 's|^case .* <.*/\([^/>]*\.v\)>$|\1|p' "$state/bridge-calls")
 expected_basename_order='rocq_prime_bounded_example.v
 rocq_exists_spec.v
 rocq_unique_spec.v
 spec_narrow_discharge.v
-rocq_false_certificate.v'
+rocq_false_certificate.v
+spec_linked_extern.v'
 [ "$observed_basename_order" = "$expected_basename_order" ]
 grep -F 'batch-prime-bounded' "$state/verify-1" >/dev/null
 grep -F 'single-prime-bounded' "$state/verify-2" >/dev/null
-[ "$(sed -n 's/^receipt-dir <\([^>]*\)>$/\1/p' "$state/bridge-calls" | sort -u | wc -l | tr -d ' ')" -eq 5 ]
+[ "$(sed -n 's/^receipt-dir <\([^>]*\)>$/\1/p' "$state/bridge-calls" | sort -u | wc -l | tr -d ' ')" -eq 6 ]
 [ "$(grep -c 'lock-create inference-cargo-target-rust-1.98-lock' "$state/events")" -eq 3 ]
 [ "$(grep -c 'lock-rm inference-cargo-target-rust-1.98-lock' "$state/events")" -eq 3 ]
 [ "$(grep -c ' task0-snapshot$' "$state/events")" -eq 3 ]
@@ -1003,8 +1007,8 @@ for adapter in batch single both; do
     run_wrapper $base_args --adapter "$adapter" >"$work/$adapter.out"
     case "$adapter" in
         batch) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; assert_no_match regex '^case ' "$state/bridge-calls" ;;
-        single) assert_no_match regex '^batch ' "$state/bridge-calls"; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ] ;;
-        both) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ] ;;
+        single) assert_no_match regex '^batch ' "$state/bridge-calls"; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 6 ] ;;
+        both) [ "$(grep -c '^batch ' "$state/bridge-calls")" -eq 1 ]; [ "$(grep -c '^case ' "$state/bridge-calls")" -eq 6 ] ;;
     esac
 done
 
@@ -1055,7 +1059,7 @@ export INFERENCE_WASM_VERIFIER_RECEIPT_DIR
 # shellcheck disable=SC2086
 run_wrapper $base_args --adapter both >"$work/ambient-receipt.out"
 unset INFERENCE_WASM_VERIFIER_RECEIPT_DIR
-[ "$(grep -c '^case ' "$state/bridge-calls")" -eq 5 ]
+[ "$(grep -c '^case ' "$state/bridge-calls")" -eq 6 ]
 
 # Every bridge boundary is revalidated after the bridge, including mutations to the next adapter.
 for boundary_attack in dirty-next replace-next container image-provenance final-single-dirty; do
@@ -1270,7 +1274,7 @@ assert_no_match fixed 'rocq-discharge-docker: result=pass' "$work/verify-post-fi
 
 reset_state
 expect_failure batch-extra-receipt env FAKE_BATCH_EXTRA=1 FAKE_STATE="$state" FAKE_REVISION="$revision" FAKE_COQ_WASM_REVISION="$coq_wasm_revision" FAKE_IMAGE_REFERENCE="$image_reference" FAKE_IMAGE_ID="$image_id" FAKE_REPOSITORY_MOUNT="$repository_mount" FAKE_VERIFIER_CHECKOUT="$verifier" DOCKER="$fake_docker" GIT="$fake_git" "$fixture/ci/rocq-discharge-docker.sh" --wasm-verifier "$verifier" --container verifier-dev --adapter both
-[ "$(grep -c '/receipts/.*\.json$' "$state/rejected-batch-layout")" -eq 5 ]
+[ "$(grep -c '/receipts/.*\.json$' "$state/rejected-batch-layout")" -eq 6 ]
 [ "$(grep -c '/receipts/extra$' "$state/rejected-batch-layout")" -eq 1 ]
 assert_no_match regex '^case ' "$state/bridge-calls"
 

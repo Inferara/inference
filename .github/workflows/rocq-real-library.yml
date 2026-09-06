@@ -13,8 +13,8 @@ name: Rocq real libraries (wasm-to-v)
 #   * the real-library job type-checks every gated module against the real
 #     libraries, including the PRIVATE wasm-verifier one. That needs a runner
 #     carrying those libraries, so it skips loudly where none is configured.
-#   * the selected-artifact job asks pinned verifier B to discharge five exact
-#     fresh artifacts and requires the eleven-proved/one-refuted result.
+#   * the selected-artifact job asks pinned verifier B to discharge six exact
+#     fresh artifacts and requires the thirteen-proved/one-refuted result.
 
 on:
   push:
@@ -293,7 +293,7 @@ jobs:
           esac
           cargo +1.98.0 fetch --locked
 
-      - name: Discharge the five selected fresh artifacts
+      - name: Discharge the six selected fresh artifacts
         env:
           INFERENCE_WASM_VERIFIER_DISCHARGER: ${{ vars.WASM_VERIFIER_DISCHARGER }}
           INFERENCE_ROCQ_DISCHARGE_REQUIRED: '1'
@@ -302,7 +302,7 @@ jobs:
           cargo +1.98.0 test -p inference-tests --locked --offline --verbose \
             "rocq_dischargeability::direct::configured_dischargeability_gate" \
             -- --exact --nocapture 2>&1 | tee selected-discharge.log
-          marker='rocq-discharge: result=pass cases=5 proved=11 refuted=1'
+          marker='rocq-discharge: result=pass cases=6 proved=13 refuted=1'
           if marker_count=$(awk -v marker="$marker" \
             '$0 == marker { count++ } END { print count + 0 }' selected-discharge.log)
           then
@@ -316,13 +316,13 @@ jobs:
           esac
           if [ "$marker_count" -ne 1 ]; then
             echo "::error::selected-artifact discharge emitted $marker_count exact success \
-          markers; expected exactly one five-case, eleven-proved, one-refuted marker"
+          markers; expected exactly one six-case, thirteen-proved, one-refuted marker"
             exit 1
           fi
           {
             echo "### Selected-artifact dischargeability: CHECKED"
             echo
-            echo "Exactly five fresh artifacts discharged: eleven endpoints proved,"
+            echo "Exactly six fresh artifacts discharged: thirteen endpoints proved,"
             echo "one false-spec endpoint refuted, against pinned verifier B."
           } >> "$GITHUB_STEP_SUMMARY"
 
