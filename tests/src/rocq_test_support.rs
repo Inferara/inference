@@ -1,5 +1,7 @@
 use crate::utils::{build_ast, get_test_data_path};
 use inference::LinkOptions;
+use inference::wasm_link::driver::resolve_external_modules;
+use inference::wasm_link::resolve::{ModulePath, SearchPath};
 use inference_type_checker::TypeCheckerBuilder;
 use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 use rustc_hash::FxHashMap;
@@ -113,13 +115,23 @@ impl LinkedExternal {
 }
 
 /// Proof-mode `.v` for a fixture that links external `.wasm` modules,
-/// running the same three steps a real `infc -L` build does: obtain each
-/// external's bytes, compile the main fixture, statically merge, and
-/// translate the *merged* module.
+/// running the same steps a real `infc -L` build does: resolve each external
+/// through the compiler driver, compile the main fixture, statically merge
+/// under the declarations' write-set contracts, and translate the *merged*
+/// module.
 ///
 /// The merge is what makes an obligation about an `external fn` resolvable
 /// at all: before it the external is an import, and an import carries no
 /// body for the downstream realization obligation to reduce.
+///
+/// The externals go through [`resolve_external_modules`], not straight into
+/// the linker, so every gate a production build applies to a library applies
+/// here: signature validation of each bound declaration against the `.wasm`,
+/// and the **checked** write-set mode, under which a merged body that stores
+/// through a parameter its declaration did not mark `mut` is refused. A
+/// producer that handed the bytes over unchecked could publish a selected
+/// artifact for a link `infc` rejects, and a companion proof would then
+/// certify an artifact no user can build.
 ///
 /// `options` carries what the merge does with the verification sections a
 /// library ships. It is a caller's own input rather than a constant here
@@ -137,22 +149,41 @@ pub(crate) fn generate_linked_v(
     externals: &[LinkedExternal],
     options: &LinkOptions,
 ) -> String {
-    let libs: Vec<(&str, Vec<u8>)> = externals
-        .iter()
-        .map(|external| (external.logical_module, external.wasm()))
-        .collect();
-    let lib_refs: Vec<(&str, &[u8])> = libs
-        .iter()
-        .map(|(name, bytes)| (*name, bytes.as_slice()))
-        .collect();
+    // The driver resolves a logical module to `<dir>/<segments>.wasm`, so each
+    // external is laid out under a search directory the way `-L` expects.
+    let lib_dir = tempfile::tempdir().expect("create a library search directory");
+    for external in externals {
+        let relative = ModulePath::from_segments(external.logical_module.split("::"))
+            .unwrap_or_else(|e| panic!("{}: {e}", external.logical_module))
+            .to_relative_path();
+        let target = lib_dir.path().join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+        }
+        std::fs::write(&target, external.wasm())
+            .unwrap_or_else(|e| panic!("write {}: {e}", target.display()));
+    }
+
+    let path = get_test_data_path().join("inf").join(file);
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let typed_context = TypeCheckerBuilder::build_typed_context(build_ast(source))
+        .unwrap_or_else(|e| panic!("type check failed for {file}: {e}"))
+        .typed_context();
+    let mut search_path = SearchPath::new();
+    search_path.push_lib_dir(lib_dir.path().to_path_buf());
+    let resolved = resolve_external_modules(&typed_context, &search_path, None)
+        .unwrap_or_else(|e| panic!("resolving the externals of {file} failed: {e}"));
+
     let main = compile_fixture(file, module_name, CompilationMode::Proof);
-    // The unchecked write-set mode: each external here is supplied as bytes
-    // by the fixture itself rather than resolved from the program's `use`
-    // clauses, so no declaration-derived contract is in hand. The subject is
-    // the emitted `.v`, and a write-set declaration has no representation in
-    // it — the merged body has no imports left to describe.
-    let linked = inference::link_with_options(&main, &lib_refs, None, options)
-        .unwrap_or_else(|e| panic!("link failed for {file}: {e}"))
-        .wasm;
+    let linked = inference::link_with_options(
+        &main,
+        &resolved.module_bytes(),
+        Some(&resolved.contracts),
+        options,
+    )
+    .unwrap_or_else(|e| panic!("link failed for {file}: {e}"))
+    .wasm;
     translate(file, module_name, &linked)
 }
