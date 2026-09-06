@@ -184,6 +184,21 @@
 //!   generalizes the linker's existing extern-only rejection of a unit parameter
 //!   to every function and moves it to analysis. See [`rules::unit_as_value`].
 //!
+//! ### Unnamed Parameters (A050)
+//!
+//! - A050: a parameter of a function with a body must be written with a name or
+//!   with `_`. A parameter with no name can be neither read in the body nor
+//!   labelled at a call site, and the language already has one spelling for
+//!   that: `_: T` says the parameter is present and deliberately unused, while a
+//!   bare `T` says nothing at all, leaving two spellings for one thing. The
+//!   reported index counts the declared parameters from zero with a `self`
+//!   receiver excluded, matching the numbering the type checker's own argument
+//!   messages use. `external fn` keeps the form, because an extern declares an
+//!   ABI signature with no body to read a parameter in. Unlike A048 and A049
+//!   this is not a gate on an unimplemented feature — `_: T` is supported — but
+//!   a removal of the weaker of two spellings, as A033 and A046 already do. See
+//!   [`rules::unnamed_parameter`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -357,6 +372,7 @@ mod tests {
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { arg: "arr".to_string(), param: "a".to_string(), callee: "sort_pair".to_string(), ty: "[i32; 2]".to_string(), root: errors::ImmutableArgumentRoot::Binding, location: dummy_location() },
             AnalysisDiagnostic::StringNotSupported { position: "the type of a string literal", location: dummy_location() },
             AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
+            AnalysisDiagnostic::UnnamedParameter { function: "f".to_string(), index: 0, ty: "i32".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

@@ -233,6 +233,16 @@ The repair the message offers follows the position, on the pattern A047 uses: a 
 
 The rule generalizes a judgement the linker already makes on the extern path alone, where lowering an `external fn` signature fails for a parameter whose value type comes back empty. A049 applies it to every function and to the other carrier positions and moves it from link time to analysis; the link-time check stays in place as defence in depth, which is why "has no value representation" is the phrase both use. `spec` bodies are covered for A048's reason. The binding half reads the type the checker recorded rather than the raw annotation: lowering is total, so a `let` with no type child is given a synthesized unit type node — unreachable from a clean parse, because the grammar requires `: type`, but a rule reading the raw annotation would be one grammar relaxation away from rejecting every binding in the language.
 
+### Unnamed Parameters (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A050 | `UnnamedParameter` | error | a parameter of a function with a body declared as a bare positional type (`fn f(i32)`) rather than `name: T` or `_: T` |
+
+A050 requires a parameter of a defined function to be written with a name or with `_`. The grammar admits three spellings, and on a function with a body the bare positional type says strictly less than `_: T` while occupying the same slot: it binds nothing, so the body has no name to read the value through; it cannot be labelled, so a call site that names its arguments has nothing to name it by; and where `_: T` is a deliberate declaration that the parameter exists and is not read, a bare `T` states nothing at all. It is also the grammar's fallback arm, which is what lets a forgotten annotation misparse — `fn f(x)` is a parameter whose *type* is `x`, not a parameter named `x`. Removing the weaker of two spellings for one concept is the direction A033 and A046 already take.
+
+The check is a declaration walk over free functions, struct methods, `spec` functions, and methods of a struct declared inside a `spec`. The index counts the declared parameters from zero with a `self` receiver excluded, so `fn m(self, i32)` reports parameter 0 — the number the type checker already uses when it talks about an argument of that method, since the parameter lists those messages index into are built with the receiver filtered out. A method is rendered `Struct::method`. `external fn` is a documented non-scope: an extern declares an ABI signature with no body to read a parameter in, so a positional type is a complete statement of it, and it is the spelling the corpus uses. It is nonetheless the wrong form on an extern whose linked body *writes* through a parameter, because `mut` is a field of a named parameter alone and an unnamed one cannot carry the write-set contract A047 checks — a recommendation the rule does not enforce, since a read-only extern is a fine use of the bare form. Unlike A048 and A049, this rule is not a gate on an unimplemented feature: `_: T` is supported, and the bare form is rejected because one spelling for the concept is better than two.
+
 ## Diagnostic Output Format
 
 ```
@@ -346,6 +356,7 @@ Test files are organized by rule group:
 | `rules_a047.rs` | A047 (compound argument at a `mut` `external fn` parameter) |
 | `rules_a048.rs` | A048 (`string` values) |
 | `rules_a049.rs` | A049 (unit values) |
+| `rules_a050.rs` | A050 (unnamed parameter on a defined function) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
