@@ -11,19 +11,41 @@ on:
     branches:
       - main
     paths:
-      - 'core/wasm-to-v/**'
-      - 'core/wasm-codegen/**'
+      # Every crate under core/, not the two this list used to name. A linked
+      # corpus entry drags in the linker, the `hassert` IR and codec, the
+      # function-key crate the call graph is built on, and the `inference`
+      # driver that sequences codegen, link and translation. Enumerating
+      # `core/wasm-to-v` and `core/wasm-codegen` left all four outside the
+      # filter, so a change to any of them could not trigger the gate that
+      # elaborates its output. This repository is public, so hosted Actions
+      # minutes are free and the broader filter costs nothing an accurate
+      # enumeration would have saved.
+      - 'core/**'
+      # Not under core/: the binary reader both the translator and the linker
+      # read modules and name sections with, so a change here moves the bytes
+      # the gate elaborates. It is the only crate outside core/ on the producer
+      # chain.
+      - 'tools/inf-wasmparser/**'
       - 'tests/test_data/inf/**'
       # A linked corpus entry merges a committed external, so re-committing one
       # changes exactly what the gate elaborates.
       - 'tests/test_data/wasmlib/**'
+      # The committed goldens the gate's producer comparisons read, including
+      # the linked-external artifact a companion proof is written against: an
+      # edit here changes the verdict without touching a producer.
+      - 'tests/test_data/rocq/**'
       - 'tests/src/rocq_typecheck.rs'
+      # The shared producer: the single-file and linked generators both live
+      # here, so this file decides what every gated module is built from.
+      - 'tests/src/rocq_test_support.rs'
+      # What that producer builds every gated module through: the AST builder
+      # and the test-data root.
+      - 'tests/src/utils.rs'
       - 'tests/src/rocq_stub_drift.rs'
       # The declaration reader both the coverage audit and the drift check
       # measure with: a shape it stops reading is a declaration each stops
       # holding to anything.
       - 'tests/src/rocq_decls.rs'
-      - 'core/wasm-to-v/wasm-verifier-pin.txt'
       # The module list itself: dropping a `mod` line here deletes a whole gate,
       # and the filename allowlist above would not have noticed.
       - 'tests/src/lib.rs'
@@ -32,19 +54,41 @@ on:
     branches:
       - main
     paths:
-      - 'core/wasm-to-v/**'
-      - 'core/wasm-codegen/**'
+      # Every crate under core/, not the two this list used to name. A linked
+      # corpus entry drags in the linker, the `hassert` IR and codec, the
+      # function-key crate the call graph is built on, and the `inference`
+      # driver that sequences codegen, link and translation. Enumerating
+      # `core/wasm-to-v` and `core/wasm-codegen` left all four outside the
+      # filter, so a change to any of them could not trigger the gate that
+      # elaborates its output. This repository is public, so hosted Actions
+      # minutes are free and the broader filter costs nothing an accurate
+      # enumeration would have saved.
+      - 'core/**'
+      # Not under core/: the binary reader both the translator and the linker
+      # read modules and name sections with, so a change here moves the bytes
+      # the gate elaborates. It is the only crate outside core/ on the producer
+      # chain.
+      - 'tools/inf-wasmparser/**'
       - 'tests/test_data/inf/**'
       # A linked corpus entry merges a committed external, so re-committing one
       # changes exactly what the gate elaborates.
       - 'tests/test_data/wasmlib/**'
+      # The committed goldens the gate's producer comparisons read, including
+      # the linked-external artifact a companion proof is written against: an
+      # edit here changes the verdict without touching a producer.
+      - 'tests/test_data/rocq/**'
       - 'tests/src/rocq_typecheck.rs'
+      # The shared producer: the single-file and linked generators both live
+      # here, so this file decides what every gated module is built from.
+      - 'tests/src/rocq_test_support.rs'
+      # What that producer builds every gated module through: the AST builder
+      # and the test-data root.
+      - 'tests/src/utils.rs'
       - 'tests/src/rocq_stub_drift.rs'
       # The declaration reader both the coverage audit and the drift check
       # measure with: a shape it stops reading is a declaration each stops
       # holding to anything.
       - 'tests/src/rocq_decls.rs'
-      - 'core/wasm-to-v/wasm-verifier-pin.txt'
       # The module list itself: dropping a `mod` line here deletes a whole gate,
       # and the filename allowlist above would not have noticed.
       - 'tests/src/lib.rs'
@@ -78,7 +122,7 @@ jobs:
       # the `mod regenerate` helpers too, and those are ignored by design.
       - name: Assert the gate's filter still selects its tests
         env:
-          ROCQ_GATE_TEST_FLOOR: '40'
+          ROCQ_GATE_TEST_FLOOR: '45'
         run: |
           set -euo pipefail
           selected=$(cargo test -p inference-tests "rocq_typecheck::" -- --list \
@@ -95,11 +139,11 @@ jobs:
       # so no coqc job requires the private verifier library — only this stub.
       #
       # The pass floor closes what the selection floor above cannot see: a
-      # selection of 31 that runs 0 because every gate was `#[ignore]`d is still
+      # selection of 45 that runs 0 because every gate was `#[ignore]`d is still
       # `test result: ok` and still exit 0.
       - name: Run the coqc round-trip gate
         env:
-          ROCQ_GATE_PASS_FLOOR: '29'
+          ROCQ_GATE_PASS_FLOOR: '33'
         run: |
           set -euo pipefail
           cargo test -p inference-tests --verbose "rocq_typecheck::" 2>&1 | tee gate.log
