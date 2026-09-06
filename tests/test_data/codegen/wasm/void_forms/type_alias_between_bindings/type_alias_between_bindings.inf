@@ -1,0 +1,10 @@
+// An alias declared between two bindings. The bindings keep consecutive local
+// indices across it, so a change that made the statement consume a local index
+// would move this golden.
+
+pub fn main() -> i32 {
+    let a: i32 = 20;
+    type T = i32;
+    let b: i32 = 22;
+    return a + b;
+}

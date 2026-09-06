@@ -338,6 +338,36 @@ fn a_forall_sibling_is_choice_lowered_too() {
     );
 }
 
+/// A parameter written `_: T` costs a frame slot exactly as a named one does,
+/// so the choice suffix begins after it.
+///
+/// An `exists`-bodied free function is the one shape whose obligation payload
+/// denotes against the real activation frame, so the compiler asserts that the
+/// observed suffix base equals the plan's recorded entry arity. A plan that
+/// counted only the named parameters would put that arity at 0 while the
+/// signature had already spent slot 0 on `_`, and the assertion would fire on
+/// this program — a panic reachable from a source the front end accepts. Both
+/// slots are `i32`, so nothing downstream would catch a suffix placed one slot
+/// early: the module would validate and the obligation would read the argument
+/// where it expects the drawn value.
+#[test]
+fn an_unnamed_parameter_costs_a_slot_before_the_choice_suffix() {
+    let wasm = compile_spec_module(
+        "spec S {
+          fn f(_: i32) exists {
+            let n: i32 = @;
+            assert(n >= n);
+          }
+        }",
+    );
+    assert_vanilla(&wasm);
+    let wat = flat(&wat_of(&wasm));
+    assert!(
+        wat.contains("(param i32) (param $n i32)"),
+        "the unnamed parameter holds slot 0 and the choice takes slot 1:\n{wat}"
+    );
+}
+
 /// A specification *method* is planned too. Its receiver — and, when it returns
 /// a compound, its sret pointer — precede the declared parameters, so the
 /// suffix base must be the local index observed at the suffix site rather than

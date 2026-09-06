@@ -1,0 +1,8 @@
+// A type alias declared inside a function body. An alias is nominal and
+// introduces no value, so it contributes no instruction and consumes no local.
+
+pub fn main() -> i32 {
+    type T = i32;
+    let x: i32 = 40;
+    return x + 2;
+}

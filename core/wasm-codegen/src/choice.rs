@@ -73,7 +73,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId};
-use inference_ast::nodes::{ArgKind, BlockKind, Def, Expr, Stmt};
+use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
@@ -345,11 +345,12 @@ fn plan_function(
     } else {
         FrameContract::Free
     };
-    let entry_arity = args
-        .iter()
-        .filter(|arg| matches!(arg.kind, ArgKind::Named { .. } | ArgKind::SelfRef { .. }))
-        .count();
-    let entry_arity = u32::try_from(entry_arity).expect("more than u32::MAX parameters");
+    // Every declared parameter costs one frame slot, named or not: the WebAssembly
+    // signature declares one per written argument, and the choice suffix is
+    // appended after all of them. A count that skipped the unnamed ones would put
+    // the k-th choice on a declared parameter's slot, so the obligation payload
+    // would read an argument where it expects a drawn value.
+    let entry_arity = u32::try_from(args.len()).expect("more than u32::MAX parameters");
 
     let mut builder = PlanBuilder {
         ctx,

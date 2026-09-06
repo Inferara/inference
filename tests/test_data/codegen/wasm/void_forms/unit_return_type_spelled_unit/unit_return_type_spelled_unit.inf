@@ -1,0 +1,17 @@
+// The two spellings of "returns nothing". `unit` is a builtin type *name*, so it
+// reaches code generation as a named type, while `()` reaches it as a simple
+// type kind; both declare the empty result list and must agree.
+
+fn spelled_unit() -> unit {
+    return;
+}
+
+fn spelled_parens() -> () {
+    return;
+}
+
+pub fn main() -> i32 {
+    spelled_unit();
+    spelled_parens();
+    return 9;
+}

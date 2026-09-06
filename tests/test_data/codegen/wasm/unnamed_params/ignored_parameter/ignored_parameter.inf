@@ -1,0 +1,12 @@
+// A parameter written `_: T` still occupies an ABI slot: the call site pushes an
+// argument for it and the declared signature counts it. It takes a WebAssembly
+// parameter and advances the slot counter, and binds no name, so nothing in the
+// body can read it.
+
+fn taking(a: i32, _: i32) -> i32 {
+    return a;
+}
+
+pub fn main() -> i32 {
+    return taking(40, 2) + 2;
+}

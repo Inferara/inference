@@ -1,0 +1,14 @@
+// An exported function is the module's WebAssembly ABI boundary, and the
+// contract there is a property of the slot rather than of the binding: a host
+// may pass any i32 bit pattern for a narrow parameter, so the entry prologue
+// canonicalizes every declared narrow slot, named or not. An in-language caller
+// can only write an in-domain literal, so the out-of-domain half of the contract
+// is exercised by the host calls in the execution test.
+
+pub fn f(_: u8, b: i32) -> i32 {
+    return b;
+}
+
+pub fn main() -> i32 {
+    return f(3, 7);
+}

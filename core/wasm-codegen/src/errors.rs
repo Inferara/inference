@@ -1,13 +1,55 @@
+use inference_ast::nodes::Location;
 use thiserror::Error;
 
-/// Error returned when a function call expression cannot be lowered by the codegen pass.
+/// The reason code generation refused to emit a module.
 ///
-/// This is an internal error type used by [`super::compiler::Compiler::lower_function_call`]
-/// and sret return lowering. Callers convert it to a `panic!` depending on whether the
-/// case indicates a type-checker inconsistency.
+/// Every variant is a refusal, not a report of progress: the module is
+/// abandoned and no artifact is written. Refusals fall into two families —
+/// limits a real program can reach (a spec name past the section's byte cap, an
+/// over-large uzumaki unrolling) and guarantees an earlier phase was supposed to
+/// establish (a construct with no lowering, a callee that resolved to nothing).
+/// The second family is reachable only from a caller that drives code generation
+/// straight off a typed context without running analysis, or that ignores the
+/// diagnostics it was handed; it exists so such a caller gets a refusal rather
+/// than a malformed artifact.
+///
+/// The error travels out of `codegen` as an `anyhow::Error`; the CLI renders it
+/// as `Codegen failed: {e}` and exits 1.
 #[derive(Debug, Error)]
 #[must_use = "errors must not be silently ignored"]
 pub(crate) enum CodegenError {
+    /// A construct with no WebAssembly lowering reached code generation. Every
+    /// shape reported here is rejected with a source location by the named
+    /// analysis rule (or by the type checker); this is the defense for a caller
+    /// that goes straight from type checking to code generation, so an
+    /// unlowerable construct can never be silently dropped or emitted as a
+    /// malformed body.
+    ///
+    /// `rule` names what rejects the shape earlier — an `A0xx` rule id, a family
+    /// of them, or a prose phrase such as `the type checker`. A few shapes have
+    /// no earlier owner at all (an unimplemented language feature reached through
+    /// a spelling nothing rejects yet); there the field says so in prose, and the
+    /// rendered sentence still reads as a statement about what does or does not
+    /// stand between the user and this refusal. It is written to fit the template
+    /// as the subject of "rejects it before code generation", so a plural family
+    /// is phrased as a singular noun.
+    ///
+    /// Code generation mints no diagnostic code of its own: the `P0xx` namespace
+    /// belongs to proof-mode obligations, and a second compile-mode namespace
+    /// would give every shape two catalog entries, one of which a user can only
+    /// reach by skipping analysis.
+    #[error(
+        "{}{construct} has no WebAssembly lowering; {rule} rejects it before code generation",
+        .location.map_or_else(String::new, |l| format!("{}:{}: ", l.start_line, l.start_column))
+    )]
+    UnsupportedConstruct {
+        construct: String,
+        rule: &'static str,
+        /// `None` where the refusal is made against a type rather than a node:
+        /// the layout helpers in [`super::memory`] are handed a
+        /// `TypeInfoKind` and have no source position to report.
+        location: Option<Location>,
+    },
     /// The function name was not found in the pre-built index map.
     /// This should never happen if the type-checker ran successfully.
     #[error(
@@ -319,5 +361,93 @@ impl SpecNameSeparatorDetails {
             Some(label) => format!(" in file '{label}'"),
             None => String::new(),
         }
+    }
+}
+
+/// Every analysis rule id a [`CodegenError`] message names.
+///
+/// A backstop diagnostic points the reader at the rule that owns the located
+/// version of the same complaint, so each id here is a claim that the rule
+/// exists. `inference-tests` checks the list against
+/// `inference_analysis::rules::all_rules`, which is what turns a renamed or
+/// retired rule into a failing test rather than a message pointing at nothing.
+///
+/// Kept honest in the other direction by `every_named_rule_id_is_listed` below:
+/// an id written into a `rule:` field but missing here fails that test.
+pub const NAMED_ANALYSIS_RULES: &[&str] = &[
+    "A012", "A014", "A015", "A016", "A017", "A018", "A022", "A025", "A027", "A038", "A039",
+    "A040", "A048", "A049", "A050",
+];
+
+#[cfg(test)]
+mod named_rule_tests {
+    use super::NAMED_ANALYSIS_RULES;
+
+    /// The sources whose `rule:` fields the list above summarizes. Every
+    /// `CodegenError::UnsupportedConstruct` in the crate is built in one of
+    /// these two files.
+    const RULE_BEARING_SOURCES: &[(&str, &str)] = &[
+        ("compiler.rs", include_str!("compiler.rs")),
+        ("memory.rs", include_str!("memory.rs")),
+    ];
+
+    /// Collects every `A0xx` token appearing inside a `rule: "…"` field, across
+    /// the sources above. A rule field may name a family in prose
+    /// (`the uzumaki-position family (A014, A038, A039, A040)`), so the scan
+    /// reads the whole literal rather than expecting the id to be the whole of it.
+    fn ids_written_in_rule_fields() -> Vec<String> {
+        const OPENER: &str = "rule: \"";
+        let mut found = Vec::new();
+        for (_name, source) in RULE_BEARING_SOURCES {
+            for (at, _) in source.match_indices(OPENER) {
+                let rest = &source[at + OPENER.len()..];
+                let Some(end) = rest.find('"') else { continue };
+                let literal: Vec<char> = rest[..end].chars().collect();
+                for start in 0..literal.len() {
+                    if literal[start] == 'A'
+                        && literal.len() >= start + 4
+                        && literal[start + 1..start + 4]
+                            .iter()
+                            .all(char::is_ascii_digit)
+                    {
+                        found.push(literal[start..start + 4].iter().collect::<String>());
+                    }
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
+    /// Anti-vacuity: the scan must actually find the literals it exists to read.
+    /// A pattern that stopped matching would otherwise leave the completeness
+    /// test below trivially satisfied.
+    #[test]
+    fn the_rule_field_scan_finds_the_literals_it_reads() {
+        let ids = ids_written_in_rule_fields();
+        assert!(
+            ids.len() >= 8,
+            "the scan should find every rule id the crate's diagnostics name, found only {ids:?}"
+        );
+        for expected in ["A048", "A049", "A050", "A014", "A016"] {
+            assert!(
+                ids.contains(&expected.to_string()),
+                "the scan missed `{expected}`, which a diagnostic in this crate names: {ids:?}"
+            );
+        }
+    }
+
+    /// Completeness in both directions, so the exported list cannot drift from
+    /// the messages it summarizes.
+    #[test]
+    fn every_named_rule_id_is_listed() {
+        let written = ids_written_in_rule_fields();
+        let mut listed: Vec<String> = NAMED_ANALYSIS_RULES.iter().map(|s| (*s).to_string()).collect();
+        listed.sort_unstable();
+        assert_eq!(
+            written, listed,
+            "NAMED_ANALYSIS_RULES must list exactly the rule ids the crate's diagnostics name"
+        );
     }
 }

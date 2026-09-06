@@ -1,0 +1,17 @@
+// An unnamed parameter following a receiver. The receiver keeps the first
+// parameter slot, because a call pushes it ahead of the user arguments, and the
+// unnamed parameter takes the next one — declaration order is what numbers the
+// slots, whether or not a parameter binds a name.
+
+struct Counter {
+    value: i32;
+
+    fn scaled(self, _: i32) -> i32 {
+        return self.value * 3;
+    }
+}
+
+pub fn main() -> i32 {
+    let c: Counter = Counter { value: 14 };
+    return c.scaled(9);
+}
