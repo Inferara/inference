@@ -345,6 +345,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.1.3
 
+      # The checkout `WASM_VERIFIER_REPO` names is a clone the runner keeps
+      # across jobs, not one this job makes, so it holds whatever was last
+      # fetched into it. The comparison below reads the pinned revision with
+      # `git show`, which never fetches, so a pin bump failed this job for no
+      # reason but that nothing had fetched the commit yet. Fetching moves
+      # neither HEAD nor the worktree — the discharge lane's clean-checkout
+      # requirement is untouched — it only makes the pinned objects readable.
+      - name: Fetch the pinned revision into the runner's checkout
+        env:
+          WASM_VERIFIER_REPO: ${{ vars.WASM_VERIFIER_REPO }}
+        run: |
+          set -euo pipefail
+          pin=core/wasm-to-v/wasm-verifier-pin.txt
+          revision=$(awk '$1 == "revision" { print $2 }' "$pin")
+          if [ -z "$revision" ]; then
+            echo "::error::$pin records no wasm-verifier revision"
+            exit 1
+          fi
+          timeout 300 git -C "$WASM_VERIFIER_REPO" fetch --quiet origin
+          if ! git -C "$WASM_VERIFIER_REPO" cat-file -e "${revision}^{commit}"; then
+            echo "::error::$WASM_VERIFIER_REPO still has no commit $revision after \
+          fetching origin: the pinned revision is reachable from no branch of the \
+          remote the checkout tracks"
+            exit 1
+          fi
+
       # `WasmVerifier` alone: the public `Wasm` tier already ran on a hosted
       # runner, and requiring it here would demand a WasmCert checkout this
       # runner has no reason to carry.
