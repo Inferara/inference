@@ -117,9 +117,20 @@ such names are individually well-typed but would otherwise collide in this flat 
 
 ## Supported Initializer Expression Kinds
 
-The `Statement::VariableDefinition` arm inside `lower_statement` accepts three expression
-kinds as the right-hand side of a `let` binding. Any other expression kind currently
-results in a `todo!` panic, indicating it is not yet implemented.
+The `Statement::VariableDefinition` arm inside `lower_statement` routes through
+`lower_named_binding_init`, which dispatches on the binding's recorded type before it looks
+at the initializer at all: an array or struct binding takes the compound-copy path, a call
+to a compound-returning function takes the sret path (see
+[Arrays and Memory](arrays-and-memory.md)), and everything else lowers the initializer as an
+ordinary expression and emits `local.set`. The three subsections below document that last
+path — the scalar shapes that produce a value for the `local.set` to consume.
+
+Every other expression kind either lowers through the same general expression recursion or
+is refused with a diagnostic, never with an abort. Two refusals are raised here in
+particular: a binding whose recorded type is unit, which has nothing to store and would
+otherwise `local.set` from an empty operand stack, and a binding with no initializer at all.
+Both are rejected earlier with a source location by analysis rules A049 and A025
+respectively, so the refusals are the defence for a caller that skipped analysis.
 
 ### Literal
 
@@ -251,10 +262,21 @@ and use `.cast_signed()` to obtain the `i64` bit pattern before emitting `i64.co
 ensures that `18446744073709551615` (which is `u64::MAX`) is emitted as `i64.const -1`,
 the correct 2's-complement bit pattern.
 
-### Unsupported literal kinds
+### The remaining literal kinds
 
-`Array`, `String`, and `Unit` literals are not yet implemented and will produce a `todo!`
-panic at compile time if encountered.
+An **array** literal is not lowered by `lower_literal` at all: it needs a named frame slot
+to be written into, so it is handled by the compound path described in
+[Arrays and Memory](arrays-and-memory.md).
+
+A **unit** literal lowers to nothing, which is the correct lowering for a value that
+occupies no operand-stack slot. That is what makes `return;` compile — the parser
+synthesizes a unit literal for the missing expression — along with `return ();` and a bare
+`();` statement. A unit literal anywhere else is rejected by analysis rule A049.
+
+A **string** literal has no lowering, because there is no layout for a string in linear
+memory. Analysis rule A048 rejects it with a source location before code generation runs;
+the code generation arm refuses it as well, so a caller that skips analysis gets a refusal
+rather than a malformed module.
 
 ## Relationship to `ConstantDefinition`
 

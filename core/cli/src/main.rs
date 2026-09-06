@@ -594,7 +594,13 @@ fn main() {
 /// ## Implementation Notes
 ///
 /// - Uses `anyhow::Result` for error propagation from library functions
-/// - Calls `process::exit(1)` explicitly on errors (no panics)
+/// - Reports every phase failure as a diagnostic and calls `process::exit(1)`
+///   explicitly, rather than aborting the process. Code generation is fail-closed
+///   for this reason: a construct that reaches it without a lowering is recorded
+///   as a `CodegenError` and returned, and this function renders it as
+///   `Codegen failed: …`. The property is enforced by the `panic_free` sweep in
+///   `tests/src/panic_free.rs`, which runs the whole pipeline over every fixture
+///   in the repository in both compilation modes inside `catch_unwind`
 /// - Reads entire source file into memory (limitation: no streaming)
 /// - Phase execution is sequential (no parallelization)
 #[allow(clippy::too_many_lines)]

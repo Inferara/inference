@@ -60,6 +60,23 @@ fn explicit_unit() -> unit {
 **AST Representation**: `Type::Simple(SimpleTypeKind::Unit)`
 **Type Checker Representation**: `TypeInfoKind::Unit`
 
+**Where unit is legal**: as a return type, in all three spellings — `-> ()`,
+`-> unit`, and an omitted return type. Code generation implements that
+directly, by giving the WebAssembly function an empty result list, so a bare
+`return;`, an explicit `return ();` and a bare `();` statement all compile.
+
+**Where unit is rejected**: as the type of a *carrier* — a `let` or `const`
+binding, a parameter (including `_: ()` and an `external fn` parameter), a
+struct field, or an array element type at any nesting depth. A unit value
+carries no information, so it occupies no bytes and has no WebAssembly type: a
+parameter declared `()` is given no argument slot to arrive in, a binding of it
+has nothing to store, and an array of it has no element size for frame layout
+to compute. The type checker accepts all of these; analysis rule A049
+(`UnitAsValue`) is what rejects them, with a message naming the position and
+the repair. A unit *literal* is likewise rejected everywhere except as the
+whole expression of a `return` or of an expression statement, so `f(())` is an
+error while `return ();` is not.
+
 ### Boolean Type
 
 Boolean values are either `true` or `false`.
@@ -84,7 +101,23 @@ fn test() -> bool {
 
 UTF-8 encoded strings.
 
-**Note**: String is not currently part of `SimpleTypeKind` as it's not yet fully implemented as a primitive type in the compiler. String support is under development. The type checker recognizes `string` as a valid type through the `TypeInfoKind::String` variant, but full runtime support is pending.
+**Note**: String is not part of `SimpleTypeKind`, and it is not implemented as
+a value type anywhere in the compiler. The type checker recognizes `string` and
+`String` as root-scope builtin type *names*, mapping both to the
+`TypeInfoKind::String` variant, so an annotation that spells one type-checks —
+but no phase after the type checker can act on it. There is no layout for a
+string in linear memory, so frame layout has no byte size to give one; there is
+no WebAssembly value type to pass one in, so a signature carrying one has
+nothing to lower to; and there is no term for a proof to describe one with.
+
+Because the type name is accepted and the values are not, the rejection is a
+diagnostic rather than a lowering failure: analysis rule A048
+(`StringNotSupported`) rejects every position at which a string value could be
+introduced — a string literal in any expression position, and `string` or
+`String` as the type of a binding, a parameter (including an `external fn`
+parameter), a return type, or a struct field, looking through array nesting at
+any depth. So this declaration is two A048 errors, one for the parameter and
+one for the return type, rather than a working function:
 
 ```rust
 fn greet(name: string) -> string {
@@ -92,12 +125,17 @@ fn greet(name: string) -> string {
 }
 ```
 
+Until string support lands, model text as data that has a layout: a `[u8; N]`
+with its bytes written as numbers, or an enum tag when the value is one of a
+fixed set.
+
 **Type Checker Representation**: `TypeInfoKind::String`
 
-**Current Operations**:
+**Type-checker-level operations** (reachable only before analysis rejects the
+program):
 - Comparison: `==`, `!=`
 
-**Planned Operations** (under development):
+**Planned operations** (pending string support):
 - Concatenation: `+`
 - Length: `.len()` method
 - Indexing: `[i]` for character access

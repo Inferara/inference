@@ -318,7 +318,7 @@ into one sorted, deduplicated list, each tagged with a stable `code`:
 | Parser | `syntax` | unterminated string, missing `;` |
 | Import resolution | `import` | unresolved `use`, broken imported file |
 | Type checker | `type` | mismatched types, unknown name |
-| Analysis rules | `A001`…`A047` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
+| Analysis rules | `A001`…`A050` | non-det block constraints (see [Static Analysis](static-analysis.md)) |
 
 Only the entry document's own diagnostics are published — errors inside an
 imported file are that file's diagnostics when *it* is open, though a broken

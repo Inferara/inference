@@ -98,9 +98,10 @@ mod analysis_rules_tests {
     }
 
     /// Whether the whole pipeline accepts `source`: analysis first, then code
-    /// generation. `try_codegen` unwraps the analysis result, so it panics rather
-    /// than returning `Err` on a rejected program; splitting the two phases lets a
-    /// test assert "this never reaches codegen" without relying on that panic.
+    /// generation. The two phases stay split so a test can assert "this never
+    /// reaches code generation" as a fact about code generation alone — a single
+    /// combined helper would report the analysis verdict for a rejected program
+    /// and say nothing about what the backend would have done with it.
     fn compiles(source: &str) -> bool {
         analyze(source).is_ok() && try_codegen_no_analysis(source).is_ok()
     }
@@ -908,8 +909,9 @@ mod analysis_rules_tests {
 
     /// Documented non-route: type aliases are non-transparent in Inference, so an
     /// alias naming a field-less struct is a dead end rather than a way to reach a
-    /// value of it. (Local `type` statements are independently unimplemented in
-    /// codegen, so only the analysis verdict is asserted here.)
+    /// value of it. (A body-level `type` statement is erased by code generation —
+    /// an alias introduces no value and every use of it was resolved by the type
+    /// checker — so the analysis verdict is the whole of what there is to assert.)
     #[test]
     fn a045_local_type_alias_to_fieldless_not_flagged() {
         let source = "struct E { } pub fn f() -> i32 { type X = E; return 0; }";
