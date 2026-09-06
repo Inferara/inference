@@ -9,7 +9,7 @@ that consumes the generated `.v` files.
 
 The consumer is wasm-verifier (a private Inferara repository; this
 document is the authoritative, in-repo statement of the contract —
-verified against wasm-verifier commit `181cd67`, and the vendored
+verified against wasm-verifier commit `fb0b2dd`, and the vendored
 signature stub in `rocq-stub/` type-checks the emittable subset of it
 locally), built on **vanilla WasmCert-Coq v2.2.0** at commit `0fd83fa`
 — not the `WasmCert-Coq-Essence` fork this crate previously targeted.
@@ -80,17 +80,14 @@ collapsed:
    other raw byte may be spliced into or rewritten in the proof companion.
 
 Inference pins the independent companions, manifest, discharger, and Docker
-adapters at wasm-verifier B (`181cd676662453182b9753d1b19ca933c68770c3`), which
-certifies the first five cases: eleven proved endpoints and the false fixture's
-refuted one. `linked-extern` is published by this repository *ahead* of its
-companion. The request, the receipt validator, and the CI lane's success marker
-already require six cases and thirteen proved endpoints, and B at the pinned
-revision carries no companion, manifest entry, or `Rebind.v` endpoint for
-`spec_linked_extern.v` — so the configured lane fails closed on the six-case
-marker and is expected red until a second A -> B -> C round lands, where B
-proves the new artifact against these exact bytes and a final Inference commit
-C bumps `wasm-verifier-pin.txt` to it. Nothing certifies thirteen endpoints
-before that bump. Absence of the configured executable is reported as
+adapters at wasm-verifier B (`fb0b2dd56bd451960197cf7e7ccdc513eea47d8b`), which
+certifies all six cases: thirteen proved endpoints and the false fixture's
+refuted one. `linked-extern` reached that state through a second A -> B -> C
+round: this repository published the artifact first (A), B proved it against
+those exact bytes and admitted it to its manifest, and the pin bump to B is
+the C that lets the configured lane require the six-case marker and pass it.
+Nothing certified thirteen endpoints before that bump. Absence of the
+configured executable is reported as
 `Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
 The initial ordered floor is exact:

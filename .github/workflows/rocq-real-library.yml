@@ -266,13 +266,13 @@ jobs:
   # pull_request_target.
   #
   # WASM_VERIFIER_DISCHARGER must resolve to verifier B
-  # 181cd676662453182b9753d1b19ca933c68770c3's
+  # fb0b2dd56bd451960197cf7e7ccdc513eea47d8b's
   # ci/discharge/run-docker-case.sh. The adapter itself requires that clean B
   # revision and implements the protocol-1 single-case executable contract.
   selected-artifact-discharge:
     name: Selected-artifact discharge
     # This job's configured adapter is verifier B
-    # 181cd676662453182b9753d1b19ca933c68770c3 ci/discharge/run-docker-case.sh.
+    # fb0b2dd56bd451960197cf7e7ccdc513eea47d8b ci/discharge/run-docker-case.sh.
     needs: dischargeability-gate
     if: needs.dischargeability-gate.outputs.present == 'true'
     runs-on: ${{ vars.WASM_VERIFIER_RUNNER }}
