@@ -219,6 +219,20 @@ Covered: a string literal in every expression position; the recorded type of a `
 
 The type name is kept and the values are rejected, so an author who writes `string` is told the feature is not implemented and what to model text with instead — a `[u8; N]` with its bytes written as numbers, or an enum tag when the value is one of a fixed set — rather than being told `string` is an unknown type. Type positions are read from the annotation as written rather than from the resolved struct table, because the predicate is a builtin type kind that `TypeInfo::from_type_id` decides on its own; the binding half reads the type the checker recorded, which is the resolved one. Two documented non-scopes: type aliases, item form and statement form alike, because aliases are nominal in Inference and so name a type at which no value can be produced; and the `self` receiver, whose type is the enclosing struct. `spec` bodies are covered — a spec function is lowered to a real WebAssembly function in proof mode and reaches the same expression lowering — and the proof translation's own rejection covers a string literal in an *assertion term*, which is a different path. The rule is a gate on an unimplemented feature: the day strings are implemented, it is deleted whole.
 
+### Unit Values (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A049 | `UnitAsValue` | error | a `()` value: a unit literal outside the two exempt statement forms, or `()`/`unit` as the type of a binding, parameter, or struct field |
+
+A049 draws the line between the *absence* of a value and a *value of nothing*. The first is the point of the unit type and is implemented: a function whose return type is `()`, `unit`, or omitted returns nothing, and code generation gives it an empty result list. The second is a declaration that cannot be honoured — a unit value carries no information, so it occupies no bytes and has no WebAssembly type. A parameter declared `()` is given no argument slot to arrive in, a binding of it has nothing to store, an array of it has no element size for frame layout to compute, and a struct field of it has no offset that means anything.
+
+Covered: a unit literal, the recorded type of a `let` or of a `const` at function or module scope, a function/method/`external fn` parameter (including `_: ()`), and a struct field — arrays peeled at any depth, both spellings (`()` and `unit`) resolving to the same type kind. **The return type is not covered**, because it is the one place unit means something. Two statement forms are exempt: a unit literal as the whole expression of a `return` or of an expression statement, parentheses peeled. That exemption is load-bearing rather than cosmetic — the parser synthesizes a unit literal for the missing expression of a bare `return;`, so a rule that rejected the literal unconditionally would reject every void function ever written. The exemption reaches the root and nothing below it, so `f(())` is still reported.
+
+The repair the message offers follows the position, on the pattern A047 uses: a declaration is repaired by editing or deleting the declaration, while an expression standing where a value was required has no declaration to edit, so the same advice would send the author looking for one that is not there.
+
+The rule generalizes a judgement the linker already makes on the extern path alone, where lowering an `external fn` signature fails for a parameter whose value type comes back empty. A049 applies it to every function and to the other carrier positions and moves it from link time to analysis; the link-time check stays in place as defence in depth, which is why "has no value representation" is the phrase both use. `spec` bodies are covered for A048's reason. The binding half reads the type the checker recorded rather than the raw annotation: lowering is total, so a `let` with no type child is given a synthesized unit type node — unreachable from a clean parse, because the grammar requires `: type`, but a rule reading the raw annotation would be one grammar relaxation away from rejecting every binding in the language.
+
 ## Diagnostic Output Format
 
 ```
@@ -290,9 +304,9 @@ The walker module also exposes several type-inspection helpers used by multiple 
 - `fieldless_struct_name(ctx, kind, module_path)` — returns the bare name of the field-less struct a type is, or is an array of at any depth; resolves all four type carriers (canonical `Struct`, bare `Custom`, and both `::`-qualified forms) so a same-named struct in another file is not picked up by its bare name; used by A045
 - `is_compound_return_call(arena, expr_id, ctx)` — returns true when an expression is a function call that returns a compound type (struct or array); used by A016, A017, and A018
 - `separated_negated_literal(arena, expr_id)` — returns the numeric literal a `-` is applied to but written apart from, measuring separation on offsets rather than source text; used by A046, which rejects the spelling, and by A022, which skips exactly those literals so the two cannot drift apart
-- `innermost_element(kind)` — returns the element type at the bottom of any array nesting (`[[i32; 2]; 3]` → `i32`), and a non-array kind unchanged; used by A048, which asks its question of the element and reports the annotation that carries it once rather than once per layer
+- `innermost_element(kind)` — returns the element type at the bottom of any array nesting (`[[i32; 2]; 3]` → `i32`), and a non-array kind unchanged; used by A048 and A049, which ask their question of the element and report the annotation that carries it once rather than once per layer
 
-The position strings the value-rejecting rules name in their messages (`"a struct literal"`, `"the type of a parameter"`, …) live in `src/rules/position.rs` so A045 and A048 cannot drift into naming the same position two ways. The values are asserted by the message tests, so they must not change without those.
+The position strings the value-rejecting rules name in their messages (`"a struct literal"`, `"the type of a parameter"`, …) live in `src/rules/position.rs` so A045, A048 and A049 cannot drift into naming the same position two ways. The values are asserted by the message tests, so they must not change without those.
 
 ## Testing
 
@@ -331,6 +345,7 @@ Test files are organized by rule group:
 | `rules_a046.rs` | A046 (unary minus separated from the literal it negates) |
 | `rules_a047.rs` | A047 (compound argument at a `mut` `external fn` parameter) |
 | `rules_a048.rs` | A048 (`string` values) |
+| `rules_a049.rs` | A049 (unit values) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

@@ -38,6 +38,7 @@ pub mod string_not_supported;
 pub mod struct_uzumaki_as_argument;
 pub mod top_level_const;
 pub mod uninitialized_variable;
+pub mod unit_as_value;
 pub mod uzumaki_in_reassignment;
 pub mod uzumaki_on_compound_array_element;
 pub mod uzumaki_on_compound_field;
@@ -84,6 +85,7 @@ use string_not_supported::StringNotSupported;
 use struct_uzumaki_as_argument::StructUzumakiAsArgument;
 use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
+use unit_as_value::UnitAsValue;
 use uzumaki_in_reassignment::UzumakiInReassignment;
 use uzumaki_on_compound_array_element::UzumakiOnCompoundArrayElement;
 use uzumaki_on_compound_field::UzumakiOnCompoundField;
@@ -147,5 +149,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &SpacedNegativeLiteral,
         &ExternMutArgument,
         &StringNotSupported,
+        &UnitAsValue,
     ]
 }
