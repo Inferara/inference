@@ -309,7 +309,7 @@ exists to prevent.
 ## What holds this mirror to its originals
 
 The authoritative targets are the real `WasmCert-Coq` (v2.2.0, commit
-`0fd83fa`) and `wasm-verifier` (commit `181cd67`) libraries, recorded in
+`0fd83fa`) and `wasm-verifier` (commit `fb0b2dd`) libraries, recorded in
 `../wasm-verifier-pin.txt`. Two gates hold this stub to them, and both
 read the upstream sources at the pinned revisions rather than from
 whatever a checkout happens to have on disk.
