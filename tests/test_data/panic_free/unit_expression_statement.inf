@@ -1,0 +1,5 @@
+// A bare `();` statement, the other position the parser really produces a unit literal in.
+pub fn main() -> i32 {
+    ();
+    return 1;
+}

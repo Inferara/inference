@@ -1,0 +1,8 @@
+// `()` as a parameter type, which is given no argument slot.
+fn f(u: ()) -> i32 {
+    return 1;
+}
+
+pub fn main() -> i32 {
+    return 1;
+}

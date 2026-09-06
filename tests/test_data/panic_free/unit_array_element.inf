@@ -1,0 +1,5 @@
+// `()` as an array element type, which has no element size.
+pub fn main() -> i32 {
+    let a: [(); 2] = [(), ()];
+    return 1;
+}

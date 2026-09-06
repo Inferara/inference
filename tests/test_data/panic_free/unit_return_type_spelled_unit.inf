@@ -1,0 +1,9 @@
+// `unit` as a return type: a builtin type name rather than the `()` simple type, and the same empty result list.
+fn helper() -> unit {
+    return;
+}
+
+pub fn main() -> i32 {
+    helper();
+    return 1;
+}

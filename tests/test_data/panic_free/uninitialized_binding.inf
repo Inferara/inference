@@ -1,0 +1,5 @@
+// A binding with no initializer, which reaches code generation with no value to store.
+pub fn main() -> i32 {
+    let x: i32;
+    return 1;
+}

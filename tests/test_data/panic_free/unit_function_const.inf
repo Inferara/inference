@@ -1,0 +1,5 @@
+// `()` at a function-body `const`, the constant scope a top-level rule does not already claim.
+pub fn main() -> i32 {
+    const NOTHING: () = ();
+    return 1;
+}

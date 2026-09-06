@@ -1,0 +1,5 @@
+// `string` at a function-body `const`, the only scope where a constant is not also rejected for being top level.
+pub fn main() -> i32 {
+    const GREETING: string = "hi";
+    return 1;
+}

@@ -1,0 +1,5 @@
+// A type alias declared inside a function body, which is nominal and introduces no value.
+pub fn main() -> i32 {
+    type T = i32;
+    return 1;
+}

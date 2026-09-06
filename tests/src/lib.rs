@@ -7,6 +7,7 @@ mod ast;
 mod codegen;
 mod diagnostics_file_context;
 mod hassert_translation;
+mod panic_free;
 mod parser_literal_diagnostics;
 mod robustness;
 mod rocq_decls;

@@ -1,0 +1,8 @@
+// A parameter declared by its type alone on a function with a body.
+fn taking(i32) -> i32 {
+    return 1;
+}
+
+pub fn main() -> i32 {
+    return 1;
+}

@@ -1,0 +1,8 @@
+// `()` as a struct field type, which occupies no bytes in the record.
+struct Holder {
+    nothing: ();
+}
+
+pub fn main() -> i32 {
+    return 1;
+}

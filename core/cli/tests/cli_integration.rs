@@ -2908,3 +2908,76 @@ fn help_names_the_adoption_flag() {
         "--help must say what the flag does, got:\n{stdout}"
     );
 }
+
+/// A construct with no lowering used to end a build as a process abort rather
+/// than as a diagnostic, and both halves of the repair are visible only from
+/// outside the compiler.
+///
+/// `return;` in a function that returns nothing is the shape that made the
+/// point: the parser synthesizes a unit literal for the missing expression, and
+/// the arm that received it had nothing to emit, so a program the front end had
+/// just accepted exited with a stock Rust panic message and status 101. It now
+/// builds, and the assertion below is that it builds *quietly* — a successful
+/// exit is not enough on its own, because the failure this pins is a message on
+/// stderr, not a status.
+#[test]
+fn a_void_return_builds_without_aborting() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(dest.path(), "pub fn main() { return; }").unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    let assert = cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        !stderr.contains("panicked"),
+        "an accepted program must compile without aborting, got:\n{stderr}"
+    );
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "a successful build must leave an artifact"
+    );
+}
+
+/// The other half: a construct that genuinely cannot be lowered is refused with
+/// a rule diagnostic, not with an abort.
+///
+/// `string` is accepted as a type name by the type checker and has no
+/// representation any later phase can produce, so it used to reach code
+/// generation and die there. A bare `.failure()` would be satisfied by that
+/// abort just as well as by the diagnostic, which is why the rule code and the
+/// absence of a panic are both asserted, and why the artifact is checked for:
+/// a refused build that still wrote a `.wasm` would be refusing after the fact.
+#[test]
+fn a_string_program_is_refused_with_a_diagnostic() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(
+        dest.path(),
+        "pub fn main() -> i32 { let s: string = \"hi\"; return 1; }",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("error[A048]"),
+        "the rejection must name the rule that owns it, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "an unlowerable construct must produce a diagnostic, not an abort, got:\n{stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected build must leave no artifact"
+    );
+}
