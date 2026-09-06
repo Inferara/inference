@@ -32,16 +32,18 @@
 //!   resolves those against the source root and reports a missing file before
 //!   parsing; in process there is no project context, so the same clauses are
 //!   reported by the type checker instead. Either way it reaches no module.
-//! - `spec_linked_extern.inf`, `spec_linked_toolchain.inf`,
-//!   `spec_adopted_extern.inf` and `spec_adopted_both.inf` bind externals the
-//!   driver resolves to `.wasm` files through `-L` and merges. Resolution is a
-//!   driver step, not a code generation one: the main module compiles and
-//!   validates on its own, with its externals as ordinary WebAssembly imports,
-//!   which is exactly the property this file asserts about it. The *merged*
-//!   artifact is gated by the linked corpus in `rocq_typecheck.rs`.
+//! - `spec_linked_extern.inf`, `spec_linked_exists.inf`,
+//!   `spec_linked_unique.inf`, `spec_linked_app_ok.inf`,
+//!   `spec_linked_toolchain.inf`, `spec_adopted_extern.inf` and
+//!   `spec_adopted_both.inf` bind externals the driver resolves to `.wasm` files
+//!   through `-L` and merges. Resolution is a driver step, not a code generation
+//!   one: the main module compiles and validates on its own, with its externals
+//!   as ordinary WebAssembly imports, which is exactly the property this file
+//!   asserts about it. The *merged* artifact is gated by the linked corpus in
+//!   `rocq_typecheck.rs`.
 //!
-//! So the table's split is 37 valid and 9 rejected, where `infc --mode proof`
-//! run over the same directory reaches 33 modules and refuses 13: the four
+//! So the table's split is 40 valid and 9 rejected, where `infc --mode proof`
+//! run over the same directory reaches 33 modules and refuses 16: the seven
 //! linked fixtures are the difference, in the direction of this gate covering
 //! more rather than less.
 
@@ -267,6 +269,18 @@ mod gate {
                   nothing",
         },
         Fixture {
+            stem: "spec_linked_app_ok",
+            expected: StockValid(ScalarChoice),
+            why: "a `forall` body drawing a scalar and claiming a linked external's application \
+                  is realized; see the module documentation on why this gate compiles it unlinked",
+        },
+        Fixture {
+            stem: "spec_linked_exists",
+            expected: StockValid(AlreadyChoiceLowered),
+            why: "an `exists` body whose reachability payload applies a linked external; its \
+                  only non-deterministic body was already choice-lowered",
+        },
+        Fixture {
             stem: "spec_linked_extern",
             expected: StockValid(ScalarChoice),
             why: "a `forall` body drawing a scalar and applying a linked external; see the \
@@ -282,6 +296,12 @@ mod gate {
             expected: StockValid(ScalarChoice),
             why: "`forall` bodies drawing scalars and applying externals from a foreign \
                   toolchain's artifact",
+        },
+        Fixture {
+            stem: "spec_linked_unique",
+            expected: StockValid(AlreadyChoiceLowered),
+            why: "the `unique` counterpart of `spec_linked_exists`; the two kinds are consumed \
+                  by different predicates, so neither stands in for the other",
         },
         Fixture {
             stem: "spec_literal_ctx",

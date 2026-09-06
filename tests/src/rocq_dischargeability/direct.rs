@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_fake_discharger_runs_probe_five_cases_and_common_verify() {
+    fn valid_fake_discharger_runs_probe_all_cases_and_common_verify() {
         let helper = compile_helper();
         let templates = receipt_templates();
         let mut runner = CanonicalInvocationRunner {
