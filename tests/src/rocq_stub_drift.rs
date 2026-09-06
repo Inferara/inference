@@ -318,9 +318,15 @@ mod drift {
             return String::from_utf8(output.stdout)
                 .map_err(|e| format!("{path} at {revision} is not UTF-8: {e}"));
         }
+        // Git's own words are the diagnosis: "fetch the pinned revision" is
+        // the repair for a missing commit, and the wrong one for a checkout git
+        // refuses to read at all (dubious ownership, not a repository) — which
+        // this message would otherwise describe identically.
+        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
-            "{} has no {path} at {revision}; fetch the pinned revision",
-            repo.display()
+            "{} has no {path} at {revision}; fetch the pinned revision (git: {})",
+            repo.display(),
+            stderr.trim()
         ))
     }
 
