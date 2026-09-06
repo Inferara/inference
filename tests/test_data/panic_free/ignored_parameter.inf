@@ -1,0 +1,8 @@
+// A parameter written `_: T` on a function with a body: it occupies an ABI slot and binds no name.
+fn taking(a: i32, _: i32) -> i32 {
+    return a;
+}
+
+pub fn main() -> i32 {
+    return taking(1, 2);
+}

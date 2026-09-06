@@ -1,0 +1,5 @@
+// `()` as a binding type, which has nothing to store.
+pub fn main() -> i32 {
+    let u: () = ();
+    return 1;
+}

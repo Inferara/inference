@@ -1,0 +1,5 @@
+// A string literal in expression position, bound to a `string`-typed local.
+pub fn main() -> i32 {
+    let s: string = "hi";
+    return 1;
+}

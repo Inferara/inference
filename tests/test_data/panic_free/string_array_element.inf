@@ -1,0 +1,5 @@
+// `string` as an array element type, which the frame layout would have to size.
+pub fn main() -> i32 {
+    let a: [string; 2] = ["a", "b"];
+    return 1;
+}

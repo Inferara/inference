@@ -1,0 +1,9 @@
+// A generic name in expression position, the one producer of a type node where a value belongs.
+fn t(a: i32) -> i32 {
+    return a;
+}
+
+pub fn main() -> i32 {
+    let x: i32 = t i32';
+    return x;
+}

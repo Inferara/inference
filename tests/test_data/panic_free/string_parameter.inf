@@ -1,0 +1,8 @@
+// `string` as a parameter type, which has no WebAssembly type to pass a value in.
+fn greet(name: string) -> i32 {
+    return 1;
+}
+
+pub fn main() -> i32 {
+    return 1;
+}

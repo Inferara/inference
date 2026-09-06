@@ -1,0 +1,11 @@
+// An unnamed parameter ahead of an `exists` body's choice suffix, where the frame plan's entry arity is asserted against the observed slot.
+pub fn main() -> i32 {
+    return 1;
+}
+
+spec S {
+    fn f(_: i32) exists {
+        let n: i32 = @;
+        assert(n >= n);
+    }
+}

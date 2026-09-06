@@ -1,0 +1,9 @@
+// `return;` in a function that returns nothing: the parser synthesizes a unit literal for the missing expression.
+fn helper() {
+    return;
+}
+
+pub fn main() -> i32 {
+    helper();
+    return 1;
+}
