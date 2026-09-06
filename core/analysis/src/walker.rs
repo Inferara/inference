@@ -183,6 +183,23 @@ pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
     }
 }
 
+/// The element type at the bottom of any array nesting.
+///
+/// `[i32; 3]` and `[[i32; 2]; 3]` both yield `i32`; a kind that is not an array
+/// is returned unchanged, so a caller can apply it unconditionally.
+///
+/// An array type is never a value position on its own — it always sits inside a
+/// binding, a parameter, a return type, or a field — so a rule that rejects a
+/// type wherever a value of it could appear asks its question of the element,
+/// and reports the annotation that carries it once rather than once per layer.
+#[must_use = "this is a pure projection with no side effects"]
+pub(crate) fn innermost_element(kind: &TypeInfoKind) -> &TypeInfoKind {
+    match kind {
+        TypeInfoKind::Array(elem, _) => innermost_element(&elem.kind),
+        _ => kind,
+    }
+}
+
 /// Returns true if a type is compound: a struct/custom type, or an array
 /// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
 /// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
@@ -675,6 +692,40 @@ mod tests {
             ),
             None,
             "an array of a scalar is never zero-sized"
+        );
+    }
+
+    #[test]
+    fn innermost_element_peels_every_array_layer() {
+        let i32_kind = TypeInfoKind::Number(NumberType::I32);
+        assert_eq!(
+            innermost_element(&array_of(i32_kind.clone(), 3)),
+            &i32_kind,
+            "`[i32; 3]` must yield its element type"
+        );
+        assert_eq!(
+            innermost_element(&array_of(
+                array_of(array_of(i32_kind.clone(), 2), 3),
+                4
+            )),
+            &i32_kind,
+            "peeling must recurse past the outermost layer, not stop at it"
+        );
+    }
+
+    #[test]
+    fn innermost_element_returns_a_non_array_unchanged() {
+        let string_kind = TypeInfoKind::String;
+        assert_eq!(
+            innermost_element(&string_kind),
+            &string_kind,
+            "a scalar carries no nesting and must be returned as it stands"
+        );
+        let struct_kind = TypeInfoKind::Struct("P".to_string(), "P".to_string());
+        assert_eq!(
+            innermost_element(&struct_kind),
+            &struct_kind,
+            "a named type is a leaf, so a caller may apply the peel unconditionally"
         );
     }
 

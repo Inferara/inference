@@ -388,6 +388,22 @@ pub enum AnalysisDiagnostic {
         root: ImmutableArgumentRoot,
         location: Location,
     },
+
+    /// One variant serves every position a string value can be introduced at,
+    /// because the fact and the fix are the same at all of them: the message
+    /// names the position and is otherwise fixed text.
+    #[error(
+        "`string` has no value representation in a compiled program and cannot be used as \
+         {position}; the type checker accepts `string` and `String` as type names, but no phase \
+         after it can lower one — there is no layout for a string in linear memory, no \
+         WebAssembly type to pass one in, and no term for a proof to describe it with; string \
+         support is not implemented, so model text as data that has a layout — a `[u8; N]` with \
+         its bytes written as numbers, or an enum tag when the value is one of a fixed set"
+    )]
+    StringNotSupported {
+        position: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -438,7 +454,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ShiftCountOutOfRange { location, .. }
             | AnalysisDiagnostic::FieldLessStructValue { location, .. }
             | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. }
-            | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. } => location,
+            | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. }
+            | AnalysisDiagnostic::StringNotSupported { location, .. } => location,
         }
     }
 
@@ -493,6 +510,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::FieldLessStructValue { .. } => "A045",
             AnalysisDiagnostic::SpacedNegativeLiteral { .. } => "A046",
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { .. } => "A047",
+            AnalysisDiagnostic::StringNotSupported { .. } => "A048",
         }
     }
 }
@@ -1865,6 +1883,76 @@ mod tests {
             constant.starts_with(shared) && binding.starts_with(shared),
             "only the repair clause may differ between the two roots, got:\n{constant}\n{binding}"
         );
+    }
+
+    /// The A048 message is the only place a reader is told that a type the
+    /// checker accepted cannot be used, so it has to carry the whole
+    /// explanation: which name, that it has no value representation, why no
+    /// later phase can supply one, and what to write instead.
+    #[test]
+    fn display_string_not_supported() {
+        let err = AnalysisDiagnostic::StringNotSupported {
+            position: "the type of a string literal",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("`string` has no value representation"),
+            "A048 diagnostic must name the type and state what is wrong, got: {text}"
+        );
+        assert!(
+            text.contains("accepts `string` and `String` as type names"),
+            "A048 diagnostic must say why the annotation was accepted, got: {text}"
+        );
+        assert!(
+            text.contains("no layout for a string in linear memory"),
+            "A048 diagnostic must state the memory mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("no WebAssembly type to pass one in"),
+            "A048 diagnostic must state the ABI mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("no term for a proof to describe it with"),
+            "A048 diagnostic must state the verification consequence, got: {text}"
+        );
+        assert!(
+            text.contains("string support is not implemented"),
+            "A048 diagnostic must say the feature is missing rather than forbidden, got: {text}"
+        );
+        assert!(
+            text.contains("a `[u8; N]` with its bytes written as numbers"),
+            "A048 diagnostic must offer the byte-array fix, and say how to write the bytes, \
+             got: {text}"
+        );
+        assert!(
+            text.contains("an enum tag"),
+            "A048 diagnostic must offer the fixed-set fix, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A048");
+    }
+
+    /// One variant serves every position the rule covers, so each position
+    /// string must render into the same sentence.
+    #[test]
+    fn display_string_not_supported_names_each_position() {
+        for position in [
+            "the type of a string literal",
+            "the declared type of a variable",
+            "the type of a parameter",
+            "the return type of a function",
+            "the type of a struct field",
+        ] {
+            let err = AnalysisDiagnostic::StringNotSupported {
+                position,
+                location: test_location(),
+            };
+            assert!(
+                err.to_string()
+                    .contains(&format!("cannot be used as {position};")),
+                "A048 diagnostic must name the `{position}` position"
+            );
+        }
     }
 
     #[test]

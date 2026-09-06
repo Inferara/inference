@@ -23,6 +23,9 @@ pub mod method_never_accesses_self;
 pub mod missing_return;
 pub mod nested_compound_depth;
 pub mod nondet_outside_spec;
+/// Not a rule: the shared vocabulary of value positions the value-rejecting
+/// rules name in their messages.
+pub(crate) mod position;
 pub mod recursion;
 pub mod reserved_export_name;
 pub mod return_inside_loop;
@@ -31,6 +34,7 @@ pub mod shift_count_out_of_range;
 pub mod spaced_negative_literal;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
+pub mod string_not_supported;
 pub mod struct_uzumaki_as_argument;
 pub mod top_level_const;
 pub mod uninitialized_variable;
@@ -76,6 +80,7 @@ use shift_count_out_of_range::ShiftCountOutOfRange;
 use spaced_negative_literal::SpacedNegativeLiteral;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
+use string_not_supported::StringNotSupported;
 use struct_uzumaki_as_argument::StructUzumakiAsArgument;
 use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
@@ -141,5 +146,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &FieldLessStructValue,
         &SpacedNegativeLiteral,
         &ExternMutArgument,
+        &StringNotSupported,
     ]
 }

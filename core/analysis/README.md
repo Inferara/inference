@@ -41,6 +41,7 @@ Errors, warnings, and informational findings are partitioned by severity. The `a
 | `errors` | `AnalysisDiagnostic`, `AnalysisErrors`, `AnalysisResult`, `Severity` |
 | `walker` | `walk_function_bodies()`, `for_each_function_body()`, `WalkContext` |
 | `rules` | `all_rules()` registry and one sub-module per rule |
+| `rules::position` | the shared position phrases the value-rejecting rules name in their messages |
 
 ## Rules
 
@@ -206,6 +207,18 @@ An enum is out of scope because it lowers to a bare `i32` tag, and so is every s
 
 Resolution is scope-aware, as in A024: an `external fn` may be declared at a file's top level or inside a `spec`, the two may share a name, and each call is measured against the declaration visible from where it stands. Mutability is read from the argument's *root* binding, so `p`, `p.inner`, `arr[i]` and `(p)` are all judged by the binding they reach into — a projection of a `mut` binding is memory that binding's own declaration already says may change. An argument rooted at no binding at all (a compound literal, the result of a call, a draw) is reported rather than silently accepted, but it is never the only diagnostic such a program gets: A012, A016 and A014/A039 already reject those shapes as arguments, so this half of the rule is defense in depth.
 
+### String Values (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A048 | `StringNotSupported` | error | a `string` value: a string literal, or `string`/`String` as the type of a binding, parameter, return, or struct field |
+
+A048 rejects every position at which a string value could be introduced. `string` and `String` are root-scope builtin type names, so every annotation that spells one type-checks — and nothing after the type checker can act on it. There is no layout for a string in linear memory, so frame layout has no byte size to give one; there is no WebAssembly value type to pass one in, so a signature carrying one has nothing to lower to; and there is no term for a proof to describe one with. The three failure modes that produced were an abort on the literal, an abort one layer earlier in the byte-size computation that lays out a frame or a struct, and a clean unsupported-type error on a signature — none of them a diagnostic anyone could act on.
+
+Covered: a string literal in every expression position; the recorded type of a `let` or of a `const` at function or module scope; a function, method, or `external fn` parameter, including `_: string` and a bare positional `string`; a function, method, or `external fn` return type; and a struct field — with array nesting looked through at any depth, since an array of strings is exactly as unrepresentable as a string and an array type is never a value position on its own. Reporting is per offending construct, so `let s: string = "hi";` reports twice: the annotation and the literal are two separate things to remove. A module-scope `const` is checked in its own right rather than left to A032, for the reason A045 records.
+
+The type name is kept and the values are rejected, so an author who writes `string` is told the feature is not implemented and what to model text with instead — a `[u8; N]` with its bytes written as numbers, or an enum tag when the value is one of a fixed set — rather than being told `string` is an unknown type. Type positions are read from the annotation as written rather than from the resolved struct table, because the predicate is a builtin type kind that `TypeInfo::from_type_id` decides on its own; the binding half reads the type the checker recorded, which is the resolved one. Two documented non-scopes: type aliases, item form and statement form alike, because aliases are nominal in Inference and so name a type at which no value can be produced; and the `self` receiver, whose type is the enclosing struct. `spec` bodies are covered — a spec function is lowered to a real WebAssembly function in proof mode and reaches the same expression lowering — and the proof translation's own rejection covers a string literal in an *assertion term*, which is a different path. The rule is a gate on an unimplemented feature: the day strings are implemented, it is deleted whole.
+
 ## Diagnostic Output Format
 
 ```
@@ -277,6 +290,9 @@ The walker module also exposes several type-inspection helpers used by multiple 
 - `fieldless_struct_name(ctx, kind, module_path)` — returns the bare name of the field-less struct a type is, or is an array of at any depth; resolves all four type carriers (canonical `Struct`, bare `Custom`, and both `::`-qualified forms) so a same-named struct in another file is not picked up by its bare name; used by A045
 - `is_compound_return_call(arena, expr_id, ctx)` — returns true when an expression is a function call that returns a compound type (struct or array); used by A016, A017, and A018
 - `separated_negated_literal(arena, expr_id)` — returns the numeric literal a `-` is applied to but written apart from, measuring separation on offsets rather than source text; used by A046, which rejects the spelling, and by A022, which skips exactly those literals so the two cannot drift apart
+- `innermost_element(kind)` — returns the element type at the bottom of any array nesting (`[[i32; 2]; 3]` → `i32`), and a non-array kind unchanged; used by A048, which asks its question of the element and reports the annotation that carries it once rather than once per layer
+
+The position strings the value-rejecting rules name in their messages (`"a struct literal"`, `"the type of a parameter"`, …) live in `src/rules/position.rs` so A045 and A048 cannot drift into naming the same position two ways. The values are asserted by the message tests, so they must not change without those.
 
 ## Testing
 
@@ -314,6 +330,7 @@ Test files are organized by rule group:
 | `rules_a045.rs` | A045 (field-less struct values) |
 | `rules_a046.rs` | A046 (unary minus separated from the literal it negates) |
 | `rules_a047.rs` | A047 (compound argument at a `mut` `external fn` parameter) |
+| `rules_a048.rs` | A048 (`string` values) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
