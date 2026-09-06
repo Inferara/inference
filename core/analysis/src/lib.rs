@@ -158,6 +158,22 @@
 //!   is the supported method-namespace idiom (`E::helper()`), which needs no
 //!   values. See [`rules::fieldless_struct_value`].
 //!
+//! ### Value Representation (A048)
+//!
+//! One more type that no value can be produced of, alongside the field-less
+//! struct A045 covers above.
+//!
+//! - A048: `string` has no value representation in a compiled program. The type
+//!   checker accepts `string` and `String` as builtin type names, but no phase
+//!   after it can lower one — there is no layout in linear memory, no
+//!   WebAssembly value type, and no proof term. A string literal, a `string`
+//!   binding, parameter, return type or struct field is rejected, with arrays
+//!   peeled at any depth. The type name is kept and the values rejected, so the
+//!   author is told the feature is missing and what to model text with instead
+//!   rather than that `string` is unknown. Type aliases and the `self` receiver
+//!   are documented non-scopes. This is a gate on an unimplemented feature: it
+//!   is deleted whole the day strings land. See [`rules::string_not_supported`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -329,6 +345,7 @@ mod tests {
             AnalysisDiagnostic::FieldLessStructValue { name: "E".to_string(), position: "a struct literal", location: dummy_location() },
             AnalysisDiagnostic::SpacedNegativeLiteral { value: "128".to_string(), location: dummy_location() },
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { arg: "arr".to_string(), param: "a".to_string(), callee: "sort_pair".to_string(), ty: "[i32; 2]".to_string(), root: errors::ImmutableArgumentRoot::Binding, location: dummy_location() },
+            AnalysisDiagnostic::StringNotSupported { position: "the type of a string literal", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

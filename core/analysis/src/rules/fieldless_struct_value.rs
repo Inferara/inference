@@ -92,20 +92,11 @@ use inference_type_checker::type_info::TypeInfo;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
+use crate::rules::position::{
+    PARAMETER_TYPE, RETURN_TYPE, SELF_RECEIVER_TYPE, STRUCT_FIELD_TYPE, STRUCT_LITERAL,
+    VARIABLE_TYPE,
+};
 use crate::walker;
-
-/// A struct-literal expression, in any expression position.
-const STRUCT_LITERAL: &str = "a struct literal";
-/// A `let` binding, or a `const` declaration at function or module scope.
-const VARIABLE_TYPE: &str = "the declared type of a variable";
-/// A function, method, or `external fn` parameter (the receiver has its own).
-const PARAMETER_TYPE: &str = "the type of a parameter";
-/// A function, method, or `external fn` return type.
-const RETURN_TYPE: &str = "the return type of a function";
-/// A struct field declaration.
-const STRUCT_FIELD_TYPE: &str = "the type of a struct field";
-/// A `self` / `mut self` receiver declared on a field-less struct.
-const SELF_RECEIVER_TYPE: &str = "the type of a `self` receiver";
 
 crate::rule! {
     /// A field-less struct has no value representation and may not be used as
