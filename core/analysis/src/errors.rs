@@ -71,6 +71,22 @@ fn extern_mut_argument_fix(arg: &str, root: ImmutableArgumentRoot) -> String {
     }
 }
 
+/// The repair clause of [`AnalysisDiagnostic::UnitAsValue`], which differs by
+/// the position the unit reached.
+///
+/// A declaration is repaired by editing or deleting the declaration; an
+/// expression standing where a value was required has no declaration to edit,
+/// so the same advice would send the author looking for one that is not there.
+/// Reading the position rather than a yes/no keeps the two apart, and ties the
+/// choice to the one position constant that names an expression.
+fn unit_as_value_fix(position: &str) -> &'static str {
+    if position == crate::rules::position::VALUE {
+        "drop the `()`, or write a value the surrounding expression can use"
+    } else {
+        "remove the declaration, or give it a type that carries a value"
+    }
+}
+
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -404,6 +420,25 @@ pub enum AnalysisDiagnostic {
         position: &'static str,
         location: Location,
     },
+
+    /// The message has to say which spellings of unit stay legal, because the
+    /// one it rejects and the ones it does not are written with the same two
+    /// characters — a reader told only that `()` is unusable would conclude
+    /// that a void function is too. `position` also selects the repair, because
+    /// the value position has no declaration for the other clause to point at.
+    #[error(
+        "the unit type `()` has no value representation and cannot be used as {position}; a unit \
+         value carries no information, so it occupies no bytes and has no WebAssembly type — a \
+         parameter declared `()` is given no argument slot, a binding of it has nothing to store, \
+         and an array of it has no element size; `()` stays legal as the way a function says it \
+         returns nothing, and `return;`, `return ();` and a bare `();` statement are unaffected; \
+         {fix}",
+        fix = unit_as_value_fix(.position)
+    )]
+    UnitAsValue {
+        position: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -455,7 +490,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::FieldLessStructValue { location, .. }
             | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. }
             | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. }
-            | AnalysisDiagnostic::StringNotSupported { location, .. } => location,
+            | AnalysisDiagnostic::StringNotSupported { location, .. }
+            | AnalysisDiagnostic::UnitAsValue { location, .. } => location,
         }
     }
 
@@ -511,6 +547,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::SpacedNegativeLiteral { .. } => "A046",
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { .. } => "A047",
             AnalysisDiagnostic::StringNotSupported { .. } => "A048",
+            AnalysisDiagnostic::UnitAsValue { .. } => "A049",
         }
     }
 }
@@ -1951,6 +1988,117 @@ mod tests {
                 err.to_string()
                     .contains(&format!("cannot be used as {position};")),
                 "A048 diagnostic must name the `{position}` position"
+            );
+        }
+    }
+
+    /// `()` is written the same way in the position this rule rejects and in
+    /// the positions it leaves alone, so the message has to name the legal ones
+    /// explicitly or a reader will conclude that a void function is illegal
+    /// too.
+    #[test]
+    fn display_unit_as_value() {
+        let err = AnalysisDiagnostic::UnitAsValue {
+            position: "a value",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("the unit type `()` has no value representation"),
+            "A049 diagnostic must name the type and state what is wrong, got: {text}"
+        );
+        assert!(
+            text.contains("occupies no bytes and has no WebAssembly type"),
+            "A049 diagnostic must explain the mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("is given no argument slot"),
+            "A049 diagnostic must say what a unit parameter lacks, got: {text}"
+        );
+        assert!(
+            text.contains("a binding of it has nothing to store"),
+            "A049 diagnostic must say what a unit binding lacks, got: {text}"
+        );
+        assert!(
+            text.contains("an array of it has no element size"),
+            "A049 diagnostic must say what a unit array lacks, got: {text}"
+        );
+        assert!(
+            text.contains("`()` stays legal as the way a function says it returns nothing"),
+            "A049 diagnostic must say the return position is unaffected, got: {text}"
+        );
+        assert!(
+            text.contains("`return;`, `return ();` and a bare `();` statement are unaffected"),
+            "A049 diagnostic must name the exempt statement forms, got: {text}"
+        );
+        assert!(
+            text.contains("drop the `()`, or write a value the surrounding expression can use"),
+            "A049 diagnostic must offer the fix the value position can take, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A049");
+    }
+
+    /// The repair differs by position, and getting it wrong is not cosmetic: an
+    /// expression standing where a value was required has no declaration to
+    /// remove, so the declaration advice would send the author looking for one
+    /// that is not there. The two clauses are asserted against each other, so a
+    /// change that collapses them back into one fails here.
+    #[test]
+    fn display_unit_as_value_repair_follows_the_position() {
+        let of_position = |position| {
+            AnalysisDiagnostic::UnitAsValue {
+                position,
+                location: test_location(),
+            }
+            .to_string()
+        };
+        let declaration_fix = "remove the declaration, or give it a type that carries a value";
+        let value_fix = "drop the `()`, or write a value the surrounding expression can use";
+
+        for position in [
+            "the declared type of a variable",
+            "the type of a parameter",
+            "the type of a struct field",
+        ] {
+            let text = of_position(position);
+            assert!(
+                text.contains(declaration_fix),
+                "A049 must offer the declaration repair at `{position}`, got: {text}"
+            );
+            assert!(
+                !text.contains(value_fix),
+                "A049 must not offer the expression repair at `{position}`, got: {text}"
+            );
+        }
+
+        let value = of_position("a value");
+        assert!(
+            value.contains(value_fix),
+            "A049 must offer the expression repair at the value position, got: {value}"
+        );
+        assert!(
+            !value.contains(declaration_fix),
+            "A049 must not ask an expression to remove a declaration it does not have, \
+             got: {value}"
+        );
+    }
+
+    #[test]
+    fn display_unit_as_value_names_each_position() {
+        for position in [
+            "a value",
+            "the declared type of a variable",
+            "the type of a parameter",
+            "the type of a struct field",
+        ] {
+            let err = AnalysisDiagnostic::UnitAsValue {
+                position,
+                location: test_location(),
+            };
+            assert!(
+                err.to_string()
+                    .contains(&format!("cannot be used as {position};")),
+                "A049 diagnostic must name the `{position}` position"
             );
         }
     }

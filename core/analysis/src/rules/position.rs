@@ -22,6 +22,9 @@ pub(crate) const STRUCT_LITERAL: &str = "a struct literal";
 /// phrase names the *type*, not the literal, because the subject of the
 /// sentence it lands in is a type name.
 pub(crate) const STRING_LITERAL: &str = "the type of a string literal";
+/// An expression standing where a value is required, named for a type that has
+/// no value to stand there with.
+pub(crate) const VALUE: &str = "a value";
 /// A `let` binding, or a `const` declaration at function or module scope.
 pub(crate) const VARIABLE_TYPE: &str = "the declared type of a variable";
 /// A function, method, or `external fn` parameter (the receiver has its own).

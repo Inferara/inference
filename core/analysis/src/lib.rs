@@ -158,9 +158,9 @@
 //!   is the supported method-namespace idiom (`E::helper()`), which needs no
 //!   values. See [`rules::fieldless_struct_value`].
 //!
-//! ### Value Representation (A048)
+//! ### Value Representation (A048, A049)
 //!
-//! One more type that no value can be produced of, alongside the field-less
+//! Two more types that no value can be produced of, alongside the field-less
 //! struct A045 covers above.
 //!
 //! - A048: `string` has no value representation in a compiled program. The type
@@ -173,6 +173,16 @@
 //!   rather than that `string` is unknown. Type aliases and the `self` receiver
 //!   are documented non-scopes. This is a gate on an unimplemented feature: it
 //!   is deleted whole the day strings land. See [`rules::string_not_supported`].
+//! - A049: the unit type has no value representation. `()` is legitimate as the
+//!   *absence* of a value — a return type of `()`, `unit`, or nothing at all —
+//!   and illegitimate as a value: a parameter declared `()` is given no argument
+//!   slot, a binding of it has nothing to store, an array of it has no element
+//!   size, and a struct field of it has no meaningful offset. The return
+//!   position is deliberately not covered, and a unit literal standing as the
+//!   whole expression of a `return` or of an expression statement is exempt,
+//!   because the parser spells a bare `return;` with a synthesized one. The rule
+//!   generalizes the linker's existing extern-only rejection of a unit parameter
+//!   to every function and moves it to analysis. See [`rules::unit_as_value`].
 //!
 //! ## Pipeline Position
 //!
@@ -346,6 +356,7 @@ mod tests {
             AnalysisDiagnostic::SpacedNegativeLiteral { value: "128".to_string(), location: dummy_location() },
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { arg: "arr".to_string(), param: "a".to_string(), callee: "sort_pair".to_string(), ty: "[i32; 2]".to_string(), root: errors::ImmutableArgumentRoot::Binding, location: dummy_location() },
             AnalysisDiagnostic::StringNotSupported { position: "the type of a string literal", location: dummy_location() },
+            AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
