@@ -439,6 +439,27 @@ pub enum AnalysisDiagnostic {
         position: &'static str,
         location: Location,
     },
+
+    /// `index` is 0-based over the parameters the declaration writes, with a
+    /// `self` receiver excluded — the same numbering the type checker's own
+    /// argument messages use, since the parameter lists those messages index
+    /// into are built with the receiver filtered out. Two user-facing messages must not number
+    /// one slot differently. `function` arrives pre-rendered (`Struct::method`
+    /// for a method) because the diagnostic has no arena to resolve a receiver
+    /// against.
+    #[error(
+        "parameter {index} of `{function}` is declared by its type alone (`{ty}`); a parameter \
+         with no name can be neither read in the body nor labeled at a call site, and Inference \
+         already has one spelling for that — `_: {ty}` says the parameter is present and \
+         deliberately unused, while a bare `{ty}` says nothing at all, leaving two spellings for \
+         one thing; write `_: {ty}` if you do not need the value, or give the parameter a name"
+    )]
+    UnnamedParameter {
+        function: String,
+        index: usize,
+        ty: String,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -491,7 +512,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::SpacedNegativeLiteral { location, .. }
             | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. }
             | AnalysisDiagnostic::StringNotSupported { location, .. }
-            | AnalysisDiagnostic::UnitAsValue { location, .. } => location,
+            | AnalysisDiagnostic::UnitAsValue { location, .. }
+            | AnalysisDiagnostic::UnnamedParameter { location, .. } => location,
         }
     }
 
@@ -548,6 +570,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ExternWriteThroughImmutableArgument { .. } => "A047",
             AnalysisDiagnostic::StringNotSupported { .. } => "A048",
             AnalysisDiagnostic::UnitAsValue { .. } => "A049",
+            AnalysisDiagnostic::UnnamedParameter { .. } => "A050",
         }
     }
 }
@@ -2099,6 +2122,74 @@ mod tests {
                 err.to_string()
                     .contains(&format!("cannot be used as {position};")),
                 "A049 diagnostic must name the `{position}` position"
+            );
+        }
+    }
+
+    /// The A050 message names a parameter the source gives no name to, so the
+    /// index and the type are the only two handles a reader has on it — and the
+    /// fix has to be spelled, because the shorter of the two repairs is a
+    /// single character the reader has to be told about.
+    #[test]
+    fn display_unnamed_parameter() {
+        let err = AnalysisDiagnostic::UnnamedParameter {
+            function: "P::m".to_string(),
+            index: 1,
+            ty: "i32".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("parameter 1 of `P::m`"),
+            "A050 diagnostic must name the position and the function, got: {text}"
+        );
+        assert!(
+            text.contains("declared by its type alone (`i32`)"),
+            "A050 diagnostic must name the type that stands in for the parameter, got: {text}"
+        );
+        assert!(
+            text.contains("neither read in the body nor labeled at a call site"),
+            "A050 diagnostic must say what the missing name costs, got: {text}"
+        );
+        assert!(
+            text.contains("`_: i32` says the parameter is present and deliberately unused"),
+            "A050 diagnostic must contrast the two spellings, got: {text}"
+        );
+        assert!(
+            text.contains("leaving two spellings for one thing"),
+            "A050 diagnostic must say why the weaker spelling is removed, got: {text}"
+        );
+        assert!(
+            text.contains("write `_: i32` if you do not need the value"),
+            "A050 diagnostic must spell the `_` fix out, got: {text}"
+        );
+        assert!(
+            text.contains("give the parameter a name"),
+            "A050 diagnostic must offer the naming fix, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A050");
+    }
+
+    /// The fix is built from the parameter's own type, so it has to track it —
+    /// an array type in particular, whose rendering carries brackets the advice
+    /// must reproduce rather than paraphrase.
+    #[test]
+    fn display_unnamed_parameter_quotes_each_type() {
+        for ty in ["i32", "[i32; 2]", "Point"] {
+            let err = AnalysisDiagnostic::UnnamedParameter {
+                function: "f".to_string(),
+                index: 0,
+                ty: ty.to_string(),
+                location: test_location(),
+            };
+            let text = err.to_string();
+            assert!(
+                text.contains(&format!("write `_: {ty}` if you do not need the value")),
+                "A050 must recommend the `_` spelling of `{ty}`, got: {text}"
+            );
+            assert!(
+                text.contains(&format!("a bare `{ty}` says nothing at all")),
+                "A050 must quote the offending spelling of `{ty}`, got: {text}"
             );
         }
     }
