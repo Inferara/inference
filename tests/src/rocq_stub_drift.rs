@@ -330,9 +330,39 @@ mod drift {
         Err(format!(
             "{} has no {path} at {revision}; fetch the pinned revision (git: {})\n{}",
             repo.display(),
-            stderr.trim(),
+            redact_url_credentials(stderr.trim()),
             describe_checkout(repo, revision)
         ))
+    }
+
+    /// Replaces the userinfo of every URL in `text` — `https://user:token@host`
+    /// becomes `https://***@host`. A checkout's remote may carry a token in its
+    /// URL, and everything this module says about a checkout ends up in a CI
+    /// log, so nothing it quotes may repeat one.
+    fn redact_url_credentials(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find("://") {
+            let after = &rest[start + 3..];
+            let authority_end = after
+                .find(|c: char| c == '/' || c.is_whitespace())
+                .unwrap_or(after.len());
+            let authority = &after[..authority_end];
+            match authority.rfind('@') {
+                Some(at) => {
+                    out.push_str(&rest[..start + 3]);
+                    out.push_str("***");
+                    out.push_str(&authority[at..]);
+                    rest = &after[authority_end..];
+                }
+                None => {
+                    out.push_str(&rest[..start + 3 + authority_end]);
+                    rest = &after[authority_end..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// What a checkout is, in the terms that decide whether a pinned revision
@@ -350,7 +380,7 @@ mod drift {
                     if lines.is_empty() {
                         "(empty)".to_string()
                     } else {
-                        lines.join(" | ")
+                        redact_url_credentials(&lines.join(" | "))
                     }
                 }
                 // `git config --get` of an absent key exits 1 and says nothing;
@@ -358,7 +388,7 @@ mod drift {
                 Ok(out) if out.stderr.is_empty() => "(unset)".to_string(),
                 Ok(out) => format!(
                     "(failed: {})",
-                    String::from_utf8_lossy(&out.stderr).trim()
+                    redact_url_credentials(String::from_utf8_lossy(&out.stderr).trim())
                 ),
                 Err(e) => format!("(could not run git: {e})"),
             }
@@ -1365,6 +1395,21 @@ mod drift {
     /// The scanners find the end of a declaration by that marker, so a stripper
     /// that confused the two would end an inductive at its first qualified name
     /// and read the constructors after it as nothing at all.
+    #[test]
+    fn a_remote_url_credential_never_reaches_the_failure_text() {
+        let quoted = redact_url_credentials(
+            "origin\thttps://user:ghp_secret@github.com/org/repo.git (fetch) | \
+             origin\tgit@github-alias:org/repo.git (push) | \
+             fatal: unable to access 'https://tok@example.com/x/': timeout",
+        );
+        assert!(!quoted.contains("ghp_secret"), "{quoted}");
+        assert!(!quoted.contains("tok@"), "{quoted}");
+        assert!(quoted.contains("https://***@github.com/org/repo.git"), "{quoted}");
+        assert!(quoted.contains("https://***@example.com/x/"), "{quoted}");
+        assert!(quoted.contains("git@github-alias:org/repo.git"), "{quoted}");
+        assert_eq!(redact_url_credentials("no urls here"), "no urls here");
+    }
+
     #[test]
     fn only_a_sentence_ending_dot_is_marked() {
         assert_eq!(
