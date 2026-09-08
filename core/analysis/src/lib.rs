@@ -199,6 +199,25 @@
 //!   a removal of the weaker of two spellings, as A033 and A046 already do. See
 //!   [`rules::unnamed_parameter`].
 //!
+//! ### Generic Code (A051)
+//!
+//! - A051: generic code has no lowering, and neither a type parameter nor a type
+//!   argument may be written. The type checker infers a type argument at each
+//!   call site and checks the body against it, but nothing carries that
+//!   substitution further: the compiler does not monomorphize, so a type
+//!   parameter reaches code generation standing for no type at all. A type
+//!   *argument* has no declaration to apply to in the first place — a struct, an
+//!   enum, a type alias and an `external fn` each declare a bare name, and only a
+//!   function binds a type parameter. Rejected are a `fn` declaring type
+//!   parameters (one finding per declaration, no reachability filter and no
+//!   entry-point carve-out), a type application as a parameter, return type,
+//!   struct field, or the declared type of a `let` or `const`, and a type
+//!   application in expression position at any depth. Type aliases and function
+//!   types are documented non-scopes. Only the declaration half is a gate on an
+//!   unimplemented feature; the type-application half states a property of the
+//!   language and survives monomorphization. See
+//!   [`rules::generic_not_supported`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -373,6 +392,7 @@ mod tests {
             AnalysisDiagnostic::StringNotSupported { position: "the type of a string literal", location: dummy_location() },
             AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
             AnalysisDiagnostic::UnnamedParameter { function: "f".to_string(), index: 0, ty: "i32".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::GenericNotSupported { site: errors::GenericSite::Declaration { function: "f".to_string(), params: "T'".to_string() }, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
