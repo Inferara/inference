@@ -524,15 +524,20 @@ fn type_byte_size_with_visited(
             rule: "A049",
             location: None,
         }),
-        // A generic type is never instantiated (#320), a function type has no
-        // value, and a spec type names a proof-only item. None of them describes
-        // bytes, and none is owned by an analysis rule, so the refusal names the
-        // type rather than a rule.
-        TypeInfoKind::Generic(_) | TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => {
-            Err(CodegenError::UnsupportedType {
-                rendered: kind.to_string(),
-            })
-        }
+        // A type application gives type arguments to a declaration that takes
+        // none, so it describes no bytes to lay out.
+        TypeInfoKind::Generic(_) => Err(CodegenError::UnsupportedConstruct {
+            construct: "a value of a generic type in memory".to_string(),
+            rule: "A051",
+            location: None,
+        }),
+        // A function type has no value and a spec type names a proof-only item.
+        // Neither describes bytes, and neither is owned by an analysis rule, so
+        // the refusal names the type rather than a rule.
+        TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => Err(CodegenError::UnsupportedType {
+            rendered: kind.to_string(),
+            location: None,
+        }),
     }
 }
 
@@ -647,11 +652,15 @@ fn natural_alignment_with_visited(
             rule: "A049",
             location: None,
         }),
-        TypeInfoKind::Generic(_) | TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => {
-            Err(CodegenError::UnsupportedType {
-                rendered: kind.to_string(),
-            })
-        }
+        TypeInfoKind::Generic(_) => Err(CodegenError::UnsupportedConstruct {
+            construct: "a value of a generic type in memory".to_string(),
+            rule: "A051",
+            location: None,
+        }),
+        TypeInfoKind::Function(_) | TypeInfoKind::Spec(_) => Err(CodegenError::UnsupportedType {
+            rendered: kind.to_string(),
+            location: None,
+        }),
     }
 }
 
@@ -2376,6 +2385,25 @@ mod tests {
             natural_alignment_for_type(&kind, &ctx, &[]).unwrap(),
             4,
             "[[i32; 3]; 2] alignment = i32 alignment = 4"
+        );
+    }
+
+    /// A type application describes no bytes, so it has no alignment either. The
+    /// alignment boundary is asked separately from the size boundary and answers
+    /// for itself: folding this kind back into the arm that reports a bare type
+    /// name turns this red, while every layout path that asks for a size first
+    /// stays green.
+    #[test]
+    fn natural_alignment_refuses_a_generic_type() {
+        let ctx = TypedContext::default();
+        let error = natural_alignment_for_type(&TypeInfoKind::Generic("Q".to_string()), &ctx, &[])
+            .expect_err("a type application has no alignment");
+        assert!(
+            matches!(
+                &error,
+                CodegenError::UnsupportedConstruct { rule, .. } if *rule == "A051"
+            ),
+            "expected the A051 refusal, got: {error:?}"
         );
     }
 

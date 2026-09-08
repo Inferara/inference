@@ -4,7 +4,7 @@
 //! buckets in proof mode, and runs [`translate_spec_fns`](super::translate_spec_fns)
 //! directly — deliberately *without* compiling the bodies to WASM. Driving the
 //! pass in isolation is what lets a case that would otherwise abort code
-//! generation first (a `**` that is `todo!()` in the lowerer, a construct with no
+//! generation first (a `**`, which the lowerer refuses, a construct with no
 //! encoding) still be exercised for its diagnostic, and keeps every structural
 //! assertion about the produced obligation independent of byte emission.
 #![allow(clippy::similar_names)] // the expected-tree builders use short, related names

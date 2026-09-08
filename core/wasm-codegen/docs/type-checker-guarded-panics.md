@@ -114,8 +114,7 @@ makes `pub fn f(s: string)` report a line and column instead of a bare sentence.
 
 `rule` names what rejects the shape earlier: an `A0xx` id, a family of them written as a
 singular noun phrase so it reads as the subject of "rejects it before code generation", or a
-prose phrase such as `the type checker`. A few shapes have no earlier owner at all, and there
-the field says so in prose.
+prose phrase such as `the type checker`. Every shape refused this way has such an owner.
 
 **No compile-mode diagnostic code is minted.** The `P0xx` namespace belongs to proof-mode
 obligations. A second compile-mode namespace would give every shape here a catalog entry that
@@ -143,6 +142,7 @@ The sites, by owner:
 | a `string` value in memory (frame or struct layout) | A048 |
 | a `string` value in a signature | A048 |
 | a unit value in memory | A049 |
+| an array whose element type is the unit type | A049 |
 | the unit-typed parameter `x`; a unit-typed parameter written `_` | A049 |
 | the unit-typed binding `x` | A049 |
 | a parameter declared by its type alone (`T`) | A050 |
@@ -159,20 +159,41 @@ The sites, by owner:
 | an array or struct `@` in a position that binds no variable | A014, A038, A039, A040 |
 | an `@` over a type with no value representation | A014, A038, A039, A040 |
 | an `@` over a struct whose field is itself a struct | A027 |
-| a generic type in expression position | *nothing* — generics are unimplemented (#320) |
+| a generic type in expression position | A051 |
+| a type application in a signature or below an array in one (`Q i32'`, `[Q i32'; 2]`) | A051 |
+| a value of a generic type in memory | A051 |
+| a function declared with type parameters | A051 |
 
-The last row is the only one with no earlier owner, which is why its `rule` field says so in
-prose instead of naming an id. Its two companions, `TypeNode::Generic` and
-`TypeNode::Function`, are refused by signature lowering as `CodegenError::UnsupportedType`
-rather than through the poison slot, because `val_type_from_type_id` already returns a
-`Result`.
+Every row names an owner, so a caller who reached code generation directly is pointed at the
+diagnostic the full pipeline would have produced for the same program. Of the four generic
+rows only the first goes through the poison slot, because only it is reached from the
+infallible body recursion; the other three return an early `Err` from a path that already
+carries a `Result` — `val_type_from_type_id` for a type application in a signature, the two
+fallible layout wrappers for a value of one in memory, and the head of the function-body
+visitor for a declaration's type parameters, ahead of the signature it would otherwise lower.
+`TypeNode::Function` is refused by the same signature-lowering helper as `TypeNode::Generic`,
+at its own arm of the match, but keeps `CodegenError::UnsupportedType`, naming the type rather
+than a rule: the language has no first-class functions, and no analysis rule claims that
+construct. A `type` alias named in a signature is refused the same way and for the same
+reason — an alias is nominal, nothing resolves it to the type it names before lowering, and no
+rule owns it — except that it does carry a source location, and the message ends with the type
+to write in its place.
 
 The layout boundary is worth one note of its own. `[string; N]` and `[(); N]` reach frame
 layout through three entry points — `compute_frame_layout`, `array_index_elem_size` and
 `lower_array_uzumaki` — and all three route through the two fallible wrappers,
-`type_byte_size_with_visited` and `natural_alignment_with_visited`. The refusal lives there,
-once, ahead of any instruction being emitted. Do not add a fourth check at the `element_size`
-leaf.
+`type_byte_size_with_visited` and `natural_alignment_with_visited`. For those three the
+refusal lives in the wrappers, once, ahead of any instruction being emitted. Do not add a
+fourth check at the `element_size` leaf.
+
+A **signature** position is a separate route to the same pair, and it is reached first.
+`val_type_from_type_id` asks an array for the value type of its innermost element, so a
+parameter written `[(); N]` is refused as *an array whose element type is the unit type* and
+one written `[string; N]` as *a `string` value* — both before frame layout is entered at all.
+Asking the element, rather than listing the element kinds that have no layout, is what keeps
+every kind covered by construction: a type that gains no lowering later cannot reopen the
+hole where an array of it looked like an ordinary `(param i32)` pointing at bytes nothing can
+size.
 
 ---
 
