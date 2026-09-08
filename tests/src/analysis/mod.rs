@@ -26,4 +26,5 @@ mod rules_a047;
 mod rules_a048;
 mod rules_a049;
 mod rules_a050;
+mod rules_a051;
 mod walker_tests;

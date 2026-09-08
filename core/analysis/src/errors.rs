@@ -87,6 +87,64 @@ fn unit_as_value_fix(position: &str) -> &'static str {
     }
 }
 
+/// Which generic surface an [`AnalysisDiagnostic::GenericNotSupported`] finding
+/// stands on, which is what decides the fact the message states.
+///
+/// The two sites are refused for different reasons and must never share a
+/// rationale sentence. A declaration is unlowerable because the compiler does
+/// not monomorphize, which is a missing implementation; an application of type
+/// arguments is unlowerable because no type declaration in the language accepts
+/// any, which is a property of the language and stays true whatever
+/// monomorphization does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenericSite {
+    /// A function, method, or `spec` function declaring type parameters.
+    /// `function` arrives pre-rendered (`Struct::method` for a method) because
+    /// the diagnostic has no arena to resolve a receiver against; `params` is
+    /// the binder list as the source spells it, `T' U'`.
+    Declaration { function: String, params: String },
+    /// A type application (`Q i32'`) written where a type is expected, or
+    /// standing on its own in expression position. `rendered` is the
+    /// application as the source spells it.
+    TypeApplication {
+        rendered: String,
+        position: &'static str,
+    },
+}
+
+/// The message of [`AnalysisDiagnostic::GenericNotSupported`], which is built
+/// per site rather than parameterized, because the two sites state different
+/// facts and offer different repairs.
+///
+/// Only the declaration site cites the monomorphization issue: it is the half
+/// waiting on that feature, so "should I wait for it?" is a real question there
+/// and is not one for a type argument no declaration will ever accept.
+fn generic_not_supported_message(site: &GenericSite) -> String {
+    match site {
+        GenericSite::Declaration { function, params } => format!(
+            "`{function}` is generic over `{params}`, and a generic function has no code \
+             generation; the type checker infers a type argument at each call site and checks the \
+             body against it, but nothing carries that substitution any further — the compiler \
+             does not monomorphize, so a type parameter reaches code generation still standing \
+             for no type at all, with no layout to size a frame slot with, no WebAssembly value \
+             type to pass a value in, and no term for a proof to describe one with; generics are \
+             not implemented rather than forbidden, so write one non-generic copy of \
+             `{function}` for each type it is used at, or drop the type parameters if it is only \
+             ever used at one, and track progress at \
+             https://github.com/Inferara/inference/issues/76"
+        ),
+        GenericSite::TypeApplication { rendered, position } => format!(
+            "`{rendered}` gives type arguments to a declaration that accepts none, and cannot be \
+             used as {position}; no type declaration in Inference takes type parameters — a \
+             struct, an enum, a type alias and an `external fn` all declare a bare name, and only \
+             a function binds one — so `{rendered}` names no declaration the compiler can lay \
+             out: there is no byte size for frame layout to compute, no WebAssembly value type \
+             for a signature to carry, and no term for a proof to describe a value of it; write \
+             the base type name on its own if that is the type you meant"
+        ),
+    }
+}
+
 /// Severity level for analysis findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -460,6 +518,18 @@ pub enum AnalysisDiagnostic {
         ty: String,
         location: Location,
     },
+
+    /// One variant serves both generic surfaces, because one rule owns them: a
+    /// declaration that binds type parameters and an application that gives type
+    /// arguments. `site` selects the whole message rather than a clause of it —
+    /// the two state different facts, cite different things, and offer different
+    /// repairs, so there is no shared sentence for them to be parameterized
+    /// around.
+    #[error("{message}", message = generic_not_supported_message(.site))]
+    GenericNotSupported {
+        site: GenericSite,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -513,7 +583,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ExternWriteThroughImmutableArgument { location, .. }
             | AnalysisDiagnostic::StringNotSupported { location, .. }
             | AnalysisDiagnostic::UnitAsValue { location, .. }
-            | AnalysisDiagnostic::UnnamedParameter { location, .. } => location,
+            | AnalysisDiagnostic::UnnamedParameter { location, .. }
+            | AnalysisDiagnostic::GenericNotSupported { location, .. } => location,
         }
     }
 
@@ -571,6 +642,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::StringNotSupported { .. } => "A048",
             AnalysisDiagnostic::UnitAsValue { .. } => "A049",
             AnalysisDiagnostic::UnnamedParameter { .. } => "A050",
+            AnalysisDiagnostic::GenericNotSupported { .. } => "A051",
         }
     }
 }
@@ -2192,6 +2264,195 @@ mod tests {
                 "A050 must quote the offending spelling of `{ty}`, got: {text}"
             );
         }
+    }
+
+    /// The A051 declaration message is the only place a reader is told that a
+    /// declaration the type checker handled completely cannot be compiled, so it
+    /// has to carry the whole explanation: which declaration, which binders,
+    /// that the substitution stops at the type checker, what each missing piece
+    /// costs, that the feature is missing rather than forbidden, what to write
+    /// instead, and where to follow the feature.
+    #[test]
+    fn display_generic_declaration_not_supported() {
+        let err = AnalysisDiagnostic::GenericNotSupported {
+            site: GenericSite::Declaration {
+                function: "P::m".to_string(),
+                params: "T' U'".to_string(),
+            },
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("`P::m` is generic over `T' U'`"),
+            "A051 must name the declaration and every binder it declares, got: {text}"
+        );
+        assert!(
+            text.contains("a generic function has no code generation"),
+            "A051 must state what is wrong with the declaration, got: {text}"
+        );
+        assert!(
+            text.contains("infers a type argument at each call site"),
+            "A051 must say what the type checker did, so the reader knows why it was accepted, \
+             got: {text}"
+        );
+        assert!(
+            text.contains("the compiler does not monomorphize"),
+            "A051 must name the missing mechanism, got: {text}"
+        );
+        assert!(
+            text.contains("no layout to size a frame slot with"),
+            "A051 must state the memory consequence, got: {text}"
+        );
+        assert!(
+            text.contains("no WebAssembly value type to pass a value in"),
+            "A051 must state the ABI consequence, got: {text}"
+        );
+        assert!(
+            text.contains("no term for a proof to describe one with"),
+            "A051 must state the verification consequence, got: {text}"
+        );
+        assert!(
+            text.contains("generics are not implemented rather than forbidden"),
+            "A051 must say the feature is missing rather than forbidden, got: {text}"
+        );
+        assert!(
+            text.contains("write one non-generic copy of `P::m` for each type it is used at"),
+            "A051 must spell the hand-written-copies fix out, got: {text}"
+        );
+        assert!(
+            text.contains("drop the type parameters if it is only ever used at one"),
+            "A051 must offer the single-instantiation fix, got: {text}"
+        );
+        assert!(
+            text.contains("https://github.com/Inferara/inference/issues/76"),
+            "A051 must cite the feature the declaration half waits on, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A051");
+    }
+
+    /// The application message states a different fact from the declaration one:
+    /// no declaration in the language accepts type arguments at all, which is
+    /// why it offers a different repair and cites nothing.
+    #[test]
+    fn display_generic_type_application_not_supported() {
+        let err = AnalysisDiagnostic::GenericNotSupported {
+            site: GenericSite::TypeApplication {
+                rendered: "Q i32'".to_string(),
+                position: "the type of a parameter",
+            },
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("`Q i32'` gives type arguments to a declaration that accepts none"),
+            "A051 must quote the application as written and state what is wrong, got: {text}"
+        );
+        assert!(
+            text.contains("no type declaration in Inference takes type parameters"),
+            "A051 must state the language fact behind the refusal, got: {text}"
+        );
+        assert!(
+            text.contains(
+                "a struct, an enum, a type alias and an `external fn` all declare a bare name"
+            ),
+            "A051 must enumerate the declarations that take no type parameters, got: {text}"
+        );
+        assert!(
+            text.contains("only a function binds one"),
+            "A051 must say which declaration does bind a type parameter, got: {text}"
+        );
+        assert!(
+            text.contains("no byte size for frame layout to compute"),
+            "A051 must state the memory consequence, got: {text}"
+        );
+        assert!(
+            text.contains("no WebAssembly value type for a signature to carry"),
+            "A051 must state the ABI consequence, got: {text}"
+        );
+        assert!(
+            text.contains("no term for a proof to describe a value of it"),
+            "A051 must state the verification consequence, got: {text}"
+        );
+        assert!(
+            text.contains("write the base type name on its own if that is the type you meant"),
+            "A051 must offer the repair, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A051");
+    }
+
+    /// One variant serves every position the application site covers, so each
+    /// position string must render into the same sentence.
+    #[test]
+    fn display_generic_not_supported_names_each_position() {
+        for position in [
+            "a value",
+            "the declared type of a variable",
+            "the type of a parameter",
+            "the return type of a function",
+            "the type of a struct field",
+        ] {
+            let err = AnalysisDiagnostic::GenericNotSupported {
+                site: GenericSite::TypeApplication {
+                    rendered: "Q i32'".to_string(),
+                    position,
+                },
+                location: test_location(),
+            };
+            assert!(
+                err.to_string()
+                    .contains(&format!("cannot be used as {position};")),
+                "A051 diagnostic must name the `{position}` position"
+            );
+        }
+    }
+
+    /// The two sites are refused for different reasons, and neither rationale is
+    /// true of the other: a declaration is waiting on monomorphization, while a
+    /// type argument has no declaration to apply to whatever monomorphization
+    /// does. Each clause is asserted against the other rendering, so a change
+    /// that collapses the two messages into one fails here.
+    #[test]
+    fn display_generic_not_supported_states_one_fact_per_site() {
+        let declaration = AnalysisDiagnostic::GenericNotSupported {
+            site: GenericSite::Declaration {
+                function: "id".to_string(),
+                params: "T'".to_string(),
+            },
+            location: test_location(),
+        }
+        .to_string();
+        let application = AnalysisDiagnostic::GenericNotSupported {
+            site: GenericSite::TypeApplication {
+                rendered: "Q i32'".to_string(),
+                position: "the type of a parameter",
+            },
+            location: test_location(),
+        }
+        .to_string();
+
+        let declaration_fix = "write one non-generic copy of `id` for each type it is used at";
+        let application_fix = "write the base type name on its own if that is the type you meant";
+        assert!(
+            declaration.contains(declaration_fix),
+            "A051 must offer the copies repair at a declaration, got: {declaration}"
+        );
+        assert!(
+            !declaration.contains(application_fix),
+            "A051 must not tell a declaration to drop its type arguments, got: {declaration}"
+        );
+        assert!(
+            application.contains(application_fix),
+            "A051 must offer the base-name repair at an application, got: {application}"
+        );
+        assert!(
+            !application.contains(declaration_fix),
+            "A051 must not ask an application to write non-generic copies, got: {application}"
+        );
+        assert!(
+            !application.contains("https://github.com/Inferara/inference/issues/76"),
+            "the application site is not waiting on monomorphization and must cite nothing, \
+             got: {application}"
+        );
     }
 
     #[test]
