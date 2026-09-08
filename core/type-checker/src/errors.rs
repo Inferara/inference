@@ -420,15 +420,6 @@ pub enum TypeCheckError {
     },
 
     #[error(
-        "{location}: function `{function_name}` requires {expected} type parameters, but none were provided"
-    )]
-    MissingTypeParameters {
-        function_name: String,
-        expected: usize,
-        location: Location,
-    },
-
-    #[error(
         "{location}: {expected_kind} operator `{operator:?}` cannot be applied to {operand_desc}"
     )]
     InvalidBinaryOperand {
@@ -502,6 +493,23 @@ pub enum TypeCheckError {
         "{location}: parameter `{parameter_name}` is declared more than once in `{function_name}`"
     )]
     DuplicateParameterName {
+        function_name: String,
+        parameter_name: String,
+        location: Location,
+    },
+
+    /// Two type-parameter binders of one function declaration bind the same name.
+    ///
+    /// The repeat is not shadowing: an annotation in the signature or the body
+    /// resolves to the first binder, so the later one is unnameable while still
+    /// counting towards the declared arity. Every call site is then asked for an
+    /// argument no parameter position can supply, and the resulting
+    /// "cannot infer type parameter" reports the consequence at the caller rather
+    /// than the mistake at the declaration.
+    #[error(
+        "{location}: type parameter `{parameter_name}` is declared more than once in `{function_name}`"
+    )]
+    DuplicateTypeParameterName {
         function_name: String,
         parameter_name: String,
         location: Location,
@@ -684,8 +692,18 @@ pub enum TypeCheckError {
     )]
     CannotInferUzumakiType { location: Location },
 
+    /// A call site leaves a declared type parameter unbound.
+    ///
+    /// A type argument is only ever inferred from the argument types at a call
+    /// site — a call has no place to write one — so the note names the two
+    /// repairs that exist: give some parameter the type parameter's type, or drop
+    /// a binder nothing determines. Advising an explicit type argument would name
+    /// a repair that cannot be typed.
+    ///
+    /// One report per unbound parameter is the whole report: a second message
+    /// covering the signature would render one failure twice at one location.
     #[error(
-        "{location}: cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments"
+        "{location}: cannot infer type parameter `{param_name}` for `{function_name}`\nnote: a type argument is inferred from the argument types at the call site, and no argument here determines `{param_name}`; declare a parameter of type `{param_name}` so a call fixes it, or drop the binder"
     )]
     CannotInferTypeParameter {
         function_name: String,
@@ -972,7 +990,6 @@ impl TypeCheckError {
             | TypeCheckError::UnknownArgumentLabel { location, .. }
             | TypeCheckError::ArgumentLabelOutOfOrder { location, .. }
             | TypeCheckError::TypeParameterCountMismatch { location, .. }
-            | TypeCheckError::MissingTypeParameters { location, .. }
             | TypeCheckError::InvalidBinaryOperand { location, .. }
             | TypeCheckError::InvalidUnaryOperand { location, .. }
             | TypeCheckError::BinaryOperandTypeMismatch { location, .. }
@@ -980,6 +997,7 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::SelfReferenceNotFirstParameter { location, .. }
             | TypeCheckError::DuplicateParameterName { location, .. }
+            | TypeCheckError::DuplicateTypeParameterName { location, .. }
             | TypeCheckError::ImportResolutionFailed { location, .. }
             | TypeCheckError::QualifiedPathNotAValue { location, .. }
             | TypeCheckError::QualifiedPathNotReexported { location, .. }
@@ -1413,19 +1431,6 @@ mod tests {
     }
 
     #[test]
-    fn display_missing_type_parameters() {
-        let err = TypeCheckError::MissingTypeParameters {
-            function_name: "generic_fn".to_string(),
-            expected: 2,
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: function `generic_fn` requires 2 type parameters, but none were provided"
-        );
-    }
-
-    #[test]
     fn display_invalid_binary_operand() {
         let err = TypeCheckError::InvalidBinaryOperand {
             operator: OperatorKind::Add,
@@ -1536,6 +1541,37 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: parameter `self` is declared more than once in `Number::plus`"
+        );
+    }
+
+    #[test]
+    fn display_duplicate_type_parameter_name() {
+        let err = TypeCheckError::DuplicateTypeParameterName {
+            function_name: "g".to_string(),
+            parameter_name: "T".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: type parameter `T` is declared more than once in `g`"
+        );
+    }
+
+    /// The advice names a repair that can be written. A call site has no place
+    /// to carry a type argument, so advising one would name nothing.
+    #[test]
+    fn display_cannot_infer_type_parameter() {
+        let err = TypeCheckError::CannotInferTypeParameter {
+            function_name: "id".to_string(),
+            param_name: "U".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot infer type parameter `U` for `id`\n\
+             note: a type argument is inferred from the argument types at the call site, and no \
+             argument here determines `U`; declare a parameter of type `U` so a call fixes it, or \
+             drop the binder"
         );
     }
 

@@ -32,7 +32,7 @@
 //!
 //! ## Generics
 //!
-//! Generic type parameters declared on a function (`fn foo<T>(...)`) are
+//! Generic type parameters declared on a function (`fn foo T'(...)`) are
 //! recorded on the signature when it is registered. At a call site during body
 //! inference, `infer_type_params_from_args` derives concrete substitutions for
 //! each `T` from the call's argument types and reports
@@ -1108,6 +1108,7 @@ impl TypeChecker {
                     owner.map_or_else(|| fn_name.clone(), |o| format!("{o}::{fn_name}"))
                 };
                 self.report_duplicate_parameters(args, &label, ctx);
+                self.report_duplicate_type_parameters(type_params, &label, ctx);
                 // A receiver is only a method receiver when the function is
                 // declared inside a struct; elsewhere `SelfReferenceInFunction`
                 // and `SelfReferenceOutsideMethod` own the case.
@@ -1205,6 +1206,33 @@ impl TypeChecker {
                     function_name: function_name.to_string(),
                     parameter_name,
                     location: arg.location,
+                });
+            }
+        }
+    }
+
+    /// Reports each type-parameter name bound more than once in one function
+    /// declaration, anchored at the binder that repeats it.
+    ///
+    /// A repeated binder is not shadowing: it raises the declared arity while
+    /// naming nothing new, so without this the mistake surfaces only as an
+    /// uninferrable type parameter at every call site, or — when the declaration
+    /// is never called — as the generic refusal, neither of which names the
+    /// duplication.
+    fn report_duplicate_type_parameters(
+        &mut self,
+        type_params: &[IdentId],
+        function_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let mut bound = FxHashSet::default();
+        for param_id in type_params {
+            let param = &ctx.arena()[*param_id];
+            if !bound.insert(param.name.clone()) {
+                self.push_error(TypeCheckError::DuplicateTypeParameterName {
+                    function_name: function_name.to_string(),
+                    parameter_name: param.name.clone(),
+                    location: param.location,
                 });
             }
         }
@@ -1352,7 +1380,8 @@ impl TypeChecker {
                 // signature must resolve against the surrounding scope. Validate
                 // them up front (mirroring `Def::Function`): an undeclared
                 // `Custom` type would otherwise pass the signature-only extern
-                // validator and `todo!()`-panic codegen (H6). A `self` receiver
+                // validator and reach code generation, which has no lowering for
+                // it and can only refuse it there (H6). A `self` receiver
                 // is meaningless on an extern and is rejected here (H7), matching
                 // how standalone functions reject it.
                 for arg in args {
@@ -1638,7 +1667,7 @@ impl TypeChecker {
     /// occurrences of those names in argument or return types are treated
     /// as generic placeholders rather than unresolved `Custom` types.
     ///
-    /// Example — for `fn id<T>(x: T) -> T { return x; }`, `tp_names`
+    /// Example — for `fn id T'(x: T) -> T { return x; }`, `tp_names`
     /// contains `["T"]`, so both the parameter `x: T` and the return type
     /// `T` are recorded as `TypeInfoKind::Generic("T")`; the concrete type
     /// is substituted at each call site, not here.
@@ -2978,6 +3007,16 @@ impl TypeChecker {
         }
     }
 
+    /// Returns the expression a chain of parentheses encloses, or `expr_id`
+    /// itself when it is not parenthesized.
+    fn peel_parentheses(arena: &AstArena, expr_id: ExprId) -> ExprId {
+        let mut current = expr_id;
+        while let Expr::Parenthesized { expr } = &arena[current].kind {
+            current = *expr;
+        }
+        current
+    }
+
     /// Flattens a chain of `TypeMemberAccess` nodes whose deepest base is an
     /// identifier into its `::`-separated path segments
     /// (`math::arith::add` ⇒ `["math", "arith", "add"]`).
@@ -3766,12 +3805,22 @@ impl TypeChecker {
             name: method_name_id,
         } = &arena[function_expr_id].kind
         {
-            let inner_expr = *inner_expr;
+            // A head that reads as no type name at all drops the call past
+            // method resolution into free-function handling, where it is accepted
+            // and left for code generation to refuse as a call to a proof-only
+            // specification function the program never declared. Parenthesization
+            // is not part of a callee's identity, so the head is read through it.
+            let inner_expr = Self::peel_parentheses(ctx.arena(), *inner_expr);
             let method_name_id = *method_name_id;
 
             let type_name = match &ctx.arena()[inner_expr].kind {
                 Expr::Type(ty_id) => match &ctx.arena()[*ty_id].kind {
                     TypeNode::Custom(ident_id) => Some(ctx.arena()[*ident_id].name.clone()),
+                    // A type application resolves through its base name: no
+                    // declaration in the language takes type arguments, so the
+                    // arguments name nothing distinct to resolve against, and
+                    // `Array u32'::new()` reaches the lookup `Array::new()` does.
+                    TypeNode::Generic { base, .. } => Some(ctx.arena()[*base].name.clone()),
                     TypeNode::QualifiedName { qualifier, name } => Some(format!(
                         "{}::{}",
                         ctx.arena()[*qualifier].name,
@@ -4218,17 +4267,11 @@ impl TypeChecker {
                     }
                 }
             } else {
-                // Try to infer type parameters from arguments
-                let inferred =
-                    self.infer_type_params_from_args(&signature, call_args, &location, ctx);
-                if inferred.is_empty() && !signature.type_params.is_empty() {
-                    self.push_error(TypeCheckError::MissingTypeParameters {
-                        function_name: func_name.clone(),
-                        expected: signature.type_params.len(),
-                        location,
-                    });
-                }
-                inferred
+                // Inference names every parameter no argument determines, so a
+                // second whole-signature message would render one failure twice
+                // at one location — and would name a repair (providing the
+                // arguments explicitly) that has no spelling.
+                self.infer_type_params_from_args(&signature, call_args, &location, ctx)
             }
         } else {
             FxHashMap::default()
@@ -5169,14 +5212,14 @@ impl TypeChecker {
     ///
     /// 1. **Conflicting inference.** When the same `T` appears in multiple
     ///    parameters but the corresponding arguments have different types.
-    ///    Example: `fn pair<T>(a: T, b: T)` called as `pair(1, true)` —
+    ///    Example: `fn pair T'(a: T, b: T)` called as `pair(1, true)` —
     ///    `T` is inferred as `i32` from `a` and as `bool` from `b`. The
     ///    first binding wins, and a
     ///    [`TypeCheckError::ConflictingTypeInference`] is emitted at the
     ///    call site.
     /// 2. **Unresolvable parameter.** When a type parameter declared in the
     ///    signature is not reachable from any argument. Example:
-    ///    `fn make<T>() -> T` — `T` only appears in the return position, so
+    ///    `fn make T'() -> T` — `T` only appears in the return position, so
     ///    no argument carries information about it. A
     ///    [`TypeCheckError::CannotInferTypeParameter`] is emitted.
     ///

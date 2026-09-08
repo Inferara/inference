@@ -4,8 +4,8 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 46 distinct error variants, each with specific context and location
-information. All errors implement the `Error` trait and provide detailed messages.
+The type checker produces one error variant per distinct failure, each with specific context and
+location information. All errors implement the `Error` trait and provide detailed messages.
 
 Not all variants are covered in detail below. The authoritative list of variants and their
 `#[error]` messages is in `core/type-checker/src/errors.rs`.
@@ -475,6 +475,33 @@ struct Number {
 is reachable from the body — the later parameter is unreachable and the argument passed for it is
 unnameable.
 
+### `DuplicateTypeParameterName`
+
+A function-like declaration binds the same type-parameter name more than once. A repeat is not
+shadowing: an annotation resolves to the first binder, so the later one names nothing while still
+raising the declared arity, and every call site is then asked for a type argument that no
+parameter position can supply.
+
+**Examples**:
+
+```rust
+// Free function
+fn g T' T'(x: i32) -> i32 { return x; }  // Error: type parameter `T` is declared more than once in `g`
+
+// Struct method
+struct S {
+    x: i32;
+
+    fn m T' T'(self) -> i32 {
+        // Error: type parameter `T` is declared more than once in `S::m`
+        return self.x;
+    }
+}
+```
+
+**Solution**: Rename the repeated binder, or drop it. A binder no parameter determines is the
+duplicate's other symptom, reported per call site as `CannotInferTypeParameter`.
+
 ### `InstanceMethodCalledAsAssociated`
 
 An instance method (one that takes `self`) was called using `Type::method()` syntax instead of
@@ -754,37 +781,17 @@ fn test() {
 
 ## Generic Type Errors
 
+The type checker handles generics in full, so these diagnostics all still fire; a program that
+reaches one is nonetheless refused later by analysis rule A051, which has no lowering to offer a
+type parameter.
+
 ### `TypeParameterCountMismatch`
 
-A generic function call provides a different number of explicit type arguments than the
-function's type parameter list.
+A call supplies a number of type arguments that differs from the callee's type-parameter list.
 
-**Example**:
-
-```rust
-fn identity<T>(x: T) -> T { return x; }
-
-fn test() {
-    identity::<i32, bool>(42);
-    // Error: type parameter count mismatch for `identity`: expected 1, found 2
-}
-```
-
-### `MissingTypeParameters`
-
-A generic function requires type parameters but none were provided and they could not be
-inferred.
-
-**Example**:
-
-```rust
-fn make<T>() -> T { /* ... */ }
-
-fn test() {
-    let x = make();
-    // Error: function `make` requires 1 type parameters, but none were provided
-}
-```
+No call reaches this today: a call site has no syntax for a type-argument list, so a type
+argument is only ever inferred from the argument types — see `CannotInferTypeParameter` for
+the diagnostic a call that determines no argument gets instead.
 
 ### `CannotInferTypeParameter`
 
@@ -793,11 +800,14 @@ A type parameter could not be inferred from the arguments at the call site.
 **Example**:
 
 ```rust
-fn example<T>(flag: bool) -> i32 { return 0; }
+fn example T'(flag: bool) -> i32 { return 0; }
 
 fn test() {
     example(true);
-    // Error: cannot infer type parameter `T` for `example` - consider adding explicit type arguments
+    // Error: cannot infer type parameter `T` for `example`
+    // note: a type argument is inferred from the argument types at the call site, and no
+    // argument here determines `T`; declare a parameter of type `T` so a call fixes it, or
+    // drop the binder
 }
 ```
 
@@ -808,7 +818,7 @@ The same type parameter was inferred as two different concrete types from differ
 **Example**:
 
 ```rust
-fn pair<T>(a: T, b: T) -> bool { return true; }
+fn pair T'(a: T, b: T) -> bool { return true; }
 
 fn test() {
     pair(42, true);
