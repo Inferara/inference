@@ -302,6 +302,10 @@ match NumberType::from_str("i64") {
 
 ### Type Substitution for Generics
 
+Substitution runs inside the type checker and nowhere after it: analysis rule A051 refuses a `fn`
+that declares type parameters, and a type application used as a type or in expression position,
+so no substituted type reaches code generation.
+
 ```rust
 use rustc_hash::FxHashMap;
 use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
@@ -811,7 +815,9 @@ let typed_context = type_check(arena)?;
 
 ### Issue: Generic Type Not Substituted
 
-**Problem**: Generic type parameter appears in generated code.
+**Problem**: An embedder reading `TypeInfo` back sees a type parameter where it expected a
+concrete type. The compiler's own pipeline cannot reach this: analysis rule A051 refuses the
+program before code generation runs.
 
 **Cause**: Type substitution not applied at call site.
 

@@ -1061,6 +1061,7 @@ mod enum_tests {
 mod generics_tests {
     use super::*;
     use inference_type_checker::TypeCheckerBuilder;
+    use inference_type_checker::check_with_diagnostics;
 
     /// Helper function to run type checker, returning Result to handle WIP failures
     fn try_type_check(
@@ -1115,6 +1116,49 @@ mod generics_tests {
         } else {
             panic!("Expected Function definition");
         }
+    }
+
+    /// The advice a call site gets when nothing determines a type parameter must
+    /// name a repair that can be written. The grammar has no place for a type
+    /// argument at a call site — a call carries an empty type-parameter list in
+    /// every program — so advising one pointed at nothing.
+    ///
+    /// The count is asserted alongside the wording: one call that cannot fix a
+    /// type parameter is one failure, and reporting the same call twice — once
+    /// for the parameter it cannot infer and once for the arity it was not given
+    /// — leaves the caller two messages to reconcile for one edit.
+    ///
+    /// Reinstating advice that names a call-site type argument turns this red,
+    /// and so does raising a second whole-signature diagnostic on the same call.
+    #[test]
+    fn uninferrable_type_parameter_advises_an_expressible_repair() {
+        let source = r#"fn id U'(x: i32) -> i32 { return x; } fn test() -> i32 { return id(1); }"#;
+        let arena = build_ast(source.to_string());
+        let errors: Vec<_> = check_with_diagnostics(arena)
+            .errors
+            .into_iter()
+            .map(|d| d.error.to_string())
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "one call that determines no type argument is one failure: {errors:?}"
+        );
+        let message = &errors[0];
+        assert!(
+            message.contains("cannot infer type parameter `U` for `id`"),
+            "the diagnostic still names the parameter and its function: {message}"
+        );
+        assert!(
+            message.contains(
+                "declare a parameter of type `U` so a call fixes it, or drop the binder"
+            ),
+            "the advice names the two repairs that exist: {message}"
+        );
+        assert!(
+            !message.contains("type arguments"),
+            "no advice may name a syntax the grammar has no place for: {message}"
+        );
     }
 
     #[test]

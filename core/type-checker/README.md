@@ -116,9 +116,13 @@ enum Status {
 
 ### Generic Types
 
+A type-parameter list is written after the function name, one primed name per parameter. The type
+checker handles generics in full; analysis rule A051 then refuses the program, because a type
+parameter has no lowering.
+
 ```rust
 // Generic function with type parameter T
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;
 }
 
@@ -495,7 +499,7 @@ Symbol lookup walks up the tree from the current scope to find matching symbols.
 Generic type parameters are substituted during function calls:
 
 ```rust
-fn generic<T>(x: T) -> [T; 2] {
+fn generic T'(x: T) -> [T; 2] {
     return [x, x];
 }
 

@@ -919,9 +919,9 @@ mod generic_calls_with_concrete_parameters {
     use super::*;
 
     /// This call is newly accepted by the type checker — it used to be rejected
-    /// with "expected `i64`, found `i32`". It still cannot be compiled: codegen
-    /// has no monomorphization, so it fails there with "unsupported type in
-    /// WASM codegen: T". The failure moved from the checker to codegen rather
+    /// with "expected `i64`, found `i32`". It still cannot be compiled: the
+    /// compiler does not monomorphize, so A051 rejects the declaration before
+    /// code generation. The failure moved from the checker to analysis rather
     /// than going away, which is why this is a type-checker test with no
     /// codegen fixture behind it.
     #[test]

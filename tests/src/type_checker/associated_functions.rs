@@ -131,3 +131,109 @@ fn associated_function_with_return_type_inference() {
         result.err()
     );
 }
+
+/// The head of a `Type::assoc()` call, across the spellings that name one type.
+///
+/// A head the extraction cannot read produces no type name, and the call then
+/// falls past method resolution into free-function handling — where it is
+/// accepted and left for code generation to refuse as a call to a proof-only
+/// specification function the program never declared. Every test here goes red
+/// if its spelling stops reaching the resolution the bare name reaches.
+mod qualified_call_head {
+    use crate::utils::build_ast;
+    use inference_type_checker::check_with_diagnostics;
+    use inference_type_checker::errors::TypeCheckError;
+
+    fn diagnostics(source: &str) -> Vec<TypeCheckError> {
+        let arena = build_ast(source.to_string());
+        check_with_diagnostics(arena)
+            .errors
+            .into_iter()
+            .map(|d| d.error)
+            .collect()
+    }
+
+    /// Asserts `source` is refused for naming no such method on `type_name`.
+    fn assert_method_not_found(source: &str, type_name: &str, method_name: &str) {
+        let errors = diagnostics(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one diagnostic, got: {errors:?}"
+        );
+        match &errors[0] {
+            TypeCheckError::MethodNotFound {
+                type_name: got_type,
+                method_name: got_method,
+                ..
+            } => {
+                assert_eq!(got_type, type_name, "diagnostic names the head type");
+                assert_eq!(got_method, method_name, "diagnostic names the method");
+            }
+            other => panic!("expected MethodNotFound, got {other:?}"),
+        }
+    }
+
+    /// The bare head, which resolved correctly all along. It is the reference
+    /// the three spellings below are held to.
+    #[test]
+    fn bare_head_reports_the_missing_method() {
+        assert_method_not_found(
+            r#"pub fn main() -> i32 { Array::new(); return 0; }"#,
+            "Array",
+            "new",
+        );
+    }
+
+    /// A type application resolves through its base name: no declaration in the
+    /// language takes type arguments, so the arguments name nothing distinct to
+    /// resolve against.
+    #[test]
+    fn type_application_head_resolves_through_its_base() {
+        assert_method_not_found(
+            r#"pub fn main() -> i32 { Array u32'::new(); return 0; }"#,
+            "Array",
+            "new",
+        );
+    }
+
+    /// Parenthesization is not part of a callee's identity, and the type
+    /// application is the spelling that is normally written parenthesized.
+    #[test]
+    fn parenthesized_type_application_head_resolves_through_its_base() {
+        assert_method_not_found(
+            r#"pub fn main() -> i32 { (Array u32')::new(); return 0; }"#,
+            "Array",
+            "new",
+        );
+    }
+
+    /// The parentheses alone hid the head just as thoroughly as the type
+    /// arguments did.
+    #[test]
+    fn parenthesized_bare_head_resolves_through_its_parentheses() {
+        assert_method_not_found(
+            r#"pub fn main() -> i32 { (Array)::new(); return 0; }"#,
+            "Array",
+            "new",
+        );
+    }
+
+    /// Resolution through a parenthesized head reaches the declared method, not
+    /// just the refusal: the receiver diagnostic can only be reported by a lookup
+    /// that found `get` on `P`.
+    #[test]
+    fn parenthesized_head_reaches_a_declared_method() {
+        let source = r#"struct P { x: i32; fn get(self) -> i32 { return self.x; } }
+            pub fn main() -> i32 { return (P)::get(); }"#;
+        let errors = diagnostics(source);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                TypeCheckError::InstanceMethodCalledAsAssociated { type_name, method_name, .. }
+                    if type_name == "P" && method_name == "get"
+            )),
+            "expected the receiver diagnostic for `P::get`, got: {errors:?}"
+        );
+    }
+}

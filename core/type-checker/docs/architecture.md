@@ -215,7 +215,7 @@ fn add(a: i32, b: i32) -> i32 {
     return a + b;
 }
 
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;
 }
 
@@ -523,11 +523,13 @@ The `SimpleTypeKind` enum provides:
 
 ### Type Substitution for Generics
 
-When calling a generic function, type parameters are substituted:
+When calling a generic function, type parameters are substituted. Substitution is where generics
+stop: nothing carries the result past the type checker, and analysis rule A051 refuses the program
+before code generation sees it.
 
 ```rust
 // Generic function
-fn identity<T>(x: T) -> T { return x; }
+fn identity T'(x: T) -> T { return x; }
 
 // Call site
 let result = identity(42);
@@ -715,10 +717,11 @@ TypeCheckError::TypeMismatch {
 
 **With Generic Types**:
 
-For generic functions, type parameters are substituted before comparison:
+For generic functions, type parameters are substituted before comparison (the program below type
+checks and is then refused by analysis rule A051):
 
 ```rust
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;
 }
 
@@ -1020,7 +1023,7 @@ fn test_feature() {
 - Partial type annotations (infer some parameters)
 
 **Const Generics**:
-- Array sizes as generic parameters: `fn foo<const N: usize>(arr: [i32; N])`
+- Array sizes as generic parameters
 - Const expressions in type positions
 - Const generic bounds and where clauses
 

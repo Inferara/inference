@@ -5,6 +5,7 @@ mod array_tests;
 mod associated_functions;
 mod coverage;
 mod duplicate_parameter_name;
+mod duplicate_type_parameter_name;
 mod error_recovery;
 mod extern_binding;
 mod extern_index;

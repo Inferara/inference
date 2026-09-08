@@ -357,14 +357,17 @@ fn test_enums() {
 
 ### Type Parameters
 
-Generic functions can be parameterized over types.
+Generic functions can be parameterized over types. A type-parameter list is written after the
+function name, one primed name per parameter. The type checker handles the whole of what follows;
+analysis rule A051 then refuses any program that declares a type parameter, because nothing lowers
+one to WebAssembly.
 
 ```rust
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;
 }
 
-fn first<T>(arr: [T; 2]) -> T {
+fn first T'(arr: [T; 2]) -> T {
     return arr[0];
 }
 ```
@@ -376,7 +379,7 @@ fn first<T>(arr: [T; 2]) -> T {
 Type parameters are inferred at call sites:
 
 ```rust
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;
 }
 
@@ -393,7 +396,7 @@ When calling generic functions, type parameters are substituted:
 
 ```rust
 // Generic function definition
-fn swap<T>(arr: [T; 2]) -> [T; 2] {
+fn swap T'(arr: [T; 2]) -> [T; 2] {
     return [arr[1], arr[0]];
 }
 
@@ -417,7 +420,7 @@ let result = swap([1, 2]);
 Arrays can be generic over element type:
 
 ```rust
-fn sum_array<T>(arr: [T; 3]) -> T {
+fn sum_array T'(arr: [T; 3]) -> T {
     // T must be numeric for + operator
     return arr[0] + arr[1] + arr[2];
 }
@@ -952,11 +955,11 @@ let arr2: [i32; 5] = arr;  // Error: [i32; 3] != [i32; 5]
 Currently, there are no trait-based constraints on generic types. Type parameters are unconstrained:
 
 ```rust
-fn identity<T>(x: T) -> T {
+fn identity T'(x: T) -> T {
     return x;  // OK: no constraints on T
 }
 
-fn add<T>(a: T, b: T) -> T {
+fn add T'(a: T, b: T) -> T {
     return a + b;  // Error: + requires numeric type, T is unconstrained
 }
 ```
@@ -967,7 +970,7 @@ fn add<T>(a: T, b: T) -> T {
 
 **Trait System**:
 - Interface-based polymorphism with trait definitions
-- Trait bounds on generic type parameters: `fn foo<T: Trait>(x: T)`
+- Trait bounds on generic type parameters
 - Default implementations and trait inheritance
 - Associated types and associated constants
 - Coherence checking for trait implementations
@@ -979,7 +982,7 @@ fn add<T>(a: T, b: T) -> T {
 - Bidirectional inference for lambdas and closures
 
 **Const Generics**:
-- Array sizes as generic parameters: `fn foo<const N: usize>(arr: [i32; N])`
+- Array sizes as generic parameters
 - Const expressions in type positions
 - Const bounds and where clauses
 - Compile-time array size validation
@@ -997,14 +1000,14 @@ fn add<T>(a: T, b: T) -> T {
 Widening between typed values (`i32` → `i64`) is not under consideration: all type conversions are explicit, and there is no cast operator. What function arguments and return values *do* supply is an expected type for an integer literal, which is not a conversion — see [Integer Literal Typing](#integer-literal-typing).
 
 **Advanced Type Features**:
-- Type aliases with generics: `type List<T> = [T; 10]`
+- Type aliases with generics (a `type` declaration binds no type parameter today)
 - Union types: `i32 | i64` for sum types
 - Intersection types: `T & U` for combined constraints
 - Refinement types: types with predicates
 
 **Standard Library Types**:
-- Optional types: `Option<T>` for nullable values
-- Result types: `Result<T, E>` for error handling
+- Optional types: `Option T'` for nullable values
+- Result types: `Result T' E'` for error handling
 - Never type: `!` for functions that never return
 - Tuple types: `(i32, bool, string)` for heterogeneous collections
 
