@@ -995,13 +995,17 @@ impl Compiler {
         Ok(())
     }
 
-    /// Registers a function import for every `external fn` reachable from this
-    /// source file, assigning each WASM function index `0..N` ahead of all local
+    /// Registers a function import for every `external fn` reachable from the
+    /// program, assigning each WASM function index `0..N` ahead of all local
     /// functions.
     ///
     /// For each extern this:
     /// 1. lowers its declared signature to a WASM `(params, results)` type and
-    ///    dedups it into [`Self::types`] (identical signatures share one entry);
+    ///    dedups it into [`Self::types`] (identical signatures share one entry).
+    ///    A struct or enum named in that signature is resolved from the file the
+    ///    declaration is written in — the name is spelled in that file's scope,
+    ///    and a type only that file can see would not resolve from the entry
+    ///    file's;
     /// 2. interns an [`ImportEntry`] carrying the logical module / export field
     ///    from the declaration's provenance
     ///    ([`TypedContext::extern_origin_by_decl`]), sharing one import with any
@@ -1020,11 +1024,11 @@ impl Compiler {
     pub(crate) fn register_imports(
         &mut self,
         arena: &AstArena,
-        extern_def_ids: &[DefId],
+        externs: &[crate::EmittableExtern],
         ctx: &TypedContext,
     ) -> Result<u32, CodegenError> {
-        for &def_id in extern_def_ids {
-            let Def::ExternFunction { args, returns, .. } = &arena[def_id].kind else {
+        for entry in externs {
+            let Def::ExternFunction { args, returns, .. } = &arena[entry.def_id].kind else {
                 continue;
             };
             // Resolve provenance by the declaring `DefId`, not by name. Two
@@ -1033,15 +1037,17 @@ impl Compiler {
             // and would bind the unbound declaration to the bound one's origin,
             // registering a spurious/duplicate import. The decl-keyed query
             // returns `None` for the unbound one, so it is correctly skipped.
-            let Some(origin) = ctx.extern_origin_by_decl(def_id) else {
+            let Some(origin) = ctx.extern_origin_by_decl(entry.def_id) else {
                 continue;
             };
 
-            let params = Self::import_param_types(arena, args, ctx)?;
+            let params = Self::import_param_types(arena, args, ctx, &entry.module_path)?;
             let results = match returns {
-                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx, &[])?
-                    .into_iter()
-                    .collect::<Vec<_>>(),
+                Some(ty_id) => {
+                    Self::val_type_from_type_id(arena, *ty_id, ctx, &entry.module_path)?
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                }
                 None => Vec::new(),
             };
             let type_idx = self.intern_type(params, results);
@@ -1051,7 +1057,7 @@ impl Compiler {
                 field: origin.export_field,
                 type_idx,
             });
-            self.extern_import_idx.insert(def_id, import_idx);
+            self.extern_import_idx.insert(entry.def_id, import_idx);
         }
 
         Ok(self.imports.len() as u32)
@@ -1081,11 +1087,13 @@ impl Compiler {
     /// type-only one. This keeps the import signature in lock-step with the
     /// validator's `lower_extern_signature`. A `unit` parameter cannot reach
     /// this point: the validator rejects it (`LowerSignatureError::UnitParameter`)
-    /// earlier in the pipeline.
+    /// earlier in the pipeline. `module_path` is the declaring file's, which is
+    /// the scope every named type in the signature is written in.
     fn import_param_types(
         arena: &AstArena,
         args: &[ArgData],
         ctx: &TypedContext,
+        module_path: &[String],
     ) -> Result<Vec<ValType>, CodegenError> {
         let mut params = Vec::with_capacity(args.len());
         for arg in args {
@@ -1098,7 +1106,7 @@ impl Compiler {
                 // emits no receiver param for an import.
                 ArgKind::SelfRef { .. } => continue,
             };
-            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx, &[])? {
+            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx, module_path)? {
                 params.push(val);
             }
         }
@@ -1347,27 +1355,49 @@ impl Compiler {
                 | SimpleTypeKind::U16
                 | SimpleTypeKind::I32
                 | SimpleTypeKind::U32,
-            )
-            | TypeNode::Array { .. } => Ok(Some(ValType::I32)),
+            ) => Ok(Some(ValType::I32)),
+            // An array is an I32 pointer to its first element, but only when the
+            // element it holds has a value type of its own. Asking the element
+            // itself, rather than listing the kinds that have no layout, keeps
+            // every kind covered by construction, so a type that gains no
+            // lowering later cannot reopen the hole: `[Q i32'; 2]` and
+            // `[fn(i32) -> i32; 2]` would otherwise pass a pointer to bytes
+            // nothing can size, and the export would look like an ordinary
+            // `(param i32)`. The element's own refusal is what travels out, so
+            // an array reports the same reason, at the same position, as the
+            // element spelled on its own.
+            TypeNode::Array { .. } => {
+                let element = Self::innermost_array_element(arena, ty_id);
+                match Self::val_type_from_type_id(arena, element, ctx, module_path)? {
+                    Some(_) => Ok(Some(ValType::I32)),
+                    // A unit element is the one shape that answers `Ok(None)`
+                    // instead of an error: it is not a refusal on its own, since
+                    // `-> ()` is how a function says it returns nothing. As an
+                    // array element it occupies no bytes, leaving the array no
+                    // element size to stride by.
+                    None => Err(CodegenError::UnsupportedConstruct {
+                        construct: "an array whose element type is the unit type".to_string(),
+                        rule: "A049",
+                        location: Some(arena[element].location),
+                    }),
+                }
+            }
             TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(ValType::I64)),
-            // Generics are not implemented (#320): no type argument is ever
-            // substituted, so a generic type names no layout to choose a value
-            // type from. A function type has no value representation either —
-            // there are no first-class functions in the language.
-            TypeNode::Generic { base, params } => Err(CodegenError::UnsupportedType {
-                rendered: std::iter::once(arena[*base].name.clone())
-                    .chain(params.iter().map(|p| format!("{}'", arena[*p].name)))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            }),
+            TypeNode::Generic { base, params } => {
+                Err(Self::refuse_type_application(arena, ty_id, *base, params))
+            }
+            // A function type has no value representation — there are no
+            // first-class functions in the language.
             TypeNode::Function { .. } => Err(CodegenError::UnsupportedType {
                 rendered: "a function type".to_string(),
+                location: None,
             }),
             // `TypeQualifiedName` is the dead AST variant; the parser produces
             // `Qualified` for every `::`-qualified type. It stays an error rather
             // than a panic for defense-in-depth.
             TypeNode::QualifiedName { .. } => Err(CodegenError::UnsupportedType {
                 rendered: arena[ty_id].kind.qualified_path(arena).unwrap_or_default(),
+                location: None,
             }),
             TypeNode::Qualified { .. } => {
                 // A `::`-qualified type that resolves to a struct or enum is an I32
@@ -1381,6 +1411,7 @@ impl Compiler {
                 } else {
                     Err(CodegenError::UnsupportedType {
                         rendered: path.join("::"),
+                        location: None,
                     })
                 }
             }
@@ -1411,16 +1442,162 @@ impl Compiler {
                     || ctx.lookup_enum_in(name, module_path).is_some()
                 {
                     Ok(Some(ValType::I32))
+                } else if let Some(aliased) = Self::type_alias_named(arena, ctx, name) {
+                    Err(CodegenError::UnsupportedType {
+                        rendered: format!(
+                            "the type alias `{name}`, which is not resolved to the type it names{}",
+                            Self::alias_repair_clause(arena, ctx, aliased, module_path)
+                        ),
+                        location: Some(arena[ty_id].location),
+                    })
                 } else {
-                    // The type-checker rejects an unknown type before codegen, so
-                    // this is unreachable from a well-formed pipeline. Returning an
+                    // An unknown type name reaches here two ways. The type
+                    // checker rejects a genuinely undeclared one before codegen,
+                    // so that half is unreachable from a well-formed pipeline. A
+                    // declared type *parameter* is the other: it lowers to a
+                    // bare name the type checker accepted, and this helper is
+                    // handed a `TypeId` with no enclosing binder list, so it
+                    // cannot tell the two apart. The declaration is refused
+                    // before its signature is lowered, which is what keeps that
+                    // half from reaching this locationless message. Returning an
                     // error rather than `todo!()` keeps a malformed type from
                     // panicking the compiler (H6 defense-in-depth).
                     Err(CodegenError::UnsupportedType {
                         rendered: name.clone(),
+                        location: None,
                     })
                 }
             }
+        }
+    }
+
+    /// The element type an array type ultimately holds, or `ty_id` itself when
+    /// it names no array. `[[Q i32'; 2]; 3]` reaches the `Q i32'` node.
+    fn innermost_array_element(arena: &AstArena, ty_id: TypeId) -> TypeId {
+        let mut current = ty_id;
+        while let TypeNode::Array { element, .. } = &arena[current].kind {
+            current = *element;
+        }
+        current
+    }
+
+    /// The type a `type` alias named `name` names, if the program declares one.
+    ///
+    /// An alias is not transparent: the type checker keeps `type A = i32` and
+    /// `i32` distinct, so no value of an alias can be constructed, and nothing
+    /// resolves an alias to its target before lowering. Naming one in a
+    /// signature is the only way an alias reaches the backend, and reporting it
+    /// as the alias it is — with the type to write instead — is worth more to
+    /// the reader than reporting it as a name that does not exist. The match is
+    /// on the bare name over the top-level `const` and `type` definitions the
+    /// typed context already orders: two same-named aliases in different files
+    /// give the same answer, so a diagnostic has no reason to pick between them.
+    fn type_alias_named(arena: &AstArena, ctx: &TypedContext, name: &str) -> Option<TypeId> {
+        ctx.definition_order()
+            .iter()
+            .find_map(|def_id| match &arena[*def_id].kind {
+                Def::TypeAlias { name: alias, ty, .. } if arena[*alias].name == name => Some(*ty),
+                _ => None,
+            })
+    }
+
+    /// The `; write `T` instead` clause an alias refusal ends with, or the empty
+    /// string when there is no `T` worth naming.
+    ///
+    /// `target` is the type the refused alias names directly, which may be
+    /// another alias: advising the immediate target of `type B = i32; type A = B`
+    /// would tell the reader to write `B`, which earns the very same refusal. So
+    /// the chain is followed to the first type that is not itself an alias. A
+    /// chain that closes on itself reaches no such type and gets no clause —
+    /// there is nothing true to advise, and a cyclic alias is the type checker's
+    /// to reject.
+    ///
+    /// The type the chain ends at is advised only when
+    /// [`Self::is_advisable_replacement`] holds of it, so a refusal never tells
+    /// the reader to write something that does not compile.
+    fn alias_repair_clause(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        target: TypeId,
+        module_path: &[String],
+    ) -> String {
+        let mut current = target;
+        let mut seen = FxHashSet::default();
+        while let TypeNode::Custom(ident_id) = &arena[current].kind {
+            if !seen.insert(arena[*ident_id].name.clone()) {
+                return String::new();
+            }
+            let Some(next) = Self::type_alias_named(arena, ctx, &arena[*ident_id].name) else {
+                break;
+            };
+            current = next;
+        }
+        if !Self::is_advisable_replacement(arena, ctx, current, module_path) {
+            return String::new();
+        }
+        format!(
+            "; write `{}` instead",
+            Self::render_source_type(&TypeInfo::from_type_id(arena, current).kind)
+        )
+    }
+
+    /// Whether a signature could name `ty_id` in place of the alias that stands
+    /// for it and still lower.
+    ///
+    /// The advice a diagnostic gives has to be an edit the author can make, and
+    /// two shapes are not. A type the backend has no lowering for earns a
+    /// refusal of its own once written — `string`, a function type, `Q i32'` —
+    /// and one of those, a type application, does not even have a bare spelling:
+    /// its rendering here is `Q'`, which the parser rejects. So the question is
+    /// asked of the lowering itself rather than of a list of kinds, and only a
+    /// type that lowers to a value is advised.
+    ///
+    /// An array is asked about its innermost element, which is the same question
+    /// [`Self::val_type_from_type_id`]'s array arm asks, so an array of a type
+    /// with no lowering is no more advisable than that type written alone. An
+    /// element that is itself an alias is refused before the question is asked:
+    /// writing it earns this very refusal again, and stopping there is also what
+    /// keeps this check from re-entering the alias branch that called it.
+    fn is_advisable_replacement(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        ty_id: TypeId,
+        module_path: &[String],
+    ) -> bool {
+        let element = Self::innermost_array_element(arena, ty_id);
+        if let TypeNode::Custom(ident_id) = &arena[element].kind
+            && Self::type_alias_named(arena, ctx, &arena[*ident_id].name).is_some()
+        {
+            return false;
+        }
+        matches!(
+            Self::val_type_from_type_id(arena, element, ctx, module_path),
+            Ok(Some(_))
+        )
+    }
+
+    /// The refusal a type application earns wherever it is declared.
+    ///
+    /// No type declaration in the language takes type arguments, so `Q i32'`
+    /// names nothing the backend can lay out: no byte size for a frame slot, no
+    /// value type for a signature. The message renders the application the way
+    /// the source spells it, and names the rule that owns the located version.
+    fn refuse_type_application(
+        arena: &AstArena,
+        ty_id: TypeId,
+        base: IdentId,
+        params: &[IdentId],
+    ) -> CodegenError {
+        let rendered = std::iter::once(arena[base].name.clone())
+            .chain(params.iter().map(|p| format!("{}'", arena[*p].name)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        CodegenError::UnsupportedConstruct {
+            construct: format!(
+                "the type `{rendered}`, which gives type arguments to a declaration that accepts none"
+            ),
+            rule: "A051",
+            location: Some(arena[ty_id].location),
         }
     }
 
@@ -1470,15 +1647,23 @@ impl Compiler {
         origin: &FunctionOrigin,
         choice_plan: Option<&ChoicePlan>,
     ) -> Result<(), CodegenError> {
-        let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
+        let (fn_name_id, vis, args, returns, body_id, is_generic) = match &arena[def_id].kind {
             Def::Function {
                 name,
                 vis,
                 args,
                 returns,
                 body,
+                type_params,
                 ..
-            } => (*name, vis.clone(), args.clone(), *returns, *body),
+            } => (
+                *name,
+                vis.clone(),
+                args.clone(),
+                *returns,
+                *body,
+                !type_params.is_empty(),
+            ),
             _ => return Ok(()),
         };
 
@@ -1494,6 +1679,23 @@ impl Compiler {
         self.poisoned = None;
         self.current_fn_returns_value = false;
         self.unnamed_params.clear();
+
+        // A function declared with type parameters has no code generation:
+        // nothing substitutes a type argument, so a binder reaches lowering
+        // still standing for no type — no layout to size a frame slot with and
+        // no value type to pass an argument in. It is refused here, before the
+        // signature is lowered, because the type helper is handed one `TypeId`
+        // at a time and cannot tell a binder from an undeclared name. A refusal
+        // rather than a poison, because signature lowering returns through `?`
+        // long before the poison slot is read. A051 owns the located version.
+        if is_generic {
+            cov_mark::hit!(wasm_codegen_generic_function_rejected);
+            return Err(CodegenError::UnsupportedConstruct {
+                construct: "a function declared with type parameters".to_string(),
+                rule: "A051",
+                location: Some(arena[def_id].location),
+            });
+        }
 
         let raw_name = arena[fn_name_id].name.clone();
         // Record which file this function belongs to so struct/enum metadata
@@ -4030,14 +4232,14 @@ impl Compiler {
                 let local_idx = *local_idx;
                 self.func().instruction(&Instruction::LocalGet(local_idx));
             }
-            // `Name<T>` in expression position. Generics are not implemented
-            // (#320): no type argument is ever substituted, so there is no
-            // instantiated definition to emit a call or a value for.
+            // A type application (`Q i32'`) standing in expression position. No
+            // type declaration in the language takes type arguments, so this
+            // names no definition to emit a call or a value for.
             Expr::Type(_) => {
                 cov_mark::hit!(wasm_codegen_generic_type_expression_rejected);
                 self.poison(CodegenError::UnsupportedConstruct {
                     construct: "a generic type in expression position".to_string(),
-                    rule: "generics are unimplemented (#320) and no earlier phase",
+                    rule: "A051",
                     location: Some(arena[expr_id].location),
                 });
             }
@@ -4673,8 +4875,13 @@ impl Compiler {
     ///
     /// Handles `Expr::Type(TypeId)` with `TypeNode::Custom(ident_id)` and
     /// `Expr::Identifier(ident_id)` patterns, matching the type-checker's resolution logic.
+    /// Parentheses are peeled, because `(P)::mk()` names the callee `P::mk()` names and
+    /// the type checker reads it that way: a head readable there but not here reaches the
+    /// refusal for a callee with no lowerable form on a call the type checker accepted.
+    /// A type application is deliberately unreadable here, so that a head naming one
+    /// reaches a refusal rather than being lowered through its base.
     fn extract_type_name_from_type_expr(arena: &AstArena, type_expr_id: ExprId) -> Option<String> {
-        match &arena[type_expr_id].kind {
+        match &arena[Self::peel_parenthesized(arena, type_expr_id)].kind {
             Expr::Type(ty_id) => match &arena[*ty_id].kind {
                 TypeNode::Custom(ident_id) => Some(arena[*ident_id].name.clone()),
                 _ => None,

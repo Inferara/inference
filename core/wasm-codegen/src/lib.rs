@@ -912,6 +912,15 @@ pub(crate) struct EmittableFn {
     pub(crate) def_id: DefId,
 }
 
+/// An `external fn` declaration to emit as a WASM function import, tagged with
+/// its defining file's module path (empty for the entry file). An extern's
+/// signature may name a struct or an enum, and the name is written in — and
+/// resolves from — the file that declares the extern, not the entry file.
+pub(crate) struct EmittableExtern {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) def_id: DefId,
+}
+
 /// A struct method to emit. `module_path` is the **struct's** defining file —
 /// the method's mangled name is qualified by where its struct lives, not where
 /// it is called.
@@ -972,7 +981,7 @@ struct EmittableFunctions {
     /// Top-level `external fn` declarations, emitted as WASM function imports
     /// at indices `0..N` ahead of every local function (see
     /// [`Compiler::register_imports`]).
-    imports: Vec<DefId>,
+    imports: Vec<EmittableExtern>,
     funcs: Vec<EmittableFn>,
     methods: Vec<EmittableMethod>,
     spec_funcs: Vec<EmittableSpecFn>,
@@ -1009,7 +1018,10 @@ fn collect_emittable_functions(
 ) -> Result<(), CodegenError> {
     for &def_id in defs {
         match &arena[def_id].kind {
-            Def::ExternFunction { .. } => buckets.imports.push(def_id),
+            Def::ExternFunction { .. } => buckets.imports.push(EmittableExtern {
+                module_path: module_path.to_vec(),
+                def_id,
+            }),
             Def::Function { .. } => buckets.funcs.push(EmittableFn {
                 module_path: module_path.to_vec(),
                 def_id,

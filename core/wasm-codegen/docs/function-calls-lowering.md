@@ -39,7 +39,7 @@ they occupy indices `0..N`. `set_local_func_base(N)` then seeds the local-functi
 index counter past the imports.
 
 ```text
-register_imports(arena, extern_def_ids, ctx)
+register_imports(arena, externs, ctx)
     extern_import_idx[def_id(sum)] = 0   (import at index 0)
     extern_import_idx[def_id(neg)] = 1   (import at index 1)
     returns N = 2  (import count)
@@ -53,6 +53,12 @@ rather than of the name it happens to use, and two files may declare the same
 name and bind it to different modules. `register_imports` reads the binding
 through `ctx.extern_origin_by_decl`, which answers `None` for a declaration no
 `use … from` clause binds; such a declaration is skipped and reserves no import.
+
+Each entry also carries the module path of the file the declaration is written in.
+That is the scope a struct or enum named in the declared signature is resolved
+from, because that is the scope the name was written in: an extern in a sibling
+file may name a type only that file declares, and lowering its signature from the
+entry file's scope would fail to resolve a name the program does define.
 
 ### Stage 1 — Top-level function registration (`build_func_name_to_idx`)
 
@@ -86,7 +92,7 @@ is an import or a local.
 ```text
 register_function_indices
         |
-        +---> register_imports(extern_def_ids)         // Stage 0
+        +---> register_imports(externs)                // Stage 0
         |         extern_import_idx[def_id(sum)] = 0, ...
         |         returns N = import_count
         |

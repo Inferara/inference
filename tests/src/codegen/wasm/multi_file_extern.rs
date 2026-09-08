@@ -51,9 +51,9 @@ pub fn boost(a: i32) -> i32 {
 }
 ";
 
-/// Instantiates `wasm_bytes` with `libA.scale` and `libB.scale` supplied by the
-/// host. A module that imports only one of them still instantiates: the linker
-/// is asked for the names the module names.
+/// Instantiates `wasm_bytes` with `libA.scale`, `libA.probe` and `libB.scale`
+/// supplied by the host. A module that imports only some of them still
+/// instantiates: the linker is asked for the names the module names.
 fn instantiate_with_host_libraries(wasm_bytes: &[u8]) -> (Store<()>, Instance) {
     inf_wasmparser::validate(wasm_bytes)
         .unwrap_or_else(|e| panic!("generated multi-file Wasm module is invalid: {e}"));
@@ -67,6 +67,13 @@ fn instantiate_with_host_libraries(wasm_bytes: &[u8]) -> (Store<()>, Instance) {
     linker
         .func_wrap("libB", "scale", |a: i32| a * 7)
         .expect("libB.scale is supplied by the host");
+    // Takes the compound argument as the one i32 pointer its declaration lowers
+    // to, and answers a value nothing in the program computes. Instantiation is
+    // itself the check that the module declared that import with this exact
+    // signature.
+    linker
+        .func_wrap("libA", "probe", |_p: i32| 4242)
+        .expect("libA.probe is supplied by the host");
     let mut store = Store::new(&engine, ());
     let instance = linker
         .instantiate(&mut store, &module)
@@ -256,4 +263,53 @@ pub fn helper(x: i32) -> i32 {
     ]);
     inf_wasmparser::validate(&wasm)
         .unwrap_or_else(|e| panic!("proof-mode multi-file module is invalid: {e}"));
+}
+
+/// A sibling declares and binds an `external fn` whose parameter is an array of a
+/// struct only that sibling defines.
+///
+/// The declaration's types are written in the sibling's scope, so that is the
+/// scope they have to be resolved from: lowering the import signature from the
+/// entry file's scope instead cannot see `Point`, and the whole program is
+/// refused with `unsupported type in WASM codegen: Point` — a message naming a
+/// type the program does declare. Passing an empty module path where the
+/// declaring file's belongs turns this red.
+#[test]
+fn a_siblings_extern_takes_an_array_of_its_own_struct() {
+    const ENTRY_MEASURES: &str = "\
+use side;
+
+pub fn run() -> i32 {
+    return side::measure();
+}
+";
+
+    const SIDE_DECLARES_POINT: &str = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+}
+
+external fn probe(p: [Point; 2]) -> i32;
+use { probe } from libA;
+
+pub fn measure() -> i32 {
+    let pts: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    return probe(pts);
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], ENTRY_MEASURES),
+        (vec!["side"], SIDE_DECLARES_POINT),
+    ]);
+    let (mut store, instance) = instantiate_with_host_libraries(&wasm);
+    let run: TypedFunc<(), i32> = instance
+        .get_typed_func(&mut store, "run")
+        .expect("`run` is exported from the entry file");
+    assert_eq!(
+        run.call(&mut store, ()).expect("run() executes"),
+        4242,
+        "the array argument reaches `libA.probe` as the single i32 pointer it lowers to"
+    );
 }

@@ -26,13 +26,12 @@ pub(crate) enum CodegenError {
     /// malformed body.
     ///
     /// `rule` names what rejects the shape earlier — an `A0xx` rule id, a family
-    /// of them, or a prose phrase such as `the type checker`. A few shapes have
-    /// no earlier owner at all (an unimplemented language feature reached through
-    /// a spelling nothing rejects yet); there the field says so in prose, and the
-    /// rendered sentence still reads as a statement about what does or does not
-    /// stand between the user and this refusal. It is written to fit the template
-    /// as the subject of "rejects it before code generation", so a plural family
-    /// is phrased as a singular noun.
+    /// of them, or a prose phrase such as `the type checker`. Every shape refused
+    /// this way has such an owner, which is what points a caller who reached the
+    /// backend directly at the located diagnostic the full pipeline would have
+    /// produced for the same program. The field is written to fit the template as
+    /// the subject of "rejects it before code generation", so a plural family is
+    /// phrased as a singular noun.
     ///
     /// Code generation mints no diagnostic code of its own: the `P0xx` namespace
     /// belongs to proof-mode obligations, and a second compile-mode namespace
@@ -88,12 +87,31 @@ pub(crate) enum CodegenError {
         outer_spec: String,
         inner_spec: String,
     },
-    /// A type in a signature has no WASM value-type representation. The
-    /// type-checker rejects unknown types before codegen, so reaching this is a
-    /// defense-in-depth failure rather than a normal diagnostic path; emitting
-    /// an error keeps codegen from `todo!()`-panicking on a malformed type.
-    #[error("unsupported type in WASM codegen: {rendered}")]
-    UnsupportedType { rendered: String },
+    /// A type in a signature has no WASM value-type representation.
+    ///
+    /// Unlike [`Self::UnsupportedConstruct`] this variant names no rule, because
+    /// the shapes it reports have no earlier owner: nothing rejects a function
+    /// type or a `type` alias before code generation, so a message naming one
+    /// would be false. For those it is the diagnostic a user actually sees; for
+    /// an unknown type name — which the type checker rejects first — it is
+    /// defense-in-depth, where returning an error rather than `todo!()` keeps a
+    /// malformed type from panicking the compiler.
+    #[error(
+        "{}unsupported type in WASM codegen: {rendered}",
+        .location.map_or_else(String::new, |l| format!("{}:{}: ", l.start_line, l.start_column))
+    )]
+    UnsupportedType {
+        rendered: String,
+        /// `None` for two reasons. The layout helpers in [`super::memory`] are
+        /// handed a `TypeInfoKind`, which is not an arena node and carries no
+        /// location to give. The signature-lowering arms that *do* hold a
+        /// `TypeId` — a function type, a `::`-qualified path that resolves to no
+        /// nominal type, and an unknown type name — keep `None` on purpose, so
+        /// that the messages they have always rendered are unchanged; giving
+        /// them a location is a separate change with its own diagnostics to
+        /// agree on (#392, #393).
+        location: Option<Location>,
+    },
     /// A spec name exceeds the byte cap that both `inference.spec_funcs`
     /// decoders enforce (the linker and the Rocq translator). Emitting it would
     /// produce a `.wasm` artifact that fails its own downstream link/translate
@@ -376,7 +394,7 @@ impl SpecNameSeparatorDetails {
 /// an id written into a `rule:` field but missing here fails that test.
 pub const NAMED_ANALYSIS_RULES: &[&str] = &[
     "A012", "A014", "A015", "A016", "A017", "A018", "A022", "A025", "A027", "A038", "A039",
-    "A040", "A048", "A049", "A050",
+    "A040", "A048", "A049", "A050", "A051",
 ];
 
 #[cfg(test)]

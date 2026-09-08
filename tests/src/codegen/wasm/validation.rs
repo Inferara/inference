@@ -44,6 +44,26 @@ mod codegen_validation_tests {
         );
     }
 
+    /// A parenthesized head names the same callee as a bare one, so the two
+    /// spellings must emit the same module.
+    ///
+    /// Two paths derive a qualified call's callee identity — the type checker's
+    /// and code generation's — and each has to read a head the same way. When
+    /// only the type checker reads through the parentheses, this source passes
+    /// the front end and reaches the refusal for a callee with no lowerable
+    /// form, and generation panics here instead of returning bytes.
+    #[test]
+    fn a_parenthesized_associated_call_head_emits_the_bare_module() {
+        let struct_decl = "struct P { x: i32; fn mk() -> i32 { return 5; } }";
+        let bare = format!("{struct_decl} pub fn main() -> i32 {{ return P::mk(); }}");
+        let parenthesized = format!("{struct_decl} pub fn main() -> i32 {{ return (P)::mk(); }}");
+        assert_eq!(
+            wasm_codegen(&bare),
+            wasm_codegen(&parenthesized),
+            "parentheses around a call head must not change the module"
+        );
+    }
+
     // Memory layout tests ---
 
     /// A program that allocates an array frame, so both places the layout is

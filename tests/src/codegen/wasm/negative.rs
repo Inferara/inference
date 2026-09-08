@@ -98,6 +98,29 @@ fn assert_codegen_rejects(source: &str, needle: &str) {
     }
 }
 
+/// Drives code generation with the analysis pass *running* and asserts it
+/// refused with a message containing `needle`.
+///
+/// For the shapes no analysis rule owns. Running analysis is the assertion:
+/// the message has to be the backend's own, so a rule that started rejecting
+/// the fixture would report it in its own words and turn the row red rather
+/// than silently taking the refusal over.
+#[track_caller]
+fn assert_codegen_rejects_with_analysis(source: &str, needle: &str) {
+    match codegen_attempt(source, AnalysisMode::Run) {
+        CodegenAttempt::Ok(_) => {
+            panic!("code generation must refuse this program, it produced a module")
+        }
+        CodegenAttempt::Panicked(payload) => {
+            panic!("code generation must refuse, not crash: {payload}")
+        }
+        CodegenAttempt::Rejected(message) => assert!(
+            message.contains(needle),
+            "expected a message containing {needle:?}, got: {message}"
+        ),
+    }
+}
+
 /// Drives code generation from the *partial* typed context the lossless
 /// type-check entry point returns, and asserts it refused with a message
 /// containing `needle`.
@@ -398,8 +421,8 @@ mod type_checker_backstops {
         );
     }
 
-    /// Generics are unimplemented (#320), so a generic type in expression
-    /// position names no instantiated definition to emit.
+    /// A type application in expression position names no definition to emit a
+    /// call or a value for, so code generation refuses it.
     #[test]
     fn a_generic_type_in_expression_position_is_refused() {
         cov_mark::check!(wasm_codegen_generic_type_expression_rejected);
@@ -408,21 +431,211 @@ mod type_checker_backstops {
             "a generic type in expression position",
         );
     }
+
+    /// The message names A051, so a reader who reaches this through a library
+    /// call is pointed at the rule that owns the located diagnostic. Expression
+    /// position is the one generic route whose refusal is raised here rather
+    /// than beside its siblings, so it needs its own row: nothing else in the
+    /// suite reads the rule this site reports.
+    #[test]
+    fn a_generic_type_in_expression_position_names_the_owning_rule() {
+        assert_codegen_rejects_ignoring_diagnostics(
+            "pub fn main() -> i32 { let x: i32 = t i32'; return x; }",
+            "A051",
+        );
+    }
 }
 
-/// Signature types with no WebAssembly value representation. These are refused
-/// by `val_type_from_type_id` rather than by a lowering arm, so they carry the
-/// crate's other refusal message.
-mod unsupported_signature_types {
-    use super::assert_codegen_rejects_ignoring_diagnostics;
+/// Generic code is rejected by A051 with a source location. These rows drive
+/// code generation past that rule and pin the backend's own refusal of each
+/// route a generic takes into it: the declaration that binds a type parameter,
+/// the type application in a signature, the same application buried in an array
+/// element, and the one that reaches a layout helper rather than a lowering arm.
+///
+/// Each route matters on its own, because two of them produce a *module* when
+/// the backend does not refuse: a declaration whose binder shadows a struct
+/// emits a body WebAssembly validation rejects, and an array of a type
+/// application emits an export that looks like an ordinary `(param i32)`.
+mod generic_code {
+    use super::assert_codegen_rejects;
 
-    /// A generic parameter type renders in the source spelling (`Base Type'`),
-    /// which is what the reader wrote.
+    /// Nothing substitutes a type argument, so a type parameter reaches lowering
+    /// standing for no type at all.
     #[test]
-    fn a_generic_parameter_type_is_refused() {
-        assert_codegen_rejects_ignoring_diagnostics(
-            "pub fn f(v: Vec i32') -> i32 { return 1; } pub fn main() -> i32 { return 1; }",
-            "unsupported type in WASM codegen: Vec i32'",
+    fn a_generic_function_declaration_is_refused() {
+        cov_mark::check!(wasm_codegen_generic_function_rejected);
+        assert_codegen_rejects(
+            "fn id T'(x: T) -> T { return x; } pub fn main() -> i32 { return 1; }",
+            "a function declared with type parameters",
+        );
+    }
+
+    /// The message names A051, so a reader who reaches this through a library
+    /// call is pointed at the rule that owns the located diagnostic.
+    #[test]
+    fn a_generic_declaration_names_the_owning_rule() {
+        assert_codegen_rejects(
+            "fn id T'(x: T) -> T { return x; } pub fn main() -> i32 { return 1; }",
+            "A051",
+        );
+    }
+
+    /// A type application renders in the source spelling (`Base Type'`), which
+    /// is what the reader wrote, and carries the position of the annotation.
+    #[test]
+    fn a_generic_signature_type_is_refused() {
+        assert_codegen_rejects(
+            "struct Q { x: i32; } pub fn f(v: Q i32') -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "the type `Q i32'`, which gives type arguments to a declaration that accepts none",
+        );
+    }
+
+    /// An array is a pointer to bytes, so an element with no layout leaves the
+    /// signature describing a pointer into nothing. Both depths are asserted:
+    /// a descent that stopped at the first element type would still refuse the
+    /// flat spelling.
+    #[test]
+    fn a_generic_array_element_is_refused_at_every_depth() {
+        let needle =
+            "the type `Q i32'`, which gives type arguments to a declaration that accepts none";
+        assert_codegen_rejects(
+            "struct Q { x: i32; } pub fn g(p: [Q i32'; 2]) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            needle,
+        );
+        assert_codegen_rejects(
+            "struct Q { x: i32; } pub fn g(p: [[Q i32'; 2]; 3]) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            needle,
+        );
+    }
+
+    /// A struct field reaches the layout helpers rather than a lowering arm, so
+    /// it is refused against a type with no source position to report.
+    #[test]
+    fn a_generic_typed_field_is_refused_in_memory() {
+        assert_codegen_rejects(
+            "struct Q { x: i32; } struct P { y: Q i32'; } pub fn f(p: P) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "a value of a generic type in memory",
+        );
+    }
+
+    /// A type parameter that shadows a declared struct is the shape that fails
+    /// silently without this refusal: the type checker binds the name to the
+    /// binder and the backend binds it to the struct, so every signature lowers,
+    /// the call site does not match the body, and code generation returns a
+    /// module WebAssembly validation rejects.
+    #[test]
+    fn a_shadowing_generic_does_not_reach_a_module() {
+        assert_codegen_rejects(
+            "struct T { x: i32; } fn g T'(a: T) -> T { return a; } \
+             pub fn f(n: i32) -> i32 { return g(n); } pub fn main() -> i32 { return 1; }",
+            "a function declared with type parameters",
+        );
+    }
+}
+
+/// Types a signature may name that no WebAssembly value type stands for.
+///
+/// Every row reaches one helper: an array asks its innermost element whether it
+/// has a value type at all, and an alias is a name that resolves to neither a
+/// struct nor an enum.
+///
+/// The array-of-a-function-type row and the alias rows run the analysis pass,
+/// because nothing before code generation refuses those shapes and the backend
+/// is the only place they can be caught — running analysis is what keeps that
+/// claim honest, since a rule that started owning one of them would report it in
+/// its own words and turn the row red. The unit-element row is an ordinary
+/// backstop instead: A049 owns it, so it skips analysis like every other
+/// backstop here.
+mod signature_types_with_no_value {
+    use super::{assert_codegen_rejects, assert_codegen_rejects_with_analysis};
+    use crate::utils::{AnalysisMode, CodegenAttempt, codegen_attempt};
+
+    /// An array is lowered as a pointer to its first element, so an element with
+    /// no value type leaves the export describing a pointer into bytes nothing
+    /// can size — and it does so while looking like an ordinary `(param i32)`.
+    /// Restoring an unconditional `Ok(Some(ValType::I32))` for every array turns
+    /// this red by producing a module.
+    #[test]
+    fn an_array_of_a_function_type_is_refused() {
+        assert_codegen_rejects_with_analysis(
+            "pub fn g(p: [fn(i32) -> i32; 2]) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "unsupported type in WASM codegen: a function type",
+        );
+    }
+
+    /// A unit element occupies no bytes, so the array it sits in has no stride.
+    /// It is the one element kind that answers "no value type" without an error
+    /// of its own — `-> ()` is how a function says it returns nothing — so
+    /// letting that answer fall through to `Ok(Some(ValType::I32))` instead of
+    /// minting a refusal turns this red by producing a module.
+    #[test]
+    fn an_array_of_the_unit_type_is_refused() {
+        assert_codegen_rejects(
+            "pub fn g(p: [(); 2]) -> i32 { return 1; } pub fn main() -> i32 { return 1; }",
+            "an array whose element type is the unit type",
+        );
+    }
+
+    /// An alias is not transparent — the type checker keeps `A` and `i32`
+    /// distinct — so a signature naming one reaches the backend from a program
+    /// the whole pipeline accepts up to that point. The refusal must therefore
+    /// say where it is and what to write instead; dropping the location, or
+    /// reporting the alias as an unknown type name, turns this red.
+    #[test]
+    fn a_type_alias_is_refused_with_a_location() {
+        assert_codegen_rejects_with_analysis(
+            "type A = i32; pub fn g(v: A) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "1:27: unsupported type in WASM codegen: the type alias `A`, which is not resolved \
+             to the type it names; write `i32` instead",
+        );
+    }
+
+    /// An alias whose target is a type application. No type declaration accepts
+    /// type arguments, so the target has no lowering — and it has no bare
+    /// spelling either, since it renders as `Q'`, which the parser rejects. The
+    /// refusal therefore names the alias and advises nothing. Rendering the
+    /// clause for a target the backend cannot lower turns this red.
+    #[test]
+    fn an_alias_of_a_type_application_advises_no_replacement() {
+        let source = "struct Q { x: i32; } type A = Q i32'; \
+                      pub fn g(v: A) -> i32 { return 1; } pub fn main() -> i32 { return 1; }";
+        match codegen_attempt(source, AnalysisMode::Run) {
+            CodegenAttempt::Ok(_) => {
+                panic!("code generation must refuse this program, it produced a module")
+            }
+            CodegenAttempt::Panicked(payload) => {
+                panic!("code generation must refuse, not crash: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    message
+                        .contains("the type alias `A`, which is not resolved to the type it names"),
+                    "expected the alias refusal, got: {message}"
+                );
+                assert!(
+                    !message.contains("write "),
+                    "a refusal must not advise a spelling the grammar rejects, got: {message}"
+                );
+            }
+        }
+    }
+
+    /// An alias whose target is itself an alias. Reporting the immediate target
+    /// would advise writing `B`, which earns the very same refusal; following the
+    /// chain to the first non-alias type is what makes the advice actionable, and
+    /// stopping at the immediate target turns this red.
+    #[test]
+    fn a_chained_type_alias_names_the_type_at_the_end_of_the_chain() {
+        assert_codegen_rejects_with_analysis(
+            "type B = i32; type A = B; pub fn g(v: A) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "the type alias `A`, which is not resolved to the type it names; write `i32` instead",
         );
     }
 }
