@@ -38,7 +38,8 @@ impl From<DbSeverity> for Severity {
 /// `range` is a byte range in the open file's current text; the LSP layer
 /// converts it to line/character with the file's line index. `code` groups
 /// diagnostics by source: `"syntax"`, `"import"`, `"type"`, or an analysis rule
-/// id (`"A001"`..`"A041"`).
+/// id — the `id` of one of `inference_analysis::rules::all_rules`, which is the
+/// authority on which ids exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub range: TextRange,

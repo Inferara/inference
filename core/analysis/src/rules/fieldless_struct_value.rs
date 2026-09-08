@@ -77,8 +77,9 @@
 //!
 //! - Generics: a type parameter never resolves to a struct, so a generic
 //!   signature (`fn id T'(x: T) -> T`) is outside the predicate. Nothing is missed
-//!   by that today: the compiler does not monomorphize — codegen rejects a generic
-//!   type outright — so no instantiation at a field-less struct exists to check.
+//!   by that today: the compiler does not monomorphize, and A051 rejects a generic
+//!   declaration before code generation, so no instantiation at a field-less struct
+//!   exists to check.
 //!   Implementing generic instantiation would introduce value positions this rule
 //!   does not yet see, and must revisit it.
 //! - Local type aliases: `type X = E;` is not flagged. Aliases are non-transparent

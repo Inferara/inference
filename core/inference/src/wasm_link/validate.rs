@@ -125,8 +125,9 @@ fn lower_value_type(arena: &AstArena, ty: TypeId) -> Result<Option<WasmValType>,
         // Struct / enum values are i32 pointers into linear memory, matching codegen.
         | TypeNode::Custom(_) => Ok(Some(WasmValType::I32)),
         TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(WasmValType::I64)),
-        // What remains: `Generic` and `Function`, which codegen reaches only as a
-        // `todo!()`; `QualifiedName`, the dead AST variant codegen also rejects;
+        // What remains: `Generic` and `Function`, which codegen refuses as well —
+        // a type application as the construct A051 owns, a function type as an
+        // unsupported type; `QualifiedName`, the dead AST variant codegen also rejects;
         // and `Qualified`, which codegen *does* lower, to an `i32` pointer, once
         // the path resolves to a struct or enum. Refusing the last of these is a
         // divergence the type checker keeps out of reach — see the module

@@ -568,7 +568,8 @@ fn names_enum(ctx: &TypedContext, kind: &TypeInfoKind, module_path: &[String]) -
 /// variant fails compilation here rather than being silently sized as zero,
 /// which would under-approximate the frame and make A036 unsound. The outer
 /// `_ => 0` arm covers only genuinely non-frame `TypeInfoKind` variants
-/// (`String`/`Unit`/`Generic`/etc.) that never reach a frame slot.
+/// (`String`/`Unit`/`Generic`/etc.) that never reach a frame slot — A048, A049
+/// and A051 refuse the first three before a frame is laid out.
 ///
 /// A visited set keyed by canonical key guards against cyclic struct definitions
 /// (defense-in-depth; the type checker and A026 reject these first) and keeps
@@ -627,7 +628,8 @@ fn exact_byte_size_visited(
                 0
             }
         }
-        // String/Unit/Generic/etc. never reach a frame slot in valid programs.
+        // String/Unit/Generic are refused by A048/A049/A051 before a frame is
+        // laid out; no non-frame variant reaches a slot.
         _ => 0,
     }
 }
@@ -642,7 +644,8 @@ fn exact_byte_size_visited(
 /// which would under-approximate slot padding and make A036 unsound. The outer
 /// `_ => 1` arm covers only byte-aligned `Bool`/`i8`/`u8` and genuinely
 /// non-frame `TypeInfoKind` variants (`String`/`Unit`/`Generic`/unresolved
-/// names) that never reach a frame slot.
+/// names) that never reach a frame slot — A048, A049 and A051 refuse the first
+/// three before a frame is laid out.
 ///
 /// A visited set keyed by canonical key guards against cyclic struct definitions
 /// (defense-in-depth), matching the pattern in [`exact_byte_size_visited`].
@@ -682,8 +685,9 @@ fn alignment_of(
                 1
             }
         }
-        // Bool and i8/u8 are byte-aligned; String/Unit/Generic and unresolved
-        // names never reach a frame slot in valid programs and align to 1.
+        // Bool and i8/u8 are byte-aligned; String/Unit/Generic are refused by
+        // A048/A049/A051 and unresolved names by the type checker, so none of
+        // them reaches a frame slot; they align to 1.
         _ => 1,
     }
 }

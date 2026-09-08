@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Forty-seven rules are registered in `all_rules()`. Forty-two are
+Forty-eight rules are registered in `all_rules()`. Forty-three are
 error-severity — they block compilation — and five are warnings; no
 info-severity rule has been defined yet. Three ids in the numbering range
 (A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A050. The tables below group the rules by the invariant family they
+A001 to A051. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -413,6 +413,7 @@ of its scope, the same statically-known-literal boundary A022 draws.
 | A048 | `string` has no value representation: no string literal, and no `string`/`String` as the type of a binding, parameter, return, or struct field |
 | A049 | the unit type has no value representation: no `()`/`unit` as the type of a binding, parameter, or struct field, and no unit literal outside `return;`, `return ();` and a bare `();` |
 | A050 | a parameter of a function with a body must be written `name: T` or `_: T`, never as a bare positional type |
+| A051 | generic code has no lowering: no `fn` declaring type parameters (`fn id T'`), and no type application (`Q i32'`) as a type or in expression position |
 
 These are honesty rules: each rejects, with a named diagnostic, a construct
 the pipeline does not (or does not yet) support — rather than letting it fail
@@ -453,6 +454,32 @@ no argument at a call site, and where `_: T` deliberately declares a present
 and unused parameter, a bare `T` states nothing at all. `external fn` keeps the
 bare form, because an extern declares an ABI signature with no body to read a
 parameter in, so a positional type is a complete statement of it.
+
+Only one of A051's two halves belongs to the not-yet-supported family. A
+function declaring type parameters is a promise the backend cannot keep: the
+type checker infers a type argument at each call site and checks the body
+against it, and nothing carries that substitution any further, so a binder
+reaches code generation still standing for no type — no layout to size a frame
+slot with, no WebAssembly type to pass a value in, no term for a proof to
+describe one with. That half is deleted the day monomorphization lands, which
+is tracked in issue #76. A type *application* — `Q i32'` written as a
+parameter, return, field or binding type, or standing on its own in expression
+position — is not waiting on anything: no type declaration in Inference takes
+type arguments, since a struct, an enum, a type alias and an `external fn`
+each declare a bare name and only a function binds one, so `Q i32'` names no
+declaration at all. **That half survives monomorphization and must not be
+deleted with the first.** The rule reads a
+declaration's declared binders and nothing else, with no reachability filter
+and no entry-point carve-out, because every narrowing leaves a real defect
+standing: a binder appearing in no lowered type is uncallable — nothing can
+infer it — yet was still emitted, exported, and in proof mode shipped a
+complete obligation with the binder discarded, and a binder shadowing a
+declared type was read as the parameter by the type checker and as the type by
+code generation, which emitted a module WebAssembly validation rejects. A type
+position is looked through array nesting at any depth, and an expression is
+descended to any depth. Type aliases are outside the rule for A048's reason,
+and a function type is refused for its own, with or without a type parameter
+in it.
 
 ### External function write-through
 

@@ -210,8 +210,13 @@ end-to-end equivalence proof.
 
 - No incremental reparsing: every call to `parse` processes the full source from scratch.
 - The owned `SyntaxNode` CST is internal to this crate; it is not a public red/green tree.
-- The Inference language has no generics, traits, closures, or lifetimes — the grammar is
-  intentionally small and the parser does not need to handle them.
+- Generics *are* parsed: a postfix prime type-parameter list on a `fn` (`fn identity T'(x: T)
+  -> T`) and a generic name (`Vec i32'`) both lower into the arena. Nothing lowers them further
+  — after type checking, analysis rule A051 refuses a `fn` that declares type parameters, and
+  a type application used as a type or in expression position. A type application inside a `type`
+  alias is a documented non-scope of that rule: an alias is nominal, so it declares a name at
+  which no value can be produced. Traits, closures and lifetimes are absent from the language,
+  so the parser does not handle them.
 - Richer diagnostic surfaces (labels, notes, quick-fixes) are deferred; the structured
   `ParseError { span, message }` substrate is in place for future IDE work.
 

@@ -286,7 +286,7 @@ pub fn add(a: i32, b: i32) -> i32 {
 ```
 
 **Fields:**
-- `type_parameters`: Generic type parameters (e.g., `<T, U>`)
+- `type_parameters`: Generic type parameters (e.g., `T' U'`)
 - `arguments`: Function parameters
 - `returns`: Return type (None for unit return)
 - `body`: Function body (Block, Forall, Exists, etc.)
@@ -647,7 +647,7 @@ pub struct BinaryExpression {
 **Operators:**
 ```rust
 pub enum OperatorKind {
-    Pow,      // **  — parsed but NOT yet lowered in WASM codegen (todo!)
+    Pow,      // **  — parsed, then refused: it has no WASM lowering
     Add,      // +
     Sub,      // -
     Mul,      // *
@@ -671,8 +671,9 @@ pub enum OperatorKind {
 
 **Codegen notes:**
 
-- `Pow` (`**`) is not yet implemented in the WASM backend. Attempting to lower a
-  binary expression with this operator will panic with a `todo!()`.
+- `Pow` (`**`) has no WebAssembly lowering and no expansion of one. The type
+  checker refuses every use of it (`PowOperatorNotSupported`); code generation
+  carries a located refusal behind that as a backstop.
 - `And` and `Or` lower to a valued WebAssembly `if (result i32)` block and
   short-circuit: `a && b` evaluates `a` and evaluates `b` only when `a` is true
   (the result is `0` otherwise); `a || b` evaluates `a` and evaluates `b` only
@@ -1074,8 +1075,8 @@ pub struct GenericType {
 
 **Example source:**
 ```inference
-Vec<i32>
-HashMap<String, i32>
+Vec i32'
+HashMap string' i32'
 ```
 
 ### FunctionType
