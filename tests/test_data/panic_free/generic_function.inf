@@ -1,0 +1,8 @@
+// A function declaring a type parameter, which reaches code generation standing for no type.
+fn id T'(x: T) -> T {
+    return x;
+}
+
+pub fn main() -> i32 {
+    return id(1);
+}

@@ -36,7 +36,7 @@
 //! missing; [`gate::every_panic_free_fixture_is_listed`] closes it in both
 //! directions so a file cannot escape the table by being added beside it.
 //!
-//! The three sources, 215 fixtures and 430 compilations between them:
+//! The three sources, 218 fixtures and 436 compilations between them:
 //!
 //! - `tests/test_data/inf/` — the language corpus, every `.inf` in the
 //!   directory: 49.
@@ -47,9 +47,11 @@
 //!   files it excludes are exactly the multi-file project trees under `src/`,
 //!   whose `use` clauses need a project driver this in-process pipeline does not
 //!   have.
-//! - `tests/test_data/panic_free/` — new here: one minimal program per construct
-//!   the repair touched, 19 of them, each a single offence so that the stage it
-//!   stops at is attributable to the construct it is named for.
+//! - `tests/test_data/panic_free/` — one minimal program per construct the
+//!   compiler had no lowering for, 22 of them, each of which has since gained
+//!   either a lowering or a rule that refuses it; one is stopped by the type
+//!   checker before its rule is reached. Each is a single offence, so that the
+//!   stage it stops at is attributable to the construct it is named for.
 //!
 //! ## The single-offence constraint
 //!
@@ -123,12 +125,13 @@ mod gate {
 
     /// Every `.inf` under `tests/test_data/panic_free/`.
     ///
-    /// The first six constructs are the ones that gained a lowering, so they run
-    /// to a module; the rest gained a diagnostic, and each names the rule that
-    /// owns it. A construct in the second group is refused by analysis rather
-    /// than by code generation because analysis runs first — the code generation
-    /// backstop behind each of them is pinned separately, by the negative
-    /// codegen tests that skip analysis to reach it.
+    /// Six of the constructs have a lowering, so they run to a module; every
+    /// other row is refused before code generation reaches it, and each analysis
+    /// row names the rule that owns the construct. A construct in that second
+    /// group is refused by analysis rather than by code generation because
+    /// analysis runs first — the code generation backstop behind each of them is
+    /// pinned separately, by the negative codegen tests that skip analysis to
+    /// reach it.
     const SHAPES: &[Shape] = &[
         Shape {
             stem: "bare_type_parameter",
@@ -137,10 +140,30 @@ mod gate {
                   it and a call site cannot label it",
         },
         Shape {
+            stem: "generic_function",
+            declared: Analysis(&["A051"]),
+            why: "a type parameter reaches code generation standing for no type, and nothing \
+                  carries the type checker's per-call substitution that far",
+        },
+        Shape {
+            stem: "generic_type_application",
+            declared: Analysis(&["A051"]),
+            why: "no type declaration accepts type arguments, so an applied one names nothing to \
+                  lay out",
+        },
+        Shape {
+            stem: "generic_type_as_value",
+            declared: Analysis(&["A051"]),
+            why: "a type application written as a statement names a type where a value \
+                  belongs, and produces none",
+        },
+        Shape {
             stem: "generic_type_in_expression",
             declared: TypeCheck,
-            why: "a generic name in expression position is the one producer of a type node where \
-                  a value belongs; generics are not implemented (#320)",
+            why: "a generic name in expression position, here as the initializer of an `i32` \
+                  binding, which the type checker refuses for the mismatch before analysis \
+                  runs; the value position itself belongs to A051, and `generic_type_as_value` \
+                  is where that is pinned",
         },
         Shape {
             stem: "ignored_parameter",

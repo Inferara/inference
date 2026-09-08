@@ -2981,3 +2981,43 @@ fn a_string_program_is_refused_with_a_diagnostic() {
         "a rejected build must leave no artifact"
     );
 }
+
+/// A generic declaration is refused the same way, from outside the compiler.
+///
+/// It is the shape with the longest way to fall: a type parameter is accepted
+/// by the parser and resolved by the type checker at each call site, and only
+/// then reaches code generation with nothing standing behind it, where signature
+/// lowering sees a type identifier it cannot tell from a misspelled type name.
+/// Both the analysis rule and the code generation backstop behind it end the
+/// build, and only the rule renders a bracketed code, so a bare `.failure()`
+/// would be satisfied by either one; asserting `error[A051]` is what says the
+/// refusal arrives from the phase that carries a caret, in time to stop the
+/// artifact being written.
+#[test]
+fn a_generic_program_is_refused_with_a_diagnostic() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest = temp.child("prog.inf");
+    std::fs::write(
+        dest.path(),
+        "fn id T'(x: T) -> T { return x; } pub fn main() -> i32 { return id(1); }",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+    let assert = cmd.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("error[A051]"),
+        "the rejection must name the rule that owns it, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "an unlowerable construct must produce a diagnostic, not an abort, got:\n{stderr}"
+    );
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected build must leave no artifact"
+    );
+}
