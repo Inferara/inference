@@ -1,0 +1,12 @@
+// `Q i32'` as a parameter type, which gives type arguments to a declaration that accepts none.
+struct Q {
+    x: i32;
+}
+
+pub fn size(q: Q i32') -> i32 {
+    return 1;
+}
+
+pub fn main() -> i32 {
+    return 1;
+}
