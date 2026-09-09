@@ -11,7 +11,9 @@
 //! - an item import (`use lib::arith::{add};`) resolves a bare call across files;
 //! - two files each defining a same-named struct get distinct layouts, so a
 //!   field read picks the right offset for the file it is written in;
-//! - only the entry file's `pub fn`s are WASM exports (root-only export policy).
+//! - only the entry file's `pub fn`s are WASM exports (root-only export policy);
+//! - a struct whose field is a same-named struct in another file lays out
+//!   rather than being mistaken for a struct that contains itself.
 
 use crate::utils::{wasm_codegen_multi_file, wasm_codegen_multi_file_no_analysis};
 
@@ -3294,4 +3296,39 @@ pub fn missing() -> i32 {
 
     let (mut store, instance) = instantiate(&wasm);
     assert_eq!(call_i32(&mut store, &instance, "run"), 9);
+}
+
+/// An entry-file `Node` whose only field is the *sibling's* same-named `Node`,
+/// sized through an array's element stride and then read back element by
+/// element.
+///
+/// The layout walks guard against a struct that transitively contains itself by
+/// recording what they have already entered. Recording the bare name reads this
+/// program as exactly that: the entry's `Node` and `lib::a::Node` share a name
+/// and nothing else, so the walk enters `Node`, descends into the field, and
+/// sees `Node` again — refusing a valid program with `cycle detected in struct
+/// layout for 'Node'`. Keying the guard on the file-qualified identity, which is
+/// what the type checker resolves layouts under, is what admits it.
+///
+/// The executed value is what pins the layout the fix admits: `arr[1].inner.x`
+/// can only reach the second element's `2` if `Node` was strided as the four
+/// bytes of its foreign field. Restoring a bare-name key turns this red by
+/// refusing the program outright.
+#[test]
+fn a_same_named_nested_struct_across_files_is_not_a_layout_cycle() {
+    let main = "\
+use lib::a;
+
+struct Node { inner: lib::a::Node; }
+
+pub fn main() -> i32 {
+    let arr: [Node; 2] = [Node { inner: lib::a::Node { x: 1 } }, Node { inner: lib::a::Node { x: 2 } }];
+    return arr[1].inner.x;
+}
+";
+    let a = "pub struct Node { x: i32; }\n";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "a"], a)]);
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "main"), 2);
 }

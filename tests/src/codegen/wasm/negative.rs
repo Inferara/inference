@@ -640,6 +640,260 @@ mod signature_types_with_no_value {
     }
 }
 
+/// A type with no value written as the type of a **struct field**.
+///
+/// A field is not a signature: the type checker erases it to a name and a shape
+/// before code generation sees it, so the layout that meets it holds neither the
+/// position it was written at nor the scope its bare names were read in. A
+/// `spec` block's name is such a name — nothing canonicalizes it, because it
+/// denotes neither a struct nor an enum — so it survives to the layout
+/// unresolved, and reporting it as a name the layout failed to find blames the
+/// type checker for a program the type checker accepted. The rows here assert
+/// the field earns the refusal the same type earns in a signature; answering
+/// from the layout's own erased view instead turns them red.
+mod struct_field_types_with_no_value {
+    use super::assert_codegen_rejects_with_analysis;
+    use crate::utils::{AnalysisMode, CodegenAttempt, codegen_attempt, codegen_attempt_with_mode};
+
+    /// A struct whose field is a struct whose field is a `spec` name. The
+    /// refusal must be the one that names the type with no lowering, and must be
+    /// the only thing reported: the outer struct nests one level, which is
+    /// supported.
+    ///
+    /// Reading the inner struct's unresolved field name as a *compound* type is
+    /// what turns this red — A026 then fires first, reporting nesting the program
+    /// does not have. The identical program with an `i32` field compiles, so the
+    /// nesting claim cannot be about the nesting; that control is the row below.
+    #[test]
+    fn a_nested_struct_reports_the_field_that_has_no_lowering_not_the_nesting() {
+        let source = "spec Q { fn q() { } } struct Inner { f: Q; } struct Outer { i: Inner; } \
+                      pub fn g(v: Outer) -> i32 { return 1; } pub fn main() -> i32 { return 1; }";
+        match codegen_attempt(source, AnalysisMode::Run) {
+            CodegenAttempt::Ok(_) => {
+                panic!("code generation must refuse this program, it produced a module")
+            }
+            CodegenAttempt::Panicked(payload) => {
+                panic!("code generation must refuse, not crash: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    message.contains("unsupported type in WASM codegen: Q"),
+                    "the field with no lowering must be what is reported, got: {message}"
+                );
+                assert!(
+                    !message.contains("A026"),
+                    "one supported level of nesting must not be reported as nesting, got: {message}"
+                );
+            }
+        }
+    }
+
+    /// The identical shape with a lowerable inner field compiles, which is what
+    /// makes the row above an assertion about the field's type rather than about
+    /// the nesting. Without this control, a change that started rejecting every
+    /// nested struct would keep that row green.
+    #[test]
+    fn the_same_nesting_with_a_lowerable_inner_field_compiles() {
+        let source = "struct Inner { f: u64; } struct Outer { i: Inner; } \
+                      pub fn g(v: Outer) -> i32 { return 1; } pub fn main() -> i32 { return 1; }";
+        assert!(
+            matches!(
+                codegen_attempt(source, AnalysisMode::Run),
+                CodegenAttempt::Ok(_)
+            ),
+            "one level of struct nesting is supported and must still produce a module"
+        );
+    }
+
+    /// A `spec` block's name written as a field type. It reaches the layout as a
+    /// name nothing resolves, and no rule owns it, so the refusal is the one the
+    /// same name earns in a signature — and, either way, not an accusation
+    /// against a phase that accepted the program.
+    #[test]
+    fn a_spec_name_in_a_struct_field_does_not_blame_an_earlier_phase() {
+        let source = "spec Q { fn q() { } } struct S { f: Q; } pub fn g(v: S) -> i32 { return 1; } \
+                      pub fn main() -> i32 { return 1; }";
+        match codegen_attempt(source, AnalysisMode::Run) {
+            CodegenAttempt::Ok(_) => {
+                panic!("code generation must refuse this program, it produced a module")
+            }
+            CodegenAttempt::Panicked(payload) => {
+                panic!("code generation must refuse, not crash: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    message.contains("unsupported type in WASM codegen: Q"),
+                    "a spec name must be refused as the type it is, got: {message}"
+                );
+                assert!(
+                    !message.contains("should have caught this"),
+                    "a program the pipeline accepted must not be blamed on an earlier phase, \
+                     got: {message}"
+                );
+            }
+        }
+    }
+
+    /// A struct declared **inside a `spec` block**, whose field is a spec name.
+    ///
+    /// Such a struct is not among its file's top-level definitions, so the walk
+    /// that recovers the field's type node has to enter the `spec` scope the
+    /// struct is declared in. Reading the file alone finds no declaration of
+    /// `S` at all, the classification never happens, and the refusal degrades
+    /// back to `struct 'Q' not found in type context -- the type checker should
+    /// have caught this` — an accusation against a phase that accepted the
+    /// program.
+    ///
+    /// Proof mode is what makes the row reachable: compile mode drops
+    /// specification functions from the artifact, so nothing asks a spec-inner
+    /// struct for a layout there.
+    #[test]
+    fn a_spec_inner_struct_is_read_in_the_spec_scope_that_declares_it() {
+        let source = "spec Q { struct S { f: Q; } fn q(v: S) -> i32 { return 1; } } \
+                      pub fn main() -> i32 { return 1; }";
+        match codegen_attempt_with_mode(
+            source,
+            AnalysisMode::Run,
+            inference_wasm_codegen::CompilationMode::Proof,
+        ) {
+            CodegenAttempt::Ok(_) => {
+                panic!("code generation must refuse this program, it produced a module")
+            }
+            CodegenAttempt::Panicked(payload) => {
+                panic!("code generation must refuse, not crash: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    message.contains("unsupported type in WASM codegen: Q"),
+                    "a spec name must be refused as the type it is, got: {message}"
+                );
+                assert!(
+                    !message.contains("should have caught this"),
+                    "a program the pipeline accepted must not be blamed on an earlier phase, \
+                     got: {message}"
+                );
+            }
+        }
+    }
+
+    /// A struct reached only through an array parameter gets no layout while its
+    /// signature is lowered, so the first field access on one is what asks for
+    /// the layout — and is therefore where a field with no lowering is first
+    /// refused. The refusal has to travel out as a refusal: asserting the layout
+    /// succeeded there turns a diagnostic the caller was about to print into a
+    /// process abort, which `CodegenAttempt::Panicked` is what distinguishes.
+    #[test]
+    fn a_field_access_through_an_array_parameter_refuses_instead_of_aborting() {
+        assert_codegen_rejects_with_analysis(
+            "spec Q { fn q() { } } struct S { f: Q; g: i32; } \
+             pub fn h(v: [S; 2]) -> i32 { return v[0].g; } pub fn main() -> i32 { return 1; }",
+            "unsupported type in WASM codegen: Q",
+        );
+    }
+
+    /// A `spec` name below an **array-typed field**. The refusal is the same one,
+    /// but the name the layout fails on is not the field's own type: the field is
+    /// `[Q; 2]`, and it is the array's *element*, asked for a width so the array
+    /// can be turned into a byte count, that has no lowering.
+    ///
+    /// That is what makes this row distinct from every other field here, all of
+    /// which name the unlowerable type directly. The classification does not read
+    /// the failing name at all — it recovers the field's whole declared type node
+    /// and re-asks the signature helper — so the right message comes out only
+    /// because that helper descends an array to its element. The two halves have
+    /// to compose, and this is the only row where they must: excluding an
+    /// array-typed field from the classification leaves this program reporting a
+    /// name the layout failed to find and blaming a phase that accepted it, while
+    /// every row below stays green.
+    ///
+    /// A `spec` name carries no source position, so there is no column to assert
+    /// here: what the row pins is which message is produced, not where.
+    #[test]
+    fn an_array_typed_field_reports_the_element_that_has_no_lowering() {
+        match codegen_attempt(
+            "spec Q { fn q() { } } struct S { f: [Q; 2]; } \
+             pub fn g(v: S) -> i32 { return 1; } pub fn main() -> i32 { return 1; }",
+            AnalysisMode::Run,
+        ) {
+            CodegenAttempt::Ok(_) => {
+                panic!("code generation must refuse this program, it produced a module")
+            }
+            CodegenAttempt::Panicked(payload) => {
+                panic!("code generation must refuse, not crash: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    message.contains("unsupported type in WASM codegen: Q"),
+                    "the array's element is what has no lowering and what must be named, \
+                     got: {message}"
+                );
+                assert!(
+                    !message.contains("should have caught this"),
+                    "a program the pipeline accepted must not be blamed on an earlier phase, \
+                     got: {message}"
+                );
+            }
+        }
+    }
+
+    /// A `type` alias written as a field type reaches the same classification,
+    /// and is what shows the shared classification buys more than not blaming an
+    /// earlier phase. The alias arm is the one arm with a source position to
+    /// give, so a field earns the located refusal and the repair advice that the
+    /// same alias earns spelled in a signature — asserted here as the whole
+    /// message, exactly as the signature-position row above asserts it.
+    /// Answering from the layout's own erased view loses both halves, because a
+    /// `TypeInfoKind` keeps the bare name and drops the node it was read from.
+    ///
+    /// Whether the language keeps `type` aliases at all is an open question; if
+    /// it drops them this row is deleted together with the signature-position
+    /// alias rows above it, and not before.
+    #[test]
+    fn a_type_alias_in_a_struct_field_is_refused_where_it_is_written() {
+        assert_codegen_rejects_with_analysis(
+            "type A = i32; struct S { f: A; } pub fn g(v: S) -> i32 { return 1; } \
+             pub fn main() -> i32 { return 1; }",
+            "1:29: unsupported type in WASM codegen: the type alias `A`, which is not resolved \
+             to the type it names; write `i32` instead",
+        );
+    }
+
+    /// A declaration nothing lays out, recording a gap rather than blessing it.
+    ///
+    /// Every refusal above is raised by the layout, and a struct no lowered
+    /// signature names is never laid out — so this program is accepted and writes
+    /// a module, even though the field it declares has no lowering. Nothing owns
+    /// that: a `spec` name in a type position is refused by no analysis rule, and
+    /// A051's own suite asserts the opposite policy for its carrier, that an
+    /// unused struct with a field the layout has no size for must not compile.
+    ///
+    /// Until a declaration-anchored rule owns it, this is the behaviour, and it
+    /// is asserted so that closing the gap is a deliberate edit to this row.
+    #[test]
+    fn a_struct_declaration_no_signature_names_is_accepted_today() {
+        let source = "spec Q { fn q() { } } struct Inner { f: Q; } struct Outer { i: Inner; } \
+                      pub fn main() -> i32 { return 1; }";
+        match codegen_attempt(source, AnalysisMode::Run) {
+            CodegenAttempt::Ok(_) => {}
+            CodegenAttempt::Panicked(payload) => {
+                panic!("an unused declaration must not crash the compiler: {payload}")
+            }
+            CodegenAttempt::Rejected(message) => {
+                assert!(
+                    !message.contains("A026"),
+                    "a field whose name resolves to no struct is not a nested compound type, and \
+                     reporting it as one blames nesting the program does not have: {message}"
+                );
+                panic!(
+                    "this row records that nothing owns an unused declaration with an \
+                     unlowerable field; a rule that now owns it must replace this row rather \
+                     than change its expectation: {message}"
+                );
+            }
+        }
+    }
+}
+
 /// A `@` the lowering has no draw for: over a type with no value representation,
 /// or in a compound position that binds no variable to fill.
 ///
