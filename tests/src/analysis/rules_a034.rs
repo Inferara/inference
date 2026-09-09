@@ -115,30 +115,6 @@ mod analysis_rules_tests {
     }
 
     #[test]
-    fn a034_pub_type_alias_inside_spec_fires() {
-        let source = r#"
-            spec MySpec {
-                pub type Foo = i32;
-            }
-        "#;
-        let a034 = collect_a034(source);
-        assert_eq!(
-            a034.len(),
-            1,
-            "expected exactly one A034 for `pub type` inside spec, got: {a034:?}"
-        );
-        if let AnalysisDiagnostic::VisibilityInsideSpec {
-            def_name, def_kind, ..
-        } = &a034[0]
-        {
-            assert_eq!(def_name, "Foo");
-            assert_eq!(*def_kind, "type");
-        } else {
-            unreachable!();
-        }
-    }
-
-    #[test]
     fn a034_bare_fn_inside_spec_does_not_fire() {
         let source = r#"
             spec MySpec {

@@ -291,23 +291,6 @@ mod statement_coverage {
         );
     }
 
-    /// A `type` statement in a function body parses and type-checks. It is
-    /// narrowed to the declaration alone on purpose: aliases in Inference are
-    /// *nominal*, so `let x: MyInt = 42;` after this declaration is a type
-    /// mismatch rather than a binding of `42` at `i32` — by design, not by
-    /// omission. That makes a body-level alias legal and inert, which is a
-    /// language question rather than a parser one and is left to a follow-up.
-    #[test]
-    fn test_type_definition_statement() {
-        let source = r#"fn test() -> i32 { type MyInt = i32; return 1; }"#;
-        let result = try_type_check(source);
-        assert!(
-            result.is_ok(),
-            "Type definition statement should work, got: {:?}",
-            result.err()
-        );
-    }
-
     #[test]
     fn test_variable_definition_with_initializer() {
         let source = r#"fn test() -> i32 { let x: i32 = 42; return x; }"#;
@@ -1376,7 +1359,8 @@ mod type_validation_coverage {
 
     #[test]
     fn test_validate_custom_type_known() {
-        let source = r#"type MyType = i32; fn test(val: MyType) -> MyType { return val; }"#;
+        let source =
+            r#"struct MyType { v: i32; } fn test(val: MyType) -> MyType { return val; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),

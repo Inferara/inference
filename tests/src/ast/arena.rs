@@ -215,71 +215,29 @@ fn test_constant_definition_structure() {
 }
 
 #[test]
-fn test_type_alias_definition() {
-    let source = r#"type MyInt = i32;"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    assert_eq!(source_files[0].defs.len(), 1);
-
-    let def_id = source_files[0].defs[0];
-    if let Def::TypeAlias { name, ty, .. } = &arena[def_id].kind {
-        assert_eq!(arena[*name].name, "MyInt");
-        assert!(matches!(arena[*ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
-    } else {
-        panic!("Expected type alias definition");
-    }
-}
-
-#[test]
-fn test_multiple_type_aliases() {
-    let source = r#"type MyInt = i32;
-type MyBool = bool;
-type MyArray = [i32; 10];"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    let type_aliases: Vec<&DefData> = source_files[0]
-        .defs
-        .iter()
-        .map(|&id| &arena[id])
-        .filter(|d| matches!(d.kind, Def::TypeAlias { .. }))
-        .collect();
-    assert_eq!(type_aliases.len(), 3, "Should find 3 type definitions");
-}
-
-#[test]
-fn test_no_type_aliases_when_only_functions() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    let type_aliases: Vec<&DefData> = source_files[0]
-        .defs
-        .iter()
-        .map(|&id| &arena[id])
-        .filter(|d| matches!(d.kind, Def::TypeAlias { .. }))
-        .collect();
-    assert!(type_aliases.is_empty(), "Should find no type definitions");
-}
-
-#[test]
 fn test_mixed_definitions() {
     let source = r#"const X: i32 = 42;
-type MyInt = i32;
+struct Pair { a: i32; b: i32; }
 fn test() -> i32 { return X; }
-type MyBool = bool;"#;
+enum Flag { On, Off }"#;
     let arena = build_ast(source.to_string());
 
     let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files[0].defs.len(), 4, "Should have 4 total definitions");
 
-    let type_alias_count = source_files[0]
+    let struct_count = source_files[0]
         .defs
         .iter()
-        .filter(|&&id| matches!(arena[id].kind, Def::TypeAlias { .. }))
+        .filter(|&&id| matches!(arena[id].kind, Def::Struct { .. }))
         .count();
-    assert_eq!(type_alias_count, 2, "Should find 2 type definitions among mixed definitions");
+    assert_eq!(struct_count, 1, "Should find 1 struct among mixed definitions");
+
+    let enum_count = source_files[0]
+        .defs
+        .iter()
+        .filter(|&&id| matches!(arena[id].kind, Def::Enum { .. }))
+        .count();
+    assert_eq!(enum_count, 1, "Should find 1 enum among mixed definitions");
 }
 
 /// Tests for empty arena

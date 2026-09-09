@@ -384,36 +384,6 @@ mod analysis_rules_tests {
         assert!(compiles(source), "a program with no string must compile");
     }
 
-    /// Documented non-scope: aliases are nominal in Inference, so `type S =
-    /// string;` names a type at which no value can be produced. Every position
-    /// that could produce one is covered elsewhere.
-    #[test]
-    fn a048_item_level_type_alias_is_not_flagged() {
-        let source = r#"
-            type S = string;
-            pub fn main() -> i32 { return 0; }
-        "#;
-        assert_eq!(count_a048(source), 0);
-        assert!(
-            compiles(source),
-            "an item-level alias is erased, so it compiles unchanged"
-        );
-    }
-
-    /// The statement form of the same non-scope.
-    #[test]
-    fn a048_local_type_alias_is_not_flagged() {
-        let source = r#"
-            pub fn f() -> i32 { type S = string; return 0; }
-            pub fn main() -> i32 { return 0; }
-        "#;
-        assert_eq!(count_a048(source), 0);
-        assert!(
-            compiles(source),
-            "a body-level alias is erased just as an item-level one is"
-        );
-    }
-
     /// A `self` receiver spells no type of its own, so the receiver arm is never
     /// a route into this rule.
     #[test]

@@ -717,31 +717,6 @@ mod analysis_rules_tests {
         assert!(compiles(source));
     }
 
-    /// Documented non-scope. An alias is nominal in Inference — a binding
-    /// annotated with it does not resolve to the aliased type — so it declares a
-    /// name at which no value can be produced, and every position that could
-    /// produce one is covered on its own.
-    #[test]
-    fn a051_an_item_type_alias_is_out_of_scope() {
-        let source = r#"
-            struct Q { x: i32; }
-            type A = Q i32';
-            pub fn main() -> i32 { return 0; }
-        "#;
-        assert_eq!(count_a051(source), 0);
-    }
-
-    /// The body-level twin of the same non-scope, and it is erased in code
-    /// generation outright, so it introduces no value at all.
-    #[test]
-    fn a051_a_body_level_type_alias_is_out_of_scope() {
-        let source = r#"
-            struct Q { x: i32; }
-            pub fn main() -> i32 { type X = Q i32'; return 0; }
-        "#;
-        assert_eq!(count_a051(source), 0);
-    }
-
     /// A function type has no value representation with or without a type
     /// parameter in it, and is refused by code generation for a reason that has
     /// nothing to do with generics. The assertion is on A051 rather than on the

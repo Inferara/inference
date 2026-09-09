@@ -907,20 +907,6 @@ mod analysis_rules_tests {
         assert!(try_codegen(source).is_ok(), "the program must compile");
     }
 
-    /// Documented non-route: type aliases are non-transparent in Inference, so an
-    /// alias naming a field-less struct is a dead end rather than a way to reach a
-    /// value of it. (A body-level `type` statement is erased by code generation —
-    /// an alias introduces no value and every use of it was resolved by the type
-    /// checker — so the analysis verdict is the whole of what there is to assert.)
-    #[test]
-    fn a045_local_type_alias_to_fieldless_not_flagged() {
-        let source = "struct E { } pub fn f() -> i32 { type X = E; return 0; }";
-        assert!(
-            !has_a045(source),
-            "an alias declaration introduces no value of the aliased struct"
-        );
-    }
-
     #[test]
     fn a045_fieldless_struct_declared_inside_spec_declaration_only_accepted() {
         let source = r#"

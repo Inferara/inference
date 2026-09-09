@@ -1,14 +1,11 @@
-//! The forms that carry no value: a bare `return;`, a `();` statement, the two
-//! spellings of a unit return type, and a body-level `type` alias.
+//! The forms that carry no value: a bare `return;`, a `();` statement, and the
+//! two spellings of a unit return type.
 //!
 //! None of these produces a value, and the point of the family is that producing
 //! nothing is a real lowering rather than a gap. A unit expression occupies no
 //! operand stack slot, so `return;` is the epilogue and `return` on an empty
 //! stack, and a `();` statement emits neither the value nor the `drop` a
-//! value-producing statement would need. A type alias is nominal: the type
-//! checker has already resolved every use of it, so the statement contributes no
-//! instruction and consumes no local, which the `type_alias_between_bindings`
-//! golden pins by keeping the surrounding bindings on consecutive indices.
+//! value-producing statement would need.
 //!
 //! Each row is a golden plus an execution run, because the two catch different
 //! mistakes: the golden pins which bytes are emitted, and the run pins that the
@@ -111,28 +108,6 @@ mod void_forms_tests {
         let wasm_bytes = assert_golden("unit_return_type_spelled_unit");
         assert_main_returns(&wasm_bytes, 9);
     }
-
-    #[test]
-    fn local_type_alias_test() {
-        assert_golden("local_type_alias");
-    }
-
-    #[test]
-    fn local_type_alias_execution_test() {
-        let wasm_bytes = assert_golden("local_type_alias");
-        assert_main_returns(&wasm_bytes, 42);
-    }
-
-    #[test]
-    fn type_alias_between_bindings_test() {
-        assert_golden("type_alias_between_bindings");
-    }
-
-    #[test]
-    fn type_alias_between_bindings_execution_test() {
-        let wasm_bytes = assert_golden("type_alias_between_bindings");
-        assert_main_returns(&wasm_bytes, 42);
-    }
 }
 
 /// Regenerates the committed goldens from current compiler output.
@@ -192,17 +167,5 @@ mod regenerate {
     #[ignore]
     fn regenerate_unit_return_type_spelled_unit_wasm() {
         regenerate_one("unit_return_type_spelled_unit");
-    }
-
-    #[test]
-    #[ignore]
-    fn regenerate_local_type_alias_wasm() {
-        regenerate_one("local_type_alias");
-    }
-
-    #[test]
-    #[ignore]
-    fn regenerate_type_alias_between_bindings_wasm() {
-        regenerate_one("type_alias_between_bindings");
     }
 }

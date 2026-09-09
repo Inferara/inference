@@ -193,29 +193,6 @@ mod analysis_rules_tests {
         assert_eq!(diag.rule_id(), "A026");
     }
 
-    /// Known limitation: type aliases are not resolved by A026, so depth-2
-    /// nesting via a type alias is not detected. This test documents the
-    /// current behavior — it should start failing once type alias resolution
-    /// is implemented, at which point the assertion should be flipped.
-    #[test]
-    fn a026_type_alias_bypasses_check() {
-        let source = r#"
-            struct Inner { x: i32; y: i32; }
-            struct Middle { inner: Inner; val: i32; }
-            type MiddleAlias = Middle;
-            struct Deep { m: MiddleAlias; z: i32; }
-            fn main() -> i32 { return 0; }
-        "#;
-        let result = analyze(source);
-        if let Err(ref e) = result {
-            let has_a026 = e
-                .errors()
-                .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::NestedCompoundDepthExceeded { .. }));
-            assert!(!has_a026, "type alias nesting is not yet detected (known limitation), got: {e}");
-        }
-    }
-
     #[test]
     fn a026_flat_struct_accepted() {
         let source = r#"

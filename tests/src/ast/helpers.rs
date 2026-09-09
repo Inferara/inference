@@ -198,31 +198,6 @@ pub(crate) fn assert_const_def(
     (*ty, *value)
 }
 
-/// Assert that `def_id` points to a `Def::TypeAlias` with the given name and
-/// visibility. Returns the aliased type ID.
-#[must_use]
-pub(crate) fn assert_type_alias_def(
-    arena: &AstArena,
-    def_id: DefId,
-    name: &str,
-    vis: Visibility,
-) -> TypeId {
-    let def = &arena[def_id];
-    let Def::TypeAlias {
-        name: name_id,
-        vis: actual_vis,
-        ty,
-    } = &def.kind
-    else {
-        panic!("expected Def::TypeAlias for '{name}', got {:?}", def.kind);
-    };
-
-    assert_eq!(arena[*name_id].name, name, "type alias name");
-    assert_eq!(*actual_vis, vis, "type alias '{name}' visibility");
-
-    *ty
-}
-
 /// Assert that `def_id` points to a `Def::ExternFunction` with the given name,
 /// visibility, parameter count, and return type presence. Returns `(args, returns)`.
 #[must_use]
@@ -969,13 +944,6 @@ mod tests {
         let (ty, value) = assert_const_def(&arena, defs[0], "X", Visibility::Private);
         assert_simple_type(&arena, ty, SimpleTypeKind::I32);
         assert_number(&arena, value, "42");
-    }
-
-    #[test]
-    fn test_assert_type_alias() {
-        let (arena, defs) = parse_defs("type MyInt = i32;");
-        let ty = assert_type_alias_def(&arena, defs[0], "MyInt", Visibility::Private);
-        assert_simple_type(&arena, ty, SimpleTypeKind::I32);
     }
 
     #[test]

@@ -60,9 +60,6 @@ enum Color {
     Blue,
 }
 
-// Type alias
-type Coordinate = Point;
-
 // External function declaration
 external fn print(value: i32) -> ();
 

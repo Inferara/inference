@@ -2,11 +2,11 @@
 //! hierarchy (issue #63).
 //!
 //! Where `multi_file.rs` pins the load-bearing smoke behaviors, this file crosses
-//! the full grid: item kinds (fn / struct / enum / const
-//! / type alias / method) × import forms (absolute path, file import, item import,
-//! `pub use` namespace re-export, transitive re-export chains) × visibility (pub /
-//! private), positive and negative, plus collisions, value cycles, specs, and the
-//! dual-location private-access diagnostics.
+//! the full grid: item kinds (fn / struct / enum / const / method) × import forms
+//! (absolute path, file import, item import, `pub use` namespace re-export,
+//! transitive re-export chains) × visibility (pub / private), positive and
+//! negative, plus collisions, value cycles, specs, and the dual-location
+//! private-access diagnostics.
 //!
 //! Every test drives [`crate::utils::try_type_check_multi_file`] over
 //! `(module_path, source)` pairs (entry first, empty path = entry). Sources are
@@ -21,9 +21,6 @@
 //!   import brings its bare name into scope. The qualified annotation resolves to
 //!   the same nominal identity the value carries (see the
 //!   `qualified_*_annotation_*` tests).
-//! - **Type aliases are nominal, not transparent, even single-file** (`expected
-//!   Id, found i32`). A pre-existing type-checker trait, not a multi-file
-//!   regression. Pinned by [`type_alias_is_nominal_not_transparent`].
 //! - **`pub use` of *items* does not surface them through the re-exporting file**;
 //!   only `pub use` of a *namespace* (whole file) is traversable. Pinned by
 //!   [`pub_use_of_item_is_not_surfaced_through_reexporter`].
@@ -37,10 +34,8 @@
 //!   path; private consts are rejected at the boundary. Pinned by
 //!   [`const_is_an_importable_item`], [`const_reachable_via_namespace_qualified_path`],
 //!   and their private twins.
-//! - **A private associated method is *not* callable cross-file**, and a private
-//!   type-alias item import is rejected like any other item kind. Pinned by
-//!   [`private_associated_method_rejected_cross_file`] and
-//!   [`private_type_alias_item_import_rejected`].
+//! - **A private associated method is *not* callable cross-file**. Pinned by
+//!   [`private_associated_method_rejected_cross_file`].
 //! - **Instance methods resolve on a cross-file imported struct** (and a private
 //!   one is rejected with a visibility error). Pinned by
 //!   [`instance_method_resolves_on_imported_struct`] and
@@ -564,34 +559,6 @@ mod tests {
             msg.contains("note: constant `lib::vals::MAX` is defined at")
                 && msg.contains("in file `lib::vals`; add `pub` to export it"),
             "the diagnostic names the definition site and the fix, got: {msg}"
-        );
-    }
-
-    // Axis 5 — type alias imports. The import resolves; the alias is nominal.
-
-    #[test]
-    fn type_alias_pub_item_import_resolves() {
-        // A `pub type` alias imported as an item resolves the import without error
-        // even if unused; the alias name is bound in the importing file.
-        assert_ok(&[
-            (vec![], "use lib::ty::{Id}; pub fn main() {}"),
-            (vec!["lib", "ty"], "pub type Id = i32;"),
-        ]);
-    }
-
-    #[test]
-    fn type_alias_is_nominal_not_transparent() {
-        // Pre-existing single-file behavior: a `type Id = i32;` alias is treated
-        // nominally, so `let x: Id = 5;` is a mismatch. Pinned here so the
-        // multi-file matrix records that aliasing is not transparency (the
-        // failure below is NOT a multi-file regression).
-        let msg = assert_err(&[(
-            vec![],
-            "type Id = i32; pub fn main() -> i32 { let x: Id = 5; return 0; }",
-        )]);
-        assert!(
-            msg.contains("type mismatch") && msg.contains("expected `Id`, found `i32`"),
-            "an alias is nominal, not transparent, got: {msg}"
         );
     }
 
@@ -1808,7 +1775,7 @@ mod tests {
         ]);
     }
 
-    // Axis 11 — CircularDefinition over const / type-alias value graphs.
+    // Axis 11 — CircularDefinition over const value graphs.
     // File-import cycles are legal; only value cycles are rejected.
 
     #[test]
@@ -1824,25 +1791,6 @@ mod tests {
         assert!(
             msg.contains("A -> A"),
             "the cycle names the self-loop, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn type_alias_only_cycle_rejected() {
-        let msg = assert_err(&[(vec![], "type A = B; type B = A; pub fn main() {}")]);
-        assert!(
-            msg.contains("circular definition detected"),
-            "a type-alias-only cycle is rejected, got: {msg}"
-        );
-        assert!(msg.contains('A') && msg.contains('B'), "names the cycle, got: {msg}");
-    }
-
-    #[test]
-    fn const_then_type_alias_mixed_cycle_rejected() {
-        let msg = assert_err(&[(vec![], "const A: i32 = B; type B = A; pub fn main() {}")]);
-        assert!(
-            msg.contains("circular definition detected"),
-            "a const->type-alias mixed cycle is rejected, got: {msg}"
         );
     }
 
@@ -2003,27 +1951,6 @@ mod tests {
         );
     }
 
-    // Axis 15 — type-alias visibility.
-
-    #[test]
-    fn private_type_alias_item_import_rejected() {
-        // Importing a *private* type alias as an item is rejected, the same as a
-        // private fn / struct / enum item import: type aliases carry real
-        // visibility in the symbol table now.
-        let msg = assert_err(&[
-            (vec![], "use lib::ty::{Id}; pub fn main() {}"),
-            (vec!["lib", "ty"], "type Id = i32;"),
-        ]);
-        assert!(
-            msg.contains("item `Id` in file `lib::ty` is private"),
-            "a private type-alias item import is rejected, got: {msg}"
-        );
-        assert!(
-            msg.contains("note: `Id` is defined at") && msg.contains("add `pub` to export it"),
-            "ImportedItemPrivate carries a dual-location note for an alias, got: {msg}"
-        );
-    }
-
     // Axis 16 — entry-file boundary: a non-entry file reaches NO entry item by
     // bare name — neither private (soundness) nor public (no ambient cross-file
     // visibility). The entry's `pub` items are reachable only through the reserved
@@ -2089,24 +2016,6 @@ mod tests {
             msg.contains("enum `Color` is not defined")
                 || msg.contains("unknown type `Color`"),
             "a private entry enum is not reachable by bare name, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn private_entry_type_alias_not_reachable_by_bare_name() {
-        // A private `type` alias in the entry file is not visible by bare name in
-        // an imported file (an alias is nominal, so referencing it as a `let` type
-        // would be `unknown type`).
-        let msg = assert_err(&[
-            (vec![], "type Id = i32; pub fn main() {}"),
-            (
-                vec!["lib", "helper"],
-                "pub fn run() -> i32 { let x: Id = 0; return 0; }",
-            ),
-        ]);
-        assert!(
-            msg.contains("unknown type `Id`") || msg.contains("`Id`"),
-            "a private entry type alias is not reachable by bare name, got: {msg}"
         );
     }
 

@@ -14,7 +14,7 @@ enum Arch {
   Evm
 }
 //Expression
-fn valid_Address(a: Address) -> Address {
+fn valid_Address(a: u32) -> u32 {
   a = !a;
   return a;
 }
@@ -41,7 +41,7 @@ fn add(a : i32, b : i32) -> i32 {
 fn add(a : i32, b : i32) -> i32 forall {
   return a + b;
 }
-fn procuring_sorted(func: sf) -> () forall {
+fn procuring_sorted(func: fn(u32, u32) -> u32) -> () forall {
   assume {
     a = valid_Address();
     b = valid_Address();
@@ -60,10 +60,9 @@ fn func() -> () {
 //Spec
 spec some_spec {}
 spec some_spec {
-  external fn sorting_function (Address, Address) -> Address;
+  external fn sorting_function (u32, u32) -> u32;
 }
 spec some_spec {
-  type sf = sorting_function;
 }
 //Struct
 struct pizza {
@@ -120,11 +119,11 @@ fn constructor() -> some_spec {
 fn constructor() -> some_spec {
   self.mem = (Array u64')::new(10, a, false, get_name("abc"), "str", (Array i32')::new(10 * 2));
 }
-fn valid_Address(a: Address) -> Address {
+fn valid_Address(a: u32) -> u32 {
   assert (a < self.max_curr_mem && (a % 4));
   return a;
 }
-fn valid_Address(a: Address) -> Address {
+fn valid_Address(a: u32) -> u32 {
   assert (a < self.max_curr_mem && !(a % 4) && !a);
   return a;
 }
@@ -132,7 +131,7 @@ fn main() -> i32 {
   return -1 - -2;
 }
 //Assert
-fn valid_Address(a: Address) -> Address {
+fn valid_Address(a: u32) -> u32 {
   assert (a < 0);
   return a;
 }
@@ -183,7 +182,7 @@ fn sum_all(xs: [i32; 10]) -> i32 {
 }
 //Variable Declaration
 fn proof() -> () {
-  let a: Address = 0;
+  let a: u32 = 0;
 }
 fn proof() -> () {
   let a: i32 = @;
@@ -245,13 +244,12 @@ spec Definitions {
   external fn external_function(a: u32, b: u32) -> u32;
 }
 spec Definitions {
-  type Address = u32;
 }
 spec AuctionSpec {
   const MAX_BID: u64 = 1000;
   const MIN_BID: u64 = 100;
   struct Bid {
-    bidder: Address;
+    bidder: u32;
     amount: u64;
   }
   enum AuctionState {
@@ -274,7 +272,7 @@ enum specType {
   Contract
 }
 struct Account {
-  address: Address;
+  address: u32;
   balance: u64;
   fn can_withdraw(amount: u64) -> bool {
     return self.balance >= amount;
@@ -289,7 +287,7 @@ fn example() -> u32 {
   return b;
 }
 struct Account {
-  address: Address;
+  address: u32;
   balance: u64;
 }
 fn get_balance(account: Account) -> u64 {
@@ -376,8 +374,7 @@ fn bubble_sort(arr: [i32;10], compare_function: fn(left: i32, right: i32) -> i32
 }
 use { hash } from cryptography;
 spec HashContext {
-    type HashFunction = fn([u8; 100]) -> [u8; 32];
-    fn verify_hash_transitivity(hash_f: HashFunction) -> () {
+    fn verify_hash_transitivity(hash_f: fn([u8; 100]) -> [u8; 32]) -> () {
         let data1: [u8; 100] = @;
         let result_1: [u8; 32] = hash_f(data1);
         let data2: [u8; 100] = @;
@@ -574,7 +571,6 @@ fn foo() {
   let y: i32 = @;
   // 'y' can be any possible i32 value
 }
-type Address = u32;
 fn foo() {
   let flag: u32 = 0;
   assert(flag <= 0);
