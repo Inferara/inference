@@ -174,20 +174,16 @@ visitor for a declaration's type parameters, ahead of the signature it would oth
 `TypeNode::Function` is refused by the same signature-lowering helper as `TypeNode::Generic`,
 at its own arm of the match, but keeps `CodegenError::UnsupportedType`, naming the type rather
 than a rule: the language has no first-class functions, and no analysis rule claims that
-construct. A `type` alias is refused the same way and for the same reason — an alias is
-nominal, nothing resolves it to the type it names before lowering, and no rule owns it —
-except that it does carry a source location, and the message ends with the type to write in
-its place. A `spec` block's name written as a type is the third such shape, refused by the
-same helper's bare-name arm.
+construct. A `spec` block's name written as a type is the second such shape, refused for the
+same reason by the same helper's bare-name arm.
 
 ## The one classification, and the two positions that reach it
 
-A struct **field** can be written with any of those three types just as a signature can, and
-for two of them — the `spec` name and the `type` alias — the refusal `val_type_from_type_id`
-mints is the only diagnostic there is, since no analysis rule owns either. Those two are the
-*nominal* carriers: names the type checker canonicalizes into nothing, one because it denotes
-neither a struct nor an enum and the other because nothing resolves it to the type it names, so
-each reaches a layout still spelled as a name. The corollary is that where no layout is
+A struct **field** can be written with either of those types just as a signature can, and for
+one of them — the `spec` name — the refusal `val_type_from_type_id` mints is the only
+diagnostic there is, since no analysis rule owns it. That one is the *nominal* carrier: a name
+the type checker canonicalizes into nothing, because it denotes neither a struct nor an enum,
+so it reaches a layout still spelled as a name. The corollary is that where no layout is
 computed there is no diagnostic at all — a struct no lowered signature names, and in compile
 mode a `spec` body — which is a gap nothing currently owns, recorded on `CodegenError`'s module
 documentation. A
@@ -197,7 +193,7 @@ written at and the scope its names were read in, and that erasure is all the lay
 `memory.rs` is handed. Left there, the layout can only report such a name as one it failed to
 resolve, and blame the type checker for a program the type checker accepted.
 
-So for those two the layout mints no message of its own.
+So for that one the layout mints no message of its own.
 `compute_struct_field_layout_with_visited` runs one `map_err` over each field — covering the
 field's shape, its width and its alignment together — and `classify_unlowerable_field` recovers
 the field's own `TypeId` from the arena and asks `val_type_from_type_id`. The consequences
@@ -209,16 +205,14 @@ worth keeping straight:
   declaration at all and leaves the accusation standing.
 - Only `StructNotFoundInTypeContext` is re-reported. That is what makes nesting work: an inner
   struct's bad field was already classified in *its* loop under *its* scope, and passes back
-  out untouched. It is also what bounds the hook to the two nominal carriers — every other
+  out untouched. It is also what bounds the hook to the nominal carrier — every other
   unlowerable field type is refused by `memory.rs`'s own arms, under a different variant, and
   never reaches the hook.
 - A refusal that cannot be traced back to a declaration is left exactly as it was. Do not
   widen this into a fallback that invents a position.
-- A field inherits whatever the helper gives — the `None` location the arms that keep one give,
-  and equally the position and repair clause the alias arm gives — so a field and a signature
-  cannot disagree about a type the hook classifies. That is not a claim about every written
-  type; the function type below is the exception, and it is the exception because it never
-  reaches the hook.
+- A field inherits whatever the helper gives, so a field and a signature cannot disagree about
+  a type the hook classifies. That is not a claim about every written type; the function type
+  below is the exception, and it is the exception because it never reaches the hook.
 
 The `map_err` covers all three of the field's questions so that no future reordering of them
 can slip past it, but only two can be first today: the shape, for a nominal name that resolves

@@ -54,7 +54,10 @@ pub(crate) fn at_type_start(p: &Parser) -> bool {
 /// The leading-keyword dispatch in items/statements (`item`, `definition`,
 /// `statement`) routes a `spec`/`type` at the head of a definition or statement
 /// to the keyword rule *before* the expression/name path is reached, so adding
-/// them here does not make `spec Foo {}` or `type T = u8;` ambiguous.
+/// them here does not make `spec Foo {}` or `type T = u8;` ambiguous. `type` is
+/// listed here even though the language has no type-alias declaration and its
+/// keyword rule exists only to refuse `type T = u8;`: the identifier positions
+/// above are the reason the token stays contextual.
 pub(crate) const IDENT_LIKE: TokenSet = TokenSet::new(&[
     SyntaxKind::Ident,
     SyntaxKind::SelfKw,

@@ -675,8 +675,8 @@ call the function rather than naming it as a value.
 
 ### `CircularDefinition`
 
-A cycle among definition *values*: `const` initializers that reference each other,
-or mutually recursive `type` aliases, across one or more files. File-to-file
+A cycle among definition *values*: `const` initializers that reference each
+other, across one or more files. File-to-file
 import cycles are allowed; only value cycles, which have no evaluation order, are
 errors. The message names the cycle members in order.
 
@@ -1176,7 +1176,7 @@ A struct field's type creates a size cycle, making the struct infinitely large.
 
 **Message format**: `{location}: recursive struct definition: field \`{field_name}\` of struct \`{struct_name}\` has type \`{field_type}\` which creates a cycle`
 
-Cycles through arrays (e.g., `struct A { items: [A; 3] }`) and through type aliases are both detected.
+Cycles through arrays (e.g., `struct A { items: [A; 3] }`) are detected too.
 
 **Example**:
 

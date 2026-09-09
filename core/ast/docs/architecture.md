@@ -285,7 +285,7 @@ fn get_visibility(node: &Node) -> Visibility {
 }
 ```
 
-Supported definitions: `FunctionDefinition`, `StructDefinition`, `EnumDefinition`, `ConstantDefinition`, `TypeDefinition`, `ModuleDefinition`.
+Supported definitions: `FunctionDefinition`, `StructDefinition`, `EnumDefinition`, `ConstantDefinition`, `ModuleDefinition`.
 
 ## Design Trade-offs
 

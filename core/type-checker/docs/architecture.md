@@ -20,7 +20,6 @@ This document provides an in-depth look at the type checker's internal architect
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Phase 2: register_types()                            │  │
-│  │  - Collect type aliases (type X = Y)                  │  │
 │  │  - Register struct definitions with fields            │  │
 │  │  - Register enum definitions with variants            │  │
 │  │  - Register spec definitions                          │  │
@@ -121,7 +120,7 @@ SymbolTable {
 
 **Goal**: Collect all type definitions into the symbol table.
 
-**Input**: Type aliases, struct definitions, enum definitions, spec definitions
+**Input**: Struct definitions, enum definitions, spec definitions
 
 **Output**: Symbol table populated with type information
 
@@ -129,8 +128,6 @@ SymbolTable {
 
 ```rust
 // Example AST
-type MyInt = i32;
-
 struct Point {
     x: i32,
     y: i32,
@@ -145,7 +142,6 @@ enum Color {
 // After Phase 2
 SymbolTable {
     types: {
-        "MyInt": TypeAlias(TypeInfo { kind: Number(I32), ... }),
         "Point": Struct(StructInfo {
             name: "Point",
             fields: {

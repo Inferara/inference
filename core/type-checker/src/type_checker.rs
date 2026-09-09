@@ -401,10 +401,10 @@ impl TypeChecker {
             .collect()
     }
 
-    /// Detects value cycles among top-level `const` initializers and `type`
-    /// aliases across all files, emitting [`TypeCheckError::CircularDefinition`]
-    /// on a cycle. When acyclic, records the dependency-first topological order on
-    /// the context for a later phase to emit constants in a computable order.
+    /// Detects value cycles among top-level `const` initializers across all
+    /// files, emitting [`TypeCheckError::CircularDefinition`] on a cycle. When
+    /// acyclic, records the dependency-first topological order on the context for
+    /// a later phase to emit constants in a computable order.
     ///
     /// File-to-file import cycles are unaffected — they are allowed (#63). Only a
     /// cycle in the *values* of definitions, which has no evaluation order, is an
@@ -446,9 +446,9 @@ impl TypeChecker {
         }
     }
 
-    /// Builds a [`DefNode`] for every top-level `const` and `type` alias across
-    /// all files, recording the scope each registered in (its file scope) and its
-    /// scope ancestry so the value graph can resolve references by name.
+    /// Builds a [`DefNode`] for every top-level `const` across all files,
+    /// recording the scope each registered in (its file scope) and its scope
+    /// ancestry so the value graph can resolve references by name.
     fn collect_definition_nodes(&mut self, ctx: &TypedContext) -> Vec<DefNode> {
         let mut nodes = Vec::new();
         for (module_path, defs) in Self::files_with_defs(ctx) {
@@ -946,12 +946,12 @@ impl TypeChecker {
                         })
                     })
             }
-            // A field whose type stayed unresolved (`Custom`) is a type-alias name:
-            // a struct/enum would have canonicalized to `Struct`/`Enum` already.
-            // Follow the alias to its underlying type so a cycle that runs through
-            // `type X = SomeStruct` is still detected. (Pure alias→alias and
-            // const cycles are caught earlier by the definition-graph check; this
-            // covers a struct field reaching back through an alias.)
+            // A field type left as `Custom` is a name `renormalize_signatures`
+            // did not rewrite — a builtin, or a nominal type reachable only
+            // through the symbol table (an item import binds one in the file
+            // scope rather than in the field's own kind). Resolve it there so a
+            // cycle running back through such a name is still detected; a name
+            // nothing resolves ends the walk.
             TypeInfoKind::Custom(name) => {
                 if !visited.insert(name.clone()) {
                     return false;

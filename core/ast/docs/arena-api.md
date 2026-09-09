@@ -201,21 +201,22 @@ for def_id in &func_ids {
 
 `function_def_ids` walks the source files and returns `DefId`s whose `kind` is `Def::Function`. It does not return methods (struct-associated functions) — only top-level function definitions.
 
-### Getting Type Aliases
+### Getting Definitions of One Kind
 
-There is no dedicated method for type aliases. Iterate `source_files → defs` and filter by variant:
+Only functions have a dedicated method. For any other kind, iterate `source_files → defs` and
+filter by variant:
 
 ```rust
 use inference_ast::nodes::Def;
 
 let source_files = arena.source_files();
-let type_aliases: Vec<_> = source_files[0]
+let structs: Vec<_> = source_files[0]
     .defs
     .iter()
-    .filter(|&&id| matches!(arena[id].kind, Def::TypeAlias { .. }))
+    .filter(|&&id| matches!(arena[id].kind, Def::Struct { .. }))
     .collect();
 
-println!("Type aliases: {}", type_aliases.len());
+println!("Structs: {}", structs.len());
 ```
 
 This structural traversal pattern replaces the old `filter_nodes` global scan.
@@ -226,7 +227,7 @@ This structural traversal pattern replaces the old `filter_nodes` global scan.
 let name = arena.def_name(def_id);  // &str
 ```
 
-Works for functions, structs, enums, specs, constants, type aliases, and modules.
+Works for every `Def` variant: functions, `external fn` declarations, structs, enums, specs, and constants.
 
 ### Getting an Identifier Name
 

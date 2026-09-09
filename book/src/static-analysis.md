@@ -235,7 +235,7 @@ Most rules need to visit every statement in every function body and inspect the 
 - `Def::Function` — calls the callback with the function's body block
 - `Def::Struct` — iterates methods and calls the callback for each method's body
 - `Def::Spec` — recurses into the spec's nested definitions
-- `Def::Enum`, `Def::Constant`, `Def::ExternFunction`, `Def::TypeAlias` — skipped
+- `Def::Enum`, `Def::Constant`, `Def::ExternFunction` — skipped
 
 This ensures every function body in the program is visited regardless of where it is defined: top-level functions, struct methods, and functions inside spec blocks are all covered by a single call to `walk_function_bodies`. There is no module arm because
 [modules are files](module-hierarchy-and-multi-file-compilation.md), not AST nodes — `walk_function_bodies` reaches an imported module's bodies by iterating every source file in the `TypedContext`.
@@ -465,21 +465,19 @@ describe one with. That half is deleted the day monomorphization lands, which
 is tracked in issue #76. A type *application* — `Q i32'` written as a
 parameter, return, field or binding type, or standing on its own in expression
 position — is not waiting on anything: no type declaration in Inference takes
-type arguments, since a struct, an enum, a type alias and an `external fn`
-each declare a bare name and only a function binds one, so `Q i32'` names no
-declaration at all. **That half survives monomorphization and must not be
-deleted with the first.** The rule reads a
-declaration's declared binders and nothing else, with no reachability filter
-and no entry-point carve-out, because every narrowing leaves a real defect
-standing: a binder appearing in no lowered type is uncallable — nothing can
-infer it — yet was still emitted, exported, and in proof mode shipped a
-complete obligation with the binder discarded, and a binder shadowing a
-declared type was read as the parameter by the type checker and as the type by
-code generation, which emitted a module WebAssembly validation rejects. A type
-position is looked through array nesting at any depth, and an expression is
-descended to any depth. Type aliases are outside the rule for A048's reason,
-and a function type is refused for its own, with or without a type parameter
-in it.
+type arguments, since a struct, an enum and an `external fn` each declare a
+bare name and only a function binds one, so `Q i32'` names no declaration at
+all. **That half survives monomorphization and must not be deleted with the
+first.** The rule reads a declaration's declared binders and nothing else,
+with no reachability filter and no entry-point carve-out, because every
+narrowing leaves a real defect standing: a binder appearing in no lowered type
+is uncallable — nothing can infer it — yet was still emitted, exported, and in
+proof mode shipped a complete obligation with the binder discarded, and a
+binder shadowing a declared type was read as the parameter by the type checker
+and as the type by code generation, which emitted a module WebAssembly
+validation rejects. A type position is looked through array nesting at any
+depth, and an expression is descended to any depth. A function type is refused
+for its own reason, with or without a type parameter in it.
 
 ### External function write-through
 

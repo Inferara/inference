@@ -434,10 +434,10 @@ mode; it is not a restriction on file names used by import directives.
   accessed through its canonical path.
 - **No per-field visibility.** Struct fields inherit the struct's `pub` or private
   visibility. There is no `pub` modifier on individual fields.
-- **Circular const/type-alias value initialization is an error.** Import cycles between
-  files are legal and handled correctly, but circular *value* initialization — a constant
-  whose value depends (through a chain of constants or type aliases) on itself — is rejected
-  with a `CircularDefinition` error.
+- **Circular const value initialization is an error.** Import cycles between
+  files are legal and handled correctly, but circular *value* initialization — a
+  constant whose value depends, through a chain of constants, on itself — is
+  rejected with a `CircularDefinition` error.
 - **Bare `infc src/main.inf` treats `src/` as the source root.** In this mode, sibling
   `.inf` files under `src/` that are not reachable from `main.inf` produce unreachable
   warnings. The `infs` project toolchain (see

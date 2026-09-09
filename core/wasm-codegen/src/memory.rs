@@ -375,19 +375,16 @@ fn field_layout_size_align(
 /// type: it keeps a nominal carrier's bare name and drops both the source
 /// position and the scope the name was read in. A name the type checker
 /// canonicalizes into nothing survives to a layout unresolved — a `spec` block's
-/// name, which denotes neither a struct nor an enum, and a `type` alias, which
-/// nothing resolves to the type it names — and for such a name the layout can
-/// only say it was not found and blame an earlier phase that in fact accepted
-/// the program.
+/// name, which denotes neither a struct nor an enum — and for such a name the
+/// layout can only say it was not found and blame an earlier phase that in fact
+/// accepted the program.
 ///
 /// The field's own type node says what the type actually is, so this recovers it
 /// and asks [`Compiler::val_type_from_type_id`], the same classification a
 /// signature gets. That is what keeps the two positions from disagreeing about a
-/// type this classifies — including the source position and the repair clause an
-/// alias earns, neither of which survives the erasure. It is not a claim about
-/// every written type: a function type never arrives here, because the layout
-/// refuses it at its own arm, and a field and a signature do render that one
-/// differently.
+/// type this classifies. It is not a claim about every written type: a function
+/// type never arrives here, because the layout refuses it at its own arm, and a
+/// field and a signature do render that one differently.
 ///
 /// Only [`CodegenError::StructNotFoundInTypeContext`] is re-reported, which
 /// is what makes this correct under nesting: a field whose own field failed was

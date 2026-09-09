@@ -120,36 +120,36 @@ pub(crate) enum CodegenError {
     ///
     /// Unlike [`Self::UnsupportedConstruct`] this variant names no rule, because
     /// the shapes it reports have no earlier owner: nothing rejects a function
-    /// type, a `type` alias or a `spec` block's name used as a type before code
-    /// generation, so a message naming one would be false. For those it is the
-    /// diagnostic a user actually sees, in a signature and — for a name that
-    /// reaches a layout unresolved — on a struct field too; for an unknown type
-    /// name, which the type checker rejects first, it is defense-in-depth, where
-    /// returning an error rather than `todo!()` keeps a malformed type from
-    /// panicking the compiler.
+    /// type or a `spec` block's name used as a type before code generation, so a
+    /// message naming one would be false. For those it is the diagnostic a user
+    /// actually sees, in a signature and — for a name that reaches a layout
+    /// unresolved — on a struct field too; for an unknown type name, which the
+    /// type checker rejects first, it is defense-in-depth, where returning an
+    /// error rather than `todo!()` keeps a malformed type from panicking the
+    /// compiler.
     #[error(
         "{}unsupported type in WASM codegen: {rendered}",
         .location.map_or_else(String::new, |l| format!("{}:{}: ", l.start_line, l.start_column))
     )]
     UnsupportedType {
         rendered: String,
-        /// `Some` where the refusal is made against a type *node*: the alias
-        /// arm, the one arm that has a position to give and gives it, whether it
-        /// is reached from a signature or from a struct field.
+        /// Always `None` today: no arm that raises this variant has a source
+        /// position to give. The field is the slot one would be filled into.
         ///
-        /// The arms that hold a `TypeId` and still keep `None` — a function
-        /// type, a `::`-qualified path that resolves to no nominal type, and a
-        /// bare name that names no type the backend can lower, a `spec` among
-        /// them — do so on purpose, so that the messages they have always
-        /// rendered are unchanged; giving them a location is a separate change
-        /// with its own diagnostics to agree on (#392, #393). A struct field
-        /// classified through `memory::classify_unlowerable_field` inherits
-        /// whatever its type's own arm answers, which is what keeps a field and
-        /// a signature from disagreeing about one type — including the `None` a
-        /// `spec` name carries in both positions. A function type is not
-        /// classified that way at all — the layout refuses it at its own arm —
-        /// so the two positions render that one differently, and both happen to
-        /// carry `None`.
+        /// The arms that hold a `TypeId` and keep `None` — a function type, a
+        /// `::`-qualified path that resolves to no nominal type, and a bare name
+        /// that names no type the backend can lower, a `spec` among them — do so
+        /// on purpose, so that the messages they have always rendered are
+        /// unchanged; giving them a location is a separate change with its own
+        /// diagnostics to agree on (#392, #393). The one arm that did report a
+        /// type node's position was the `type` alias arm, and the language no
+        /// longer has aliases for it to report on. A struct field classified
+        /// through `memory::classify_unlowerable_field` inherits whatever its
+        /// type's own arm answers, which is what keeps a field and a signature
+        /// from disagreeing about one type — including the `None` a `spec` name
+        /// carries in both positions. A function type is not classified that way
+        /// at all — the layout refuses it at its own arm — so the two positions
+        /// render that one differently.
         ///
         /// The position is **relative to the file that declares the refused
         /// signature or struct**, which in a multi-file program need not be the
@@ -158,9 +158,9 @@ pub(crate) enum CodegenError {
         /// `line:col` reads as the entry file's. Analysis solved the same problem
         /// by pairing every finding with its defining file and rendering the
         /// label through `inference_ast::nodes::file_label`; code generation's
-        /// located refusals — this variant and the
-        /// [`Self::UnsupportedConstruct`] arms that carry a type node's position
-        /// — do not yet, and qualifying one without the others would make a
+        /// located refusals — the [`Self::UnsupportedConstruct`] arms that carry
+        /// a type node's position, and this slot should it ever be filled — do
+        /// not yet, and qualifying one without the others would make a
         /// bare `line:col` ambiguous rather than merely unqualified. Until they
         /// move together, a caller that reports these to a user across files has
         /// to supply the file itself.

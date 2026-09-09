@@ -634,7 +634,7 @@ pub enum TypeCheckError {
     EmptyImportList { path: String, location: Location },
 
     /// A cycle among definition *values* — consts whose initializers reference
-    /// each other, or mutually recursive type aliases — across one or more files.
+    /// each other — across one or more files.
     /// `cycle` names the members in order (e.g. `A -> B -> A`). File-to-file
     /// import cycles are allowed and never reach here; only value cycles, which
     /// have no computable evaluation order, are rejected.

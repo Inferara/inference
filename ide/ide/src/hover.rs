@@ -236,7 +236,7 @@ fn ident_in_directive(
     None
 }
 
-/// A `let name: T` / `type name = …` binding: the declared name's type.
+/// A `let name: T` binding: the declared name's type.
 fn ident_in_stmt(
     arena: &AstArena,
     ctx: &TypedContext,

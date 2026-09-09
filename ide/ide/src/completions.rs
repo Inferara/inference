@@ -254,7 +254,6 @@ fn def_kind(arena: &AstArena, def: DefId) -> CompletionItemKind {
         Def::Enum { .. } => CompletionItemKind::Enum,
         Def::Constant { .. } => CompletionItemKind::Constant,
         Def::Spec { .. } => CompletionItemKind::Module,
-        // A type alias names a type, so it shares the struct icon in the list.
         Def::Struct { .. } => CompletionItemKind::Struct,
     }
 }

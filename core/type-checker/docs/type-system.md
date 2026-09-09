@@ -1000,7 +1000,6 @@ fn add T'(a: T, b: T) -> T {
 Widening between typed values (`i32` → `i64`) is not under consideration: all type conversions are explicit, and there is no cast operator. What function arguments and return values *do* supply is an expected type for an integer literal, which is not a conversion — see [Integer Literal Typing](#integer-literal-typing).
 
 **Advanced Type Features**:
-- Type aliases with generics (a `type` declaration binds no type parameter today)
 - Union types: `i32 | i64` for sum types
 - Intersection types: `T & U` for combined constraints
 - Refinement types: types with predicates
