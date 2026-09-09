@@ -333,11 +333,6 @@ pub enum Def {
         ty: TypeId,
         value: ExprId,
     },
-    TypeAlias {
-        name: IdentId,
-        vis: Visibility,
-        ty: TypeId,
-    },
 }
 
 // Statements
@@ -368,10 +363,6 @@ pub enum Stmt {
         ty: TypeId,
         value: Option<ExprId>,
         is_mut: bool,
-    },
-    TypeDef {
-        name: IdentId,
-        ty: TypeId,
     },
     Assert {
         expr: ExprId,

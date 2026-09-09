@@ -86,7 +86,6 @@ fn check_statement(
         | Stmt::Break
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
         | Stmt::Assert { .. }
         | Stmt::ConstDef(_) => {}
     }

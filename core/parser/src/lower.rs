@@ -84,6 +84,11 @@ impl<'s> Lowering<'s> {
                 SyntaxKind::UseDirective => {
                     directives.push(Directive::Use(self.lower_use_directive(child)));
                 }
+                SyntaxKind::TypeDefinitionStatement => {
+                    // A type alias has no AST form: the grammar keeps the node
+                    // only so it can report on it, and the parse already failed.
+                    // Dropping it here is what lets the AST carry no alias.
+                }
                 _ => {
                     let def_id = self.lower_definition(child);
                     defs.push(def_id);
@@ -193,7 +198,6 @@ impl<'s> Lowering<'s> {
             SyntaxKind::ConstantDefinition => self.lower_constant_definition(node),
             SyntaxKind::FunctionDefinition => self.lower_function_definition(node),
             SyntaxKind::ExternalFunctionDefinition => self.lower_external_function_definition(node),
-            SyntaxKind::TypeDefinitionStatement => self.lower_type_alias_definition(node),
             _ => {
                 self.push_error(
                     node,
@@ -242,9 +246,15 @@ impl<'s> Lowering<'s> {
         // children are the name `Identifier` and, on the `pub spec` error path, a
         // stray `Visibility` node; both are filtered out so an already-rejected
         // `pub spec` does not cascade a second diagnostic from re-lowering the
-        // name as if it were a definition.
+        // name as if it were a definition. A rejected type alias is filtered for
+        // the same reason: it has no AST form to lower to.
         for child in node.node_children().filter(|child| {
-            !matches!(child.kind, SyntaxKind::Identifier | SyntaxKind::Visibility)
+            !matches!(
+                child.kind,
+                SyntaxKind::Identifier
+                    | SyntaxKind::Visibility
+                    | SyntaxKind::TypeDefinitionStatement
+            )
         }) {
             let def_id = self.lower_definition(child);
             defs.push(def_id);
@@ -444,28 +454,6 @@ impl<'s> Lowering<'s> {
         })
     }
 
-    /// Mirrors `Builder::build_type_alias_definition`: **type then name**, then
-    /// the `DefData`. A `type X = T;` aliases the type after `=` (there is no
-    /// `:`), so the type is anchored on `=`, not `:`. A malformed alias missing
-    /// its type lowers to a unit placeholder so lowering stays total.
-    fn lower_type_alias_definition(&mut self, node: &SyntaxNode) -> DefId {
-        let location = node.loc;
-        let ty = match self.node_after_token(node, SyntaxKind::Eq) {
-            Some(type_node) => self.lower_type(type_node),
-            None => self.alloc_simple_type(location, SimpleTypeKind::Unit),
-        };
-        let name = self.lower_name_or_error(self.first_identifier(node), node);
-
-        self.arena.defs.alloc(DefData {
-            location,
-            kind: Def::TypeAlias {
-                name,
-                vis: self.visibility(node),
-                ty,
-            },
-        })
-    }
-
     /// Mirrors `Builder::build_argument_data`, dispatching on the argument node
     /// kind. For `argument_declaration` the alloc order is **type then name**.
     fn lower_argument_data(&mut self, node: &SyntaxNode) -> ArgData {
@@ -565,9 +553,13 @@ impl<'s> Lowering<'s> {
 
     /// Mirrors `Builder::build_block_statements`: lower each named child of the
     /// block in source order. (Our CST node-children are exactly tree-sitter's
-    /// named children.)
+    /// named children.) A rejected type alias is dropped rather than lowered: it
+    /// has no AST form, and the parse that produced the node already failed.
     fn lower_block_statements(&mut self, node: &SyntaxNode) -> Vec<StmtId> {
-        let stmt_nodes: Vec<&SyntaxNode> = node.node_children().collect();
+        let stmt_nodes: Vec<&SyntaxNode> = node
+            .node_children()
+            .filter(|child| child.kind != SyntaxKind::TypeDefinitionStatement)
+            .collect();
         stmt_nodes
             .into_iter()
             .map(|child| self.lower_statement(child))
@@ -667,17 +659,6 @@ impl<'s> Lowering<'s> {
                         value,
                         is_mut,
                     },
-                })
-            }
-            SyntaxKind::TypeDefinitionStatement => {
-                let ty = match self.node_after_token(node, SyntaxKind::Eq) {
-                    Some(type_node) => self.lower_type(type_node),
-                    None => self.alloc_simple_type(location, SimpleTypeKind::Unit),
-                };
-                let name = self.lower_name_or_error(self.first_identifier(node), node);
-                self.arena.stmts.alloc(StmtData {
-                    location,
-                    kind: Stmt::TypeDef { name, ty },
                 })
             }
             SyntaxKind::AssertStatement => {
@@ -2198,20 +2179,39 @@ mod tests {
     }
 
     #[test]
-    fn lowers_rejected_type_alias() {
-        // The grammar refuses `type` aliases but still completes the node, so
-        // lowering still reaches `Def::TypeAlias` — and adds no second
-        // diagnostic of its own.
+    fn drops_rejected_type_alias() {
+        // The grammar refuses `type` aliases and completes the node anyway, but
+        // there is no AST form for one: lowering drops it, leaving the source
+        // file with no definitions at all, and adds no second diagnostic.
         let arena = lower_rejected("type Id = i32;", &[TYPE_ALIAS_MESSAGE]);
+        let files: Vec<_> = arena.source_files().collect();
+        assert_eq!(files.len(), 1, "expected exactly one source file");
+        assert!(
+            files[0].defs.is_empty(),
+            "the alias must lower to nothing, got {:?}",
+            files[0]
+                .defs
+                .iter()
+                .map(|d| &arena[*d].kind)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn drops_rejected_type_alias_in_a_spec() {
+        // The spec body reaches the same production through the item dispatch,
+        // and drops it through its own filter: the spec keeps its other member
+        // and gains nothing for the alias.
+        let arena = lower_rejected(
+            "spec S { type T = u32; const a: i32 = 1; }",
+            &[TYPE_ALIAS_MESSAGE],
+        );
         match single_def(&arena) {
-            Def::TypeAlias { name, ty, .. } => {
-                assert_eq!(arena.ident_name(*name), "Id");
-                assert!(matches!(
-                    arena[*ty].kind,
-                    TypeNode::Simple(SimpleTypeKind::I32)
-                ));
+            Def::Spec { defs, .. } => {
+                assert_eq!(defs.len(), 1, "only the const survives");
+                assert!(matches!(arena[defs[0]].kind, Def::Constant { .. }));
             }
-            other => panic!("expected type alias, got {other:?}"),
+            other => panic!("expected spec, got {other:?}"),
         }
     }
 
@@ -2802,19 +2802,17 @@ mod tests {
     }
 
     #[test]
-    fn lowers_rejected_type_in_body() {
-        // Statement position takes the same refused production, and lowers to
-        // `Stmt::TypeDef` behind the same single diagnostic.
-        let arena = lower_rejected("fn f() { type T = i32; }", &[TYPE_ALIAS_MESSAGE]);
+    fn drops_rejected_type_in_body() {
+        // Statement position takes the same refused production and drops it the
+        // same way: the alias contributes no statement, and the statement after
+        // it still lowers, so the drop skips exactly one child.
+        let arena = lower_rejected(
+            "fn f() { type T = i32; let x: i32 = 1; }",
+            &[TYPE_ALIAS_MESSAGE],
+        );
         match single_stmt(&arena) {
-            Stmt::TypeDef { name, ty } => {
-                assert_eq!(arena.ident_name(*name), "T");
-                assert!(matches!(
-                    arena[*ty].kind,
-                    TypeNode::Simple(SimpleTypeKind::I32)
-                ));
-            }
-            other => panic!("expected type def stmt, got {other:?}"),
+            Stmt::VarDef { name, .. } => assert_eq!(arena.ident_name(*name), "x"),
+            other => panic!("expected the let statement, got {other:?}"),
         }
     }
 

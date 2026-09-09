@@ -128,6 +128,9 @@ once and leaving the following item to parse cleanly:
   "expected an item", while bumping the keyword first would abandon at the `fn` of
   `type Op = fn(i32) -> i32;` — another anchor. Reporting inside the intact production
   keeps one alias to exactly one message and still consumes the declaration through its `;`.
+  The node it completes exists only to carry that rejection: lowering drops it at each of
+  the three places it collects children — the source file, a `spec` body, and a block — so
+  no alias reaches the AST.
 
 The `from`-form external WASM import (`use {x} from M;`) is unchanged and
 disambiguated from source imports by the presence of the `from` keyword.
@@ -203,7 +206,7 @@ Assignment (`=`) is a statement (`assign_statement`), not an expression operator
 
 ## Testing
 
-The crate contains **320 unit tests** distributed across the lexer, engine, grammar, and
+The crate contains **321 unit tests** distributed across the lexer, engine, grammar, and
 syntax tree modules. Test coverage includes per-token-class lexer round-trips, joint-bit
 edge cases (`-42` vs `- 42`, `Vec i32'`, `a::b`), grammar CST-shape assertions for every
 construct, precedence-climb fixtures, struct-vs-block disambiguation, and resilience tests

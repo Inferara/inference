@@ -116,10 +116,6 @@ describe("Grammar: Declaration keywords", () => {
     assertTokenScope("enum Color {", "enum", "keyword.declaration.enum");
   });
 
-  it("type is keyword.declaration", () => {
-    assertTokenScope("type Alias = i32;", "type", "keyword.declaration.type");
-  });
-
   it("const is keyword.declaration", () => {
     assertTokenScope(
       "const x: i32 = 42;",

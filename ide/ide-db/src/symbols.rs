@@ -42,8 +42,7 @@ fn collect_def(arena: &AstArena, def: DefId, out: &mut Vec<DefId>) {
         Def::Function { .. }
         | Def::ExternFunction { .. }
         | Def::Enum { .. }
-        | Def::Constant { .. }
-        | Def::TypeAlias { .. } => {}
+        | Def::Constant { .. } => {}
     }
 }
 

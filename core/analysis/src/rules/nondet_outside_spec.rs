@@ -68,8 +68,7 @@ fn scan_defs(
             Def::Spec { .. }
             | Def::Enum { .. }
             | Def::Constant { .. }
-            | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. } => {}
+            | Def::ExternFunction { .. } => {}
         }
     }
 }
@@ -127,7 +126,6 @@ fn scan_stmt(
         | Stmt::Break
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
         | Stmt::Assert { .. }
         | Stmt::ConstDef(_) => {}
     }

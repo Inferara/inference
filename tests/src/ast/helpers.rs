@@ -383,16 +383,6 @@ pub(crate) fn assert_expr_stmt(arena: &AstArena, stmt_id: StmtId) -> ExprId {
     *expr_id
 }
 
-/// Assert that `stmt_id` is a `Stmt::TypeDef`. Returns `(name_ident, type_id)`.
-#[must_use]
-pub(crate) fn assert_type_def_stmt(arena: &AstArena, stmt_id: StmtId) -> (IdentId, TypeId) {
-    let stmt = &arena[stmt_id];
-    let Stmt::TypeDef { name, ty } = &stmt.kind else {
-        panic!("expected Stmt::TypeDef, got {:?}", stmt.kind);
-    };
-    (*name, *ty)
-}
-
 /// Assert that `stmt_id` is a `Stmt::ConstDef`. Returns the inner [`DefId`].
 #[must_use]
 pub(crate) fn assert_const_def_stmt(arena: &AstArena, stmt_id: StmtId) -> DefId {

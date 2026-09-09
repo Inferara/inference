@@ -1,31 +1,30 @@
-//! Definition-value cycle detection over `const` initializers and type aliases.
+//! Definition-value cycle detection over `const` initializers.
 //!
 //! File-to-file import cycles are allowed (#63): scope resolution walks a
 //! pre-built tree, so a cyclic import graph costs nothing. What *cannot* be
 //! resolved is a cycle among definition **values** — a `const` whose initializer
-//! reads another `const` that (transitively) reads the first, or mutually
-//! recursive type aliases. Such a cycle has no evaluation order, so it is a hard
-//! error ([`TypeCheckError::CircularDefinition`]).
+//! reads another `const` that (transitively) reads the first. Such a cycle has no
+//! evaluation order, so it is a hard error
+//! ([`TypeCheckError::CircularDefinition`]).
 //!
-//! The graph is built across all files. A node is one top-level `const` or
-//! `type` alias, identified by `(defining-scope-id, name)` so same-named
-//! definitions in different files stay distinct. An edge `A -> B` means `A`'s
-//! value (a const initializer expression or a type-alias target type) references
-//! `B` by name or qualified path. The graph is checked for cycles; when acyclic,
-//! a topological order is produced for a later phase to emit definitions in a
-//! computable order.
+//! The graph is built across all files. A node is one top-level `const`,
+//! identified by `(defining-scope-id, name)` so same-named definitions in
+//! different files stay distinct. An edge `A -> B` means `A`'s initializer
+//! expression references `B` by name or qualified path. The graph is checked for
+//! cycles; when acyclic, a topological order is produced for a later phase to
+//! emit definitions in a computable order.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{DefId, ExprId, TypeId};
-use inference_ast::nodes::{Def, Expr, Location, TypeNode};
+use inference_ast::ids::{DefId, ExprId};
+use inference_ast::nodes::{Def, Expr, Location};
 use rustc_hash::FxHashMap;
 
 use crate::symbol_table::{ResolvedImportTarget, SymbolTable};
 
-/// A node in the definition-value graph: a top-level `const` or `type` alias.
+/// A node in the definition-value graph: a top-level `const`.
 #[derive(Debug, Clone)]
 pub(crate) struct DefNode {
-    /// The `const` / `type alias` declaration this node stands for.
+    /// The `const` declaration this node stands for.
     pub(crate) def_id: DefId,
     /// The scope the definition was registered in (its file scope for a
     /// top-level definition). With its `name`, uniquely identifies the node.
@@ -74,13 +73,11 @@ pub(crate) enum GraphOutcome {
 
 /// Cross-file edge discovery via item/namespace imports.
 ///
-/// A bare reference (`type A = B;`) or a namespace-qualified one (`const A =
-/// m::C;`) can name a definition in *another* file only through an import — `::`
-/// does not parse in type position, so an item import is the sole way to express
-/// a cross-file type-alias reference. The referrer's own scope chain (`by_key`)
-/// and `::`-canonical paths (`by_path`) never see those bindings, so without this
-/// translation every cross-file definition cycle is invisible to the cycle check
-/// (#63).
+/// A bare reference (`const A: i32 = B;`) or a namespace-qualified one (`const A:
+/// i32 = m::C;`) can name a definition in *another* file only through an import.
+/// The referrer's own scope chain (`by_key`) and `::`-canonical paths (`by_path`)
+/// never see those bindings, so without this translation every cross-file
+/// definition cycle is invisible to the cycle check (#63).
 ///
 /// This maps a referring file scope's import bindings to the canonical `::`-path
 /// of what they bind, so a reference can be rewritten to a path that `by_path`
@@ -158,7 +155,7 @@ impl ImportBindings {
 
 /// Builds and analyzes the definition-value graph for `nodes`.
 ///
-/// `nodes` must list every top-level `const` and `type` alias across all files.
+/// `nodes` must list every top-level `const` across all files.
 /// References resolve against the scope chains carried by each node and against
 /// `table`'s resolved import bindings, so a cross-file reference expressed only
 /// through an item or namespace import is discovered as an edge (#63).
@@ -194,9 +191,6 @@ impl<'a> DefGraph<'a> {
             match &arena[node.def_id].kind {
                 Def::Constant { value, .. } => {
                     collect_expr_refs(arena, *value, &mut referenced);
-                }
-                Def::TypeAlias { ty, .. } => {
-                    collect_type_refs(arena, *ty, &mut referenced);
                 }
                 _ => continue,
             }
@@ -309,12 +303,13 @@ impl<'a> DefGraph<'a> {
 /// 3. failing both, the reference is rewritten through the referring file's
 ///    import bindings — an item import (`use lib::t::{B};`) or a namespace import
 ///    (`use lib::m;` then `m::C`) — and the resulting canonical path is matched.
-///    This is the only way a cross-file type-alias reference can be expressed, so
-///    it is essential for cross-file cycle detection (#63).
+///    This is how a cross-file reference reaches a definition the referring file
+///    cannot otherwise name, so it is essential for cross-file cycle detection
+///    (#63).
 ///
 /// Returns `None` when the reference names something that is not a tracked
-/// const/type alias (a function, a builtin, a local, an unimported name) — such
-/// references never participate in a definition-value cycle.
+/// const (a function, a builtin, a local, an unimported name) — such references
+/// never participate in a definition-value cycle.
 fn resolve_ref(
     by_key: &FxHashMap<(u32, &str), usize>,
     by_path: &FxHashMap<String, usize>,
@@ -401,25 +396,5 @@ fn flatten_path(arena: &AstArena, expr_id: ExprId) -> Option<String> {
         Some(segments.join("::"))
     } else {
         None
-    }
-}
-
-/// Collects type-alias references from a type node: `Custom`, `QualifiedName`,
-/// and `Qualified` names, recursing into arrays.
-///
-/// A `::`-qualified reference is collected as its full `::`-joined path so it
-/// matches the by-path index a qualified definition is keyed under; collecting
-/// only the leaf would miss the edge to a cross-file type alias.
-fn collect_type_refs(arena: &AstArena, ty_id: TypeId, out: &mut Vec<String>) {
-    let kind = &arena[ty_id].kind;
-    match kind {
-        TypeNode::Custom(ident_id) => out.push(arena[*ident_id].name.clone()),
-        TypeNode::QualifiedName { .. } | TypeNode::Qualified { .. } => {
-            if let Some(path) = kind.qualified_path(arena) {
-                out.push(path);
-            }
-        }
-        TypeNode::Array { element, .. } => collect_type_refs(arena, *element, out),
-        _ => {}
     }
 }

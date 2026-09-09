@@ -362,7 +362,8 @@ pub(crate) fn constant_definition(p: &mut Parser) {
 /// full: the error is recorded on the `type` keyword without moving the cursor,
 /// so the rest of the rule still eats the declaration through its `;`. See the
 /// message's own documentation for why nothing lighter than the intact
-/// production works here.
+/// production works here. The completed node exists only to carry that
+/// rejection: lowering drops it, because there is no AST form for an alias.
 pub(crate) fn type_definition_statement(p: &mut Parser) {
     let m = p.start();
     visibility(p);

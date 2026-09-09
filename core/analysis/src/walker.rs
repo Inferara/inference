@@ -242,8 +242,8 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
         // by that key so a field typed as a cross-file struct reaches the right
         // definition. A same-named struct in another file has a distinct key, so a
         // bare-name lookup would otherwise land on the wrong struct and misjudge
-        // its nesting depth. `Custom` is an unresolved (or alias) name with no key,
-        // for which the bare name is the only handle.
+        // its nesting depth. `Custom` is an unresolved name with no key, for which
+        // the bare name is the only handle.
         TypeInfoKind::Struct(_, key) => ctx
             .lookup_struct(key)
             .is_some_and(|s| struct_has_compound_field(ctx, &s)),
@@ -288,8 +288,8 @@ fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
 /// carrier holds is by construction one the struct is registered under, so key
 /// lookup is complete, and falling back to the bare name could only add a path
 /// to a same-named struct in *another* file, which is exactly what the key
-/// exists to distinguish; `Custom` is an unresolved (or alias) name whose only
-/// handle is the bare name, resolved against the referencing file; and a
+/// exists to distinguish; `Custom` is an unresolved name whose only handle is
+/// the bare name, resolved against the referencing file; and a
 /// `::`-qualified annotation carries an unresolved path resolved against that
 /// same file. Enums, scalars, and names that resolve to nothing yield `None`.
 ///
@@ -405,7 +405,6 @@ fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
         | Stmt::Assign { .. }
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
         | Stmt::Assert { .. }
         | Stmt::ConstDef(_) => false,
     }
@@ -450,7 +449,6 @@ fn walk_stmt_recursive(
         | Stmt::Break
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
         | Stmt::Assert { .. }
         | Stmt::ConstDef(_) => {}
     }
@@ -481,8 +479,7 @@ pub(crate) fn for_each_function_body(
             }
             Def::Enum { .. }
             | Def::Constant { .. }
-            | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. } => {}
+            | Def::ExternFunction { .. } => {}
         }
     }
 }
@@ -550,7 +547,6 @@ fn walk_statement(
         | Stmt::Break
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
         | Stmt::Assert { .. }
         | Stmt::ConstDef(_) => {}
     }
@@ -1017,23 +1013,13 @@ mod tests {
                 value: value_expr,
             },
         });
-        let alias_name = alloc_ident(&mut arena, "Alias");
-        let alias_type = alloc_unit_type(&mut arena);
-        let type_def = arena.defs.alloc(DefData {
-            location: dummy_location(),
-            kind: Def::TypeAlias {
-                name: alias_name,
-                vis: Visibility::default(),
-                ty: alias_type,
-            },
-        });
         let mut count = 0;
-        for_each_function_body(&arena, &[enum_def, const_def, type_def], &mut |_body| {
+        for_each_function_body(&arena, &[enum_def, const_def], &mut |_body| {
             count += 1;
         });
         assert_eq!(
             count, 0,
-            "should not visit bodies for enum, constant, or type alias definitions"
+            "should not visit bodies for enum or constant definitions"
         );
     }
 

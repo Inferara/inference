@@ -317,8 +317,7 @@ impl AstArena {
             | Def::Struct { name, .. }
             | Def::Enum { name, .. }
             | Def::Spec { name, .. }
-            | Def::Constant { name, .. }
-            | Def::TypeAlias { name, .. } => *name,
+            | Def::Constant { name, .. } => *name,
         };
         &self[name_id].name
     }

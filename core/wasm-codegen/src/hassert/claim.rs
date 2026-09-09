@@ -109,7 +109,6 @@ fn in_stmt(arena: &AstArena, stmt: StmtId, descent: Descent) -> Option<Claim> {
         | Stmt::Expr(_)
         | Stmt::VarDef { .. }
         | Stmt::ConstDef(_)
-        | Stmt::TypeDef { .. }
         | Stmt::Assign { .. }
         | Stmt::Break => None,
     }

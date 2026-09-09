@@ -18,7 +18,6 @@ pub enum SymbolKind {
     Method,
     Spec,
     Constant,
-    TypeAlias,
 }
 
 /// A definition and the definitions nested inside it, forming the document
@@ -126,7 +125,6 @@ fn def_symbol(arena: &AstArena, def: DefId) -> Option<DocumentSymbol> {
             (SymbolKind::Spec, children)
         }
         Def::Constant { .. } => (SymbolKind::Constant, Vec::new()),
-        Def::TypeAlias { .. } => (SymbolKind::TypeAlias, Vec::new()),
     };
     Some(DocumentSymbol {
         name,
@@ -143,7 +141,6 @@ mod tests {
     use crate::test_utils::{at, single};
 
     const SOURCE: &str = "const MAX: i32 = 1;\n\
-type Handle = i32;\n\
 enum Color { Red, Green }\n\
 struct Point { px: i32; py: i32; fn getx(self) -> i32 { return self.px; } }\n\
 spec Laws { fn commutes() {} }\n\
@@ -180,7 +177,6 @@ fn entry() { return; }";
             summary,
             vec![
                 ("MAX", SymbolKind::Constant),
-                ("Handle", SymbolKind::TypeAlias),
                 ("Color", SymbolKind::Enum),
                 ("Point", SymbolKind::Struct),
                 ("Laws", SymbolKind::Spec),
@@ -192,7 +188,7 @@ fn entry() { return; }";
     #[test]
     fn selection_ranges_point_at_the_name() {
         let symbols = symbols(SOURCE);
-        for name in ["MAX", "Handle", "Color", "Point", "Laws", "entry"] {
+        for name in ["MAX", "Color", "Point", "Laws", "entry"] {
             let symbol = top(&symbols, name);
             assert_eq!(
                 symbol.selection_range.start,

@@ -89,7 +89,6 @@ use crate::type_info::TypeInfo;
 /// Kind of symbol registration for registration error context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationKind {
-    Type,
     Struct,
     Enum,
     Spec,
@@ -101,7 +100,6 @@ pub enum RegistrationKind {
 impl Display for RegistrationKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            RegistrationKind::Type => write!(f, "type"),
             RegistrationKind::Struct => write!(f, "struct"),
             RegistrationKind::Enum => write!(f, "enum"),
             RegistrationKind::Spec => write!(f, "spec"),
@@ -1147,12 +1145,12 @@ mod tests {
     #[test]
     fn display_registration_failed_without_reason() {
         let err = TypeCheckError::RegistrationFailed {
-            kind: RegistrationKind::Type,
+            kind: RegistrationKind::Struct,
             name: "Foo".to_string(),
             reason: None,
             location: test_location(),
         };
-        assert_eq!(err.to_string(), "1:5: error registering type `Foo`");
+        assert_eq!(err.to_string(), "1:5: error registering struct `Foo`");
     }
 
     #[test]
@@ -1298,7 +1296,6 @@ mod tests {
 
     #[test]
     fn display_registration_kind() {
-        assert_eq!(RegistrationKind::Type.to_string(), "type");
         assert_eq!(RegistrationKind::Struct.to_string(), "struct");
         assert_eq!(RegistrationKind::Enum.to_string(), "enum");
         assert_eq!(RegistrationKind::Spec.to_string(), "spec");

@@ -96,7 +96,6 @@ pub(crate) fn symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
         // A spec is a set of laws over a type, closest to an interface/trait.
         ide::SymbolKind::Spec => SymbolKind::INTERFACE,
         ide::SymbolKind::Constant => SymbolKind::CONSTANT,
-        ide::SymbolKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
     }
 }
 
@@ -423,10 +422,6 @@ mod tests {
         assert_eq!(symbol_kind(ide::SymbolKind::Method), SymbolKind::METHOD);
         assert_eq!(symbol_kind(ide::SymbolKind::Spec), SymbolKind::INTERFACE);
         assert_eq!(symbol_kind(ide::SymbolKind::Constant), SymbolKind::CONSTANT);
-        assert_eq!(
-            symbol_kind(ide::SymbolKind::TypeAlias),
-            SymbolKind::TYPE_PARAMETER
-        );
     }
 
     #[test]

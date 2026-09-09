@@ -244,10 +244,6 @@ fn def_children(arena: &AstArena, id: DefId) -> Vec<NodeId> {
             out.push(NodeId::Type(*ty));
             out.push(NodeId::Expr(*value));
         }
-        Def::TypeAlias { name, ty, .. } => {
-            out.push(NodeId::Ident(*name));
-            out.push(NodeId::Type(*ty));
-        }
     }
     out
 }
@@ -304,10 +300,6 @@ fn stmt_children(arena: &AstArena, id: StmtId) -> Vec<NodeId> {
             if let Some(value) = value {
                 out.push(NodeId::Expr(*value));
             }
-        }
-        Stmt::TypeDef { name, ty } => {
-            out.push(NodeId::Ident(*name));
-            out.push(NodeId::Type(*ty));
         }
         Stmt::ConstDef(def) => out.push(NodeId::Def(*def)),
         Stmt::Break => {}
@@ -702,21 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn hits_the_name_and_aliased_type_of_a_type_alias() {
-        let source = "type Word = u64;";
-        let (arena, file) = single_file(source);
-
-        let name = hit_test(&arena, file, source.find("Word").unwrap() as u32)
-            .expect("covers the alias name");
-        assert_eq!(hit_text(&arena, source, &name), "Word");
-
-        let ty = hit_test(&arena, file, source.find("u64").unwrap() as u32)
-            .expect("covers the aliased type");
-        assert!(matches!(ty.node, NodeId::Type(_)));
-        assert_eq!(hit_text(&arena, source, &ty), "u64");
-    }
-
-    #[test]
     fn hits_the_type_of_an_ignored_argument() {
         // `_: i32` names no binding, so the type is the argument's only child.
         let source = "fn f(_: i32) {}";
@@ -803,22 +780,6 @@ mod tests {
             .expect("covers a statement in the else-block");
         assert_eq!(hit_text(&arena, source, &hit), "z");
         assert!(hit.ancestors.iter().any(|a| matches!(a, NodeId::Block(_))));
-    }
-
-    #[test]
-    fn hits_a_local_type_definition_statement() {
-        // A local `type X = ..;` is a statement, distinct from a top-level alias.
-        let source = "fn f() { type Small = u8; }";
-        let (arena, file) = single_file(source);
-
-        let name = hit_test(&arena, file, source.find("Small").unwrap() as u32)
-            .expect("covers the local type name");
-        assert_eq!(hit_text(&arena, source, &name), "Small");
-
-        let ty = hit_test(&arena, file, source.find("u8").unwrap() as u32)
-            .expect("covers the local aliased type");
-        assert!(matches!(ty.node, NodeId::Type(_)));
-        assert_eq!(hit_text(&arena, source, &ty), "u8");
     }
 
     #[test]

@@ -1463,14 +1463,6 @@ impl Compiler {
                     || ctx.lookup_enum_in(name, module_path).is_some()
                 {
                     Ok(Some(ValType::I32))
-                } else if let Some(aliased) = Self::type_alias_named(arena, ctx, name) {
-                    Err(CodegenError::UnsupportedType {
-                        rendered: format!(
-                            "the type alias `{name}`, which is not resolved to the type it names{}",
-                            Self::alias_repair_clause(arena, ctx, aliased, module_path)
-                        ),
-                        location: Some(arena[ty_id].location),
-                    })
                 } else {
                     // A bare name reaches here three ways, and one of them is a
                     // program the whole pipeline accepts: a `spec` block's name
@@ -1502,101 +1494,6 @@ impl Compiler {
             current = *element;
         }
         current
-    }
-
-    /// The type a `type` alias named `name` names, if the program declares one.
-    ///
-    /// An alias is not transparent: the type checker keeps `type A = i32` and
-    /// `i32` distinct, so no value of an alias can be constructed, and nothing
-    /// resolves an alias to its target before lowering. Naming one in a
-    /// signature is the only way an alias reaches the backend, and reporting it
-    /// as the alias it is — with the type to write instead — is worth more to
-    /// the reader than reporting it as a name that does not exist. The match is
-    /// on the bare name over the top-level `const` and `type` definitions the
-    /// typed context already orders: two same-named aliases in different files
-    /// give the same answer, so a diagnostic has no reason to pick between them.
-    fn type_alias_named(arena: &AstArena, ctx: &TypedContext, name: &str) -> Option<TypeId> {
-        ctx.definition_order()
-            .iter()
-            .find_map(|def_id| match &arena[*def_id].kind {
-                Def::TypeAlias { name: alias, ty, .. } if arena[*alias].name == name => Some(*ty),
-                _ => None,
-            })
-    }
-
-    /// The `; write `T` instead` clause an alias refusal ends with, or the empty
-    /// string when there is no `T` worth naming.
-    ///
-    /// `target` is the type the refused alias names directly, which may be
-    /// another alias: advising the immediate target of `type B = i32; type A = B`
-    /// would tell the reader to write `B`, which earns the very same refusal. So
-    /// the chain is followed to the first type that is not itself an alias. A
-    /// chain that closes on itself reaches no such type and gets no clause —
-    /// there is nothing true to advise, and a cyclic alias is the type checker's
-    /// to reject.
-    ///
-    /// The type the chain ends at is advised only when
-    /// [`Self::is_advisable_replacement`] holds of it, so a refusal never tells
-    /// the reader to write something that does not compile.
-    fn alias_repair_clause(
-        arena: &AstArena,
-        ctx: &TypedContext,
-        target: TypeId,
-        module_path: &[String],
-    ) -> String {
-        let mut current = target;
-        let mut seen = FxHashSet::default();
-        while let TypeNode::Custom(ident_id) = &arena[current].kind {
-            if !seen.insert(arena[*ident_id].name.clone()) {
-                return String::new();
-            }
-            let Some(next) = Self::type_alias_named(arena, ctx, &arena[*ident_id].name) else {
-                break;
-            };
-            current = next;
-        }
-        if !Self::is_advisable_replacement(arena, ctx, current, module_path) {
-            return String::new();
-        }
-        format!(
-            "; write `{}` instead",
-            Self::render_source_type(&TypeInfo::from_type_id(arena, current).kind)
-        )
-    }
-
-    /// Whether a signature could name `ty_id` in place of the alias that stands
-    /// for it and still lower.
-    ///
-    /// The advice a diagnostic gives has to be an edit the author can make, and
-    /// two shapes are not. A type the backend has no lowering for earns a
-    /// refusal of its own once written — `string`, a function type, `Q i32'` —
-    /// and one of those, a type application, does not even have a bare spelling:
-    /// its rendering here is `Q'`, which the parser rejects. So the question is
-    /// asked of the lowering itself rather than of a list of kinds, and only a
-    /// type that lowers to a value is advised.
-    ///
-    /// An array is asked about its innermost element, which is the same question
-    /// [`Self::val_type_from_type_id`]'s array arm asks, so an array of a type
-    /// with no lowering is no more advisable than that type written alone. An
-    /// element that is itself an alias is refused before the question is asked:
-    /// writing it earns this very refusal again, and stopping there is also what
-    /// keeps this check from re-entering the alias branch that called it.
-    fn is_advisable_replacement(
-        arena: &AstArena,
-        ctx: &TypedContext,
-        ty_id: TypeId,
-        module_path: &[String],
-    ) -> bool {
-        let element = Self::innermost_array_element(arena, ty_id);
-        if let TypeNode::Custom(ident_id) = &arena[element].kind
-            && Self::type_alias_named(arena, ctx, &arena[*ident_id].name).is_some()
-        {
-            return false;
-        }
-        matches!(
-            Self::val_type_from_type_id(arena, element, ctx, module_path),
-            Ok(Some(_))
-        )
     }
 
     /// The definitions the scope `site` contains: a named `spec` block's own when
@@ -2601,7 +2498,7 @@ impl Compiler {
                     Def::Constant { value, .. } => Self::expr_any(arena, *value, pred),
                     _ => false,
                 },
-                Stmt::Block(_) | Stmt::Break | Stmt::TypeDef { .. } => false,
+                Stmt::Block(_) | Stmt::Break => false,
             };
         });
         found
@@ -3732,12 +3629,6 @@ impl Compiler {
                     }
                 }
             }
-            // A type alias is nominal and introduces no value, so it contributes
-            // no instruction: the type checker resolved every use of the alias,
-            // and a use in value position is a type error there rather than a
-            // node here. A file-level `Def::TypeAlias` is erased the same way, so
-            // a body-local alias and a top-level one agree.
-            Stmt::TypeDef { .. } => {}
             Stmt::Assert { expr } => {
                 self.lower_assert_statement(arena, expr, ctx);
             }
@@ -8233,10 +8124,7 @@ mod tests {
         use super::*;
         use inference_ast::arena::AstArena;
         use inference_ast::ids::{BlockId, ExprId, StmtId};
-        use inference_ast::nodes::{
-            BlockData, BlockKind, Expr, ExprData, Ident, Location, SimpleTypeKind, Stmt, StmtData,
-            TypeData, TypeNode,
-        };
+        use inference_ast::nodes::{BlockData, BlockKind, Expr, ExprData, Location, Stmt, StmtData};
 
         fn leaf(arena: &mut AstArena) -> StmtId {
             arena.stmts.alloc(StmtData {
@@ -8397,26 +8285,10 @@ mod tests {
                 _ => panic!("an else-less if still classifies as an alternative (single arm)"),
             }
 
-            let type_name = arena.idents.alloc(Ident {
-                location: Location::default(),
-                name: "T".to_string(),
-            });
-            let type_id = arena.types.alloc(TypeData {
-                location: Location::default(),
-                kind: TypeNode::Simple(SimpleTypeKind::I32),
-            });
-            for leaf_kind in [
-                Stmt::Break,
-                Stmt::TypeDef {
-                    name: type_name,
-                    ty: type_id,
-                },
-            ] {
-                assert!(
-                    matches!(Compiler::nested_blocks(&leaf_kind), NestedBlocks::None),
-                    "a statement carrying no sub-block must classify as None",
-                );
-            }
+            assert!(
+                matches!(Compiler::nested_blocks(&Stmt::Break), NestedBlocks::None),
+                "a statement carrying no sub-block must classify as None",
+            );
         }
     }
 

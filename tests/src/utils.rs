@@ -826,7 +826,7 @@ fn collect_exprs_from_stmt(
             results.extend(inner_exprs);
         }
         Stmt::Assert { expr } => collect_exprs_from_expr(arena, *expr, predicate, results),
-        Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => {}
+        Stmt::Break | Stmt::ConstDef(_) => {}
     }
 }
 

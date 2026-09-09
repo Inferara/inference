@@ -459,7 +459,7 @@ impl TypeChecker {
                 let def_data = &ctx.arena()[def_id];
                 let location = def_data.location;
                 let name_id = match &def_data.kind {
-                    Def::Constant { name, .. } | Def::TypeAlias { name, .. } => *name,
+                    Def::Constant { name, .. } => *name,
                     _ => continue,
                 };
                 nodes.push(DefNode {
@@ -476,7 +476,7 @@ impl TypeChecker {
         nodes
     }
 
-    /// Registers `Def::TypeAlias`, `Def::Struct`, `Def::Enum`, and `Def::Spec`.
+    /// Registers `Def::Struct`, `Def::Enum`, and `Def::Spec`.
     ///
     /// Within each file, top-level definitions are registered before that file's
     /// `spec` blocks. A spec-inner struct/enum is keyed by its enclosing file
@@ -508,21 +508,6 @@ impl TypeChecker {
         let def_data = &arena[def_id];
         let location = def_data.location;
         match &def_data.kind {
-            Def::TypeAlias { name, ty, vis } => {
-                let type_name = arena[*name].name.clone();
-                let type_info = TypeInfo::from_type_id(arena, *ty);
-                let alias_vis = vis.clone();
-                self.symbol_table
-                    .register_type_with_visibility(&type_name, Some(type_info), alias_vis, location)
-                    .unwrap_or_else(|_| {
-                        self.push_error(TypeCheckError::RegistrationFailed {
-                            kind: RegistrationKind::Type,
-                            name: type_name,
-                            reason: None,
-                            location,
-                        });
-                    });
-            }
             Def::Struct {
                 name,
                 vis,
@@ -1453,7 +1438,7 @@ impl TypeChecker {
                     guard.collect_for_def(inner_id, ctx);
                 }
             }
-            Def::Struct { .. } | Def::Enum { .. } | Def::TypeAlias { .. } => {}
+            Def::Struct { .. } | Def::Enum { .. } => {}
         }
     }
 
@@ -2099,19 +2084,6 @@ impl TypeChecker {
                 }
                 ctx.set_node_typeinfo(NodeId::Ident(name), target_type.clone());
                 ctx.set_node_typeinfo(NodeId::Stmt(stmt_id), target_type);
-            }
-            Stmt::TypeDef { name, ty } => {
-                let arena = ctx.arena();
-                let type_name = arena[name].name.clone();
-                let type_info = TypeInfo::from_type_id(arena, ty);
-                if let Err(err) = self.symbol_table.register_type(&type_name, Some(type_info)) {
-                    self.push_error(TypeCheckError::RegistrationFailed {
-                        kind: RegistrationKind::Type,
-                        name: type_name,
-                        reason: Some(err.to_string()),
-                        location,
-                    });
-                }
             }
             Stmt::Assert { expr } => {
                 self.validate_bool_expression(expr, TypeMismatchContext::Assert, ctx);

@@ -422,7 +422,7 @@ impl PlanBuilder<'_> {
                         self.walk_expr(*value);
                     }
                 }
-                Stmt::Break | Stmt::TypeDef { .. } => {}
+                Stmt::Break => {}
             }
         }
     }
