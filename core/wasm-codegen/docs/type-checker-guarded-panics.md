@@ -174,10 +174,78 @@ visitor for a declaration's type parameters, ahead of the signature it would oth
 `TypeNode::Function` is refused by the same signature-lowering helper as `TypeNode::Generic`,
 at its own arm of the match, but keeps `CodegenError::UnsupportedType`, naming the type rather
 than a rule: the language has no first-class functions, and no analysis rule claims that
-construct. A `type` alias named in a signature is refused the same way and for the same
-reason — an alias is nominal, nothing resolves it to the type it names before lowering, and no
-rule owns it — except that it does carry a source location, and the message ends with the type
-to write in its place.
+construct. A `type` alias is refused the same way and for the same reason — an alias is
+nominal, nothing resolves it to the type it names before lowering, and no rule owns it —
+except that it does carry a source location, and the message ends with the type to write in
+its place. A `spec` block's name written as a type is the third such shape, refused by the
+same helper's bare-name arm.
+
+## The one classification, and the two positions that reach it
+
+A struct **field** can be written with any of those three types just as a signature can, and
+for two of them — the `spec` name and the `type` alias — the refusal `val_type_from_type_id`
+mints is the only diagnostic there is, since no analysis rule owns either. Those two are the
+*nominal* carriers: names the type checker canonicalizes into nothing, one because it denotes
+neither a struct nor an enum and the other because nothing resolves it to the type it names, so
+each reaches a layout still spelled as a name. The corollary is that where no layout is
+computed there is no diagnostic at all — a struct no lowered signature names, and in compile
+mode a `spec` body — which is a gap nothing currently owns, recorded on `CodegenError`'s module
+documentation. A
+field does not reach the helper on its own. The type checker erases a field to a
+`TypeInfoKind`, keeping a nominal carrier's bare name and dropping both the position it was
+written at and the scope its names were read in, and that erasure is all the layout in
+`memory.rs` is handed. Left there, the layout can only report such a name as one it failed to
+resolve, and blame the type checker for a program the type checker accepted.
+
+So for those two the layout mints no message of its own.
+`compute_struct_field_layout_with_visited` runs one `map_err` over each field — covering the
+field's shape, its width and its alignment together — and `classify_unlowerable_field` recovers
+the field's own `TypeId` from the arena and asks `val_type_from_type_id`. The consequences
+worth keeping straight:
+
+- The scope is the **declaring** struct's, from `TypedContext::declaration_scope_of_scope` over
+  its `definition_scope_id` — file and `spec` both. A struct declared inside a `spec` block is
+  not among its file's top-level definitions, so reading the access site's scope finds no
+  declaration at all and leaves the accusation standing.
+- Only `StructNotFoundInTypeContext` is re-reported. That is what makes nesting work: an inner
+  struct's bad field was already classified in *its* loop under *its* scope, and passes back
+  out untouched. It is also what bounds the hook to the two nominal carriers — every other
+  unlowerable field type is refused by `memory.rs`'s own arms, under a different variant, and
+  never reaches the hook.
+- A refusal that cannot be traced back to a declaration is left exactly as it was. Do not
+  widen this into a fallback that invents a position.
+- A field inherits whatever the helper gives — the `None` location the arms that keep one give,
+  and equally the position and repair clause the alias arm gives — so a field and a signature
+  cannot disagree about a type the hook classifies. That is not a claim about every written
+  type; the function type below is the exception, and it is the exception because it never
+  reaches the hook.
+
+The `map_err` covers all three of the field's questions so that no future reordering of them
+can slip past it, but only two can be first today: the shape, for a nominal name that resolves
+to nothing, and the width, for that name below an array. Every path asks a type's *size* before
+its alignment, so the alignment question is never the first to meet a field with no width —
+`CodegenError::StructNotFoundInTypeContext`'s own documentation carries that argument, and the
+alignment walk's copy of the raise site is the reason it has to.
+
+**The function type is not covered by any of this, and a field and a signature do render it
+differently.** It is not a nominal carrier: it arrives as `TypeInfoKind::Function`, which
+`memory.rs` refuses at its own arm with `UnsupportedType { rendered: kind.to_string() }` — so
+the hook, which matches only `StructNotFoundInTypeContext`, never sees it. A signature says `a
+function type`; a field says `fn() -> i32`, and says it whatever parameters were written,
+because the parser never lowers a `fn(…)` type's parameter list at all (`lower.rs`,
+`SyntaxKind::TypeFn`, pinned by the AST parity contract). Unifying the two therefore starts in
+the parser, not here. `string`, `()` and a type application are likewise refused by
+`memory.rs`'s own arms — those name the rule that owns them, which is a message a signature has
+no reason to match.
+
+Because the layout is where a field's refusal now surfaces, a caller of
+`compute_struct_field_layout` on a path that can reach a field with no lowering must propagate
+it. A struct reached only through an array parameter gets no layout while its signature is
+lowered, so the *first field access* on one is what asks for the layout — and asserting success
+there turns a diagnostic into a process abort. `choice.rs`'s `leaf_classes` is the one
+deliberate discard: its `.ok()?` reads "a shape the emitters refuse", and it plans rather than
+lowers, so declining to plan is not a diagnostic swallowed — wherever that spec body is in fact
+lowered, its frame layout asks the same question with a `?` and refuses.
 
 The layout boundary is worth one note of its own. `[string; N]` and `[(); N]` reach frame
 layout through three entry points — `compute_frame_layout`, `array_index_elem_size` and
@@ -230,6 +298,29 @@ them are exhaustive over `TypeInfoKind` — a `Bool | Number | Enum` scalar arm,
 `::`-qualified nominal type sized by struct resolution, an array sized recursively, and an
 outright refusal for `string`, `()` and the generic, function and spec types. So a kind that
 describes no bytes cannot reach a leaf that assumes it does.
+
+**Not a fifth family: the four `.expect`s left on a layout `Result`** — the sret array-return
+path, the element width and the struct-leaf layout under an array literal, and the array-typed
+struct field. Each holds a `CodegenError` about the program, so by the table below each belongs
+in the poison slot, and they stay only because they sit in infallible lowering functions and
+nothing reaches them.
+
+The reason is worth stating exactly, because the obvious one is wrong. It is *not* that the
+offending struct has no literal. That holds only for the carriers whose values cannot be
+written at all — a `spec` name, a function type and a type application among them, each of
+which the type checker refuses a literal for (`S { f: 1 }` is a type mismatch against `Q`). It
+does not hold for `string` or `()`: the type checker accepts `S { f: "a", g: 1 }`, and only
+analysis stands between that program and these sites — which is precisely the caller class this
+whole family exists for. What actually holds them off is that every route to them asks the
+enclosing struct or array for its layout first, through `compute_frame_layout` or
+`compute_element_layout_if_struct` with a `?`, and that question refuses at the field boundary
+before an element is lowered. Driven with analysis skipped, a local array literal of such a
+struct, an sret array return of one, and a struct literal whose array-typed field is built from
+non-literal elements all come back as refusals reading `a `string` value in memory has no
+WebAssembly lowering` — not as aborts.
+
+Do not read them as sanctioned; the field-offset site beside them was the same shape and *was*
+reachable, and `tests/src/panic_free.rs` is where a new witness for any of them would show up.
 
 The distinction to carry away:
 
