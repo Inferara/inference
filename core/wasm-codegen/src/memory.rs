@@ -50,11 +50,15 @@
 //! including every frame layout and every call site in compiler.rs, is identical
 //! either way.
 
+use crate::compiler::Compiler;
 use crate::errors::CodegenError;
 use crate::target::EmitFeatures;
-use inference_type_checker::StructInfo;
+use inference_ast::arena::AstArena;
+use inference_ast::ids::TypeId;
+use inference_ast::nodes::Def;
+use inference_type_checker::{StructFieldInfo, StructInfo};
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
-use inference_type_checker::typed_context::TypedContext;
+use inference_type_checker::typed_context::{DeclarationScope, TypedContext};
 use rustc_hash::{FxHashMap, FxHashSet};
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
@@ -212,6 +216,24 @@ pub(crate) fn resolve_struct_with_defining_path(
     Some((info, defining_path))
 }
 
+/// The canonical identity of a resolved struct: its defining file's path joined
+/// onto its bare name, or the bare name alone for an entry-file struct.
+///
+/// This is the key the layout walks record in their cycle-detection sets. The
+/// bare name is not an identity — the type checker keeps it only so code
+/// generation can re-qualify it — and two files may each define a struct of that
+/// name. A `visited` set keyed on the bare name reads `struct Node { inner:
+/// lib::a::Node; }` as a struct that transitively contains itself and refuses a
+/// valid program, so the key has to be the same file-qualified identity the type
+/// checker resolves layouts under.
+fn struct_identity(info: &StructInfo, defining_path: &[String]) -> String {
+    if defining_path.is_empty() {
+        info.name.clone()
+    } else {
+        format!("{}::{}", defining_path.join("::"), info.name)
+    }
+}
+
 /// Splits a `::`-joined type path (`lib::geom::Point`) into its segments, the
 /// form [`TypedContext::lookup_struct_by_qualified_path`] expects. A
 /// [`TypeInfoKind::Qualified`]/[`TypeInfoKind::QualifiedName`] carries its path
@@ -276,29 +298,9 @@ fn compute_struct_field_layout_with_visited(
     let mut max_align: u32 = 1;
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
 
-    // Each field gets a fresh clone of the ancestor visited set so that
-    // sibling fields of the same struct type (e.g. `a: Point; b: Point`)
-    // don't falsely trigger cycle detection against each other.
     for field in &struct_info.fields {
-        let mut field_visited = visited.clone();
-        let layout = compute_field_layout_with_visited(
-            &field.type_info.kind,
-            ctx,
-            module_path,
-            &mut field_visited,
-        )?;
-
-        let size = match &layout {
-            CompoundFieldLayout::NestedStruct { total_size, .. } => *total_size,
-            CompoundFieldLayout::NestedArray {
-                elem_size, length, ..
-            } => elem_size
-                .checked_mul(*length)
-                .expect("Array byte count overflow: element size * length exceeds u32::MAX"),
-            CompoundFieldLayout::Scalar => type_byte_size(&field.type_info.kind, ctx, module_path)?,
-        };
-
-        let align = natural_alignment_for_type(&field.type_info.kind, ctx, module_path)?;
+        let (layout, size, align) = field_layout_size_align(field, ctx, module_path, visited)
+            .map_err(|e| classify_unlowerable_field(e, ctx, struct_info, &field.name))?;
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
@@ -327,6 +329,132 @@ fn compute_struct_field_layout_with_visited(
     Ok((total_size, field_slots))
 }
 
+/// One field's compound shape, byte width and natural alignment.
+///
+/// Split out of [`compute_struct_field_layout_with_visited`]'s loop so the three
+/// questions share one refusal path. Any of them can be the first to meet a
+/// field type that describes no bytes — the shape for a nominal name that
+/// resolves to nothing, the width for that name below an array — and all of them
+/// report it the same unhelpful way, so classifying once at the loop is what
+/// keeps one repair from needing three copies.
+///
+/// The field gets a fresh clone of the ancestor `visited` set, so sibling fields
+/// of the same struct type (`a: Point; b: Point`) do not read each other as a
+/// layout cycle.
+fn field_layout_size_align(
+    field: &StructFieldInfo,
+    ctx: &TypedContext,
+    module_path: &[String],
+    visited: &FxHashSet<String>,
+) -> Result<(CompoundFieldLayout, u32, u32), CodegenError> {
+    let mut field_visited = visited.clone();
+    let layout = compute_field_layout_with_visited(
+        &field.type_info.kind,
+        ctx,
+        module_path,
+        &mut field_visited,
+    )?;
+    let size = match &layout {
+        CompoundFieldLayout::NestedStruct { total_size, .. } => *total_size,
+        CompoundFieldLayout::NestedArray {
+            elem_size, length, ..
+        } => elem_size
+            .checked_mul(*length)
+            .expect("Array byte count overflow: element size * length exceeds u32::MAX"),
+        CompoundFieldLayout::Scalar => type_byte_size(&field.type_info.kind, ctx, module_path)?,
+    };
+    let align = natural_alignment_for_type(&field.type_info.kind, ctx, module_path)?;
+    Ok((layout, size, align))
+}
+
+/// Re-reports a field's layout refusal as a refusal of the *type the field is
+/// written with*, when the layout could only name it as a name it failed to
+/// resolve.
+///
+/// A layout walks [`TypeInfoKind`], the type checker's erasure of a written
+/// type: it keeps a nominal carrier's bare name and drops both the source
+/// position and the scope the name was read in. A name the type checker
+/// canonicalizes into nothing survives to a layout unresolved — a `spec` block's
+/// name, which denotes neither a struct nor an enum, and a `type` alias, which
+/// nothing resolves to the type it names — and for such a name the layout can
+/// only say it was not found and blame an earlier phase that in fact accepted
+/// the program.
+///
+/// The field's own type node says what the type actually is, so this recovers it
+/// and asks [`Compiler::val_type_from_type_id`], the same classification a
+/// signature gets. That is what keeps the two positions from disagreeing about a
+/// type this classifies — including the source position and the repair clause an
+/// alias earns, neither of which survives the erasure. It is not a claim about
+/// every written type: a function type never arrives here, because the layout
+/// refuses it at its own arm, and a field and a signature do render that one
+/// differently.
+///
+/// Only [`CodegenError::StructNotFoundInTypeContext`] is re-reported, which
+/// is what makes this correct under nesting: a field whose own field failed was
+/// already classified in *its* struct's loop, under *its* declaring scope, and
+/// passes through here untouched.
+///
+/// The declaration is looked for in the scope that declares the struct, not the
+/// one that uses it: a struct declared inside a `spec` block is not among its
+/// file's top-level definitions, and reading the access site's scope would find
+/// no declaration at all and leave the accusation standing.
+///
+/// The original error stands when the declaration cannot be found in the arena —
+/// a [`StructInfo`] registered directly, with no source behind it — so a refusal
+/// is never traded for a worse one.
+fn classify_unlowerable_field(
+    error: CodegenError,
+    ctx: &TypedContext,
+    struct_info: &StructInfo,
+    field_name: &str,
+) -> CodegenError {
+    if !matches!(error, CodegenError::StructNotFoundInTypeContext { .. }) {
+        return error;
+    }
+    let site = ctx.declaration_scope_of_scope(struct_info.definition_scope_id);
+    let arena = ctx.arena();
+    let Some(ty_id) = struct_field_type_id(arena, ctx, &struct_info.name, field_name, &site) else {
+        return error;
+    };
+    match Compiler::val_type_from_type_id(arena, ty_id, ctx, &site.module_path) {
+        Err(classified) => classified,
+        Ok(_) => error,
+    }
+}
+
+/// The arena type node the field `field_name` of the struct `struct_name` is
+/// declared with, searched in the scope `site` that declares the struct: a named
+/// `spec` block's own definitions when `site` names one, and the file's top-level
+/// definitions otherwise.
+///
+/// The type checker keeps a field's *type*, never its type node — it stores a
+/// name and a shape, and the position and the scope go with the node it read
+/// them from. The declaration is the only place both survive, and matching on the
+/// name within one scope is exact rather than a guess: a spec-inner struct may
+/// not share a name with a top-level one in the same file, and neither may two
+/// declarations in one scope.
+///
+/// The scope is turned into a set of declarations by
+/// [`Compiler::defs_in_scope`], which is where the rule for reading a
+/// [`DeclarationScope`] lives.
+fn struct_field_type_id(
+    arena: &AstArena,
+    ctx: &TypedContext,
+    struct_name: &str,
+    field_name: &str,
+    site: &DeclarationScope,
+) -> Option<TypeId> {
+    Compiler::defs_in_scope(arena, ctx, site)?
+        .iter()
+        .find_map(|def_id| match &arena[*def_id].kind {
+            Def::Struct { name, fields, .. } if arena[*name].name == struct_name => Some(fields),
+            _ => None,
+        })?
+        .iter()
+        .find(|f| arena[f.name].name == field_name)
+        .map(|f| f.ty)
+}
+
 /// Determines the [`CompoundFieldLayout`] for a given field type.
 fn compute_field_layout_with_visited(
     kind: &TypeInfoKind,
@@ -339,7 +467,7 @@ fn compute_field_layout_with_visited(
             if let Some((inner_struct, defining_path)) =
                 resolve_struct_with_defining_path(kind, ctx, module_path)
             {
-                if !visited.insert(name.clone()) {
+                if !visited.insert(struct_identity(&inner_struct, &defining_path)) {
                     return Err(CodegenError::CycleInStructLayout { name: name.clone() });
                 }
                 let (total_size, fields) = compute_struct_field_layout_with_visited(
@@ -481,12 +609,12 @@ fn type_byte_size_with_visited(
         | TypeInfoKind::Custom(name)
         | TypeInfoKind::Qualified(name)
         | TypeInfoKind::QualifiedName(name) => {
-            if !visited.insert(name.clone()) {
-                return Err(CodegenError::CycleInStructLayout { name: name.clone() });
-            }
             if let Some((struct_info, defining_path)) =
                 resolve_struct_with_defining_path(kind, ctx, module_path)
             {
+                if !visited.insert(struct_identity(&struct_info, &defining_path)) {
+                    return Err(CodegenError::CycleInStructLayout { name: name.clone() });
+                }
                 let (total_size, _) = compute_struct_field_layout_with_visited(
                     &struct_info,
                     ctx,
@@ -611,12 +739,12 @@ fn natural_alignment_with_visited(
         | TypeInfoKind::Custom(name)
         | TypeInfoKind::Qualified(name)
         | TypeInfoKind::QualifiedName(name) => {
-            if !visited.insert(name.clone()) {
-                return Err(CodegenError::CycleInStructLayout { name: name.clone() });
-            }
             if let Some((struct_info, defining_path)) =
                 resolve_struct_with_defining_path(kind, ctx, module_path)
             {
+                if !visited.insert(struct_identity(&struct_info, &defining_path)) {
+                    return Err(CodegenError::CycleInStructLayout { name: name.clone() });
+                }
                 let mut max_align = 1u32;
                 for f in &struct_info.fields {
                     let align = natural_alignment_with_visited(

@@ -31,6 +31,22 @@ fn file_local_key(bare_name: &str, module_path: &[String]) -> String {
     }
 }
 
+/// The scope a declaration is written in: a source file, and the `spec` block
+/// inside it when the declaration sits in a spec body.
+///
+/// A `spec` block is a scope of its own, so the items declared there are
+/// invisible everywhere else, including to another spec in the same file. Naming
+/// only the file would collapse those declarations together with the file's own,
+/// so a consumer that has to find a declaration back in the arena — to read the
+/// type nodes the type checker's tables do not keep — carries both halves.
+#[derive(Debug, Clone)]
+pub struct DeclarationScope {
+    /// Source-root-relative segments of the file. Empty for the entry file.
+    pub module_path: Vec<String>,
+    /// The enclosing `spec` block's name, or `None` at the file's top level.
+    pub spec_name: Option<String>,
+}
+
 /// The defining-file identity of a resolved function/method call target.
 ///
 /// Type checking resolves every call — including a cross-file path
@@ -578,6 +594,24 @@ impl TypedContext {
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn module_path_of_scope(&self, scope_id: u32) -> Vec<String> {
         self.symbol_table.file_module_path_of_scope(scope_id)
+    }
+
+    /// The [`DeclarationScope`] a definition registered in `scope_id` is written
+    /// in: the file that contains the scope, together with the `spec` block when
+    /// `scope_id` is one.
+    ///
+    /// [`Self::module_path_of_scope`] answers the file half alone, which is the
+    /// whole answer for a layout — a struct's fields lay out the same wherever
+    /// they are declared. It is not the whole answer for *finding the
+    /// declaration*: a `spec` block holds its own items, so a consumer that has
+    /// to read a definition back out of the arena needs the spec half too, and
+    /// the file alone would look straight past a spec-inner declaration.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn declaration_scope_of_scope(&self, scope_id: u32) -> DeclarationScope {
+        DeclarationScope {
+            module_path: self.symbol_table.file_module_path_of_scope(scope_id),
+            spec_name: self.symbol_table.spec_name_of_scope(scope_id),
+        }
     }
 
     /// Registers a struct definition in the type context for testing.

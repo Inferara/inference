@@ -200,15 +200,28 @@ pub(crate) fn innermost_element(kind: &TypeInfoKind) -> &TypeInfoKind {
     }
 }
 
-/// Returns true if a type is compound: a struct/custom type, or an array
-/// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
-/// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
+/// Returns true if a *field's* type is compound: a struct, or an array whose
+/// innermost element type is compound. Scalar arrays like `[i32; 3]` and
+/// multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
+///
+/// A bare name is compound when it *names a struct*, which is not the same
+/// question as whether it fails to name an enum. The type checker rewrites every
+/// field-type name that resolves to a struct or an enum into
+/// [`TypeInfoKind::Struct`] or [`TypeInfoKind::Enum`] before analysis runs, so a
+/// name still spelled `Custom` here is one it canonicalizes into nothing — a
+/// `spec` block's name is one such — and none of those describes bytes at all,
+/// let alone compound ones. Answering yes reports nesting the program does not
+/// have, and reports it ahead of the message that names the real reason: code
+/// generation refuses such a field wherever its struct's layout is computed, at
+/// a signature, a frame slot or a field access. A declaration no layout reaches
+/// is accepted today, by this rule and by code generation alike; no rule owns
+/// that gap, and answering yes here would not close it, only mislabel it.
 #[must_use]
-fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
+fn is_compound_field_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
         TypeInfoKind::Struct(_, _) => true,
-        TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
-        TypeInfoKind::Array(elem, _) => is_compound_type(ctx, &elem.kind),
+        TypeInfoKind::Custom(name) => ctx.lookup_struct(name).is_some(),
+        TypeInfoKind::Array(elem, _) => is_compound_field_type(ctx, &elem.kind),
         _ => false,
     }
 }
@@ -249,9 +262,10 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
 fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
     s.fields.iter().any(|f| match &f.type_info.kind {
         TypeInfoKind::Struct(_, _) => true,
-        TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
+        TypeInfoKind::Custom(n) => ctx.lookup_struct(n).is_some(),
         TypeInfoKind::Array(_, _) => {
-            is_compound_type(ctx, &f.type_info.kind) || array_nesting_depth(&f.type_info.kind) > 1
+            is_compound_field_type(ctx, &f.type_info.kind)
+                || array_nesting_depth(&f.type_info.kind) > 1
         }
         _ => false,
     })
