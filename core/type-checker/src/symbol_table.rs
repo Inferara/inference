@@ -2343,6 +2343,20 @@ impl SymbolTable {
         self.mod_scopes.get(&key).map(|id| id.as_u32())
     }
 
+    /// The name of the `spec` block `scope_id` is the scope of, or `None` when
+    /// `scope_id` is not a spec scope.
+    ///
+    /// A scope's `name` is only an identity once spec-ness is established, which
+    /// is why the check and the read are one operation here: a file scope and a
+    /// block scope both carry names too.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn spec_name_of_scope(&self, scope_id: u32) -> Option<String> {
+        if !self.is_spec_scope(scope_id) {
+            return None;
+        }
+        self.scope(ScopeId(scope_id)).map(|s| s.name.clone())
+    }
+
     /// Returns the `::`-joined module path of the scope `scope_id` — its cached
     /// `full_path`. For a top-level definition's scope this is its defining
     /// file's path (`lib::arith`); the empty string for the entry file (root).

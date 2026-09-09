@@ -84,7 +84,7 @@ use inference_hassert::HSpecMap;
 use inference_type_checker::{
     EnumInfo, ExternIndex,
     type_info::{NumberType, TypeInfo, TypeInfoKind},
-    typed_context::TypedContext,
+    typed_context::{DeclarationScope, TypedContext},
 };
 use wasm_encoder::{
     BlockType as WasmBlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection,
@@ -1326,7 +1326,28 @@ impl Compiler {
         Ok(assigned)
     }
 
-    /// Maps an Inference type to the corresponding WASM `ValType`.
+    /// Maps an Inference type to the corresponding WASM `ValType`, and refuses
+    /// the types that have none.
+    ///
+    /// This is the crate's one classification of a written type. Every signature
+    /// it lowers answers from it, and so does [`crate::memory`]'s layout walk for
+    /// a nominal name that reaches a layout unresolved — a `spec` block's name is
+    /// one, since it denotes neither a struct nor an enum and the type checker
+    /// canonicalizes it into nothing. The layout walk is handed a `TypeInfoKind`,
+    /// which is the type checker's erasure of a type node and carries neither a
+    /// source position nor the scope its bare names were read in, so such a name
+    /// can only be reported there as one the walk failed to find. Recovering the
+    /// field's own `TypeId` and asking here instead is what lets a struct field
+    /// earn the same refusal that the type earns spelled in a signature — rather
+    /// than a second message that disagrees with the first.
+    ///
+    /// The other unlowerable field types do not come back here: `string`, `()`, a
+    /// type application, a function type and a `spec` *type* carrier are refused
+    /// by the layout's own arms, which name the owning rule where there is one. A
+    /// function type is the one written type a field and a signature therefore
+    /// still render differently — `fn() -> i32` against `a function type` — and
+    /// closing that starts in the parser, which never lowers a `fn(…)` type's
+    /// parameter list at all.
     ///
     /// `Ok(None)` is the *empty* value type, and it means different things at the
     /// two positions this is asked about. A unit **return** is the empty result
@@ -1339,7 +1360,7 @@ impl Compiler {
     /// Struct and enum types (named by `TypeNode::Custom` or a `::`-qualified
     /// path, resolved against `TypedContext`) are `ValType::I32` pointers into
     /// linear memory.
-    fn val_type_from_type_id(
+    pub(crate) fn val_type_from_type_id(
         arena: &AstArena,
         ty_id: TypeId,
         ctx: &TypedContext,
@@ -1451,17 +1472,19 @@ impl Compiler {
                         location: Some(arena[ty_id].location),
                     })
                 } else {
-                    // An unknown type name reaches here two ways. The type
-                    // checker rejects a genuinely undeclared one before codegen,
-                    // so that half is unreachable from a well-formed pipeline. A
-                    // declared type *parameter* is the other: it lowers to a
-                    // bare name the type checker accepted, and this helper is
-                    // handed a `TypeId` with no enclosing binder list, so it
-                    // cannot tell the two apart. The declaration is refused
-                    // before its signature is lowered, which is what keeps that
-                    // half from reaching this locationless message. Returning an
-                    // error rather than `todo!()` keeps a malformed type from
-                    // panicking the compiler (H6 defense-in-depth).
+                    // A bare name reaches here three ways, and one of them is a
+                    // program the whole pipeline accepts: a `spec` block's name
+                    // written as a type. A spec names a proof-only item, so it
+                    // binds no values and no rule claims it, and this is the
+                    // message its author reads. The other two are defense: the
+                    // type checker rejects a genuinely undeclared name before
+                    // codegen, and a declared type *parameter* is refused with
+                    // its declaration ahead of the signature that spells it —
+                    // this helper is handed a `TypeId` with no enclosing binder
+                    // list, so it could not tell a type parameter from an
+                    // undeclared name on its own. Returning an error rather than
+                    // `todo!()` keeps a malformed type from panicking the
+                    // compiler.
                     Err(CodegenError::UnsupportedType {
                         rendered: name.clone(),
                         location: None,
@@ -1574,6 +1597,40 @@ impl Compiler {
             Self::val_type_from_type_id(arena, element, ctx, module_path),
             Ok(Some(_))
         )
+    }
+
+    /// The definitions the scope `site` contains: a named `spec` block's own when
+    /// `site` names one, and the file's top-level definitions otherwise.
+    ///
+    /// This is the arena half of a resolution the type checker already made — a
+    /// scope came back from it, and this finds the declarations that scope holds
+    /// so a consumer can read the type nodes the type checker's tables do not
+    /// keep. The rule it encodes is how a [`DeclarationScope`] names a set of
+    /// definitions: a named `spec` block's own items when it names one, the
+    /// file's top level otherwise, and in neither case descending into a nested
+    /// `spec`. A struct field's declared type is read back out of the arena this
+    /// way, in [`crate::memory`], because the classification there is asked of a
+    /// `TypeId` and the field's declaration is the only place one still exists
+    /// after the type checker's erasure.
+    pub(crate) fn defs_in_scope<'a>(
+        arena: &'a AstArena,
+        ctx: &'a TypedContext,
+        site: &DeclarationScope,
+    ) -> Option<&'a [DefId]> {
+        let file = ctx
+            .source_files()
+            .find(|sf| sf.module_path == site.module_path)?;
+        let Some(spec) = &site.spec_name else {
+            return Some(&file.defs);
+        };
+        file.defs.iter().find_map(|def_id| match &arena[*def_id].kind {
+            Def::Spec {
+                name: spec_name,
+                defs,
+                ..
+            } if arena[*spec_name].name == *spec => Some(defs.as_slice()),
+            _ => None,
+        })
     }
 
     /// The refusal a type application earns wherever it is declared.
@@ -7421,8 +7478,13 @@ impl Compiler {
     /// The returned [`ResolvedField`] allows callers to decide whether to emit a
     /// load instruction (scalar) or push a pointer (compound field).
     ///
-    /// Fails when the accessed expression is not of a struct type, which only a
-    /// caller that reached code generation with type errors can produce.
+    /// Fails two ways. The accessed expression may not be of a struct type,
+    /// which only a caller that reached code generation with type errors can
+    /// produce. And the fallback recomputation may refuse: a struct reached only
+    /// through an array parameter is never laid out while its signature is
+    /// lowered, so this is the first place its layout is asked for, and a field
+    /// whose type has no lowering is refused here for a program the whole
+    /// pipeline accepted up to this point.
     fn resolve_struct_field_offset(
         &self,
         arena: &AstArena,
@@ -7489,9 +7551,10 @@ impl Compiler {
         }
         .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
+        // Aborting here would turn a diagnostic the caller was going to print into
+        // a crash; see this function's own docs for why the layout can refuse.
         let (_, field_slots) =
-            compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
-                .expect("resolve field offset: struct layout computation failed");
+            compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
         let field_slot = field_slots
             .iter()
             .find(|fs| fs.name == *field_name)

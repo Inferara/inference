@@ -8,10 +8,19 @@ use thiserror::Error;
 /// limits a real program can reach (a spec name past the section's byte cap, an
 /// over-large uzumaki unrolling) and guarantees an earlier phase was supposed to
 /// establish (a construct with no lowering, a callee that resolved to nothing).
-/// The second family is reachable only from a caller that drives code generation
-/// straight off a typed context without running analysis, or that ignores the
-/// diagnostics it was handed; it exists so such a caller gets a refusal rather
-/// than a malformed artifact.
+///
+/// Most of the second family is reachable only from a caller that drives code
+/// generation straight off a typed context without running analysis, or that
+/// ignores the diagnostics it was handed; for those it exists so such a caller
+/// gets a refusal rather than a malformed artifact. It is not a backstop
+/// throughout, and a variant must not be documented as one without a shape to
+/// point at: a `spec` block's name written as a type has no earlier owner at all
+/// — nothing rejects it before code generation — so where one is written in a
+/// position a signature or a layout reaches, the refusal here is the only
+/// diagnostic there is, and the whole pipeline reaches it. A *declaration*
+/// nothing lays out is the residue: a struct no lowered signature names is never
+/// asked for a layout, so a field of one carrying such a type is accepted today
+/// and nothing owns that gap.
 ///
 /// The error travels out of `codegen` as an `anyhow::Error`; the CLI renders it
 /// as `Codegen failed: {e}` and exits 1.
@@ -74,7 +83,27 @@ pub(crate) enum CodegenError {
         "cycle detected in struct layout for '{name}' -- the struct transitively contains itself"
     )]
     CycleInStructLayout { name: String },
-    /// A struct name referenced during layout computation was not found in the type context.
+    /// A nominal name in a layout position resolved to neither a struct nor an
+    /// enum, and the field it was written on could not be traced back to its
+    /// declaration.
+    ///
+    /// The blame in the message is the reason the second half matters. A name the
+    /// type checker canonicalizes into nothing reaches a layout unresolved — a
+    /// `spec` block's name is one — and for a program containing one the type
+    /// checker did *not* fail to catch anything: it accepts it. Such a field is
+    /// re-reported against its own declaration on the way out of the field loop
+    /// (see `memory::classify_unlowerable_field`), so this variant never leaves
+    /// the layout for it, which is what keeps the accusation off every program a
+    /// user can write.
+    ///
+    /// Two ways out are left, and neither is a source program. A
+    /// [`StructInfo`](inference_type_checker::StructInfo) may have no declaration
+    /// behind it to re-report against — one registered directly into a context,
+    /// as the crate's own unit tests do. And the alignment walk iterates a
+    /// struct's fields itself rather than through that loop; every path asks the
+    /// *size* of a type before its alignment, so a field that has no width is
+    /// refused at the size boundary first and the alignment question is never
+    /// reached. So the message keeps its blame.
     #[error(
         "struct '{name}' not found in type context -- the type checker should have caught this"
     )]
@@ -87,29 +116,54 @@ pub(crate) enum CodegenError {
         outer_spec: String,
         inner_spec: String,
     },
-    /// A type in a signature has no WASM value-type representation.
+    /// A written type has no WASM value-type representation.
     ///
     /// Unlike [`Self::UnsupportedConstruct`] this variant names no rule, because
     /// the shapes it reports have no earlier owner: nothing rejects a function
-    /// type or a `type` alias before code generation, so a message naming one
-    /// would be false. For those it is the diagnostic a user actually sees; for
-    /// an unknown type name — which the type checker rejects first — it is
-    /// defense-in-depth, where returning an error rather than `todo!()` keeps a
-    /// malformed type from panicking the compiler.
+    /// type, a `type` alias or a `spec` block's name used as a type before code
+    /// generation, so a message naming one would be false. For those it is the
+    /// diagnostic a user actually sees, in a signature and — for a name that
+    /// reaches a layout unresolved — on a struct field too; for an unknown type
+    /// name, which the type checker rejects first, it is defense-in-depth, where
+    /// returning an error rather than `todo!()` keeps a malformed type from
+    /// panicking the compiler.
     #[error(
         "{}unsupported type in WASM codegen: {rendered}",
         .location.map_or_else(String::new, |l| format!("{}:{}: ", l.start_line, l.start_column))
     )]
     UnsupportedType {
         rendered: String,
-        /// `None` for two reasons. The layout helpers in [`super::memory`] are
-        /// handed a `TypeInfoKind`, which is not an arena node and carries no
-        /// location to give. The signature-lowering arms that *do* hold a
-        /// `TypeId` — a function type, a `::`-qualified path that resolves to no
-        /// nominal type, and an unknown type name — keep `None` on purpose, so
-        /// that the messages they have always rendered are unchanged; giving
-        /// them a location is a separate change with its own diagnostics to
-        /// agree on (#392, #393).
+        /// `Some` where the refusal is made against a type *node*: the alias
+        /// arm, the one arm that has a position to give and gives it, whether it
+        /// is reached from a signature or from a struct field.
+        ///
+        /// The arms that hold a `TypeId` and still keep `None` — a function
+        /// type, a `::`-qualified path that resolves to no nominal type, and a
+        /// bare name that names no type the backend can lower, a `spec` among
+        /// them — do so on purpose, so that the messages they have always
+        /// rendered are unchanged; giving them a location is a separate change
+        /// with its own diagnostics to agree on (#392, #393). A struct field
+        /// classified through `memory::classify_unlowerable_field` inherits
+        /// whatever its type's own arm answers, which is what keeps a field and
+        /// a signature from disagreeing about one type — including the `None` a
+        /// `spec` name carries in both positions. A function type is not
+        /// classified that way at all — the layout refuses it at its own arm —
+        /// so the two positions render that one differently, and both happen to
+        /// carry `None`.
+        ///
+        /// The position is **relative to the file that declares the refused
+        /// signature or struct**, which in a multi-file program need not be the
+        /// file the caller is building. Locations are per-file-local in the
+        /// merged arena, and this variant carries no module path, so the rendered
+        /// `line:col` reads as the entry file's. Analysis solved the same problem
+        /// by pairing every finding with its defining file and rendering the
+        /// label through `inference_ast::nodes::file_label`; code generation's
+        /// located refusals — this variant and the
+        /// [`Self::UnsupportedConstruct`] arms that carry a type node's position
+        /// — do not yet, and qualifying one without the others would make a
+        /// bare `line:col` ambiguous rather than merely unqualified. Until they
+        /// move together, a caller that reports these to a user across files has
+        /// to supply the file itself.
         location: Option<Location>,
     },
     /// A spec name exceeds the byte cap that both `inference.spec_funcs`
