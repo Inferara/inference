@@ -53,6 +53,31 @@ const GLOB_IMPORT_MESSAGE: &str =
     "glob imports are not supported; import the file (use a::b;) or list items \
      explicitly (use a::b::{x, y};)";
 
+/// The diagnostic for a `type` alias declaration (`type N = i32;`). An alias
+/// names a type but nothing ever resolves the name back to the type it names, so
+/// no value can be produced at the alias name and the declaration can only ever
+/// be unused: the language does not have the feature the syntax promises, and the
+/// syntax is refused rather than kept as a trap.
+///
+/// The production below is kept, and deliberately reports without attempting
+/// recovery, because both recovery routes are broken here:
+///
+/// * `recover_to_semicolon` returns immediately when the cursor sits on an
+///   `ITEM_RECOVERY` anchor, and `type` is itself one of those anchors. It would
+///   consume nothing, the marker would complete empty, and `source_file`'s
+///   non-advance guard would fire a second, bogus "expected an item".
+/// * Bumping the `type` keyword first does not rescue it either: `fn` is also an
+///   `ITEM_RECOVERY` anchor, so recovery over `type Op = fn(i32) -> i32;` would
+///   abandon at the `fn` and leave the rest of the declaration loose in the tree.
+///
+/// Reporting inside the intact production sidesteps both: the rule still consumes
+/// the whole declaration through its `;` and still completes its node, so one
+/// alias is exactly one diagnostic and the item after it parses untouched.
+const TYPE_ALIAS_MESSAGE: &str =
+    "type aliases are not supported; an alias declares a name no value can ever have, so the \
+     declaration can only ever be unused — write the type it names at each use site: \
+     `let n: i32 = 1;` rather than `type N = i32; let n: N = 1;`";
+
 /// `[pub] use ( path [ :: { types } ] | { types } from module_ref ) ;`
 /// (`use_directive`). An optional leading `pub` re-exports the import. The two
 /// forms are distinguished by whether the body starts with `{`. In the `from`
@@ -332,9 +357,16 @@ pub(crate) fn constant_definition(p: &mut Parser) {
 
 /// `[pub] type ident = _type ;` (`type_definition_statement`). Also
 /// reachable as a statement inside a block.
+///
+/// The declaration is rejected with [`TYPE_ALIAS_MESSAGE`] and then consumed in
+/// full: the error is recorded on the `type` keyword without moving the cursor,
+/// so the rest of the rule still eats the declaration through its `;`. See the
+/// message's own documentation for why nothing lighter than the intact
+/// production works here.
 pub(crate) fn type_definition_statement(p: &mut Parser) {
     let m = p.start();
     visibility(p);
+    p.error(TYPE_ALIAS_MESSAGE);
     p.expect(SyntaxKind::TypeKw);
     types::identifier(p);
     p.expect(SyntaxKind::Eq);

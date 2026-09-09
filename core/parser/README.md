@@ -101,7 +101,8 @@ in the `vis` field of `UseDirective`. This required a fix in the top-level `item
 dispatch (`grammar.rs`): the parser now peeks past a leading `pub` token to detect
 `use` and routes it to `use_directive` rather than the general `definition` path.
 
-Four forms are rejected at the parser with educational messages and clean recovery:
+Five forms are rejected at the parser with educational messages, each reported exactly
+once and leaving the following item to parse cleanly:
 
 - `use a::b::*;` — glob imports are not supported; the error names the two supported
   forms (`use a::b;` and `use a::b::{x, y};`).
@@ -118,6 +119,15 @@ Four forms are rejected at the parser with educational messages and clean recove
   takes its type from where it is used, everything else that Inference numbers are
   decimal digits only. The `Number` token still carries the digits alone, which is
   what lowering stores as the literal's value.
+- `type Name = T;` — type aliases are not supported (issue #182). Nothing resolves an
+  alias name back to the type it names, so no value can ever be produced at the alias
+  name and the declaration can only ever be unused; the error names the replacement —
+  write the type it stands for at each use site. Unlike the four above, this one attempts
+  no recovery, and must not: `type` is itself an `ITEM_RECOVERY` anchor, so skipping to
+  the `;` would consume nothing and let the top-level advance guard fire a second, bogus
+  "expected an item", while bumping the keyword first would abandon at the `fn` of
+  `type Op = fn(i32) -> i32;` — another anchor. Reporting inside the intact production
+  keeps one alias to exactly one message and still consumes the declaration through its `;`.
 
 The `from`-form external WASM import (`use {x} from M;`) is unchanged and
 disambiguated from source imports by the presence of the `from` keyword.
@@ -193,7 +203,7 @@ Assignment (`=`) is a statement (`assign_statement`), not an expression operator
 
 ## Testing
 
-The crate contains **135 unit tests** distributed across the lexer, engine, grammar, and
+The crate contains **320 unit tests** distributed across the lexer, engine, grammar, and
 syntax tree modules. Test coverage includes per-token-class lexer round-trips, joint-bit
 edge cases (`-42` vs `- 42`, `Vec i32'`, `a::b`), grammar CST-shape assertions for every
 construct, precedence-climb fixtures, struct-vs-block disambiguation, and resilience tests

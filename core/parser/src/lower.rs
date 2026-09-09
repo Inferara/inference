@@ -1787,6 +1787,33 @@ mod tests {
         result.arena
     }
 
+    /// The verbatim type-alias-rejection diagnostic, kept in sync with
+    /// `grammar::items::TYPE_ALIAS_MESSAGE`. Duplicated rather than re-exported
+    /// so a change to the user-facing wording must be a deliberate edit here.
+    const TYPE_ALIAS_MESSAGE: &str =
+        "type aliases are not supported; an alias declares a name no value can ever have, so the \
+         declaration can only ever be unused — write the type it names at each use site: \
+         `let n: i32 = 1;` rather than `type N = i32; let n: N = 1;`";
+
+    /// Parses `src`, asserts the parse produced exactly `expected` (in source
+    /// order), and returns the arena. Lowering runs over rejected constructs
+    /// too, so this is how a construct the grammar refuses gets its lowered
+    /// shape checked — and how a second, lowering-level diagnostic for the same
+    /// input would be caught.
+    fn lower_rejected(src: &str, expected: &[&str]) -> AstArena {
+        let result = parse(src);
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "unexpected diagnostics for {src:?}"
+        );
+        result.arena
+    }
+
     /// The single top-level definition's `kind`. Asserts exactly one source file
     /// with exactly one top-level def.
     fn single_def(arena: &AstArena) -> &Def {
@@ -2171,8 +2198,11 @@ mod tests {
     }
 
     #[test]
-    fn lowers_type_alias() {
-        let arena = lower("type Id = i32;");
+    fn lowers_rejected_type_alias() {
+        // The grammar refuses `type` aliases but still completes the node, so
+        // lowering still reaches `Def::TypeAlias` — and adds no second
+        // diagnostic of its own.
+        let arena = lower_rejected("type Id = i32;", &[TYPE_ALIAS_MESSAGE]);
         match single_def(&arena) {
             Def::TypeAlias { name, ty, .. } => {
                 assert_eq!(arena.ident_name(*name), "Id");
@@ -2772,8 +2802,10 @@ mod tests {
     }
 
     #[test]
-    fn lowers_type_in_body() {
-        let arena = lower("fn f() { type T = i32; }");
+    fn lowers_rejected_type_in_body() {
+        // Statement position takes the same refused production, and lowers to
+        // `Stmt::TypeDef` behind the same single diagnostic.
+        let arena = lower_rejected("fn f() { type T = i32; }", &[TYPE_ALIAS_MESSAGE]);
         match single_stmt(&arena) {
             Stmt::TypeDef { name, ty } => {
                 assert_eq!(arena.ident_name(*name), "T");
