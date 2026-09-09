@@ -128,10 +128,6 @@ fn def_children(arena: &AstArena, id: DefId) -> Vec<NodeId> {
             out.push(NodeId::Type(*ty));
             out.push(NodeId::Expr(*value));
         }
-        Def::TypeAlias { name, ty, .. } => {
-            out.push(NodeId::Ident(*name));
-            out.push(NodeId::Type(*ty));
-        }
     }
     out
 }
@@ -185,10 +181,6 @@ fn stmt_children(arena: &AstArena, id: StmtId) -> Vec<NodeId> {
             if let Some(value) = value {
                 out.push(NodeId::Expr(*value));
             }
-        }
-        Stmt::TypeDef { name, ty } => {
-            out.push(NodeId::Ident(*name));
-            out.push(NodeId::Type(*ty));
         }
         Stmt::ConstDef(def) => out.push(NodeId::Def(*def)),
         Stmt::Break => {}
@@ -292,8 +284,7 @@ pub(crate) fn def_name_ident(arena: &AstArena, def: DefId) -> IdentId {
         | Def::Struct { name, .. }
         | Def::Enum { name, .. }
         | Def::Spec { name, .. }
-        | Def::Constant { name, .. }
-        | Def::TypeAlias { name, .. } => *name,
+        | Def::Constant { name, .. } => *name,
     }
 }
 
@@ -396,8 +387,7 @@ pub(crate) fn def_is_public(arena: &AstArena, def: DefId) -> bool {
         | Def::Struct { vis, .. }
         | Def::Enum { vis, .. }
         | Def::Spec { vis, .. }
-        | Def::Constant { vis, .. }
-        | Def::TypeAlias { vis, .. } => vis,
+        | Def::Constant { vis, .. } => vis,
     };
     matches!(vis, Visibility::Public)
 }
@@ -675,7 +665,6 @@ struct StructProbe { field_p: i32; fn method_p(self) -> i32 { return self.field_
 enum ColorProbe { RedV, GreenV, BlueV }\n\
 spec RulesProbe { fn law_probe() -> i32 { return 1; } }\n\
 const LIMIT_PROBE: GaugeTy = REF_PROBE;\n\
-type AliasProbe = TargetTy;\n\
 fn with_ignored(_: IgnoredTy) -> i32 { return 1; }";
         let (arena, entry) = analyze(source);
         let idents = walked_idents(&arena, entry);
@@ -697,15 +686,13 @@ fn with_ignored(_: IgnoredTy) -> i32 { return 1; }";
                 "LIMIT_PROBE",
                 "GaugeTy",
                 "REF_PROBE", // constant: name, type, value
-                "AliasProbe",
-                "TargetTy",  // type alias: name + aliased type
                 "IgnoredTy", // ignored-argument type
             ],
         );
     }
 
     #[test]
-    fn walk_descends_into_assign_loop_if_typedef_and_constdef_statements() {
+    fn walk_descends_into_assign_loop_if_and_constdef_statements() {
         // Each probe identifier appears in exactly one syntactic position, so its
         // presence pins the arm that had to descend to reach it.
         let source = "fn stmt_probes() -> i32 {\n\
@@ -714,7 +701,6 @@ loop loop_cond() { loop_body(); }\n\
 loop { plain_loop_body(); break; }\n\
 if if_cond() { then_probe(); } else { else_probe(); }\n\
 if bare_cond() { bare_then(); }\n\
-type LocalAlias = LocalTarget;\n\
 const LOCAL_K: i32 = local_const_val;\n\
 return 1;\n\
 }";
@@ -733,8 +719,6 @@ return 1;\n\
                 "else_probe", // if/else: condition, then, else
                 "bare_cond",
                 "bare_then", // if without an else block
-                "LocalAlias",
-                "LocalTarget", // local type def: name + aliased type
                 "LOCAL_K",
                 "local_const_val", // local const def: name + value
             ],
@@ -887,8 +871,7 @@ external fn extern_def(i32) -> i32;\n\
 struct struct_def { f: i32; }\n\
 enum enum_def { Va }\n\
 spec spec_def { fn nested_def() -> i32 { return 1; } }\n\
-const const_def: i32 = 1;\n\
-type type_def = i32;";
+const const_def: i32 = 1;";
         let (arena, entry) = analyze(source);
         let names: Vec<&str> = arena[entry]
             .defs
@@ -904,7 +887,6 @@ type type_def = i32;";
                 "enum_def",
                 "spec_def",
                 "const_def",
-                "type_def",
             ]
         );
     }
@@ -919,8 +901,6 @@ pub enum PubEnum { Va }\n\
 enum PrivEnum { Vb }\n\
 pub const PUB_C: i32 = 1;\n\
 const PRIV_C: i32 = 1;\n\
-pub type PubT = i32;\n\
-type PrivT = i32;\n\
 external fn extern_priv(i32) -> i32;\n\
 spec spec_priv { fn spec_fn() -> i32 { return 1; } }";
         let (arena, entry) = analyze(source);
@@ -929,7 +909,7 @@ spec spec_priv { fn spec_fn() -> i32 { return 1; } }";
                 find_def_by_name(&arena, entry, name).unwrap_or_else(|| panic!("no def `{name}`"));
             def_is_public(&arena, def)
         };
-        for name in ["pub_fn", "PubStruct", "PubEnum", "PUB_C", "PubT"] {
+        for name in ["pub_fn", "PubStruct", "PubEnum", "PUB_C"] {
             assert!(is_public(name), "`{name}` is declared pub");
         }
         for name in [
@@ -937,7 +917,6 @@ spec spec_priv { fn spec_fn() -> i32 { return 1; } }";
             "PrivStruct",
             "PrivEnum",
             "PRIV_C",
-            "PrivT",
             "extern_priv",
             "spec_priv",
         ] {

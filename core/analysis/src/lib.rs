@@ -170,8 +170,8 @@
 //!   binding, parameter, return type or struct field is rejected, with arrays
 //!   peeled at any depth. The type name is kept and the values rejected, so the
 //!   author is told the feature is missing and what to model text with instead
-//!   rather than that `string` is unknown. Type aliases and the `self` receiver
-//!   are documented non-scopes. This is a gate on an unimplemented feature: it
+//!   rather than that `string` is unknown. The `self` receiver is a documented
+//!   non-scope. This is a gate on an unimplemented feature: it
 //!   is deleted whole the day strings land. See [`rules::string_not_supported`].
 //! - A049: the unit type has no value representation. `()` is legitimate as the
 //!   *absence* of a value — a return type of `()`, `unit`, or nothing at all —
@@ -207,13 +207,13 @@
 //!   substitution further: the compiler does not monomorphize, so a type
 //!   parameter reaches code generation standing for no type at all. A type
 //!   *argument* has no declaration to apply to in the first place — a struct, an
-//!   enum, a type alias and an `external fn` each declare a bare name, and only a
-//!   function binds a type parameter. Rejected are a `fn` declaring type
+//!   enum and an `external fn` each declare a bare name, and only a function
+//!   binds a type parameter. Rejected are a `fn` declaring type
 //!   parameters (one finding per declaration, no reachability filter and no
 //!   entry-point carve-out), a type application as a parameter, return type,
 //!   struct field, or the declared type of a `let` or `const`, and a type
-//!   application in expression position at any depth. Type aliases and function
-//!   types are documented non-scopes. Only the declaration half is a gate on an
+//!   application in expression position at any depth. Function types are a
+//!   documented non-scope. Only the declaration half is a gate on an
 //!   unimplemented feature; the type-application half states a property of the
 //!   language and survives monomorphization. See
 //!   [`rules::generic_not_supported`].

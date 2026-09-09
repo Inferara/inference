@@ -136,8 +136,8 @@ fn generic_not_supported_message(site: &GenericSite) -> String {
         GenericSite::TypeApplication { rendered, position } => format!(
             "`{rendered}` gives type arguments to a declaration that accepts none, and cannot be \
              used as {position}; no type declaration in Inference takes type parameters — a \
-             struct, an enum, a type alias and an `external fn` all declare a bare name, and only \
-             a function binds one — so `{rendered}` names no declaration the compiler can lay \
+             struct, an enum and an `external fn` all declare a bare name, and only a function \
+             binds one — so `{rendered}` names no declaration the compiler can lay \
              out: there is no byte size for frame layout to compute, no WebAssembly value type \
              for a signature to carry, and no term for a proof to describe a value of it; write \
              the base type name on its own if that is the type you meant"
@@ -2353,7 +2353,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "a struct, an enum, a type alias and an `external fn` all declare a bare name"
+                "a struct, an enum and an `external fn` all declare a bare name"
             ),
             "A051 must enumerate the declarations that take no type parameters, got: {text}"
         );

@@ -126,8 +126,7 @@ fn scan_defs(
             // type is a complete statement of its ABI.
             Def::ExternFunction { .. }
             | Def::Enum { .. }
-            | Def::Constant { .. }
-            | Def::TypeAlias { .. } => {}
+            | Def::Constant { .. } => {}
         }
     }
 }

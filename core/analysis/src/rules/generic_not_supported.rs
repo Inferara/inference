@@ -8,9 +8,9 @@
 //! for no type at all — there is no layout to size a frame slot with, no
 //! WebAssembly value type to pass a value in, and no term for a proof to
 //! describe one with. A type *argument* is worse off still: no type declaration
-//! in the language accepts one. A struct, an enum, a type alias and an
-//! `external fn` each declare a bare name, and only a function binds a type
-//! parameter, so `Q i32'` names no declaration at all.
+//! in the language accepts one. A struct, an enum and an `external fn` each
+//! declare a bare name, and only a function binds a type parameter, so
+//! `Q i32'` names no declaration at all.
 //!
 //! What that produced before this rule was not one failure but three, and only
 //! the first was a failure. A binder that appears in a lowered type reached an
@@ -84,15 +84,8 @@
 //! generic function's type parameter would have shadowed. A bare base name used
 //! as a type (`fn g(p: Q)`), and an array of one.
 //!
-//! Two positions are outside the predicate, and both are deliberate:
+//! One position is outside the predicate, and it is deliberate:
 //!
-//! - **Type aliases**, whether the item form `type A = Q i32';` or the statement
-//!   form inside a body. Aliases are nominal in Inference — a binding annotated
-//!   with the alias does not resolve to the aliased type — so an alias declares
-//!   a name at which no value can be produced, and the body-level form is erased
-//!   in code generation outright. Every position that could produce a value is
-//!   covered above. This is the same non-scope A045 and A048 record for the same
-//!   reason.
 //! - **Function types** (`fn(i32) -> i32`), which have no value representation
 //!   with or without a type parameter in them and are not this rule's subject.
 //!
@@ -199,7 +192,7 @@ fn check_defs(
                 check_type_expressions(arena, module_path, *value, errors);
             }
             Def::Spec { defs, .. } => check_defs(arena, module_path, defs, errors),
-            Def::Enum { .. } | Def::TypeAlias { .. } => {}
+            Def::Enum { .. } => {}
         }
     }
 }

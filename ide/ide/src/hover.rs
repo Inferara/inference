@@ -251,11 +251,6 @@ fn ident_in_stmt(
                 .unwrap_or_else(|| TypeInfo::from_type_id(arena, *ty));
             Some(named_type(arena.ident_name(ident), &type_info))
         }
-        Stmt::TypeDef { name, ty } if *name == ident => Some(code_block(&format!(
-            "type {} = {}",
-            arena.ident_name(ident),
-            render_type(&TypeInfo::from_type_id(arena, *ty))
-        ))),
         _ => None,
     }
 }

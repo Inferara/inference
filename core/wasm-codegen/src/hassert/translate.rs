@@ -973,7 +973,6 @@ impl<'a> SpecFnTranslator<'a> {
                 let def_id = *def_id;
                 self.bind_const(def_id, rest, mode)
             }
-            Stmt::TypeDef { .. } => self.t_stmts(rest, mode),
             Stmt::Assign { .. } => {
                 self.error(
                     PCode::P003,

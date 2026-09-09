@@ -107,11 +107,8 @@
 //!
 //! ## What stays legal
 //!
-//! Every void function and every way of returning from one. Type aliases,
-//! whether the item form or the statement form: aliases are nominal in
-//! Inference, so an alias names a type at which no value can be produced, and
-//! every position that could produce one is covered above. The `self` receiver,
-//! whose type is the enclosing struct.
+//! Every void function and every way of returning from one. The `self`
+//! receiver, whose type is the enclosing struct.
 //!
 //! The rule is unconditional — it inspects source shape, not compilation mode.
 
@@ -189,7 +186,7 @@ fn check_defs(
                 check_unit_literals(arena, module_path, *value, errors);
             }
             Def::Spec { defs, .. } => check_defs(arena, module_path, defs, errors),
-            Def::Enum { .. } | Def::TypeAlias { .. } => {}
+            Def::Enum { .. } => {}
         }
     }
 }

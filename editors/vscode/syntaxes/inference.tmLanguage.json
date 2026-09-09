@@ -117,10 +117,6 @@
           "match": "\\benum\\b"
         },
         {
-          "name": "keyword.declaration.type.inference",
-          "match": "\\btype\\b"
-        },
-        {
           "name": "keyword.declaration.const.inference",
           "match": "\\bconst\\b"
         },

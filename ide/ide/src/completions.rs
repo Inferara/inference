@@ -55,14 +55,18 @@ pub struct CompletionItem {
     pub detail: Option<String>,
 }
 
-/// Every reserved word the lexer recognizes, offered in keyword position.
+/// Every reserved word the lexer recognizes and the parser still accepts a
+/// declaration for, offered in keyword position.
 ///
-/// This mirrors `inference_parser`'s `SyntaxKind::from_keyword`; keeping the full
-/// set (including the primitive type names) means the completion list never
-/// drifts from what the parser actually treats as a keyword.
+/// This mirrors `inference_parser`'s `SyntaxKind::from_keyword` — keeping the
+/// full set, primitive type names included, means the completion list never
+/// drifts from what the parser actually treats as a keyword — with one
+/// deliberate omission. `type` is still a keyword to the lexer, because the
+/// grammar keeps a production for `type A = T;` in order to refuse it by name;
+/// offering it here would complete a declaration the parser rejects.
 const KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "spec", "struct", "enum", "const", "type", "external", "return", "loop",
-    "if", "else", "assert", "break", "use", "from", "self", "pub", "assume", "forall", "exists",
+    "fn", "let", "mut", "spec", "struct", "enum", "const", "external", "return", "loop", "if",
+    "else", "assert", "break", "use", "from", "self", "pub", "assume", "forall", "exists",
     "unique", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "bool", "true", "false",
 ];
 
@@ -251,7 +255,7 @@ fn def_kind(arena: &AstArena, def: DefId) -> CompletionItemKind {
         Def::Constant { .. } => CompletionItemKind::Constant,
         Def::Spec { .. } => CompletionItemKind::Module,
         // A type alias names a type, so it shares the struct icon in the list.
-        Def::Struct { .. } | Def::TypeAlias { .. } => CompletionItemKind::Struct,
+        Def::Struct { .. } => CompletionItemKind::Struct,
     }
 }
 

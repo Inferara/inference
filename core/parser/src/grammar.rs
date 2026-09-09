@@ -754,9 +754,20 @@ mod tests {
     #[test]
     fn pub_spec_body_items_survive_recovery() {
         // After the stray `pub`, every item inside the spec body must still land
-        // in the tree: a const, a type alias and a function.
+        // in the tree: a const and a function. A refused `type` declaration is
+        // driven through as well, because it is the neighbour most likely to
+        // disturb the others — each of the two diagnostics is reported once, and
+        // the alias node is bounded to its own declaration rather than eating
+        // the function after it.
         let src = "pub spec S { const a: i32 = 1; type T = u32; fn h() { } }";
-        let (root, _errors) = parse(src);
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(
+            msgs,
+            vec![
+                "specs take no visibility modifier; they are stripped before codegen".to_string(),
+                TYPE_ALIAS_MESSAGE.to_string(),
+            ]
+        );
         let s = find(&root, SyntaxKind::SpecDefinition).expect("spec survives the stray pub");
         assert_eq!(count_kind(s, SyntaxKind::ConstantDefinition), 1);
         assert_eq!(count_kind(s, SyntaxKind::TypeDefinitionStatement), 1);
@@ -915,10 +926,11 @@ mod tests {
 
     #[test]
     fn type_alias_single_error_through_lowering() {
-        // The full parse+lower pipeline must surface exactly one diagnostic. The
-        // rejected declaration still lowers, so a lowering-level complaint about
-        // the same input would show up here as a second message that the
-        // CST-only checks above cannot see.
+        // The full parse+lower pipeline must surface exactly one diagnostic.
+        // Lowering drops the rejected declaration rather than lowering it, and a
+        // drop that missed one of the three collection sites would fall through
+        // to the "unexpected definition kind" fallback — a second message that
+        // the CST-only checks above cannot see.
         let parsed = crate::parse("type A = i32;");
         assert_eq!(
             parsed.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),

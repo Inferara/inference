@@ -524,7 +524,7 @@ fn goto_in_stmt(
 ) -> Option<NavigationTarget> {
     let arena = file.arena();
     match &arena[stmt].kind {
-        Stmt::VarDef { name, .. } | Stmt::TypeDef { name, .. } if *name == ident => {
+        Stmt::VarDef { name, .. } if *name == ident => {
             nav_at_ident(file, entry, arena[stmt].location, *name)
         }
         _ => None,

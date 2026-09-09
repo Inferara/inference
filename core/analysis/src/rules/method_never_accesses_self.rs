@@ -102,7 +102,7 @@ fn stmt_references_self(arena: &AstArena, stmt_id: StmtId) -> bool {
         Stmt::VarDef { value, .. } => {
             value.is_some_and(|v| expr_references_self(arena, v))
         }
-        Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+        Stmt::Break | Stmt::ConstDef(_) => false,
     }
 }
 

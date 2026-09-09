@@ -82,9 +82,6 @@
 //!   exists to check.
 //!   Implementing generic instantiation would introduce value positions this rule
 //!   does not yet see, and must revisit it.
-//! - Local type aliases: `type X = E;` is not flagged. Aliases are non-transparent
-//!   in Inference (`let a: X` does not resolve to the aliased type), so an alias is
-//!   a dead end rather than a route to a value.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
@@ -170,7 +167,7 @@ fn check_defs(
                 check_struct_literals(ctx, module_path, *value, errors);
             }
             Def::Spec { defs, .. } => check_defs(ctx, arena, module_path, defs, errors),
-            Def::Enum { .. } | Def::TypeAlias { .. } => {}
+            Def::Enum { .. } => {}
         }
     }
 }

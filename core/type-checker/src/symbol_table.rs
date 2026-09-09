@@ -387,12 +387,14 @@ pub(crate) enum UnimportedNamespace {
     Hedged { namespace: String },
 }
 
-/// Information about a type alias (`type X = Y;`) or a builtin type binding.
+/// Information about a builtin type binding (`i32`, `bool`, …).
 ///
-/// Aliases carry real visibility (#63): a `pub type` is item-importable and
-/// reachable across files, while a private one is rejected at the file boundary
-/// exactly like a private fn/struct/enum. Builtin bindings (i32, bool, …) are
-/// always public.
+/// These are the only symbols of this kind the program builds: the language has
+/// no user-written type declaration that binds a name to another type, so every
+/// value here comes from [`SymbolTable::init_builtin_types`]. The two fields
+/// beyond the type are what `Symbol`'s uniform interface asks of every arm — a
+/// builtin is always public, and carries the sourceless default location that
+/// [`Symbol::is_builtin_binding`] reads as its sentinel.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeAliasInfo {
     pub(crate) type_info: TypeInfo,
@@ -420,8 +422,8 @@ pub(crate) struct ConstInfo {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Symbol {
-    /// A type alias mapping a name to another type (`type X = Y;`).
-    /// Also used for builtin type bindings (i32, bool, etc.).
+    /// A builtin type binding (`i32`, `bool`, …): a name standing for a type
+    /// the compiler provides. Nothing a user writes registers one.
     TypeAlias(TypeAliasInfo),
     Struct(StructInfo),
     Enum(EnumInfo),
@@ -563,8 +565,12 @@ impl Symbol {
     /// its lookup walks into the root scope: every *user* item the entry file
     /// declares — `pub` or private — is hidden behind the file boundary (Inference
     /// has no ambient cross-file visibility; entry `pub` items are reached only
-    /// through `use root;`). Builtins are registered as type aliases with a default
-    /// (sourceless) location, which distinguishes them from a user `type` alias.
+    /// through `use root;`). The sourceless default location is the sentinel that
+    /// marks one. Nothing a user writes registers a [`Symbol::TypeAlias`] today,
+    /// so the location test is redundant with the variant test; it is kept
+    /// because the sentinel, not the variant, is what the property means, and a
+    /// symbol of this kind that did carry a source location would not be a
+    /// builtin.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_builtin_binding(&self) -> bool {
         matches!(
@@ -880,42 +886,6 @@ impl SymbolTable {
     pub(crate) fn pop_scope(&mut self) {
         if let Some(current) = self.current_scope {
             self.current_scope = self.scopes[current.index()].parent;
-        }
-    }
-
-    /// Registers a type alias with default (private) visibility and no source
-    /// location. A thin wrapper over [`Self::register_type_with_visibility`] for
-    /// local (statement-level) `type` defs and test setup, where cross-file
-    /// visibility is irrelevant.
-    pub(crate) fn register_type(&mut self, name: &str, ty: Option<TypeInfo>) -> anyhow::Result<()> {
-        self.register_type_with_visibility(name, ty, Visibility::Private, Location::default())
-    }
-
-    /// Registers a type alias carrying its visibility and declaration location, so
-    /// a `pub type` is item-importable and reachable across files while a private
-    /// one is rejected at the file boundary (#63).
-    pub(crate) fn register_type_with_visibility(
-        &mut self,
-        name: &str,
-        ty: Option<TypeInfo>,
-        visibility: Visibility,
-        location: Location,
-    ) -> anyhow::Result<()> {
-        if let Some(current) = self.current_scope {
-            let type_info = ty.unwrap_or_else(|| TypeInfo {
-                kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
-                type_params: vec![],
-            });
-            self.scopes[current.index()].insert_symbol(
-                name,
-                Symbol::TypeAlias(TypeAliasInfo {
-                    type_info,
-                    visibility,
-                    definition_location: location,
-                }),
-            )
-        } else {
-            bail!("No active scope to register type")
         }
     }
 
@@ -1860,7 +1830,6 @@ impl SymbolTable {
             .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
             .cloned()
     }
-
 
     /// Resolves a `::`-qualified type path (`geo::Level`, `root::Pt`,
     /// `lib::geom::Point`) to the struct or enum it names, paired with its
@@ -3617,9 +3586,6 @@ impl SymbolTable {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
             }
-            Def::TypeAlias { name, ty, .. } => {
-                self.register_type(&arena[*name].name, Some(TypeInfo::from_type_id(arena, *ty)))?;
-            }
             Def::ExternFunction {
                 name,
                 args,
@@ -3728,6 +3694,9 @@ mod tests {
 
         #[test]
         fn is_public_follows_alias_visibility() {
+            // Every symbol of this kind the program builds is a public builtin;
+            // the private half is synthetic, and pins that the arm reads the
+            // field rather than answering a constant.
             let type_info = TypeInfo {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
@@ -3739,30 +3708,6 @@ mod tests {
                 definition_location: Location::default(),
             });
             assert!(!private.is_public());
-        }
-
-        #[test]
-        fn register_type_creates_type_alias_with_provided_type() {
-            let mut table = SymbolTable::default();
-            let type_info = TypeInfo {
-                kind: TypeInfoKind::Number(NumberType::I32),
-                type_params: vec![],
-            };
-            let result = table.register_type("MyInt", Some(type_info));
-            assert!(result.is_ok());
-            let lookup = table.lookup_type("MyInt");
-            assert!(lookup.is_some());
-        }
-
-        #[test]
-        fn register_type_creates_custom_type_when_none_provided() {
-            let mut table = SymbolTable::default();
-            let result = table.register_type("MyCustomType", None);
-            assert!(result.is_ok());
-            let lookup = table.lookup_type("MyCustomType");
-            assert!(lookup.is_some());
-            let type_info = lookup.unwrap();
-            assert!(matches!(type_info.kind, TypeInfoKind::Custom(ref s) if s == "MyCustomType"));
         }
 
         #[test]
@@ -3779,14 +3724,6 @@ mod tests {
             assert!(table.lookup_type("bool").is_some());
             assert!(table.lookup_type("unit").is_some());
             assert!(table.lookup_type("string").is_some());
-        }
-
-        #[test]
-        fn lookup_type_returns_type_alias_info() {
-            let mut table = SymbolTable::default();
-            table.register_type("TestType", None).unwrap();
-            let result = table.lookup_type("TestType");
-            assert!(result.is_some());
         }
 
         #[test]

@@ -89,8 +89,7 @@ fn check_defs(
             }
             Def::Enum { .. }
             | Def::Constant { .. }
-            | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. } => {}
+            | Def::ExternFunction { .. } => {}
         }
     }
 }

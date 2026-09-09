@@ -72,15 +72,9 @@
 //!
 //! Nothing about `string` is legal as a value, and the rule says so uniformly;
 //! there is no position where a string is accepted and no partial support to
-//! keep track of. Two positions are nonetheless outside the predicate, and both
-//! are deliberate:
+//! keep track of. One position is nonetheless outside the predicate, and it is
+//! deliberate:
 //!
-//! - **Type aliases**, whether the item form `type S = string;` or the
-//!   statement form inside a body. Aliases are nominal in Inference — a
-//!   binding annotated with the alias does not resolve to the aliased type — so
-//!   an alias declares a name at which no value can be produced. Every position
-//!   that could produce one is covered above. This is the same non-scope A045
-//!   records for the same reason.
 //! - **The `self` receiver**, whose type is the enclosing struct and so is
 //!   never `string`.
 //!
@@ -167,7 +161,7 @@ fn check_defs(
                 check_string_literals(arena, module_path, *value, errors);
             }
             Def::Spec { defs, .. } => check_defs(arena, module_path, defs, errors),
-            Def::Enum { .. } | Def::TypeAlias { .. } => {}
+            Def::Enum { .. } => {}
         }
     }
 }

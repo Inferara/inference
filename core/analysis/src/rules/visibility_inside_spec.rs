@@ -59,7 +59,6 @@ fn check_inner_def(
         Def::Struct { vis, name, .. } => (vis, *name, "struct"),
         Def::Enum { vis, name, .. } => (vis, *name, "enum"),
         Def::Constant { vis, name, .. } => (vis, *name, "const"),
-        Def::TypeAlias { vis, name, .. } => (vis, *name, "type"),
         // A nested spec inside a spec body is not currently grammatically
         // reachable; the outer scan_for_specs handles any future reachability.
         Def::Spec { .. } => return,
