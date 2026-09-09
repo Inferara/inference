@@ -119,6 +119,14 @@ mod tests {
         "glob imports are not supported; import the file (use a::b;) or list items \
          explicitly (use a::b::{x, y};)";
 
+    /// The verbatim type-alias-rejection diagnostic, kept in sync with
+    /// `items::TYPE_ALIAS_MESSAGE`. Duplicated for the same reason as
+    /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
+    const TYPE_ALIAS_MESSAGE: &str =
+        "type aliases are not supported; an alias declares a name no value can ever have, so the \
+         declaration can only ever be unused — write the type it names at each use site: \
+         `let n: i32 = 1;` rather than `type N = i32; let n: N = 1;`";
+
     /// The verbatim stray-`mut` diagnostic, kept in sync with
     /// `params::MUT_WITHOUT_BINDING_MESSAGE`. Duplicated for the same reason as
     /// [`GLOB_MESSAGE`]: the user-facing wording is pinned here.
@@ -349,24 +357,35 @@ mod tests {
     }
 
     #[test]
-    fn type_definition_statement_shape() {
+    fn type_definition_statement_is_rejected_but_keeps_its_shape() {
+        // A `type` alias is refused, and the production still consumes the whole
+        // declaration and completes its node with the name and the aliased type
+        // in place. That intact shape is what keeps one alias to exactly one
+        // diagnostic and leaves the following item untouched.
         let src = "type Address = u32;";
-        assert_clean(src);
-        let t = first(src, SyntaxKind::TypeDefinitionStatement);
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+        let t = find(&root, SyntaxKind::TypeDefinitionStatement)
+            .expect("the declaration is still recognised");
         assert_eq!(
             t.child(SyntaxKind::Identifier).map(|n| n.text(src)),
             Some("Address")
         );
         assert!(t.child(SyntaxKind::TypeU32).is_some());
+        assert!(
+            !has_error_node(&root),
+            "the rejection records a diagnostic without wrapping tokens in an Error node:\n{}",
+            tree(src)
+        );
     }
 
     #[test]
     fn spec_definition_shape() {
-        let src = "spec S { const a: i32 = 10; type T = u32; }";
+        let src = "spec S { const a: i32 = 10; fn h() { } }";
         assert_clean(src);
         let s = first(src, SyntaxKind::SpecDefinition);
         assert_eq!(count_kind(&s, SyntaxKind::ConstantDefinition), 1);
-        assert_eq!(count_kind(&s, SyntaxKind::TypeDefinitionStatement), 1);
+        assert_eq!(count_kind(&s, SyntaxKind::FunctionDefinition), 1);
     }
 
     #[test]
@@ -710,7 +729,7 @@ mod tests {
         // `pub` is then consumed and the spec body parses, so no parse cascade
         // follows. This checks parsing only; the parse+lower variant below guards
         // against a lowering cascade re-reporting the same invalid input.
-        let (_root, msgs) = parse_messages("pub spec S { const a: i32 = 10; type T = u32; }");
+        let (_root, msgs) = parse_messages("pub spec S { const a: i32 = 10; const b: u32 = 3; }");
         assert_eq!(
             msgs,
             vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
@@ -725,7 +744,7 @@ mod tests {
         // the name `Identifier` as if it were a definition and emit a spurious
         // second diagnostic. Drive the public `parse` (which runs lowering) so a
         // CST-only check cannot mask that cascade.
-        let parsed = crate::parse("pub spec S { const a: i32 = 10; type T = u32; }");
+        let parsed = crate::parse("pub spec S { const a: i32 = 10; const b: u32 = 3; }");
         assert_eq!(
             parsed.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
             vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
@@ -759,6 +778,162 @@ mod tests {
             "the item after the pub spec must parse:\n{}",
             tree(src)
         );
+    }
+
+    // -- type alias rejection: exact message, span, no cascade, no recovery
+
+    #[test]
+    fn type_alias_exact_message_single_error() {
+        // The alias diagnostic is reported exactly once, with the educational
+        // wording that names the replacement.
+        let (_root, msgs) = parse_messages("type A = i32;");
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+    }
+
+    #[test]
+    fn type_alias_diagnostic_points_at_the_type_keyword() {
+        // The span covers the `type` keyword, not the name or the declaration as
+        // a whole: the error is recorded before the keyword is consumed.
+        let src = "type A = i32;";
+        let (_root, errors) = parse_to_cst(src);
+        assert_eq!(errors.len(), 1, "expected one error, got {errors:?}");
+        let span = errors[0].span;
+        assert_eq!(
+            &src[span.offset_start as usize..span.offset_end as usize],
+            "type"
+        );
+    }
+
+    #[test]
+    fn pub_type_alias_consumes_pub_and_still_points_at_the_type_keyword() {
+        // `pub type A = i32;` — the leading `pub` is consumed as a Visibility
+        // node and only the alias is reported, with the span still on `type`
+        // rather than sliding onto the `pub`.
+        let src = "pub type A = i32;";
+        let (root, errors) = parse_to_cst(src);
+        assert_eq!(
+            errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
+            vec![TYPE_ALIAS_MESSAGE.to_string()]
+        );
+        let span = errors[0].span;
+        assert_eq!(
+            &src[span.offset_start as usize..span.offset_end as usize],
+            "type"
+        );
+        let t = find(&root, SyntaxKind::TypeDefinitionStatement)
+            .expect("the declaration is still recognised");
+        assert!(
+            t.child(SyntaxKind::Visibility).is_some(),
+            "the leading `pub` is still consumed as a Visibility node:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn type_alias_of_a_function_type_does_not_swallow_the_following_fn() {
+        // The declaration is reported in place and then consumed in full, so the
+        // `fn` of the aliased function type is read as part of that type and the
+        // real function after the `;` parses untouched. Skipping to the `;`
+        // instead would abandon at that inner `fn` — it is an ITEM_RECOVERY
+        // anchor — and leave the tail of the declaration loose in the tree.
+        let src = "type Op = fn(i32) -> i32; fn f() { }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+        let f = find(&root, SyntaxKind::FunctionDefinition)
+            .unwrap_or_else(|| panic!("the function after the alias must parse:\n{}", tree(src)));
+        assert_eq!(
+            f.child(SyntaxKind::Identifier).map(|n| n.text(src)),
+            Some("f")
+        );
+    }
+
+    #[test]
+    fn type_alias_followed_by_struct_and_use_still_parses_them() {
+        // Recovery quality across richer following items: with one error in
+        // total, the struct and the use directive after the alias both parse.
+        let src = "type A = i32; struct P { x: i32; } use math;";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+        let p = find(&root, SyntaxKind::StructDefinition)
+            .unwrap_or_else(|| panic!("the struct after the alias must parse:\n{}", tree(src)));
+        assert_eq!(count_kind(p, SyntaxKind::StructField), 1);
+        assert_eq!(count_kind(&root, SyntaxKind::UseDirective), 1);
+    }
+
+    #[test]
+    fn two_type_aliases_report_one_error_each() {
+        // Exactly one diagnostic per declaration, no cascade: the first alias is
+        // consumed through its `;`, so the second starts from a clean cursor.
+        let (_root, msgs) = parse_messages("type A = i32; type B = u32;");
+        assert_eq!(
+            msgs,
+            vec![
+                TYPE_ALIAS_MESSAGE.to_string(),
+                TYPE_ALIAS_MESSAGE.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn type_alias_in_a_block_reports_once_and_the_block_survives() {
+        // The same production is reached from statement position inside a block;
+        // the statements around the alias still parse.
+        let src = "fn f() { type T = i32; let x: i32 = 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+        assert!(
+            find(&root, SyntaxKind::VariableDefinitionStatement).is_some(),
+            "the statement after the alias must parse:\n{}",
+            tree(src)
+        );
+    }
+
+    #[test]
+    fn type_alias_in_a_spec_reports_once_and_the_body_survives() {
+        // A spec body reaches the production through the item dispatch; the rest
+        // of the body is unaffected.
+        let src = "spec S { type T = u32; const a: i32 = 1; }";
+        let (root, msgs) = parse_messages(src);
+        assert_eq!(msgs, vec![TYPE_ALIAS_MESSAGE.to_string()]);
+        let spec = find(&root, SyntaxKind::SpecDefinition)
+            .unwrap_or_else(|| panic!("the spec must parse:\n{}", tree(src)));
+        assert_eq!(count_kind(spec, SyntaxKind::ConstantDefinition), 1);
+    }
+
+    #[test]
+    fn type_alias_without_semicolon_adds_only_the_missing_semi() {
+        // Truncated at EOF: the alias diagnostic, then the production's own
+        // `expected Semi`. Pin that pair, and that the parser terminates with a
+        // SourceFile root (reaching this assertion proves it did).
+        let (root, msgs) = parse_messages("type A = i32");
+        assert_eq!(
+            msgs,
+            vec![TYPE_ALIAS_MESSAGE.to_string(), "expected Semi".to_string()]
+        );
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn type_alias_single_error_through_lowering() {
+        // The full parse+lower pipeline must surface exactly one diagnostic. The
+        // rejected declaration still lowers, so a lowering-level complaint about
+        // the same input would show up here as a second message that the
+        // CST-only checks above cannot see.
+        let parsed = crate::parse("type A = i32;");
+        assert_eq!(
+            parsed.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
+            vec![TYPE_ALIAS_MESSAGE.to_string()]
+        );
+    }
+
+    #[test]
+    fn type_stays_usable_as_an_identifier() {
+        // `type` is contextual: the rejection above fires only where the keyword
+        // heads a definition or a statement. Everywhere an identifier is
+        // expected it is still a name and must still parse clean — here as a
+        // member name and as a type name.
+        assert_clean("fn f() { self.type = ABC; }");
+        assert_clean("fn f() { let x: type = 1; }");
     }
 
     // -- pub field rejection: exact message, AST integrity, mixed members
@@ -991,12 +1166,14 @@ mod tests {
     }
 
     #[test]
-    fn const_and_type_statements_in_block() {
-        let src = "fn f() { const d: i32 = 10; type T = u32; }";
+    fn const_statement_in_block() {
+        // `const` is a definition reachable from statement position, so it lands
+        // in the block as a ConstantDefinition node rather than a statement kind
+        // of its own.
+        let src = "fn f() { const d: i32 = 10; }";
         assert_clean(src);
         let (root, _) = parse_to_cst(src);
         assert!(find(&root, SyntaxKind::ConstantDefinition).is_some());
-        assert!(find(&root, SyntaxKind::TypeDefinitionStatement).is_some());
     }
 
     #[test]
