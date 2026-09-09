@@ -74,5 +74,20 @@ rustc-hash = "2.1.3"
 # moves (#157).
 salsa = "0.27"
 
+# Debug builds carry full DWARF by default, for this workspace *and* for every
+# dependency in it — including Wasmtime and Cranelift, which the test suite
+# links. That debuginfo is the bulk of both the link time and the tens of
+# gigabytes a debug build leaves in `target/`, and almost none of it is ever
+# read: a failing test is located by the file and line in its backtrace, which
+# is what `line-tables-only` keeps.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies are not stepped through, so they carry no debuginfo at all. This
+# is the larger half of the saving, because the heaviest crates in the graph are
+# ones nobody debugs from here.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 codegen-units = 1     # Better optimization (slower compile)
