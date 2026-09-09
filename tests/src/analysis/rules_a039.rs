@@ -420,13 +420,13 @@ mod analysis_rules_tests {
     }
 
     // The predicate's `TypeInfoKind::Custom(name)` arm (rejecting a custom
-    // non-enum `@` argument) has no type-valid integration test here: a `type`
-    // alias to a struct does not behave as the struct for member access — a
-    // parameter typed by such an alias fails type-checking the moment its struct
-    // fields are used (`member access requires a struct type, found `P``), so no
-    // well-typed program reaches A039 with an unresolved `Custom` struct
-    // argument. The arm is a defensive guard matching codegen (which treats a
-    // `Custom` non-enum `@` as struct-like and refuses the missing slot) and
-    // mirroring A038's predicate; its enum-exemption branch is covered by
+    // non-enum `@` argument) has no type-valid integration test here, because no
+    // well-typed program reaches it. Every nominal type a program can write is
+    // canonicalized to `Struct` or `Enum` before classification, so a kind still
+    // spelled `Custom` names something the symbol table did not resolve — and
+    // that is `unknown type` from the type checker, ahead of analysis. The arm is
+    // a defensive guard matching codegen (which treats a `Custom` non-enum `@` as
+    // struct-like and refuses the missing slot) and mirroring A038's predicate;
+    // its enum-exemption branch is covered by
     // `a039_enum_uzumaki_argument_accepted`.
 }

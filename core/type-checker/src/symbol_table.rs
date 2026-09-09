@@ -3681,6 +3681,10 @@ mod tests {
 
         #[test]
         fn as_type_info_with_custom_type() {
+            // The payload is synthetic: `init_builtin_types` is the only producer
+            // of this symbol and only ever wraps `Number`/`Bool`/`Unit`/`String`.
+            // It pins that the arm hands back whatever it wraps rather than
+            // rebuilding a kind of its own.
             let type_info = TypeInfo {
                 kind: TypeInfoKind::Custom("MyType".to_string()),
                 type_params: vec![],

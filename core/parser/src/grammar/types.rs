@@ -40,16 +40,22 @@ pub(crate) fn at_type_start(p: &Parser) -> bool {
 /// Keyword-spelling tokens that the grammar treats as ordinary identifiers when
 /// they appear in identifier position.
 ///
-/// In the tree-sitter grammar `self`, `type`, `from` and `spec` are keywords
-/// only where the rules spell them as literals (`self_reference`, the `type` of
-/// a type definition, the `from` of a use directive, the `spec` of a spec
-/// definition). Everywhere an `identifier` is expected — a name, a member name,
-/// a struct-field name, an argument name, a qualified-name alias — they fall back
-/// to the `identifier` token (the `word` rule). The corpus relies on this:
-/// `self.type` uses `self` as a name and `type` as a member name, and
-/// `spec::AuctionSpec` uses `spec` as a qualified-name alias. We mirror it by
-/// accepting these spellings as identifiers in those positions and recording
-/// them under [`SyntaxKind::Ident`].
+/// `self`, `type`, `from` and `spec` are keywords only where a rule spells them
+/// as literals: `self_reference`, the `type` heading the refused alias
+/// declaration, the `from` of a use directive, the `spec` of a spec definition.
+/// Wherever a rule reaches [`identifier`] instead they fall back to being names,
+/// recorded under [`SyntaxKind::Ident`] so the CST reads uniformly. The corpus
+/// relies on this: `self.type` uses `self` as a name and `type` as a member
+/// name, and `spec::AuctionSpec` uses `spec` as a qualified-name qualifier. A
+/// declaration's own name is such a position too, so `fn type() { }` and
+/// `let type: i32 = 5;` both bind the keyword spelling.
+///
+/// This set widens the identifier *rule*, not every identifier *position*. Two
+/// positions are decided by a dispatch on the bare `Ident` token before
+/// [`identifier`] is ever reached, and so reject all four spellings: a parameter
+/// name (`argument` routes on `Ident` followed by `:`) and a struct-field name
+/// (the struct body loop routes on `Ident`). `fn f(type: i32)` and
+/// `struct S { type: i32; }` are parse errors, and always have been.
 ///
 /// The leading-keyword dispatch in items/statements (`item`, `definition`,
 /// `statement`) routes a `spec`/`type` at the head of a definition or statement
@@ -57,7 +63,13 @@ pub(crate) fn at_type_start(p: &Parser) -> bool {
 /// them here does not make `spec Foo {}` or `type T = u8;` ambiguous. `type` is
 /// listed here even though the language has no type-alias declaration and its
 /// keyword rule exists only to refuse `type T = u8;`: the identifier positions
-/// above are the reason the token stays contextual.
+/// above are the reason the token stays contextual. That dispatch wins at the
+/// head, so a statement *beginning* with the spelling is read as a declaration
+/// and never as an expression — `type();` does not parse as a call of a function
+/// named `type`, even though `fn type() { }` declares one and a call written
+/// anywhere else in an expression reaches it. That is why the alias diagnostic
+/// is gated on the declaration's `type <name>` head instead of being raised for
+/// everything the rule receives.
 pub(crate) const IDENT_LIKE: TokenSet = TokenSet::new(&[
     SyntaxKind::Ident,
     SyntaxKind::SelfKw,

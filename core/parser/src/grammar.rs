@@ -940,12 +940,69 @@ mod tests {
 
     #[test]
     fn type_stays_usable_as_an_identifier() {
-        // `type` is contextual: the rejection above fires only where the keyword
-        // heads a definition or a statement. Everywhere an identifier is
-        // expected it is still a name and must still parse clean — here as a
-        // member name and as a type name.
+        // `type` is contextual: wherever a rule reaches the identifier rule it is
+        // still a name and must still parse clean — as a member name, as a type
+        // name, and as the name a declaration binds.
         assert_clean("fn f() { self.type = ABC; }");
         assert_clean("fn f() { let x: type = 1; }");
+        assert_clean("fn type() -> i32 { return 1; }");
+        assert_clean("fn f() { let type: i32 = 5; }");
+    }
+
+    #[test]
+    fn a_statement_headed_by_the_type_identifier_is_not_blamed_on_an_alias() {
+        // `fn type() { }` and `let type: i32 = 5;` both declare a binding, so an
+        // author has reason to write a statement that opens with the spelling.
+        // The leading-keyword dispatch hands every one of these to the alias
+        // rule, where they fail for want of a declaration — as they did before
+        // aliases were refused. What must not happen is the alias diagnostic
+        // joining that failure: none of them declares one.
+        for src in [
+            "fn f() { type; }",
+            "fn f() { type = 6; }",
+            "fn f() { type(); }",
+            "fn f() { type.a = 1; }",
+            "fn f() { type + 1; }",
+        ] {
+            let (_root, msgs) = parse_messages(src);
+            assert!(
+                !msgs.iter().any(|m| m == TYPE_ALIAS_MESSAGE),
+                "{src:?} declares no alias, so it must not report one; got {msgs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_identifier_in_a_parameter_or_field_reports_no_alias() {
+        // Both positions dispatch on the bare `Ident` token and so refuse every
+        // contextual keyword. The cascade that follows is pre-existing, but the
+        // parameter one re-enters this file's item dispatch and reaches the alias
+        // rule; an alias claim inside it would blame a declaration nobody wrote.
+        // The field position is pinned beside it as the other half of the pair
+        // the `IDENT_LIKE` documentation names.
+        for src in ["fn f(type: i32) -> i32 { return 1; }", "struct S { type: i32; }"] {
+            let (_root, msgs) = parse_messages(src);
+            assert!(
+                !msgs.is_empty(),
+                "{src:?} is expected to stay a parse error"
+            );
+            assert!(
+                !msgs.iter().any(|m| m == TYPE_ALIAS_MESSAGE),
+                "{src:?} declares no alias, so it must not report one; got {msgs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_alias_still_reports_the_alias() {
+        // The gate keys on the declaration's `type <name>` head, not on the whole
+        // rule succeeding: a missing `=` and a missing `;` are both still the
+        // author writing an alias, so each keeps the educational message ahead of
+        // the rule's own complaint.
+        let (_root, msgs) = parse_messages("type A;");
+        assert_eq!(msgs.first().map(String::as_str), Some(TYPE_ALIAS_MESSAGE));
+        let (_root, msgs) = parse_messages("type A = i32");
+        assert_eq!(msgs.first().map(String::as_str), Some(TYPE_ALIAS_MESSAGE));
     }
 
     // -- pub field rejection: exact message, AST integrity, mixed members
