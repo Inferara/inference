@@ -539,20 +539,17 @@ mod generic_code {
 
 /// Types a signature may name that no WebAssembly value type stands for.
 ///
-/// Every row reaches one helper: an array asks its innermost element whether it
-/// has a value type at all, and an alias is a name that resolves to neither a
-/// struct nor an enum.
+/// Both rows reach one helper: an array asks its innermost element whether it
+/// has a value type at all.
 ///
-/// The array-of-a-function-type row and the alias rows run the analysis pass,
-/// because nothing before code generation refuses those shapes and the backend
-/// is the only place they can be caught — running analysis is what keeps that
-/// claim honest, since a rule that started owning one of them would report it in
-/// its own words and turn the row red. The unit-element row is an ordinary
-/// backstop instead: A049 owns it, so it skips analysis like every other
-/// backstop here.
+/// The array-of-a-function-type row runs the analysis pass, because nothing
+/// before code generation refuses that shape and the backend is the only place
+/// it can be caught — running analysis is what keeps that claim honest, since a
+/// rule that started owning it would report it in its own words and turn the row
+/// red. The unit-element row is an ordinary backstop instead: A049 owns it, so
+/// it skips analysis like every other backstop here.
 mod signature_types_with_no_value {
     use super::{assert_codegen_rejects, assert_codegen_rejects_with_analysis};
-    use crate::utils::{AnalysisMode, CodegenAttempt, codegen_attempt};
 
     /// An array is lowered as a pointer to its first element, so an element with
     /// no value type leaves the export describing a pointer into bytes nothing
@@ -578,64 +575,6 @@ mod signature_types_with_no_value {
         assert_codegen_rejects(
             "pub fn g(p: [(); 2]) -> i32 { return 1; } pub fn main() -> i32 { return 1; }",
             "an array whose element type is the unit type",
-        );
-    }
-
-    /// An alias is not transparent — the type checker keeps `A` and `i32`
-    /// distinct — so a signature naming one reaches the backend from a program
-    /// the whole pipeline accepts up to that point. The refusal must therefore
-    /// say where it is and what to write instead; dropping the location, or
-    /// reporting the alias as an unknown type name, turns this red.
-    #[test]
-    fn a_type_alias_is_refused_with_a_location() {
-        assert_codegen_rejects_with_analysis(
-            "type A = i32; pub fn g(v: A) -> i32 { return 1; } \
-             pub fn main() -> i32 { return 1; }",
-            "1:27: unsupported type in WASM codegen: the type alias `A`, which is not resolved \
-             to the type it names; write `i32` instead",
-        );
-    }
-
-    /// An alias whose target is a type application. No type declaration accepts
-    /// type arguments, so the target has no lowering — and it has no bare
-    /// spelling either, since it renders as `Q'`, which the parser rejects. The
-    /// refusal therefore names the alias and advises nothing. Rendering the
-    /// clause for a target the backend cannot lower turns this red.
-    #[test]
-    fn an_alias_of_a_type_application_advises_no_replacement() {
-        let source = "struct Q { x: i32; } type A = Q i32'; \
-                      pub fn g(v: A) -> i32 { return 1; } pub fn main() -> i32 { return 1; }";
-        match codegen_attempt(source, AnalysisMode::Run) {
-            CodegenAttempt::Ok(_) => {
-                panic!("code generation must refuse this program, it produced a module")
-            }
-            CodegenAttempt::Panicked(payload) => {
-                panic!("code generation must refuse, not crash: {payload}")
-            }
-            CodegenAttempt::Rejected(message) => {
-                assert!(
-                    message
-                        .contains("the type alias `A`, which is not resolved to the type it names"),
-                    "expected the alias refusal, got: {message}"
-                );
-                assert!(
-                    !message.contains("write "),
-                    "a refusal must not advise a spelling the grammar rejects, got: {message}"
-                );
-            }
-        }
-    }
-
-    /// An alias whose target is itself an alias. Reporting the immediate target
-    /// would advise writing `B`, which earns the very same refusal; following the
-    /// chain to the first non-alias type is what makes the advice actionable, and
-    /// stopping at the immediate target turns this red.
-    #[test]
-    fn a_chained_type_alias_names_the_type_at_the_end_of_the_chain() {
-        assert_codegen_rejects_with_analysis(
-            "type B = i32; type A = B; pub fn g(v: A) -> i32 { return 1; } \
-             pub fn main() -> i32 { return 1; }",
-            "the type alias `A`, which is not resolved to the type it names; write `i32` instead",
         );
     }
 }
@@ -834,28 +773,6 @@ mod struct_field_types_with_no_value {
                 );
             }
         }
-    }
-
-    /// A `type` alias written as a field type reaches the same classification,
-    /// and is what shows the shared classification buys more than not blaming an
-    /// earlier phase. The alias arm is the one arm with a source position to
-    /// give, so a field earns the located refusal and the repair advice that the
-    /// same alias earns spelled in a signature — asserted here as the whole
-    /// message, exactly as the signature-position row above asserts it.
-    /// Answering from the layout's own erased view loses both halves, because a
-    /// `TypeInfoKind` keeps the bare name and drops the node it was read from.
-    ///
-    /// Whether the language keeps `type` aliases at all is an open question; if
-    /// it drops them this row is deleted together with the signature-position
-    /// alias rows above it, and not before.
-    #[test]
-    fn a_type_alias_in_a_struct_field_is_refused_where_it_is_written() {
-        assert_codegen_rejects_with_analysis(
-            "type A = i32; struct S { f: A; } pub fn g(v: S) -> i32 { return 1; } \
-             pub fn main() -> i32 { return 1; }",
-            "1:29: unsupported type in WASM codegen: the type alias `A`, which is not resolved \
-             to the type it names; write `i32` instead",
-        );
     }
 
     /// A declaration nothing lays out, recording a gap rather than blessing it.

@@ -5,8 +5,8 @@ use crate::ast::helpers::{
     assert_fn_call, assert_function_def, assert_generic_type, assert_ident_expr, assert_if,
     assert_loop, assert_member_access, assert_named_arg, assert_number, assert_parens,
     assert_prefix_unary, assert_return, assert_simple_type, assert_string_literal,
-    assert_struct_def, assert_struct_literal, assert_type_alias_def, assert_type_expr,
-    assert_type_only_arg, assert_unit_literal, assert_var_def, parse_defs, parse_one,
+    assert_struct_def, assert_struct_literal, assert_type_expr, assert_type_only_arg,
+    assert_unit_literal, assert_var_def, parse_defs, parse_one,
 };
 use crate::utils::try_build_ast;
 use inference_ast::nodes::{
@@ -1188,19 +1188,6 @@ fn test_parse_external_function_mut_args() {
 
     let ty1 = assert_named_arg(&arena, &args[1], "n", false);
     assert_simple_type(&arena, ty1, SimpleTypeKind::I32);
-}
-
-// ---------------------------------------------------------------------------
-// Type alias definitions
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_parse_type_alias() {
-    let (arena, defs) = parse_defs("type sf = sorting_function;");
-    assert_eq!(defs.len(), 1);
-
-    let ty = assert_type_alias_def(&arena, defs[0], "sf", Visibility::Private);
-    assert_custom_type(&arena, ty, "sorting_function");
 }
 
 // ---------------------------------------------------------------------------

@@ -178,12 +178,6 @@ mod gate {
                   begins after it, which is the alignment the frame plan asserts",
         },
         Shape {
-            stem: "local_type_alias",
-            declared: Module,
-            why: "an alias is nominal and introduces no value, so the statement contributes no \
-                  instruction",
-        },
-        Shape {
             stem: "string_array_element",
             declared: Analysis(&["A048"]),
             why: "a string has no layout in linear memory, so an array of them has no element \

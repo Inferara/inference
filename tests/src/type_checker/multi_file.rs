@@ -440,19 +440,21 @@ mod tests {
         assert!(pos("B") < pos("C"), "B must come before C");
     }
 
-    /// A cross-file type-alias value cycle expressed through item imports must be
-    /// rejected. `::` does not parse in type position, so an item import is the
-    /// *only* way to write a cross-file type-alias reference; before the
-    /// edge-discovery fix this cycle escaped detection entirely (#63).
+    /// A cross-file value cycle whose edges are discovered only through *item*
+    /// imports must be rejected. An item import binds a bare name, so the
+    /// reference carries no `::` path for the by-path index to match; resolving
+    /// it demands going through the import binding, and before the
+    /// edge-discovery fix a cycle written this way escaped detection entirely
+    /// (#63).
     #[test]
-    fn type_alias_cycle_cross_file_via_item_import_rejected() {
+    fn const_value_cycle_cross_file_via_item_import_rejected() {
         let files = [
-            (vec![], "use lib::t::{B}; pub type A = B;"),
-            (vec!["lib", "t"], "use main::{A}; pub type B = A;"),
+            (vec![], "use lib::t::{B}; pub const A: i32 = B;"),
+            (vec!["lib", "t"], "use main::{A}; pub const B: i32 = A;"),
         ];
         let msg = try_type_check_multi_file(&files)
             .err()
-            .expect("a cross-file type-alias cycle via item import must fail")
+            .expect("a cross-file value cycle via item import must fail")
             .to_string();
         assert!(
             msg.contains("circular definition detected"),
@@ -464,20 +466,20 @@ mod tests {
         );
     }
 
-    /// The confirmed three-file mutually-recursive type-alias cycle (M3 repro):
+    /// The confirmed three-file mutually-recursive cycle (M3 repro):
     /// `main::A = lib::t::B`, `lib::t::B = lib::u::A`, `lib::u::A = lib::t::B`.
     /// Each edge crosses a file boundary only through an item import; the cycle
     /// must be caught at type-check, before codegen.
     #[test]
-    fn type_alias_cycle_three_file_via_item_import_rejected() {
+    fn const_value_cycle_three_file_via_item_import_rejected() {
         let files = [
-            (vec![], "use lib::t::{B}; pub type A = B;"),
-            (vec!["lib", "t"], "use lib::u::{A}; pub type B = A;"),
-            (vec!["lib", "u"], "use lib::t::{B}; pub type A = B;"),
+            (vec![], "use lib::t::{B}; pub const A: i32 = B;"),
+            (vec!["lib", "t"], "use lib::u::{A}; pub const B: i32 = A;"),
+            (vec!["lib", "u"], "use lib::t::{B}; pub const A: i32 = B;"),
         ];
         let msg = try_type_check_multi_file(&files)
             .err()
-            .expect("a three-file type-alias cycle via item imports must fail")
+            .expect("a three-file value cycle via item imports must fail")
             .to_string();
         assert!(
             msg.contains("circular definition detected"),
@@ -485,20 +487,20 @@ mod tests {
         );
     }
 
-    /// An acyclic cross-file type-alias chain expressed through item imports
-    /// (`A = B`, `B = C`, `C = i32`) must type-check: the cycle check follows the
-    /// import edges but finds no back-edge, so the chain is accepted.
+    /// An acyclic cross-file chain expressed through item imports (`A = B`,
+    /// `B = C`, `C = 1`) must type-check: the cycle check follows the import
+    /// edges but finds no back-edge, so the chain is accepted.
     #[test]
-    fn type_alias_chain_cross_file_via_item_import_accepted() {
+    fn const_chain_cross_file_via_item_import_accepted() {
         let files = [
-            (vec![], "use lib::t::{B}; pub type A = B; pub fn main() {}"),
-            (vec!["lib", "t"], "use lib::u::{C}; pub type B = C;"),
-            (vec!["lib", "u"], "pub type C = i32;"),
+            (vec![], "use lib::t::{B}; pub const A: i32 = B; pub fn main() {}"),
+            (vec!["lib", "t"], "use lib::u::{C}; pub const B: i32 = C;"),
+            (vec!["lib", "u"], "pub const C: i32 = 1;"),
         ];
         let result = try_type_check_multi_file(&files);
         assert!(
             result.is_ok(),
-            "an acyclic cross-file type-alias chain must type-check, got: {:?}",
+            "an acyclic cross-file chain must type-check, got: {:?}",
             result.err().map(|e| e.to_string())
         );
     }
@@ -524,19 +526,19 @@ mod tests {
         );
     }
 
-    /// A type alias that aliases its own imported name (`use other::{X}; type X =
-    /// X;`) closes a degenerate self-edge: the local name `X` collides with the
-    /// import, resolving to its own node. It must be rejected as a circular
-    /// definition.
+    /// A const whose value names its own imported name (`use other::{X};
+    /// const X = X;`) closes a degenerate self-edge: the local name `X` collides
+    /// with the import, resolving to its own node. It must be rejected as a
+    /// circular definition.
     #[test]
-    fn type_alias_self_edge_via_item_import_rejected() {
+    fn const_self_edge_via_item_import_rejected() {
         let files = [
-            (vec![], "use other::{X}; pub type X = X;"),
-            (vec!["other"], "pub type X = i32;"),
+            (vec![], "use other::{X}; pub const X: i32 = X;"),
+            (vec!["other"], "pub const X: i32 = 1;"),
         ];
         let msg = try_type_check_multi_file(&files)
             .err()
-            .expect("a self-referential alias through an import must fail")
+            .expect("a self-referential const through an import must fail")
             .to_string();
         assert!(
             msg.contains("circular definition detected"),

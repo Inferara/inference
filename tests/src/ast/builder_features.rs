@@ -335,28 +335,6 @@ fn test_location_offset_extracts_external_function() {
 }
 
 #[test]
-fn test_location_offset_extracts_type_alias() {
-    let source = r#"type MyInt = i32;"#;
-    let arena = build_ast(source.to_string());
-    let source_files: Vec<_> = arena.source_files().collect();
-    let source_file = &source_files[0];
-
-    let def_id = source_file.defs[0];
-    if let Def::TypeAlias { name, .. } = &arena[def_id].kind {
-        let loc = arena[def_id].location;
-        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
-        assert_eq!(extracted, source);
-
-        let name_loc = arena[*name].location;
-        let name_extracted =
-            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
-        assert_eq!(name_extracted, "MyInt");
-    } else {
-        panic!("Expected type alias definition");
-    }
-}
-
-#[test]
 fn test_source_file_location_covers_entire_source() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
@@ -417,53 +395,6 @@ fn test() -> Empty { return Empty {}; }"#;
         if let Expr::StructLiteral { name, .. } = &arena[exprs[0]].kind {
             assert_eq!(arena[*name].name, "Empty");
         }
-    }
-}
-
-/// Tests for type definition statement
-
-#[test]
-fn test_parse_type_definition_in_function_body() {
-    let source = r#"fn test() { type LocalInt = i32; }"#;
-    let arena = build_ast(source.to_string());
-
-    let func_id = find_function_by_name(&arena, "test").unwrap();
-    if let Def::Function { body, .. } = &arena[func_id].kind {
-        let block = &arena[*body];
-        let type_defs: Vec<_> = block
-            .stmts
-            .iter()
-            .filter(|&&s| matches!(arena[s].kind, Stmt::TypeDef { .. }))
-            .collect();
-        assert_eq!(
-            type_defs.len(),
-            1,
-            "Should find 1 type definition statement"
-        );
-
-        if let Stmt::TypeDef { name, .. } = &arena[*type_defs[0]].kind {
-            assert_eq!(arena[*name].name, "LocalInt");
-        }
-    }
-}
-
-#[test]
-fn test_parse_multiple_type_definitions_in_function() {
-    let source = r#"fn test() { type A = i32; type B = bool; type C = i64; }"#;
-    let arena = build_ast(source.to_string());
-
-    let func_id = find_function_by_name(&arena, "test").unwrap();
-    if let Def::Function { body, .. } = &arena[func_id].kind {
-        let block = &arena[*body];
-        let type_def_count = block
-            .stmts
-            .iter()
-            .filter(|&&s| matches!(arena[s].kind, Stmt::TypeDef { .. }))
-            .count();
-        assert_eq!(
-            type_def_count, 3,
-            "Should find 3 type definition statements"
-        );
     }
 }
 
@@ -907,30 +838,6 @@ fn test_parse_private_constant_visibility() {
     let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Constant { vis, .. } = &arena[def_id].kind {
-        assert_eq!(*vis, Visibility::Private);
-    }
-}
-
-#[test]
-fn test_parse_public_type_alias_visibility() {
-    let source = r#"pub type MyInt = i32;"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    let def_id = source_files[0].defs[0];
-    if let Def::TypeAlias { vis, .. } = &arena[def_id].kind {
-        assert_eq!(*vis, Visibility::Public);
-    }
-}
-
-#[test]
-fn test_parse_private_type_alias_visibility() {
-    let source = r#"type LocalInt = i32;"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    let def_id = source_files[0].defs[0];
-    if let Def::TypeAlias { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
     }
 }

@@ -441,24 +441,6 @@ fn test_external_function_return_type_is_simple() {
     }
 }
 
-/// Tests for type definitions with primitive types.
-
-#[test]
-fn test_type_alias_to_primitive_is_simple() {
-    let source = r#"type MyInt = i32;"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files: Vec<_> = arena.source_files().collect();
-    let def_id = source_files[0].defs[0];
-    if let Def::TypeAlias { ty, .. } = &arena[def_id].kind {
-        if let TypeNode::Simple(kind) = &arena[*ty].kind {
-            assert!(matches!(kind, SimpleTypeKind::I32));
-        } else {
-            panic!("Type alias should point to TypeNode::Simple");
-        }
-    }
-}
-
 /// Tests for function type parameters with primitive types.
 
 #[test]
