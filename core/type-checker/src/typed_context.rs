@@ -110,8 +110,8 @@ pub struct TypedContext {
     structs_by_key: FxHashMap<String, StructInfo>,
     /// Enums indexed by canonical key. Mirrors [`Self::structs_by_key`].
     enums_by_key: FxHashMap<String, EnumInfo>,
-    /// Topological order of top-level `const` and `type` alias definitions across
-    /// all files, dependencies first. Empty when there are no such definitions.
+    /// Topological order of top-level `const` definitions across all files,
+    /// dependencies first. Empty when there are no such definitions.
     /// A later phase emits constant values in this order so a const that reads
     /// another const sees a computed value; the order is well-defined because a
     /// value cycle is rejected during type checking.
@@ -263,16 +263,16 @@ impl TypedContext {
         self.resolved_call_targets.get(&function_expr_id)
     }
 
-    /// Records the topological order of `const`/`type` alias definitions
-    /// (dependencies first). Set during type checking once the value graph is
-    /// confirmed acyclic.
+    /// Records the topological order of `const` definitions (dependencies
+    /// first). Set during type checking once the value graph is confirmed
+    /// acyclic.
     pub(crate) fn set_definition_order(&mut self, order: Vec<DefId>) {
         self.definition_order = order;
     }
 
-    /// Topological order of top-level `const` and `type` alias definitions across
-    /// all files, dependencies first. A later phase emits constants in this order
-    /// so cross-definition reads observe computed values.
+    /// Topological order of top-level `const` definitions across all files,
+    /// dependencies first. A later phase emits constants in this order so
+    /// cross-definition reads observe computed values.
     #[must_use = "the ordering is the return value"]
     pub fn definition_order(&self) -> &[DefId] {
         &self.definition_order

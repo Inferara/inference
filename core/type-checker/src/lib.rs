@@ -74,7 +74,7 @@
 //! The type checker operates in five sequential phases:
 //!
 //! 1. **Process Directives** - Register raw import statements in scope tree
-//! 2. **Register Types** - Collect struct, enum, spec, and type alias definitions
+//! 2. **Register Types** - Collect struct, enum, and spec definitions
 //! 3. **Resolve Imports** - Bind import paths to symbols in symbol table
 //! 4. **Register Functions** - Collect function and method signatures
 //! 5. **Infer Variables** - Type-check function bodies and variable declarations

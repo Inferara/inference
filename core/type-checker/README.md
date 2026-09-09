@@ -45,7 +45,7 @@ The type checker runs in five sequential phases:
 
 ```
 1. Process Directives    → Register raw import statements
-2. Register Types        → Collect struct, enum, spec, and type alias definitions
+2. Register Types        → Collect struct, enum, and spec definitions
 3. Resolve Imports       → Bind import paths to symbols in the symbol table
 4. Register Functions    → Collect function and method signatures
 5. Infer Variables       → Type-check function bodies and variable declarations
@@ -328,7 +328,7 @@ Test organization:
 - `PrivateAccessViolation` (and `ImportedItemPrivate`) carry a second `Location` pointing at the definition site, with a "`add pub`" hint — a dual-location diagnostic requiring no new rendering infrastructure.
 
 **Function visibility bug fixed**:
-- `register_function` previously hard-coded `Visibility::Private` via `..` destructuring; the `vis` field is now extracted and forwarded. The same audit was applied to const, type-alias, and enum registration paths.
+- `register_function` previously hard-coded `Visibility::Private` via `..` destructuring; the `vis` field is now extracted and forwarded. The same audit was applied to the const and enum registration paths.
 
 **Canonical type keys**:
 - Every struct and enum is stored under a file-qualified key (e.g. `lib_arith::Point`).
@@ -337,7 +337,7 @@ Test organization:
 - Spec-inner types key by their enclosing file, so single-file programs produce bare keys and existing golden files stay valid.
 
 **`CircularDefinition` check**:
-- A dependency graph is built over const initializers and type aliases (intra- and cross-file); cycles are reported as a hard `CircularDefinition` error naming the cycle.
+- A dependency graph is built over const initializers (intra- and cross-file); cycles are reported as a hard `CircularDefinition` error naming the cycle.
 - File import cycles are explicitly allowed (the scope tree is built before any lookup).
 
 **Specs**:
@@ -370,7 +370,7 @@ Test organization:
 - Unary operators: `-` (signed integers), `!` (boolean), `~` (all integers)
 
 **Visibility and Access Control**:
-- Comprehensive visibility support for functions, structs, enums, constants, and type aliases
+- Comprehensive visibility support for functions, structs, enums, and constants
 - Proper handling of `pub` modifiers throughout symbol table and type checking phases
 - Visibility checking enforced during imports and symbol access
 - Private-by-default with explicit `pub` for public items
@@ -399,7 +399,7 @@ Test organization:
 
 **Struct Definition Validation**:
 - `DuplicateStructFieldDefinition`: struct field names must be unique within the definition
-- `RecursiveStructDefinition`: struct fields must not create a size cycle (direct or through arrays/aliases)
+- `RecursiveStructDefinition`: struct fields must not create a size cycle (direct or through arrays)
 
 **Variable Shadowing in Struct Contexts**:
 - The shadowing prohibition applies to struct variable bindings: a `let p: Point = ...` in an inner scope shadows an outer `p` and emits `VariableShadowed`
@@ -438,7 +438,7 @@ Test organization:
 
 **New `TypeCheckError` variants**:
 - `DuplicateStructFieldDefinition` — two fields with the same name in a struct `struct S { x: i32, x: i32 }` is rejected
-- `RecursiveStructDefinition` — field type creates a size cycle, including cycles through arrays (`struct A { items: [A; 3] }`) and type aliases
+- `RecursiveStructDefinition` — field type creates a size cycle, including cycles through arrays (`struct A { items: [A; 3] }`)
 - `InvalidAssignmentTarget` — left-hand side of an assignment is not a valid lvalue (identifier, array index, or struct field)
 - `ArrayLiteralSizeMismatch` — array literal element count does not match the declared array size
 - `DivisionByZero` — literal zero in the divisor position of `/` or `%`

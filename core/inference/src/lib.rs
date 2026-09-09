@@ -65,7 +65,7 @@
 //!
 //! The type checker operates in multiple phases:
 //! 1. **Process directives**: Register raw import statements
-//! 2. **Register types**: Collect struct, enum, and type alias definitions
+//! 2. **Register types**: Collect struct, enum, and spec definitions
 //! 3. **Resolve imports**: Bind import paths to symbols from other modules
 //! 4. **Collect functions**: Register function signatures and constants
 //! 5. **Infer variables**: Type-check function bodies and local variables
@@ -507,7 +507,7 @@ pub fn parse(source_code: &str) -> anyhow::Result<AstArena> {
 /// ## Type Checking Phases
 ///
 /// 1. **Process Directives**: Registers raw import statements
-/// 2. **Register Types**: Collects struct, enum, and type alias definitions
+/// 2. **Register Types**: Collects struct, enum, and spec definitions
 /// 3. **Resolve Imports**: Binds import paths to symbols from other modules
 /// 4. **Collect Functions**: Registers function signatures and constants
 /// 5. **Infer Variables**: Type-checks function bodies and local variables

@@ -289,7 +289,10 @@ notable ones:
   in the rules that introduce them; everywhere an identifier is expected they are
   ordinary identifiers (so `self.type = …` and `spec::Auction::new()` parse). The
   parser accepts these tokens where an identifier is wanted and remaps them to
-  `Ident`.
+  `Ident`. `type` is the odd one of the four: the language has no type-alias
+  declaration, and its rule exists only to consume `type Name = T;` and refuse
+  it, so the token stays contextual for the sake of every other position it can
+  appear in.
 
 ## Stage 4: the owned CST
 

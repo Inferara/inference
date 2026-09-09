@@ -61,7 +61,6 @@ AstNode
 │   ├── Break
 │   ├── If
 │   ├── VariableDefinition
-│   ├── TypeDefinition
 │   ├── Assert
 │   └── ConstantDefinition
 ├── Expression
@@ -311,26 +310,6 @@ pub struct ExternalFunctionDefinition {
 extern fn malloc(size: i32) -> i32;
 ```
 
-### TypeDefinition
-
-Type alias definition.
-
-```rust
-pub struct TypeDefinition {
-    pub id: u32,
-    pub location: Location,
-    pub visibility: Visibility,
-    pub name: Rc<Identifier>,
-    pub ty: Type,
-}
-```
-
-**Example source:**
-```inference
-type Age = i32;
-type Callback = fn(i32) -> i32;
-```
-
 ### ModuleDefinition
 
 Module definition for namespacing.
@@ -539,35 +518,6 @@ The `value` field can hold any `Expression`, including a `UzumakiExpression` (`@
 non-deterministic initialization inside `forall`, `exists`, or `unique` blocks.
 
 Only variables declared with `let mut` may be reassigned via `AssignStatement`.
-
-### TypeDefinitionStatement
-
-Local type alias definition inside a function or block body.
-
-```rust
-pub struct TypeDefinitionStatement {
-    pub id: u32,
-    pub location: Location,
-    pub name: Rc<Identifier>,
-    pub ty: Type,
-}
-```
-
-**Fields:**
-- `name`: The identifier being bound as a local type alias
-- `ty`: The aliased type
-
-**Example source:**
-```inference
-fn example() {
-    type Index = i32;
-    let i: Index = 0;
-}
-```
-
-**Note:** This is distinct from `TypeDefinition` (the top-level definition). The statement
-variant (`Statement::TypeDefinition`) carries a `TypeDefinitionStatement` and can appear
-inside function bodies. The top-level variant (`Definition::Type`) carries a `TypeDefinition`.
 
 ### AssignStatement
 
@@ -1119,32 +1069,23 @@ core::option::Option
 
 ### TypeQualifiedName
 
-Type alias with a qualified member name, produced when a type alias is used as the
-left-hand qualifier in a `::` access.
+A single-segment `::`-qualified type reference. Nothing produces one: the parser lowers
+every `::`-qualified type to `Type::Qualified`, which carries all of the leading segments
+rather than one. The variant is kept so a malformed type errors at the code generation
+boundary instead of matching some other arm, and code generation refuses it there.
 
 ```rust
 pub struct TypeQualifiedName {
     pub id: u32,
     pub location: Location,
-    pub alias: Rc<Identifier>,
+    pub qualifier: Rc<Identifier>,
     pub name: Rc<Identifier>,
 }
 ```
 
 **Fields:**
-- `alias`: The type alias on the left side of `::`
-- `name`: The member name on the right side
-
-**Example source:**
-```inference
-type Alias = SomeType;
-Alias::Member
-```
-
-**Distinction from `QualifiedName`:** `QualifiedName` represents a module path like
-`std::io::File` where the qualifier is a module identifier. `TypeQualifiedName` is used
-when the qualifier is a type alias, making the semantics type-level rather than
-module-level. The `Type::Qualified` variant holds a `TypeQualifiedName`.
+- `qualifier`: The single segment on the left side of `::`
+- `name`: The leaf type name on the right side
 
 ## Arguments
 
@@ -1260,7 +1201,6 @@ pub enum Visibility {
 - `StructDefinition` - Structs can be marked `pub struct`
 - `EnumDefinition` - Enums can be marked `pub enum`
 - `ConstantDefinition` - Constants can be marked `pub const`
-- `TypeDefinition` - Type aliases can be marked `pub type`
 - `ModuleDefinition` - Modules can be marked `pub mod`
 
 **Example source:**
@@ -1276,9 +1216,6 @@ enum PrivateEnum { C; D; }
 
 pub const PUBLIC_CONST: i32 = 100;
 const PRIVATE_CONST: i32 = 200;
-
-pub type PublicAlias = i32;
-type PrivateAlias = i32;
 ```
 
 ## Node Usage Patterns

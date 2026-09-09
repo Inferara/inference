@@ -4,7 +4,7 @@
 //! checking. It supports:
 //!
 //! - Hierarchical scopes with parent-child relationships
-//! - Type alias, struct, enum, spec, and function symbol registration
+//! - Builtin type binding, struct, enum, spec, and function symbol registration
 //! - Variable tracking within scopes
 //! - Method resolution on types
 //! - Import registration and resolution
@@ -543,7 +543,7 @@ impl Symbol {
 
     /// Check if this symbol has public visibility.
     ///
-    /// Structs, enums, functions, type aliases, and consts respect their
+    /// Structs, enums, functions, consts and builtin type bindings respect their
     /// visibility field. Specs take no visibility modifier and are treated as
     /// public (cross-file spec access is governed by import + `pub` elsewhere).
     #[must_use = "this is a pure check with no side effects"]
@@ -3643,7 +3643,7 @@ mod tests {
     mod symbol_type_alias {
         use super::*;
 
-        /// Builds a public type-alias symbol wrapping `type_info`.
+        /// Builds a public builtin type binding wrapping `type_info`.
         fn public_alias(type_info: TypeInfo) -> Symbol {
             Symbol::TypeAlias(TypeAliasInfo {
                 type_info,
