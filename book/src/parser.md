@@ -286,13 +286,17 @@ notable ones:
   an `if`/`loop` *condition* a `{` opens the body. The expression parser threads a
   `no_struct` flag through condition parsing to forbid struct literals there.
 - **Contextual keywords** — `self`, `type`, `from`, and `spec` are keywords only
-  in the rules that introduce them; everywhere an identifier is expected they are
-  ordinary identifiers (so `self.type = …` and `spec::Auction::new()` parse). The
-  parser accepts these tokens where an identifier is wanted and remaps them to
-  `Ident`. `type` is the odd one of the four: the language has no type-alias
-  declaration, and its rule exists only to consume `type Name = T;` and refuse
-  it, so the token stays contextual for the sake of every other position it can
-  appear in.
+  in the rules that introduce them; wherever a rule reaches the `identifier` rule
+  they are ordinary names, remapped to `Ident` (so `self.type = …` and
+  `spec::Auction::new()` parse, and `fn type() { }` declares a function). Two
+  identifier positions are the exception, decided by a dispatch on the bare
+  `Ident` token before that rule is reached: a parameter name and a struct-field
+  name refuse all four spellings. `type` is the odd one of the four: the language
+  has no type-alias declaration, and its rule exists only to consume
+  `type Name = T;` and refuse it, so the token stays contextual for the sake of
+  every other position it can appear in — and the refusal is gated on that
+  declaration's `type <name>` head, so a statement the rule receives for any
+  other reason is not blamed on an alias.
 
 ## Stage 4: the owned CST
 

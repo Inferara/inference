@@ -2182,18 +2182,22 @@ mod tests {
     fn drops_rejected_type_alias() {
         // The grammar refuses `type` aliases and completes the node anyway, but
         // there is no AST form for one: lowering drops it, leaving the source
-        // file with no definitions at all, and adds no second diagnostic.
-        let arena = lower_rejected("type Id = i32;", &[TYPE_ALIAS_MESSAGE]);
+        // file with only the struct written after it, and adds no second
+        // diagnostic. The sibling is the point — it pins that the file-level
+        // filter drops the alias and nothing else, the way the spec and block
+        // filters are pinned by the members they keep.
+        let arena = lower_rejected("type Id = i32; struct P { x: i32; }", &[TYPE_ALIAS_MESSAGE]);
         let files: Vec<_> = arena.source_files().collect();
         assert_eq!(files.len(), 1, "expected exactly one source file");
+        let kinds: Vec<_> = files[0].defs.iter().map(|d| &arena[*d].kind).collect();
+        assert_eq!(
+            kinds.len(),
+            1,
+            "only the struct must survive the alias, got {kinds:?}"
+        );
         assert!(
-            files[0].defs.is_empty(),
-            "the alias must lower to nothing, got {:?}",
-            files[0]
-                .defs
-                .iter()
-                .map(|d| &arena[*d].kind)
-                .collect::<Vec<_>>()
+            matches!(kinds[0], Def::Struct { .. }),
+            "the surviving definition must be the struct, got {kinds:?}"
         );
     }
 

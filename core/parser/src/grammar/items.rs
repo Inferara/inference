@@ -364,10 +364,25 @@ pub(crate) fn constant_definition(p: &mut Parser) {
 /// message's own documentation for why nothing lighter than the intact
 /// production works here. The completed node exists only to carry that
 /// rejection: lowering drops it, because there is no AST form for an alias.
+///
+/// The rejection is gated on the declaration's two-token head — `type` followed
+/// by a name — because `type` is also an ordinary identifier. `fn type() { }`
+/// and `let type: i32 = 5;` both declare a binding, so `type();` and
+/// `type = 6;` are things an author has reason to write, and the statement
+/// dispatch hands both to this rule. Neither parses: the dispatch has already
+/// committed to the declaration, so they fail at `types::identifier` exactly as
+/// they did before aliases were refused. But neither declares an alias either,
+/// and reporting one would be a confident false claim about what was written.
+/// Nothing in the language puts a name directly after a `type` in that
+/// identifier sense, so the two-token head tells the cases apart. A *malformed*
+/// alias still reports — `type A;` and `type A = i32` (no `;`) both keep their
+/// name — because there the author was in fact writing the declaration.
 pub(crate) fn type_definition_statement(p: &mut Parser) {
     let m = p.start();
     visibility(p);
-    p.error(TYPE_ALIAS_MESSAGE);
+    if types::IDENT_LIKE.contains(p.nth(1)) {
+        p.error(TYPE_ALIAS_MESSAGE);
+    }
     p.expect(SyntaxKind::TypeKw);
     types::identifier(p);
     p.expect(SyntaxKind::Eq);

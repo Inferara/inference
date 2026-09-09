@@ -550,7 +550,7 @@ mod tests {
     /// form a file-import cycle, which is explicitly allowed (#63). The cycle
     /// check must NOT flag it: the edges are import edges, not value edges. Each
     /// file imports a *function* from the other, so the import graph is cyclic
-    /// while the const/type-alias value graph stays empty.
+    /// while the const value graph stays empty.
     #[test]
     fn file_import_cycle_without_value_dependency_not_flagged() {
         let files = [

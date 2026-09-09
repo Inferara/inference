@@ -947,11 +947,12 @@ impl TypeChecker {
                     })
             }
             // A field type left as `Custom` is a name `renormalize_signatures`
-            // did not rewrite — a builtin, or a nominal type reachable only
-            // through the symbol table (an item import binds one in the file
-            // scope rather than in the field's own kind). Resolve it there so a
-            // cycle running back through such a name is still detected; a name
-            // nothing resolves ends the walk.
+            // did not rewrite: a nominal type reachable only through the symbol
+            // table, since an item import binds one in the file scope rather
+            // than in the field's own kind. It is never a builtin — `Custom` is
+            // built only for a name `TypeInfoKind::from_builtin_str` rejected.
+            // Resolve it through the table so a cycle running back through such
+            // a name is still detected; a name nothing resolves ends the walk.
             TypeInfoKind::Custom(name) => {
                 if !visited.insert(name.clone()) {
                     return false;
