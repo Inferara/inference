@@ -194,6 +194,25 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a_body_level_const_initializer_is_held_to_the_rule() {
+        // A `const` inside a function body is a statement whose initializer is
+        // an ordinary expression, and the scan reaches it like any other: the
+        // annotation governs a real `+` and names the mode already in force, so
+        // it is redundant exactly where the same text would be redundant in a
+        // `return`. The file-scope form is out of reach — the language has no
+        // such declaration yet and A032 rejects it — which is what
+        // `rules_a053` pins.
+        let source = format!(
+            "pub fn f(a: i32, b: i32) -> i32 {{
+               const K: i32 = {}(1 + 2);
+               return a + b + K;
+             }}",
+            redundant_spelling()
+        );
+        assert_eq!(a054_rule_ids(&source), vec!["A054"]);
+    }
+
+    #[test]
     fn every_width_answers_the_same_way() {
         for width in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
             let redundant = format!(

@@ -43,6 +43,20 @@ mod analysis_rules_tests {
         a053_messages(source).len()
     }
 
+    /// The rule ids of every error the analysis reports, in report order, so a
+    /// test can pin which rule a program belongs to rather than only that this
+    /// one stayed quiet.
+    fn error_rule_ids(source: &str) -> Vec<&'static str> {
+        match analyze(source) {
+            Ok(_) => Vec::new(),
+            Err(errors) => errors
+                .errors()
+                .iter()
+                .map(AnalysisDiagnostic::rule_id)
+                .collect(),
+        }
+    }
+
     #[test]
     fn an_annotated_call_governs_nothing_at_every_width() {
         // The mistake the rule exists for: the annotation is on the call, and
@@ -189,6 +203,39 @@ mod analysis_rules_tests {
                return a + b;
              }";
         assert_eq!(count_a053(source), 2);
+    }
+
+    #[test]
+    fn a_body_level_const_initializer_is_held_to_the_rule() {
+        // A `const` inside a function body is a statement whose initializer is
+        // an ordinary expression, and the scan reaches it like any other. Both
+        // shapes the message names are written there: a value that computes
+        // nothing, and a call whose own body is where the arithmetic lives.
+        let literal = "pub fn f(a: i32) -> i32 {
+               const K: i32 = checked(1);
+               return a + K;
+             }";
+        assert_eq!(count_a053(literal), 1);
+
+        let call = "pub fn g(x: i32) -> i32 { return x; }
+             pub fn f(a: i32) -> i32 {
+               const K: i32 = wrapping(g(a));
+               return K;
+             }";
+        assert_eq!(count_a053(call), 1);
+    }
+
+    #[test]
+    fn a_top_level_const_is_this_rule_s_business_only_once_the_language_has_one() {
+        // The file-scope form never reaches this rule, and the reason is that
+        // the language has no such declaration yet: A032 rejects it outright,
+        // whatever its initializer says. Pinned so that implementing top-level
+        // `const` cannot quietly ship a place an annotation goes unexamined —
+        // the day this stops reading `A032` alone, the initializer has to join
+        // the walk the body-level form is already in.
+        let source = "const K: i32 = checked(1);
+             pub fn f(a: i32) -> i32 { return a; }";
+        assert_eq!(error_rule_ids(source), vec!["A032"]);
     }
 
     /// A rejected program never reaches code generation, and the way to observe

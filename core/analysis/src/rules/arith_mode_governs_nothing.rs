@@ -28,6 +28,11 @@
 //! annotation is somewhere other than where the author meant to put it, and no
 //! change to the language's default makes it right.
 //!
+//! The initializer of a body-level `const` is walked like any other expression,
+//! so an annotation written there is held to exactly this rule; top-level
+//! `const` declarations do not exist in the language yet (A032 rejects them),
+//! and when they do their initializers have to join this walk.
+//!
 //! ## Where the line with A054 falls
 //!
 //! Containment, not government. An annotation whose subtree holds an operator
