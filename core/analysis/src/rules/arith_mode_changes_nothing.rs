@@ -15,6 +15,11 @@
 //! `unused_attributes`, and languages whose opt-out is an operator (`+%`, `&+`)
 //! have no such rule at all, because such a spelling cannot be redundant.
 //!
+//! The initializer of a body-level `const` is walked like any other expression,
+//! so an annotation written there is held to exactly this rule; top-level
+//! `const` declarations do not exist in the language yet (A032 rejects them),
+//! and when they do their initializers have to join this walk.
+//!
 //! ## What counts as changing something
 //!
 //! The comparison is against the *enclosing* effective mode, never against the

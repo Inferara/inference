@@ -644,6 +644,12 @@ mod checked_link_tests {
         // The same program and the same library, with the annotation removed.
         // Without this pair the rejection above could be a rejection of linking
         // a reachability specification against anything at all.
+        //
+        // It is also the accepting side of the resolution itself: the
+        // obligation's symbol resolves against the sections the compiler wrote,
+        // and a guard-free merge is judged on that rather than waved through.
+        // `an_unresolvable_obligation_is_refused_with_nothing_guarded_anywhere`
+        // is the same pair with the resolution broken.
         let dir = LibDir::with("mathlib", &compile_library(WRAPPING_LIB));
         let merged = link_against(&exists_program("double"), dir.path())
             .expect("a library whose arithmetic wraps is reachable from any specification");
@@ -762,6 +768,51 @@ mod checked_link_tests {
         );
 
         let dir = LibDir::with("mathlib", &compile_library(GUARDED_LIB));
+        let error = link_bytes_against(&source, &spliced, dir.path())
+            .expect_err("an obligation whose root cannot be resolved must be refused");
+        assert!(
+            error.contains("ReachableExtern.reaches_six"),
+            "the rejection must name the unresolved symbol: {error}"
+        );
+        assert!(
+            error.contains("inference.spec_funcs"),
+            "the rejection must say which half of the resolution failed: {error}"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_obligation_is_refused_with_nothing_guarded_anywhere() {
+        // The same defect with every guard taken out of the picture. Whether an
+        // obligation resolves is a question about the obligation, so the answer
+        // must not turn on whether some unrelated function traps: the program
+        // writes no `checked(...)` and links a library that writes none either,
+        // nothing in the merged module is guarded, and the obligation is still
+        // one whose walk could never have started.
+        //
+        // The accepting twin is
+        // `an_exists_specification_over_an_unguarded_library_links`: the same
+        // guard-free pair with its `inference.spec_funcs` section left as the
+        // compiler wrote it, where the symbol resolves and the link stands.
+        let source = exists_program("double");
+        let main = compile_main(&source);
+        assert_eq!(
+            checked_payload(&main),
+            None,
+            "the program writes no `checked(...)`, so codegen emits no section"
+        );
+        let spliced = with_custom_section(
+            &main,
+            SPEC_FUNCS_SECTION_NAME,
+            &spec_funcs_payload_with_no_indices("ReachableExtern"),
+        );
+
+        let library = compile_library(WRAPPING_LIB);
+        assert_eq!(
+            checked_payload(&library),
+            None,
+            "the library's arithmetic wraps, so it carries no section either"
+        );
+        let dir = LibDir::with("mathlib", &library);
         let error = link_bytes_against(&source, &spliced, dir.path())
             .expect_err("an obligation whose root cannot be resolved must be refused");
         assert!(

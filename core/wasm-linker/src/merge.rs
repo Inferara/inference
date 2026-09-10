@@ -1641,16 +1641,20 @@ impl Plan {
         main: &ParsedModule,
         externals: &[ParsedModule],
     ) -> Result<(), LinkError> {
-        let guards = self.merged_guards(main, externals)?;
-        // Nothing anywhere in the output traps, so no walk can reach one and the
-        // call graph is never built. Kept ahead of the root resolution because a
-        // link with no guard at all owes the caller no opinion about how its
-        // obligation symbols resolve.
-        if guards.all.is_empty() {
-            return Ok(());
-        }
+        // The roots are resolved first, and whether or not anything is guarded.
+        // An obligation naming no function of the merged module is malformed
+        // metadata however the rest of the module is built, so the verdict on it
+        // must not turn on whether some unrelated function happens to carry a
+        // guard — a module would otherwise link or be refused according to a
+        // property of code its obligation says nothing about. Resolution reads
+        // only the main module's own `inference.spec_funcs`, `inference.hspecs`
+        // and name entries, so it costs no more than they do.
         let roots = self.reachability_spec_roots(main)?;
-        if roots.is_empty() {
+        let guards = self.merged_guards(main, externals)?;
+        // With nothing guarded anywhere, or nothing to walk from, no walk can
+        // reach a trap. The merged call graph is built below only when one is
+        // going to run.
+        if guards.all.is_empty() || roots.is_empty() {
             return Ok(());
         }
         let graph = self.merged_call_graph(main, externals)?;
