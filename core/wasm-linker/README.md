@@ -196,6 +196,12 @@ toolchain — none of them emits one — so a foreign `.wasm` with no section is
 read correctly rather than merely conservatively. The producer never writes an
 empty section, so presence and a non-empty list say the same thing.
 
+Presence is the ordinary case rather than the exceptional one. `+`, `-`, `*`
+and unary `-` trap unless the source wrote `wrapping(...)` around them, so a
+module carries the section unless its arithmetic is modular throughout or it has
+none — which is what makes the rejection below something a caller meets in
+practice rather than a corner.
+
 The section has a second wire form, told apart by its leading version: version 1
 names the guarded functions, version 2 names none of them and says only that
 *some* function of the module carries a guard. The linker decodes both. An
@@ -293,6 +299,12 @@ section alone can see — so `infs` rewrites the section into the opaque form af
 running the optimizer, and this crate reads that as "every function of this
 module". `--no-wasm-opt`, and `enabled = false` under `[build.wasm-opt]`, are
 how a library keeps an exact record.
+
+The cost of the opaque form falls entirely on reachability. A library optimized
+with any unmarked arithmetic in it is guarded everywhere as far as this crate is
+concerned, so no `exists`/`unique` specification of the linking program may reach
+it at all, whatever it actually calls. `forall` specifications and ordinary
+linking are untouched: neither reads this section.
 
 ### External specification adoption
 

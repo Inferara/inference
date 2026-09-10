@@ -216,7 +216,7 @@
     unreachable
   )
   (func $write_whole_elem (;4;) (type 4) (result i32)
-    (local $g i32) (local $p i32) (local $__frame_ptr i32)
+    (local $g i32) (local $p i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -270,7 +270,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -279,6 +293,7 @@
     unreachable
   )
   (func $grid_param (;5;) (type 5) (param $g i32) (result i32)
+    (local i32 i32 i32)
     local.get $g
     i32.load
     local.get $g
@@ -287,7 +302,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -380,7 +409,7 @@
     unreachable
   )
   (func $mixed_offsets (;9;) (type 9) (result i32)
-    (local $m i32) (local $__frame_ptr i32)
+    (local $m i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -426,7 +455,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $m
     i32.const 4
     i32.add
@@ -435,12 +478,40 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $m
     i32.const 20
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -449,7 +520,7 @@
     unreachable
   )
   (func $two_grids (;10;) (type 10) (result i32)
-    (local $a i32) (local $b i32) (local $__frame_ptr i32)
+    (local $a i32) (local $b i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -511,7 +582,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -520,7 +605,7 @@
     unreachable
   )
   (func $zero_field_elem (;11;) (type 11) (result i32)
-    (local $g i32) (local $__frame_ptr i32)
+    (local $g i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -545,7 +630,21 @@
     i32.const 8
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -595,4 +694,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\05\04\05\09\0a\0b")
 )

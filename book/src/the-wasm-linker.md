@@ -514,6 +514,8 @@ scheme removes the common cases rather than every possible one.
 | `LinkError::DuplicateWriteContract { module, field }` | The checked-mode contract list holds more than one entry for the same `(module, field)` import; the linker has no basis to choose which one governs |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
 | `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
+| `LinkError::CheckedGuardUnderReachabilitySpec { spec_function, guarded_function, external }` | A retained `exists`/`unique` specification function reaches, through calls, a function of the merged output whose body traps on arithmetic overflow. The obligation is a claim about *running* that body, so a trap anywhere in the activation makes it false rather than narrower. `external` names the logical module a library supplied the body under, and is absent when the program supplied it. Since `+`, `-`, `*` and unary `-` trap unless written `wrapping(...)`, this is what a reachability specification over ordinary arithmetic code meets |
+| `LinkError::UnresolvedReachabilitySpecFunction { spec, symbol, reason }` | An `exists`/`unique` obligation of the main module names a specification function the merged module does not answer for. That function is where the reachability walk starts, so an unresolved symbol is not a check that passed but one that never ran |
 | `LinkError::AdoptedSpecUnlisted { module, spec }` | Adoption only: the library ships obligations under a specification its own `inference.spec_funcs` section does not list, so its two verification sections disagree with each other |
 | `LinkError::AdoptedSpecNameInvalid { module, spec, key, reason }` | Adoption only: the name an adopted specification would take is not one the proof translation can spell as an identifier; `reason` is the structural clause that rules it out |
 | `LinkError::AdoptedSpecNameCollision { spec, module, contender }` | Adoption only: the name an adopted specification would take is already claimed — by a specification the program declares (`contender: None`) or by another library's adopted specification |
@@ -576,12 +578,26 @@ them differently because their payloads are shaped differently:
   `LinkError::AmbiguousObligationSymbol` in the [Error Reference](#error-reference)
   below.
 
-Both of the above describe the **main module's own** sections. An **external**
-module's `inference.spec_funcs` and `inference.hspecs` — the spec membership
-and `hassert` obligations a linked *library* recorded about its own code —
-describe a module the output is not: only the executable closure of a satisfied
-export crosses the merge, and a library's specification functions are never in
-it. What the link does with them is an explicit input,
+A third `inference.*` section crosses the link and carries no obligation at all.
+`inference.checked` (`src/checked.rs`) lists, by **function index**, the bodies
+of its module that trap on arithmetic overflow. Since `+`, `-`, `*` and unary
+`-` trap unless the source wrote `wrapping(...)` around them, most modules with
+arithmetic in them carry it. Its absence is the producer's statement that
+none of its bodies carries such a guard, which is exactly true of a module any
+other toolchain produced. This is the one section the linker *reads* rather than
+merely carries: it remaps and re-emits the indices like `inference.spec_funcs`,
+and it walks the merged call graph from each retained `exists`/`unique`
+specification function to refuse a link in which one reaches a guarded body. A
+second wire form carries no indices and says only that some body of the module
+traps — what `infs` writes over an artifact a post-build optimizer has just
+renumbered — and the linker reads that as every function of that module.
+
+Both obligation sections above describe the **main module's own** sections. An
+**external** module's `inference.spec_funcs` and `inference.hspecs` — the spec
+membership and `hassert` obligations a linked *library* recorded about its own
+code — describe a module the output is not: only the executable closure of a
+satisfied export crosses the merge, and a library's specification functions are
+never in it. What the link does with them is an explicit input,
 `LinkOptions::external_specs`, with three settings:
 
 - **`Warn`** (the default, and what a build that writes a `.v` uses). Neither

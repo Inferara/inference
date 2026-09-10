@@ -5462,7 +5462,11 @@ fn wasm_is_valid(bytes: &[u8]) -> bool {
 
 /// A project source whose arithmetic is guarded, so the compiler records it in
 /// the `inference.checked` custom section.
-const GUARDED_PROJECT_MAIN_SRC: &str = "pub fn twice(x: i32) -> i32 {\n    return checked(x + x);\n}\n\n\
+///
+/// Nothing in it is annotated: `+` traps on overflow unless it is written
+/// `wrapping(...)`, so the guard comes from the language's own default and this
+/// is what an ordinary project looks like.
+const GUARDED_PROJECT_MAIN_SRC: &str = "pub fn twice(x: i32) -> i32 {\n    return x + x;\n}\n\n\
      pub fn main() -> i32 {\n    return twice(1);\n}\n";
 
 /// The custom-section name recording which functions of a module trap on

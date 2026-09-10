@@ -50,6 +50,10 @@ pub fn isqrt(n: i32) -> i32 {
     return x;
 }
 
+// Square-and-multiply squares once more than it uses: the last squaring happens
+// after the final bit has been consumed and its value is thrown away, so it is
+// written modular. The multiply into `result` is not — an overflow there is a
+// wrong answer rather than a discarded one.
 pub fn pow_iter(base: i32, exp: i32) -> i32 {
     let mut result: i32 = 1;
     let mut b: i32 = base;
@@ -58,7 +62,7 @@ pub fn pow_iter(base: i32, exp: i32) -> i32 {
         if (e & 1) == 1 {
             result = result * b;
         }
-        b = b * b;
+        b = wrapping(b * b);
         e = e >> 1;
     }
     return result;
@@ -105,7 +109,7 @@ pub fn pow_iter_i64(base: i64, exp: i64) -> i64 {
         if (e & one) == one {
             result = result * b;
         }
-        b = b * b;
+        b = wrapping(b * b);
         e = e >> one;
     }
     return result;
@@ -150,7 +154,7 @@ pub fn pow_u16(base: u16, exp: u16) -> u16 {
         if (e & one) == one {
             result = result * b;
         }
-        b = b * b;
+        b = wrapping(b * b);
         e = e >> one;
     }
     return result;

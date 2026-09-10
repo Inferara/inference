@@ -10,6 +10,7 @@
 #![allow(clippy::similar_names)] // the expected-tree builders use short, related names
 
 use inference_ast::arena::AstArena;
+use inference_ast::nodes::ArithMode;
 use inference_hassert::{
     HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecMap, HTerm, ReachMeta, SpecKind,
 };
@@ -71,15 +72,12 @@ fn buckets_of(ctx: &TypedContext) -> EmittableFunctions {
 /// generation runs, so the pass sees exactly what it would see in a real
 /// proof-mode build.
 fn translate(ctx: &TypedContext) -> (HSpecMap, Vec<String>) {
-    translate_under(ctx, inference_ast::nodes::ArithMode::DEFAULT)
+    translate_under(ctx, ArithMode::DEFAULT)
 }
 
 /// [`translate`] with the language's default arithmetic mode set to `default`,
 /// for the diagnostics whose text depends on what an unmarked operator means.
-fn translate_under(
-    ctx: &TypedContext,
-    default: inference_ast::nodes::ArithMode,
-) -> (HSpecMap, Vec<String>) {
+fn translate_under(ctx: &TypedContext, default: ArithMode) -> (HSpecMap, Vec<String>) {
     let buckets = buckets_of(ctx);
     let choice_plans = crate::choice::plan_choice_lowering(ctx, &buckets);
     let reach_plans = super::reach::reachability_plans(ctx, &buckets, &choice_plans)
@@ -99,6 +97,18 @@ fn ok(source: &str) -> HSpecMap {
     map
 }
 
+/// [`ok`] with the language's default arithmetic mode set to `default`, for the
+/// bodies one polarity accepts and the other refuses.
+fn ok_under(source: &str, default: ArithMode) -> HSpecMap {
+    let ctx = type_check(source);
+    let (map, diagnostics) = translate_under(&ctx, default);
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    map
+}
+
 /// Translates single-file source expected to raise diagnostics, returning them
 /// joined into one string.
 fn err(source: &str) -> String {
@@ -109,7 +119,7 @@ fn err(source: &str) -> String {
 }
 
 /// [`err`] with the language's default arithmetic mode set to `default`.
-fn err_under(source: &str, default: inference_ast::nodes::ArithMode) -> String {
+fn err_under(source: &str, default: ArithMode) -> String {
     let ctx = type_check(source);
     let (_, diagnostics) = translate_under(&ctx, default);
     assert!(!diagnostics.is_empty(), "expected diagnostics but got none");
@@ -2900,9 +2910,16 @@ fn an_anonymous_choice_in_an_exists_body_reads_its_parameter() {
 /// A pure `let` is inlined as its term on the reachability path exactly as on
 /// the universal one, occupies no payload slot, and stays out of
 /// `visible_locs`.
+///
+/// The initializer is marked modular because this is a retained body, where an
+/// operator that traps is what `P017` refuses; the annotation is inert in the
+/// payload the test is about.
 #[test]
 fn a_pure_let_is_inlined_and_stays_out_of_visible_locs() {
-    let map = ok("spec S { fn f() exists { let n: i32 = @; let t: i32 = n + 1; assert(t > 0); } }");
+    let map = ok(
+        "spec S { fn f() exists { let n: i32 = @; let t: i32 = wrapping(n + 1); \
+         assert(t > 0); } }",
+    );
     let entry = sole_entry(&map, "S");
     assert_eq!(
         entry.hassert,
@@ -5839,12 +5856,16 @@ fn p018_leaves_a_universal_body_alone() {
     assert!(map.contains_key("S"), "the obligation must still be emitted");
 }
 
-/// A reachability body whose reachable set carries no guard is accepted, and the
-/// obligation it produces is the one the same body produces with the arithmetic
-/// spelled `wrapping(...)`.
+/// A reachability body whose arithmetic is spelled `wrapping(...)` is accepted,
+/// and the obligation it produces is the one the unmarked body produced under a
+/// modular default.
 ///
-/// The equality is the whole argument for the annotation being a remedy: it
-/// changes what the callee computes, and it changes nothing about the claim.
+/// The equality is the whole argument for the annotation being a remedy rather
+/// than a second rejection: it changes what the compiled body computes, and it
+/// changes nothing about the claim. Stating it across the two polarities is
+/// what makes it checkable at all — the unmarked spelling is exactly what this
+/// rule refuses once the default traps, so the body it has to be compared with
+/// is the one that shipped before.
 #[test]
 fn p017_accepts_a_modular_reachability_body_without_changing_its_obligation() {
     let program = |arithmetic: &str| {
@@ -5853,9 +5874,11 @@ fn p017_accepts_a_modular_reachability_body_without_changing_its_obligation() {
              assume {{ assert(n >= lo); }} assert({arithmetic} >= lo); }} }}"
         )
     };
+    let annotated = ok_under(&program("wrapping(n + n)"), ArithMode::Checked);
+    let unmarked = ok_under(&program("n + n"), ArithMode::Wrapping);
     assert_eq!(
-        sole_obligation(&ok(&program("wrapping(n + n)")), "S"),
-        sole_obligation(&ok(&program("n + n")), "S")
+        sole_obligation(&annotated, "S"),
+        sole_obligation(&unmarked, "S")
     );
 }
 
@@ -5870,15 +5893,23 @@ fn p017_accepts_a_modular_reachability_body_without_changing_its_obligation() {
 /// to the clause its own polarity makes true — including where that clause is
 /// nothing at all, because under a wrapping default there is no contrast for
 /// the payload wording to draw.
+///
+/// The reachability wording's *opening* is not the default's to decide. It names
+/// the operator as the author spelled it, so an explicit `checked(...)` and an
+/// operator left unmarked read differently at the same polarity, and an
+/// unmarked one is not refused at all under a wrapping default — it carries no
+/// guard there, which is why the unmarked opening is pinned only at the checked
+/// one.
 #[test]
 fn both_p017_wordings_read_the_default_the_module_is_compiled_at() {
-    use inference_ast::nodes::ArithMode;
-
     const PAYLOAD: &str = "fn main() -> i32 { return 0; } \
                            spec S { fn f(a: i32, b: i32) forall { assert(checked(a + b) == 0); } }";
     const RETAINED: &str = "fn main() -> i32 { return 0; } \
                             spec S { fn f(lo: i32) exists { let n: i32 = @; \
                             assume { assert(n >= lo); } assert(checked(n + n) >= lo); } }";
+    const RETAINED_UNMARKED: &str = "fn main() -> i32 { return 0; } \
+                            spec S { fn f(lo: i32) exists { let n: i32 = @; \
+                            assume { assert(n >= lo); } assert(n + n >= lo); } }";
 
     let payload_wrapping = err_under(PAYLOAD, ArithMode::Wrapping);
     assert!(
@@ -5907,6 +5938,26 @@ fn both_p017_wordings_read_the_default_the_module_is_compiled_at() {
     assert!(
         retained_checked.contains("arithmetic traps on overflow everywhere else in the language"),
         "{retained_checked}"
+    );
+
+    for rendered in [&retained_wrapping, &retained_checked] {
+        assert!(
+            rendered.contains("inside a `checked(...)` has no place in the body of"),
+            "an operator the author wrote `checked(...)` around is not unmarked at either \
+             polarity: {rendered}"
+        );
+    }
+    let unmarked_checked = err_under(RETAINED_UNMARKED, ArithMode::Checked);
+    assert!(
+        unmarked_checked.contains("a `+` at `i32` has no place unmarked in the body of"),
+        "{unmarked_checked}"
+    );
+    let ctx = type_check(RETAINED_UNMARKED);
+    let (_, wrapping_diagnostics) = translate_under(&ctx, ArithMode::Wrapping);
+    assert!(
+        wrapping_diagnostics.is_empty(),
+        "an unmarked operator carries no guard under a wrapping default, so the wording that \
+         calls one unmarked has no polarity twin: {wrapping_diagnostics:?}"
     );
 }
 
@@ -5993,5 +6044,171 @@ fn the_two_function_registries_hold_the_same_keys() {
     assert_eq!(
         from_index, from_compiler,
         "the specification pass and code generation must register one set of functions"
+    );
+}
+
+// ----- 21. the whole corpus under a checked default -----------------------
+
+/// The corpus fixtures that carry a reachability specification, as
+/// `(label, source)` pairs.
+///
+/// The `.inf` files under `tests/test_data/inf` are the `coqc` gate's corpus;
+/// the two multi-file golden entries are the only other sources in the tree
+/// whose proof-mode output pins a retained body's bytes. Both sets are read
+/// from disk rather than duplicated here, so a fixture edited for one reason
+/// cannot drift away from what this sweep believes it says.
+fn reachability_corpus_sources() -> Vec<(String, String)> {
+    use std::path::Path;
+
+    let test_data = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("test_data");
+
+    let corpus = test_data.join("inf");
+    let mut entries: Vec<_> = std::fs::read_dir(&corpus)
+        .unwrap_or_else(|e| panic!("the corpus directory must be readable: {e}"))
+        .map(|entry| entry.expect("a corpus directory entry must be readable").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "inf"))
+        .collect();
+    entries.sort();
+
+    let golden = test_data.join("codegen").join("wasm").join("multi_file_golden");
+    for stem in ["proof_exists", "proof_unique"] {
+        entries.push(golden.join(stem).join("src").join("main.inf"));
+    }
+
+    entries
+        .into_iter()
+        .map(|path| {
+            let label = if path.file_name().is_some_and(|name| name == "main.inf") {
+                path.parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .expect("a multi-file golden entry sits two directories below its root")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                path.file_stem()
+                    .expect("a corpus file has a stem")
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+            (label, source)
+        })
+        .collect()
+}
+
+/// No corpus fixture reaches an overflow guard from a reachability body.
+///
+/// [`PCode::P017`] and [`PCode::P018`] are stated against the *effective* mode
+/// of an operator, so an unmarked `+` in a retained `exists`/`unique` body, and
+/// a call from one into a function whose arithmetic is unmarked, are both
+/// refused. Every corpus fixture that states such a claim therefore has to say
+/// `wrapping(...)` over the arithmetic its reachable set does, and this sweep is
+/// what says those marks are complete rather than merely plausible.
+///
+/// The mode is passed explicitly rather than taken from the constant, so the
+/// sweep keeps measuring the checked polarity whatever the language's fallback
+/// later becomes.
+///
+/// The pass is driven here without compiling any body, which is what lets the
+/// sweep cover fixtures whose executable lowering wants a linked dependency it
+/// does not have — the other corpus gates compile, so they reach fewer files
+/// than this one does. The parse and type-check refusals are pinned by name for
+/// the same reason the examined count is: a fixture that quietly stopped
+/// reaching the pass would otherwise turn this test green by covering nothing.
+#[test]
+fn no_reachability_fixture_reaches_an_overflow_guard() {
+    let mut findings: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut examined = 0_usize;
+    let mut retained_bodies = 0_usize;
+
+    for (label, source) in reachability_corpus_sources() {
+        let parsed = inference_parser::parse(&source);
+        if !parsed.errors.is_empty() {
+            skipped.push(format!("{label}: does not parse"));
+            continue;
+        }
+        let Ok(built) = TypeCheckerBuilder::build_typed_context(parsed.arena) else {
+            skipped.push(format!("{label}: does not type-check"));
+            continue;
+        };
+        let ctx = built.typed_context();
+
+        let mut buckets = EmittableFunctions::default();
+        let mut collected = true;
+        for source_file in ctx.source_files() {
+            if collect_emittable_functions(
+                ctx.arena(),
+                &source_file.defs,
+                &source_file.module_path,
+                CompilationMode::Proof,
+                &mut buckets,
+            )
+            .is_err()
+            {
+                collected = false;
+                break;
+            }
+        }
+        if !collected {
+            skipped.push(format!("{label}: has no emittable proof-mode form"));
+            continue;
+        }
+
+        let choice_plans = crate::choice::plan_choice_lowering(&ctx, &buckets);
+        let Ok(reach_plans) = super::reach::reachability_plans(&ctx, &buckets, &choice_plans)
+        else {
+            skipped.push(format!("{label}: has no reachability view"));
+            continue;
+        };
+
+        examined += 1;
+        let (map, diagnostics) =
+            super::translate_spec_fns(&ctx, &buckets, &reach_plans, ArithMode::Checked);
+        retained_bodies += map
+            .values()
+            .flatten()
+            .filter(|entry| !matches!(entry.kind, SpecKind::Forall))
+            .count();
+        for diagnostic in diagnostics {
+            let rendered = diagnostic.to_string();
+            if rendered.contains("error[P017]") || rendered.contains("error[P018]") {
+                findings.push(format!("{label}: {rendered}"));
+            }
+        }
+    }
+
+    assert!(
+        findings.is_empty(),
+        "the checked fallback refuses {} corpus obligation(s):\n{}",
+        findings.len(),
+        findings.join("\n\n")
+    );
+    assert_eq!(
+        skipped,
+        vec![
+            "bad_syntax: does not parse".to_string(),
+            "example: does not type-check".to_string(),
+            "test_parse_source_file_1: does not parse".to_string(),
+            "test_parse_source_file_2: does not parse".to_string(),
+            "test_parse_source_file_3: does not parse".to_string(),
+        ],
+        "the fixtures this sweep cannot reach are pinned, so one dropping out silently is a \
+         failure rather than a narrowing"
+    );
+    assert_eq!(
+        examined, 47,
+        "the corpus this sweep examines is pinned; a fixture added to it belongs in this count"
+    );
+    assert_eq!(
+        retained_bodies, 15,
+        "the retained `exists`/`unique` bodies are what the two rules are about, so their \
+         number is what says this sweep is not passing over an empty corpus"
     );
 }

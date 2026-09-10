@@ -32,6 +32,7 @@
   (export "gt_u16" (func $gt_u16))
   (export "mod_u16" (func $mod_u16))
   (func $add_i8 (;0;) (type 0) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 24
     i32.shl
@@ -47,14 +48,23 @@
     local.get $a
     local.get $b
     i32.add
+    local.tee 2
     i32.const 24
     i32.shl
     i32.const 24
     i32.shr_s
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
   (func $sub_i8 (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 24
     i32.shl
@@ -70,14 +80,23 @@
     local.get $a
     local.get $b
     i32.sub
+    local.tee 2
     i32.const 24
     i32.shl
     i32.const 24
     i32.shr_s
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
   (func $mul_i8 (;2;) (type 2) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 24
     i32.shl
@@ -93,10 +112,18 @@
     local.get $a
     local.get $b
     i32.mul
+    local.tee 2
     i32.const 24
     i32.shl
     i32.const 24
     i32.shr_s
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -151,6 +178,7 @@
     unreachable
   )
   (func $add_u8 (;5;) (type 5) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 255
     i32.and
@@ -162,8 +190,16 @@
     local.get $a
     local.get $b
     i32.add
+    local.tee 2
     i32.const 255
     i32.and
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -217,6 +253,7 @@
     unreachable
   )
   (func $add_i16 (;9;) (type 9) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 16
     i32.shl
@@ -232,10 +269,18 @@
     local.get $a
     local.get $b
     i32.add
+    local.tee 2
     i32.const 16
     i32.shl
     i32.const 16
     i32.shr_s
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -290,6 +335,7 @@
     unreachable
   )
   (func $add_u16 (;12;) (type 12) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 65535
     i32.and
@@ -301,8 +347,16 @@
     local.get $a
     local.get $b
     i32.add
+    local.tee 2
     i32.const 65535
     i32.and
+    local.tee 3
+    local.get 2
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -353,4 +407,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\06\00\01\02\05\09\0c")
 )

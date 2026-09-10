@@ -76,7 +76,7 @@
     unreachable
   )
   (func $sum_fields (;2;) (type 2) (result i32)
-    (local $p i32) (local $__frame_ptr i32)
+    (local $p i32) (local $__frame_ptr i32) (local i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -102,7 +102,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -167,4 +181,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\02")
 )

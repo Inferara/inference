@@ -311,6 +311,11 @@ spec MaxArg {
 /// declared `-> i64` is what types its `return 4294967296;`, and the obligation
 /// compares the `T_app` against a peer literal that has to come out at the same
 /// width for the claim to be about that function's result.
+///
+/// `scaled_grows`' antecedent carries both halves of its `assume`, and the upper
+/// half is a literal no `i32` reading could express either: it is the operand
+/// bound that keeps the doubling inside `i64`, so the widths this test is about
+/// are what state the range as well as what the range is about.
 #[test]
 fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
     let map = proof_hspecs(&read_inf("spec_literal_ctx.inf"));
@@ -344,7 +349,13 @@ fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
     let expected = imp(
         and(
             hastype(n(), HNumType::I64),
-            not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+            and(
+                not(teq(rel64(HRelop::GtS, n(), i64c(4_294_967_296)), i32c(0))),
+                not(teq(
+                    rel64(HRelop::LeS, n(), i64c(4_611_686_018_427_387_903)),
+                    i32c(0),
+                )),
+            ),
         ),
         and(
             not(teq(
@@ -363,6 +374,10 @@ fn spec_literal_ctx_fixture_types_return_argument_and_operand_positions() {
 /// choice at 1, the anonymous call-argument choice at 2 — with no `HA_ex`
 /// binder and no typing guard, and the entry carries the exists kind whose
 /// `visible_locs` include the named choice but not the anonymous one.
+///
+/// The sum is marked modular because this body is retained and reduced, where
+/// an operator that traps is what `P017` refuses; the annotation is dropped
+/// from the term, which is the shape asserted below.
 #[test]
 fn exists_spec_end_to_end_reads_frame_slots_under_its_kind() {
     let source = "\
@@ -374,7 +389,7 @@ spec Reach {
   fn f(x: i32) exists {
     let n: i32 = @;
     assume { assert(n > 0); }
-    assert(g(@) == x + n);
+    assert(g(@) == wrapping(x + n));
   }
 }
 ";
@@ -1317,13 +1332,20 @@ fn reach_program(quantifier: &str, body: &str) -> String {
 /// Effectively-checked arithmetic written in a reachability body is refused,
 /// and `wrapping(...)` is what the diagnostic tells the author to write.
 ///
+/// The operator is unmarked, which is the shape this rule exists for now that
+/// the language's default traps; an explicit `checked(...)` is refused here too,
+/// by the same scan over effective modes, and is named as the annotated operator
+/// it is rather than as an unmarked one — an author shown "unmarked" about text
+/// they marked is being told about a program they did not write.
+///
 /// The judgment reduces this body, so a trap in it empties the observation set
 /// at every entry that reaches it and the theorem is false rather than narrowed
 /// — the same failure `P016` describes for a dynamic index, one operator over.
 #[test]
 fn trapping_arithmetic_inline_in_a_reachability_body_is_refused() {
     for quantifier in ["exists", "unique"] {
-        let source = reach_program(quantifier, "assert(checked(n + n) >= lo);");
+        let article = if quantifier == "exists" { "n" } else { "" };
+        let source = reach_program(quantifier, "assert(n + n >= lo);");
         let error =
             codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
                 .unwrap_err();
@@ -1331,9 +1353,8 @@ fn trapping_arithmetic_inline_in_a_reachability_body_is_refused() {
         assert!(rendered.contains("error[P017]"), "{rendered}");
         assert!(
             rendered.contains(&format!(
-                "a `+` at `i32` inside a `checked(...)` has no place in the body of a{} \
-                 `{quantifier}`-quantified spec function",
-                if quantifier == "exists" { "n" } else { "" }
+                "a `+` at `i32` has no place unmarked in the body of a{article} \
+                 `{quantifier}`-quantified spec function"
             )),
             "{rendered}"
         );
@@ -1342,25 +1363,57 @@ fn trapping_arithmetic_inline_in_a_reachability_body_is_refused() {
                                modular"),
             "the remedy must quote back the expression the author wrote: {rendered}"
         );
+
+        let annotated = reach_program(quantifier, "assert(checked(n + n) >= lo);");
+        let error = codegen_with_target_mode_no_analysis(
+            &annotated,
+            Target::Wasm32,
+            CompilationMode::Proof,
+        )
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("error[P017]"), "{rendered}");
+        assert!(
+            rendered.contains(&format!(
+                "a `+` at `i32` inside a `checked(...)` has no place in the body of a{article} \
+                 `{quantifier}`-quantified spec function"
+            )),
+            "{rendered}"
+        );
     }
 }
 
 /// `wrapping(...)` is accepted throughout a reachability body — the final
-/// `assert` included — and changes nothing about the obligation.
+/// `assert` included — and is dropped from the obligation.
 ///
-/// That equality is what makes the annotation a remedy rather than a second
-/// rejection. The `assert` is the interesting position: its arithmetic is both
-/// compiled into the reduced body and translated into the payload term, so if
-/// the annotation were rejected there the fix the diagnostic prescribes would be
-/// unspellable at the one place authors write it.
+/// Acceptance in the `assert` is what makes the annotation a remedy rather than
+/// a second rejection: that arithmetic is both compiled into the reduced body
+/// and translated into the payload term, so a rejection there would leave the
+/// fix the diagnostic prescribes unspellable at the one place authors write it.
+///
+/// The term is spelled out rather than compared against the unmarked source,
+/// which this rule now refuses: an obligation's `+` is the wrapping machine
+/// operator whatever encloses it, and `T_binop ... BOI_add` over the two frame
+/// slots is what that means. The cross-polarity form of the same equality — the
+/// annotated body producing what the unmarked one produced before the default
+/// moved — is pinned inside the code generation crate, which can compile one
+/// source at either polarity.
 #[test]
 fn a_wrapping_annotation_is_accepted_and_inert_in_a_reachability_body() {
-    let bare = proof_hspecs(&reach_program("exists", "assert(n + n >= lo);"));
     let annotated = proof_hspecs(&reach_program("exists", "assert(wrapping(n + n) >= lo);"));
+    let add = HTerm::Binop(
+        HNumType::I32,
+        HBinop::Add,
+        Box::new(local(1)),
+        Box::new(local(1)),
+    );
     assert_eq!(
         sole_obligation(&annotated, "Claims"),
-        sole_obligation(&bare, "Claims"),
-        "the annotation must translate to the term the unmarked spelling produces"
+        and(
+            nz(rel(HRelop::GeS, local(1), local(0))),
+            nz(rel(HRelop::GeS, add, local(0))),
+        ),
+        "the annotation must be dropped and the operator translated as the machine's own"
     );
 }
 
@@ -1395,15 +1448,18 @@ fn a_nested_exists_block_takes_the_payload_wording() {
     );
 }
 
-/// Unmarked arithmetic in a reachability body is accepted under the wrapping
-/// default, because its effective mode is wrapping and nothing traps.
+/// A reachability body carrying no governed operator at all is accepted, and its
+/// obligation is emitted.
 ///
 /// The rule is stated against the effective mode rather than against the
-/// spelling, which is why this program is legal now and is the one the second
-/// wording will be about when the language's default moves.
+/// spelling, so what it refuses is arithmetic that traps and not arithmetic. A
+/// remainder cannot leave its type and no annotation reaches it, so this body
+/// passes the scan without saying anything about `+`, `-` or `*` — which is
+/// what makes it the case that separates "this rule looks at the governed
+/// operators" from "this rule looks at bodies".
 #[test]
-fn unmarked_arithmetic_in_a_reachability_body_is_accepted() {
-    let map = proof_hspecs(&reach_program("exists", "assert(n + n >= lo);"));
+fn ungoverned_arithmetic_in_a_reachability_body_is_accepted() {
+    let map = proof_hspecs(&reach_program("exists", "assert(n % 7 >= lo);"));
     assert!(map.contains_key("Claims"), "the obligation must be emitted");
 }
 
@@ -1487,7 +1543,7 @@ fn a_reachability_body_reaching_a_guard_through_a_method_is_refused() {
     let source = format!(
         "struct Counter {{
            v: i32;
-           fn step(self) -> i32 {{ return checked(self.v + 1); }}
+           fn step(self) -> i32 {{ return self.v + 1; }}
          }}
          {}",
         reach_program(
@@ -1517,9 +1573,12 @@ fn a_reachability_body_reaching_a_guard_through_a_method_is_refused() {
 /// corpus invariant is what covers it, and only for this repository's fixtures.
 #[test]
 fn a_body_that_reaches_no_guard_is_accepted() {
-    let guarded = "pub fn step(a: i32) -> i32 { return checked(a + 1); }";
+    let guarded = "pub fn step(a: i32) -> i32 { return a + 1; }";
     let modular = "pub fn step(a: i32) -> i32 { return wrapping(a + 1); }";
-    let plain = "pub fn step(a: i32) -> i32 { return a + 1; }";
+    // Division is not an operator any annotation governs, so this callee has
+    // arithmetic and still no guard — a stronger acceptance case than a body
+    // with nothing in it, which would pass whatever the walk did.
+    let ungoverned = "pub fn step(a: i32) -> i32 { return a / 2; }";
 
     // A universal caller reaching the guard.
     let universal = format!(
@@ -1532,7 +1591,7 @@ fn a_body_that_reaches_no_guard_is_accepted() {
     codegen_with_target_mode_no_analysis(&universal, Target::Wasm32, CompilationMode::Proof)
         .expect("a `forall` body is not reduced, so a guard it reaches is not this rule's business");
 
-    for callee in [modular, plain] {
+    for callee in [modular, ungoverned] {
         let source = format!(
             "{callee} {}",
             reach_program("exists", "step(n); assert(n >= lo);")
@@ -1573,9 +1632,9 @@ fn an_external_callee_is_skipped() {
 fn each_hop_resolves_in_its_own_file() {
     let program = |lib_guarded: bool| {
         let (lib_inner, entry_inner) = if lib_guarded {
-            ("checked(a + 1)", "a + 1")
+            ("a + 1", "wrapping(a + 1)")
         } else {
-            ("a + 1", "checked(a + 1)")
+            ("wrapping(a + 1)", "a + 1")
         };
         vec![
             (
@@ -1628,9 +1687,9 @@ fn each_hop_resolves_in_its_own_file() {
 fn a_bare_call_resolves_in_the_specification_s_own_file() {
     let program = |entry_guarded: bool| {
         let (lib_step, entry_step) = if entry_guarded {
-            ("a + 1", "checked(a + 1)")
+            ("wrapping(a + 1)", "a + 1")
         } else {
-            ("checked(a + 1)", "a + 1")
+            ("a + 1", "wrapping(a + 1)")
         };
         vec![
             (

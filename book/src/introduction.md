@@ -29,7 +29,8 @@ The chapters follow that order:
 - **[Memory Allocation in WASM Codegen](memory-allocation-in-wasm-codegen.md)** —
   linear-memory layout, stack frames, and array lowering.
 - **[Arithmetic Overflow in WASM Codegen](arithmetic-overflow-in-wasm-codegen.md)**
-  — WebAssembly's wrapping semantics and what they mean for proofs.
+  — why `+`, `-`, `*` and unary `-` trap, what `wrapping(...)` restores, and what
+  either means for proofs.
 - **[Unreachable Emission in Codegen](unreachable-emission-in-codegen.md)** — why
   the compiler emits a trailing `unreachable` in non-void functions.
 - **[Compilation Targets](compilation_targets.md)** — compile vs. proof modes and

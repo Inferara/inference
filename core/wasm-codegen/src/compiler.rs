@@ -71,7 +71,7 @@
 use crate::choice::{ChoiceClass, ChoiceCursor, ChoicePlan, ChoiceRun, FrameContract};
 use crate::errors::CodegenError;
 use crate::overflow_guard::{
-    self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, guard_kind,
+    self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, ModeSource, guard_kind,
 };
 use crate::target::{EmitFeatures, MemoryLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -526,9 +526,9 @@ pub(crate) struct Compiler {
     ///
     /// Reserved before the body is emitted, because a guard at `i64` needs an
     /// `i64` local and [`RegionEmit`] hands out only `i32` ones. Empty in a
-    /// function with no effectively-checked arithmetic, which is every function
-    /// of a program that writes no annotation. Reset per function alongside the
-    /// rest of the per-function state.
+    /// function with no effectively-checked arithmetic — one whose governed
+    /// operators are all written inside a `wrapping(...)`, or that has none at
+    /// all. Reset per function alongside the rest of the per-function state.
     overflow_guard_pool: GuardScratchPool,
     /// Names of the compound (array or struct) parameters of the function
     /// currently being compiled, including a `self` receiver.
@@ -864,9 +864,21 @@ impl Compiler {
     /// exists and the other decides what reads it — so both ask here rather than
     /// each restating the rule.
     fn mode_at(arena: &AstArena, expr_id: ExprId, incoming: ArithMode) -> ArithMode {
+        Self::mode_set_by(arena, expr_id).unwrap_or(incoming)
+    }
+
+    /// The mode `expr_id` puts in force inside itself, or `None` when it is not
+    /// an annotation and the mode in force at it carries through unchanged.
+    ///
+    /// The one place a node is matched against the annotation form. Two
+    /// questions are asked of it — what mode governs an operator, and whether an
+    /// author wrote that mode or the module's default supplied it — and a
+    /// diagnostic that answered the second from a match of its own could come to
+    /// call an operator unmarked that is written `checked(...)`.
+    fn mode_set_by(arena: &AstArena, expr_id: ExprId) -> Option<ArithMode> {
         match &arena[expr_id].kind {
-            Expr::ArithMode { mode, .. } => *mode,
-            _ => incoming,
+            Expr::ArithMode { mode, .. } => Some(*mode),
+            _ => None,
         }
     }
 
@@ -2918,13 +2930,13 @@ impl Compiler {
             ctx,
             block_id,
             self.default_arith_mode,
-            &mut |_, kind| demand.add(kind),
+            &mut |_, kind, _| demand.add(kind),
         );
         demand
     }
 
     /// Applies `visit` to every operator in `block_id`'s body that carries an
-    /// overflow guard, with the guard it carries.
+    /// overflow guard, with the guard it carries and where its mode came from.
     ///
     /// `default_mode` is the mode an operator outside every annotation has, so a
     /// caller compiling under one polarity and a caller asking about the other
@@ -2934,37 +2946,53 @@ impl Compiler {
     /// about a compiled body — does an operator inside a reachability body trap,
     /// and does a function a reachability body calls contain one — so what the
     /// rules reject and what the emitter emits are decided by the same walk over
-    /// the same classifier.
+    /// the same classifier. It reads the [`ModeSource`] as well, because the
+    /// operator it names in a refusal is unmarked or explicitly `checked(...)`
+    /// and the two need different sentences.
     pub(crate) fn visit_body_guarded_operators(
         arena: &AstArena,
         ctx: &TypedContext,
         block_id: BlockId,
         default_mode: ArithMode,
-        visit: &mut impl FnMut(ExprId, GuardKind),
+        visit: &mut impl FnMut(ExprId, GuardKind, ModeSource),
     ) {
         Self::body_root_expressions(arena, block_id, &mut |expr_id| {
-            Self::visit_guarded_operators(arena, ctx, expr_id, default_mode, visit);
+            Self::visit_guarded_operators(
+                arena,
+                ctx,
+                expr_id,
+                default_mode,
+                ModeSource::TheDefault,
+                visit,
+            );
         });
     }
 
     /// Applies `visit` to every guarded operator in one expression tree, `mode`
-    /// being the arithmetic mode in force at its root.
+    /// being the arithmetic mode in force at its root and `source` where that
+    /// mode came from.
     ///
     /// The mode is carried down exactly as lowering carries it: an annotation
-    /// replaces it for its own subtree, and the innermost one wins.
+    /// replaces it for its own subtree, and the innermost one wins. Its source
+    /// is carried down beside it and read from the same match, so the two cannot
+    /// disagree about which annotation, if any, governs an operator.
     fn visit_guarded_operators(
         arena: &AstArena,
         ctx: &TypedContext,
         expr_id: ExprId,
         mode: ArithMode,
-        visit: &mut impl FnMut(ExprId, GuardKind),
+        source: ModeSource,
+        visit: &mut impl FnMut(ExprId, GuardKind, ModeSource),
     ) {
-        let mode = Self::mode_at(arena, expr_id, mode);
+        let (mode, source) = match Self::mode_set_by(arena, expr_id) {
+            Some(written) => (written, ModeSource::AnAnnotation),
+            None => (mode, source),
+        };
         if let Some(kind) = Self::node_guard_kind(arena, ctx, expr_id, mode) {
-            visit(expr_id, kind);
+            visit(expr_id, kind, source);
         }
         Self::expr_children(arena, expr_id, &mut |child| {
-            Self::visit_guarded_operators(arena, ctx, child, mode, visit);
+            Self::visit_guarded_operators(arena, ctx, child, mode, source, visit);
         });
     }
 
@@ -8198,10 +8226,11 @@ impl Compiler {
     /// Each is omitted when it would say nothing, and for each the omission is
     /// the statement rather than a saving. A compile-mode build records no
     /// specifications and no obligations, so it emits neither of the first two;
-    /// a program that names no arithmetic mode has no function that traps on
-    /// overflow, so it emits none of the third — and *that* absence is what a
-    /// linker reads as "no Inference-emitted overflow guard in this module",
-    /// which is also true of every module a foreign toolchain produced.
+    /// a program whose arithmetic is all written `wrapping(...)`, or that has
+    /// none, has no function that traps on overflow, so it emits none of the
+    /// third — and *that* absence is what a linker reads as "no
+    /// Inference-emitted overflow guard in this module", which is also true of
+    /// every module a foreign toolchain produced.
     fn attach_verification_sections(&self, module: &mut Module, hspecs: &HSpecMap) {
         if !self.spec_func_indices_by_spec.is_empty() {
             module.section(&crate::spec_section::SpecFuncSection::new(
@@ -10395,11 +10424,11 @@ fn f(p: S, q: S) -> i32 {{
     /// The language's default arithmetic mode, observed from both sides.
     ///
     /// [`ArithMode::DEFAULT`] is what every unannotated `+`, `-`, `*` and unary
-    /// `-` falls back to, and flipping it is the whole of a future change to
-    /// what this language means by those operators. Compiling one source under
-    /// each polarity is what shows the fallback is actually consulted: with the
-    /// shipped default an unannotated program builds, and with the other one the
-    /// same program reaches the checked path.
+    /// `-` falls back to, and it is the whole of what this language means by
+    /// those operators. Compiling one source under each polarity is what shows
+    /// the fallback is actually consulted rather than merely present: the same
+    /// unannotated program reaches the guard under the shipped default and the
+    /// bare machine operator under the other.
     mod default_arith_mode {
         use super::*;
         use crate::overflow_guard::SCRATCH_SLOTS_PER_WIDTH;
@@ -10440,9 +10469,16 @@ fn f(p: S, q: S) -> i32 {{
             compiler.finish_and_take(&hspecs).0
         }
 
+        /// The shipped fallback is the checked one.
+        ///
+        /// Every other assertion in this module is written against whichever
+        /// value the constant holds, which is what lets one source be compiled
+        /// at both polarities; this is the one place that says which of them
+        /// ships, so moving the language's default is a deliberate edit here
+        /// rather than a silent consequence somewhere else.
         #[test]
-        fn the_shipped_default_is_the_one_the_language_has_always_had() {
-            assert_eq!(ArithMode::DEFAULT, ArithMode::Wrapping);
+        fn the_shipped_default_traps_on_overflow() {
+            assert_eq!(ArithMode::DEFAULT, ArithMode::Checked);
         }
 
         #[test]
@@ -10489,6 +10525,27 @@ fn f(p: S, q: S) -> i32 {{
                 plain_checked,
                 "`checked(…)` must name the mode the fallback does not"
             );
+        }
+
+        #[test]
+        fn a_spec_free_source_is_one_module_in_both_compilation_modes_at_either_polarity() {
+            // Nothing may gate an instruction on the compilation mode: the Rocq
+            // translation reads the artifact a proof build produces, so a
+            // compile build that emitted anything else would put a proof behind
+            // a program that does not ship. The guard is emitted from the
+            // fallback, which is why the equality is asserted at both
+            // polarities rather than only at the one in force — a guard
+            // reachable in only one of the two modes would satisfy a single
+            // reading of it.
+            const ARITHMETIC: &str = "pub fn op(a: i64, b: i64) -> i64 { return a * b + a; }";
+            for mode in [ArithMode::Wrapping, ArithMode::Checked] {
+                assert_eq!(
+                    compile_under_in(ARITHMETIC, mode, CompilationMode::Compile),
+                    compile_under_in(ARITHMETIC, mode, CompilationMode::Proof),
+                    "a spec-free source must emit one module in both compilation modes, \
+                     whatever an unannotated operator means"
+                );
+            }
         }
 
         #[test]

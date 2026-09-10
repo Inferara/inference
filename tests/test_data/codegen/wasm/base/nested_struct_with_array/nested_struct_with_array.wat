@@ -253,7 +253,7 @@
     unreachable
   )
   (func $test_deep_inner_arr_sum (;3;) (type 3) (result i32)
-    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32)
+    (local $ha i32) (local $d i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32)
     global.get 0
     i32.const 48
     i32.sub
@@ -301,14 +301,14 @@
     i32.const 16
     i32.add
     local.get $ha
-    local.set 4
-    local.set 3
-    local.get 3
-    local.get 4
+    local.set 7
+    local.set 6
+    local.get 6
+    local.get 7
     i64.load align=1
     i64.store align=1
-    local.get 3
-    local.get 4
+    local.get 6
+    local.get 7
     i64.load offset=8 align=1
     i64.store offset=8 align=1
     local.get $__frame_ptr
@@ -326,12 +326,40 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $d
     i32.const 8
     i32.add
     i32.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 48
     i32.add
@@ -340,13 +368,28 @@
     unreachable
   )
   (func $deep_param (;4;) (type 4) (param $d i32) (result i32)
+    (local i32 i32 i32)
     local.get $d
     i32.load
     local.get $d
     i32.const 16
     i32.add
     i32.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.add
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
@@ -437,4 +480,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\03\04")
 )

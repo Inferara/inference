@@ -167,8 +167,13 @@ spec OperatorMatrix {
     fn signed_wide_ops() forall {
         let a: i64 = @;
         let b: i64 = @;
+        // The divisor stays away from zero for the division claims, and the two
+        // magnitude bounds keep `a * b` inside `i64`: `3037000499 * 3037000499`
+        // is 9223372030926249001 and the next square up is past the type.
+        // `scale_i64(9223372036854775807, 2)` is the concrete argument pair at
+        // which the last claim is false without them.
         assume {
-            assert(b > 0);
+            assert(b > 0 && b <= 3037000499 && -3037000499 <= a && a <= 3037000499);
         }
         assert(div_i64(a, b) == a / b);
         assert(rem_i64(a, b) == a % b);
@@ -180,6 +185,14 @@ spec OperatorMatrix {
     fn signed_narrow_ops() forall {
         let a: i32 = @;
         let b: i32 = @;
+        // The bounds keep `a * b` inside `i32`: `46340 * 46340` is 2147395600
+        // and `46341 * 46341` is 2147488281, past the type.
+        // `scale_i32(65536, 65536)` is the concrete argument pair at which the
+        // last claim is false without them. A shift count is masked, so the two
+        // shift claims are unaffected either way.
+        assume {
+            assert(-46340 <= a && a <= 46340 && -46340 <= b && b <= 46340);
+        }
         assert(shl_i32(a, b) == a << b);
         assert(shr_i32(a, b) == a >> b);
         assert(scale_i32(a, b) == a * b);

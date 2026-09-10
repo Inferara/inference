@@ -5,6 +5,11 @@
 // visible-locs slot (an anonymous `@` in a `unique` body is rejected as
 // P012) — and the `assume` pins it to `parity(seed)`, so exactly one choice
 // survives per entry value: the shape `ValidUniqueSpec` states.
+//
+// Squaring that choice is modular by construction — the `assume` holds `bit` in
+// {-1, 0, 1} — and the `wrapping(...)` spelling keeps it so in the program that
+// ships: a retained body is reduced as written, and a choice that trapped would
+// shrink the successful set instead of narrowing the claim.
 fn parity(n: i32) -> i32 {
     return n % 2;
 }
@@ -15,7 +20,7 @@ spec ReachUnique {
         assume {
             assert(bit == parity(seed));
         }
-        assert(bit * bit == bit);
+        assert(wrapping(bit * bit) == bit);
     }
 }
 

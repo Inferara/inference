@@ -26,11 +26,26 @@ Definition Ma ofs al := {|memarg_offset := ofs; memarg_align := al|}.
 
 Definition sum_pair : module_func := {|
   modfunc_type := 0%N;
-  modfunc_locals := nil;
+  modfunc_locals := T_num T_i32 :: T_num T_i32 :: T_num T_i32 :: nil;
   modfunc_body :=
     BI_local_get 0%N (*a*) ::
     BI_local_get 1%N (*b*) ::
+    BI_local_set 3%N ::
+    BI_local_tee 2%N ::
+    BI_local_get 3%N ::
     BI_binop T_i32 (Binop_i BOI_add) ::
+    BI_local_tee 4%N ::
+    BI_local_get 2%N ::
+    BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+    BI_local_get 3%N ::
+    BI_const_num (Vi32 0) ::
+    BI_relop T_i32 (Relop_i (ROI_lt SX_S)) ::
+    BI_relop T_i32 (Relop_i ROI_ne) ::
+    BI_if (BT_valtype None) (
+      BI_unreachable ::
+      nil) (
+      nil) ::
+    BI_local_get 4%N ::
     BI_return ::
     BI_unreachable ::
     nil;

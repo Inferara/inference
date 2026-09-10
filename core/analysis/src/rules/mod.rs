@@ -11,6 +11,7 @@ pub mod compound_literal_member_assign;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
 pub mod compound_return_call_position;
+pub mod constant_arithmetic_overflow;
 pub mod dead_code;
 pub mod duplicate_local_name;
 pub mod empty_enum_definition;
@@ -65,6 +66,7 @@ use compound_literal_member_assign::CompoundLiteralMemberAssign;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
 use compound_return_call_position::CompoundReturnCallPosition;
+use constant_arithmetic_overflow::ConstantArithmeticOverflow;
 use dead_code::DeadCode;
 use duplicate_local_name::DuplicateLocalName;
 use empty_enum_definition::EmptyEnumDefinition;
@@ -160,6 +162,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UnitAsValue,
         &UnnamedParameter,
         &GenericNotSupported,
+        &ConstantArithmeticOverflow,
         &ArithModeGovernsNothing,
         &ArithModeChangesNothing,
     ]

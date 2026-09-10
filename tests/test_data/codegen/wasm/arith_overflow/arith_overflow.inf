@@ -1,42 +1,88 @@
-pub fn i32_max_plus_one() -> i32 {
+// Arithmetic at the boundaries of each width, in the two spellings that differ
+// there.
+//
+// The first eight functions compute their result from `const` bindings and are
+// written `wrapping(...)`: each is the modular answer the machine's own operator
+// gives, which is what this fixture asserted before `+`, `-`, `*` and unary `-`
+// began to trap. The second eight are the same eight operations over
+// parameters, unmarked, so each carries an overflow guard and traps on the
+// vector its twin wraps at.
+//
+// Parameters are also what keeps the constant-overflow rule from rejecting this
+// file: a folded constant that leaves its type is refused before code
+// generation, and the modular spelling is the only one that admits one.
+
+pub fn i32_max_plus_one_wrap() -> i32 {
     const max: i32 = 2147483647;
-    return max + 1;
+    return wrapping(max + 1);
 }
 
-pub fn i32_min_minus_one() -> i32 {
+pub fn i32_min_minus_one_wrap() -> i32 {
     const min: i32 = -2147483648;
-    return min - 1;
+    return wrapping(min - 1);
 }
 
-pub fn i64_max_plus_one() -> i64 {
+pub fn i64_max_plus_one_wrap() -> i64 {
     const max: i64 = 9223372036854775807;
     const one: i64 = 1;
-    return max + one;
+    return wrapping(max + one);
 }
 
-pub fn i64_min_minus_one() -> i64 {
+pub fn i64_min_minus_one_wrap() -> i64 {
     const min: i64 = -9223372036854775808;
     const one: i64 = 1;
-    return min - one;
+    return wrapping(min - one);
 }
 
-pub fn u32_max_plus_one() -> u32 {
+pub fn u32_max_plus_one_wrap() -> u32 {
     const max: u32 = 4294967295;
     const one: u32 = 1;
-    return max + one;
+    return wrapping(max + one);
 }
 
-pub fn i32_mul_overflow() -> i32 {
+pub fn i32_mul_overflow_wrap() -> i32 {
     const big: i32 = 2147483647;
-    return big * 2;
+    return wrapping(big * 2);
 }
 
-pub fn i32_neg_min() -> i32 {
+pub fn i32_neg_min_wrap() -> i32 {
     const min: i32 = -2147483648;
-    return -min;
+    return wrapping(-min);
 }
 
-pub fn i64_neg_min() -> i64 {
+pub fn i64_neg_min_wrap() -> i64 {
     const min: i64 = -9223372036854775808;
-    return -min;
+    return wrapping(-min);
+}
+
+pub fn i32_add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+pub fn i32_sub(a: i32, b: i32) -> i32 {
+    return a - b;
+}
+
+pub fn i64_add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+pub fn i64_sub(a: i64, b: i64) -> i64 {
+    return a - b;
+}
+
+pub fn u32_add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+pub fn i32_mul(a: i32, b: i32) -> i32 {
+    return a * b;
+}
+
+pub fn i32_neg(a: i32) -> i32 {
+    return -a;
+}
+
+pub fn i64_neg(a: i64) -> i64 {
+    return -a;
 }

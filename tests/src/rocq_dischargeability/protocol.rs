@@ -671,9 +671,15 @@ mod tests {
                 "coq_wasm_revision": pin.coq_wasm_revision(),
                 "coq_series": pin.coq_series(),
                 "assumption_allowlist_count": pin.assumption_allowlist_count(),
-                "expected_case_count": 6,
-                "expected_proved_endpoints": 13,
-                "expected_refuted_endpoints": 1,
+                "expected_case_count": CASES.len(),
+                "expected_proved_endpoints": CASES
+                    .iter()
+                    .map(|case| case.expected_proved())
+                    .sum::<usize>(),
+                "expected_refuted_endpoints": CASES
+                    .iter()
+                    .map(|case| case.expected_refuted())
+                    .sum::<usize>(),
                 "cases": request_cases,
             });
             let fixture = Self { root, request };

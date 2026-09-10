@@ -117,14 +117,30 @@
     unreachable
   )
   (func $BigPair.sum (;5;) (type 5) (param $self i32) (result i64)
+    (local i64 i64 i64)
     local.get $self
     i64.load
     local.get $self
     i32.const 8
     i32.add
     i64.load
+    local.set 2
+    local.tee 1
+    local.get 2
     i64.add
+    local.tee 3
+    local.get 1
+    i64.lt_s
+    local.get 2
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\01\05")
 )

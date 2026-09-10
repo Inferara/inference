@@ -32,6 +32,7 @@ For project-aware builds — `Inference.toml`, project discovery, and the `infs 
 | Spec function lowering | Structural 1:1 from source | Rocq readability — no optimizer runs to disturb it |
 | Execution function bytes | Byte-identical to compile mode release | Proofs must cover the actual deployed code, not a differently-compiled variant |
 | Target | Wasm32 only | Custom 0xfc intrinsics required |
+| Runtime guards | Emitted in both modes | A `+`, `-`, `*` or unary `-` that traps on overflow traps in the module a proof is written about and in the one that ships, as the bounds, narrow-division and enum-tag guards already did; nothing may gate an emitted instruction on the mode |
 | Name section | Always emitted | Rocq identifiers require function/local names |
 | DWARF | Never | Not useful for formal verification |
 | wasm-opt | Never applied to proof-mode output | `[build.wasm-opt]` (`infs`'s opt-in Binaryen post-build step) explicitly skips proof/`-v` builds — Binaryen has no lowering for the non-det opcode family a spec function may carry |

@@ -6,8 +6,14 @@
 // trap-on-false) and the obligation travels as an exists-kind
 // `inference.hspecs` v2 entry whose visible locs name the entry parameter
 // and the two named choices only.
+//
+// The doubling is modular by construction and spelled `wrapping(...)` to keep
+// it so in the program that ships: this body is retained, which means a
+// reachability judgment reduces it and everything it calls, and an operator
+// that could leave its type would empty the observation set at the entries
+// where it does rather than narrow the claim.
 fn double(n: i32) -> i32 {
-    return n + n;
+    return wrapping(n + n);
 }
 
 spec ReachExists {
@@ -20,7 +26,7 @@ spec ReachExists {
         assume {
             assert(wide >= 0);
         }
-        assert(double(n) == n + n);
+        assert(double(n) == wrapping(n + n));
         assert(double(@) >= lo);
     }
 }

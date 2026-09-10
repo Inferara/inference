@@ -203,7 +203,8 @@ The loop and copy shapes need scratch i32 locals — an induction variable, and 
 `emit_memcpy_via_stack`, the entry point used by every body-level compound copy) a
 destination and source base local to hold the two addresses popped off the WASM
 operand stack. These are **not** part of the eagerly computed declaration list built by
-`pre_scan_locals` and the frame-pointer/bounds-check/narrow-division reservations,
+`pre_scan_locals` and the frame-pointer, bounds-check, narrow-division and
+overflow-guard reservations,
 because whether — and how many times — a function needs them is a property of the
 instructions emitted while lowering its body, not something that can be predicted ahead
 of emission without duplicating the emission logic.

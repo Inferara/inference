@@ -23,9 +23,15 @@
 // No data segment: the merged module built from this one is compiled by `coqc`,
 // and the corpus rejects a data segment in any module it gates — reported
 // against the main fixture's name rather than this one.
+//
+// `scale` is spelled modular for the reason its twin in
+// `spec_adopted_reach_mathlib.inf` is: `scales` claims the identity for every
+// `i32`, which a trap at `x = 214599` would falsify, and the two libraries have
+// to stay one body for the only observable difference between linking them to
+// be the reachability obligation.
 
 pub fn scale(a: i32) -> i32 {
-  return a * 10007;
+  return wrapping(a * 10007);
 }
 
 spec ScaleSpec {

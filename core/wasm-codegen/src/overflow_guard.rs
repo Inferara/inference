@@ -81,6 +81,20 @@ pub(crate) enum GuardKind {
     NarrowFit(NarrowFit),
 }
 
+/// Where an operator got the arithmetic mode it is compiled under.
+///
+/// Nothing emitted depends on this — the mode alone decides that — but a
+/// diagnostic about a guarded operator does: an author who wrote
+/// `checked(a + b)` must not be told the operator is unmarked, and one who wrote
+/// no annotation must not be pointed at one that is not there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ModeSource {
+    /// No annotation encloses the operator: its mode is the module's default.
+    TheDefault,
+    /// An annotation encloses the operator, and the innermost one set its mode.
+    AnAnnotation,
+}
+
 /// The guard `op` needs at `kind` under `mode`, or `None` when it needs none.
 ///
 /// This is the whole definition of "this operator is guarded". Emission calls it
@@ -226,9 +240,9 @@ impl GuardScratch {
 ///
 /// Accumulated by scanning the body with [`guard_kind`] — the same classifier
 /// the emission sites ask — so a body demands scratch for exactly the classes it
-/// will emit guards at. A body with no effectively-checked arithmetic demands
-/// nothing, which is what keeps a program that writes no annotation
-/// byte-identical to one compiled before guards existed.
+/// will emit guards at. A body whose governed operators are all written inside
+/// a `wrapping(...)`, or that has none, demands nothing and is byte-identical to
+/// the same body compiled before guards existed.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) struct GuardScratchDemand {
     i32_class: bool,

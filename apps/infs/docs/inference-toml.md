@@ -279,7 +279,7 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 
   `infs` therefore rewrites the record after optimizing, into a form that says only that *some* function of the module traps. A later link reads that as *every* function of the module and refuses any reachability specification reaching it, rather than checking a list that has quietly gone stale. The build prints a line saying so whenever it marks an artifact.
 
-  This costs nothing for a program you build and run. It matters for a library: if some other project links yours and states an `exists`- or `unique`-quantified specification over a call into it, build the library without `[build.wasm-opt]` (or with `--no-wasm-opt`) so its record stays exact. A module whose arithmetic is written `wrapping(...)` throughout records nothing, is never marked, and is unaffected.
+  This costs nothing for a program you build and run. It matters for a library, and it reaches most of them: `+`, `-`, `*` and unary `-` trap unless the source wrote `wrapping(...)` around them, so a library with any arithmetic at all carries the record and is marked once it is optimized. From then on no `exists`- or `unique`-quantified specification in a project that links it may reach it, whatever it calls. If some other project states one over a call into your library, build the library without `[build.wasm-opt]` (or with `--no-wasm-opt`) so its record stays exact. `forall` specifications and ordinary linking are unaffected either way, and a module whose arithmetic is written `wrapping(...)` throughout records nothing and is never marked.
 
 ### [verification]
 

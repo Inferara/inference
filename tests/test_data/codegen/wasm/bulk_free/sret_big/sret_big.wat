@@ -341,29 +341,29 @@
     unreachable
   )
   (func $read_block_ends (;6;) (type 6) (result i64)
-    (local $g i32) (local $__frame_ptr i32) (local i32)
+    (local $g i32) (local $__frame_ptr i32) (local i64 i64 i64 i32)
     global.get 0
     i32.const 160
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 2
+    local.set 5
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 2
+      local.get 5
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 2
+      local.get 5
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 2
+      local.get 5
       i32.const 16
       i32.add
-      local.tee 2
+      local.tee 5
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
@@ -375,12 +375,56 @@
     local.get $g
     i64.load
     i64.const 1000
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     local.get $g
     i32.const 152
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 160
     i32.add
@@ -389,29 +433,29 @@
     unreachable
   )
   (func $read_block_body (;7;) (type 7) (result i64)
-    (local $h i32) (local $__frame_ptr i32) (local i32)
+    (local $h i32) (local $__frame_ptr i32) (local i64 i64 i64 i32)
     global.get 0
     i32.const 160
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 2
+    local.set 5
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 2
+      local.get 5
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 2
+      local.get 5
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 2
+      local.get 5
       i32.const 16
       i32.add
-      local.tee 2
+      local.tee 5
       i32.const 160
       i32.ne
       br_if 0 (;@1;)
@@ -425,7 +469,37 @@
     i32.add
     i64.load
     i64.const 1000
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     local.get $h
     i32.const 8
     i32.add
@@ -433,15 +507,73 @@
     i32.add
     i64.load
     i64.const 100
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $h
     i32.const 8
     i32.add
     i32.const 136
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 160
     i32.add
@@ -450,29 +582,29 @@
     unreachable
   )
   (func $sret_neighbour_intact (;8;) (type 8) (result i64)
-    (local $guard i32) (local $k i32) (local $__frame_ptr i32) (local i32)
+    (local $guard i32) (local $k i32) (local $__frame_ptr i32) (local i64 i64 i64 i32)
     global.get 0
     i32.const 176
     i32.sub
     local.tee $__frame_ptr
     global.set 0
     i32.const 0
-    local.set 3
+    local.set 6
     loop ;; label = @1
       local.get $__frame_ptr
-      local.get 3
+      local.get 6
       i32.add
       i64.const 0
       i64.store
       local.get $__frame_ptr
-      local.get 3
+      local.get 6
       i32.add
       i64.const 0
       i64.store offset=8
-      local.get 3
+      local.get 6
       i32.const 16
       i32.add
-      local.tee 3
+      local.tee 6
       i32.const 176
       i32.ne
       br_if 0 (;@1;)
@@ -500,17 +632,105 @@
     local.get $k
     i64.load
     i64.const 1000
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.mul
+    local.set 5
+    local.get 4
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 4
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 3
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 5
+        local.get 4
+        i64.div_s
+        local.get 3
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 5
     local.get $guard
     i64.load
     i64.const 10
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.mul
+    local.set 5
+    local.get 4
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 4
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 3
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 5
+        local.get 4
+        i64.div_s
+        local.get 3
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 5
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.add
+    local.tee 5
+    local.get 3
+    i64.lt_s
+    local.get 4
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $guard
     i32.const 8
     i32.add
     i64.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.add
+    local.tee 5
+    local.get 3
+    i64.lt_s
+    local.get 4
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 176
     i32.add
@@ -518,4 +738,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\06\07\08")
 )

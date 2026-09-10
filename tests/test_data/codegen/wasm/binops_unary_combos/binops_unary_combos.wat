@@ -36,38 +36,142 @@
   (export "bitnot_shift" (func $bitnot_shift))
   (export "neg_i64" (func $neg_i64))
   (func $neg_add (;0;) (type 0) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     i32.const 0
     local.get $a
     i32.sub
+    local.tee 4
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $neg_sub (;1;) (type 1) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     i32.const 0
     local.get $a
     i32.sub
+    local.tee 4
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.sub
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $neg_mul (;2;) (type 2) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     i32.const 0
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.mul
+    local.set 4
+    local.get 3
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 3
+      i32.const -1
+      i32.eq
+      if ;; label = @2
+        local.get 2
+        i32.const -2147483648
+        i32.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i32.div_s
+        local.get 2
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     i32.sub
+    local.tee 4
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $add_neg (;3;) (type 3) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 0
     local.get $b
     i32.sub
+    local.tee 4
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -181,11 +285,33 @@
     unreachable
   )
   (func $neg_i64_add (;13;) (type 13) (param $a i64) (param $b i64) (result i64)
+    (local i64 i64 i64)
     i64.const 0
     local.get $a
     i64.sub
+    local.tee 4
+    i64.const -9223372036854775808
+    i64.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -199,9 +325,17 @@
     unreachable
   )
   (func $neg_shift (;15;) (type 15) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     i32.const 0
     local.get $a
     i32.sub
+    local.tee 4
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $b
     i32.shl
     return
@@ -217,10 +351,19 @@
     unreachable
   )
   (func $neg_i64 (;17;) (type 17) (param $a i64) (result i64)
+    (local i64 i64 i64)
     i64.const 0
     local.get $a
     i64.sub
+    local.tee 3
+    i64.const -9223372036854775808
+    i64.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\07\00\01\02\03\0d\0f\11")
 )

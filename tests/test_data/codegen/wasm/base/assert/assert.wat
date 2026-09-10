@@ -65,7 +65,7 @@
     unreachable
   )
   (func $assert_in_loop_with_break (;3;) (type 3) (param $n i32) (result i32)
-    (local $i i32)
+    (local $i i32) (local i32 i32 i32)
     i32.const 0
     local.set $i
     block ;; label = @1
@@ -90,7 +90,21 @@
         end
         local.get $i
         i32.const 1
+        local.set 3
+        local.tee 2
+        local.get 3
         i32.add
+        local.tee 4
+        local.get 2
+        i32.lt_s
+        local.get 3
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 4
         local.set $i
         br 0 (;@2;)
       end
@@ -100,6 +114,7 @@
     unreachable
   )
   (func $double_assert (;4;) (type 4) (param $x i32) (param $y i32) (result i32)
+    (local i32 i32 i32)
     local.get $x
     i32.const 0
     i32.gt_s
@@ -116,7 +131,21 @@
     end
     local.get $x
     local.get $y
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.add
+    local.tee 4
+    local.get 2
+    i32.lt_s
+    local.get 3
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
@@ -208,6 +237,7 @@
     unreachable
   )
   (func $assert_complex (;10;) (type 10) (param $a i32) (param $b i32) (param $c i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     i32.const 0
     i32.gt_s
@@ -231,9 +261,37 @@
     end
     local.get $a
     local.get $b
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $c
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     return
     unreachable
   )
@@ -252,4 +310,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\03\04\0a")
 )

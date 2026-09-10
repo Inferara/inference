@@ -153,7 +153,7 @@ mod tests {
 
     const VERIFIER_B: &str = "fb0b2dd56bd451960197cf7e7ccdc513eea47d8b";
     const PROTECTED_CHECKOUT: &str = "actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f";
-    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=6 proved=13 refuted=1";
+    const SUCCESS_LINE: &str = "rocq-discharge: result=pass cases=7 proved=15 refuted=1";
 
     /// The marker this module asserts the workflow contains is the one the
     /// harness prints.

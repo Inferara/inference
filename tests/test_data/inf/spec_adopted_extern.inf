@@ -16,10 +16,14 @@
 // module record by ordinal discriminating: a merged artifact with one
 // constant-bearing body would satisfy such an assertion no matter which ordinal
 // the obligation named.
+//
+// `scaled_sum` is spelled modular exactly as in `spec_adopted_both.inf`: the two
+// fixtures are the same program apart from the specification, and the pair is
+// controlled only while the body they share stays one body.
 
 external fn scale(x: i32) -> i32;
 use { scale } from mathlib;
 
 pub fn scaled_sum(a: i32, b: i32) -> i32 {
-  return scale(a) + b * 31;
+  return wrapping(scale(a) + b * 31);
 }

@@ -18,7 +18,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $assigned_elements (;0;) (type 0) (result i64)
-    (local $a i32) (local $__frame_ptr i32)
+    (local $a i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 16
     i32.sub
@@ -48,7 +48,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -201,7 +215,7 @@
     unreachable
   )
   (func $element_expressions (;5;) (type 5) (result i64)
-    (local $a i32) (local $__frame_ptr i32)
+    (local $a i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 16
     i32.sub
@@ -227,7 +241,37 @@
     i64.const 1
     i64.const 20
     i64.shl
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.mul
+    local.set 4
+    local.get 3
+    i64.const 0
+    i64.ne
+    if ;; label = @1
+      local.get 3
+      i64.const -1
+      i64.eq
+      if ;; label = @2
+        local.get 2
+        i64.const -9223372036854775808
+        i64.eq
+        if ;; label = @3
+          unreachable
+        end
+      else
+        local.get 4
+        local.get 3
+        i64.div_s
+        local.get 2
+        i64.ne
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+    local.get 4
     i64.store
     local.get $__frame_ptr
     local.set $a
@@ -237,7 +281,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 3
+    local.tee 2
+    local.get 3
     i64.add
+    local.tee 4
+    local.get 2
+    i64.lt_s
+    local.get 3
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -246,7 +304,7 @@
     unreachable
   )
   (func $peer_typed_element (;6;) (type 6) (param $v i64) (result i64)
-    (local $a i32) (local $__frame_ptr i32)
+    (local $a i32) (local $__frame_ptr i32) (local i64 i64 i64)
     global.get 0
     i32.const 16
     i32.sub
@@ -261,7 +319,21 @@
     i32.add
     local.get $v
     i64.const 1
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.add
+    local.tee 5
+    local.get 3
+    i64.lt_s
+    local.get 4
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     i64.store
     local.get $__frame_ptr
     i32.const 8
@@ -276,7 +348,21 @@
     i32.const 8
     i32.add
     i64.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i64.add
+    local.tee 5
+    local.get 3
+    i64.lt_s
+    local.get 4
+    i64.const 0
+    i64.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -284,4 +370,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\03\00\05\06")
 )

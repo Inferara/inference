@@ -73,16 +73,44 @@
     unreachable
   )
   (func $add_u32 (;7;) (type 7) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.tee 3
     i32.add
+    local.tee 4
+    local.get 3
+    i32.lt_u
+    if ;; label = @1
+      unreachable
+    end
+    local.get 4
     return
     unreachable
   )
   (func $mul_u32 (;8;) (type 8) (param $a i32) (param $b i32) (result i32)
+    (local i32 i32 i32)
     local.get $a
     local.get $b
+    local.set 3
+    local.tee 2
+    local.get 3
     i32.mul
+    local.set 4
+    local.get 3
+    i32.const 0
+    i32.ne
+    if ;; label = @1
+      local.get 4
+      local.get 3
+      i32.div_u
+      local.get 2
+      i32.ne
+      if ;; label = @2
+        unreachable
+      end
+    end
+    local.get 4
     return
     unreachable
   )
@@ -107,4 +135,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\07\08")
 )

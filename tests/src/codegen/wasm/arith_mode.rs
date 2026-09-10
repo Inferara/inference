@@ -128,13 +128,12 @@ fn assert_same_as_default(plain: &str, annotated: &str) {
 /// to changes the emitted module.
 ///
 /// Size is the observable side of the difference, and which way it points is
-/// decided by the default rather than by the call sites. While the default is
-/// wrapping, the non-default annotation is the checked one and can only make a
-/// module longer — its guard plus the scratch locals the function declares for
-/// it. At the flip the non-default annotation becomes the wrapping one and
-/// every one of these cases turns into the same measurement in the opposite
-/// direction, which is why the comparison is written once, here, and no case
-/// below spells a direction.
+/// decided by the default rather than by the call sites. Under the checked
+/// default the non-default annotation is the modular one, so it can only make a
+/// module shorter — it removes a guard and the scratch locals the function
+/// declared for it. Under the other default every one of these cases is the
+/// same measurement in the opposite direction, which is why the comparison is
+/// written once, here, and no case below spells a direction.
 fn assert_differs_from_default(plain: &str, annotated: &str) {
     let plain_module = module(plain);
     let annotated_module = module(annotated);
@@ -317,25 +316,26 @@ fn every_guard_traps_through_unreachable_and_nothing_else() {
     // `unreachable`s it has and what encloses them: each guard's trap sits alone
     // inside an `if` of its own, and every `unreachable` the checked build adds
     // over the plain one is one of those.
+    //
+    // Which of the two spellings carries the guard comes from the language's
+    // default, so the pair is built the same way the byte-cost rows below build
+    // theirs and the measurement is guarded minus unguarded at either polarity.
     for (width, neg_is_legal) in WIDTHS {
-        let mut pairs = vec![
-            (
-                binary_source(width, "a + b"),
-                binary_source(width, "checked(a + b)"),
-            ),
-            (
-                binary_source(width, "a - b"),
-                binary_source(width, "checked(a - b)"),
-            ),
-            (
-                binary_source(width, "a * b"),
-                binary_source(width, "checked(a * b)"),
-            ),
-        ];
+        let mut expressions = vec!["a + b", "a - b", "a * b"];
         if neg_is_legal {
-            pairs.push((unary_source(width, "-a"), unary_source(width, "checked(-a)")));
+            expressions.push("-a");
         }
-        for (plain, checked) in pairs {
+        for expression in expressions {
+            let unary = expression == "-a";
+            let build = |body: &str| {
+                if unary {
+                    unary_source(width, body)
+                } else {
+                    binary_source(width, body)
+                }
+            };
+            let (guarded, unguarded) = guarded_and_unguarded(expression);
+            let (plain, checked) = (build(&unguarded), build(&guarded));
             let plain_wat = wat(&plain);
             let checked_wat = wat(&checked);
             assert_eq!(
@@ -451,12 +451,15 @@ fn an_annotation_over_a_comparison_governs_the_arithmetic_inside_it() {
 #[test]
 fn an_annotation_in_a_const_initializer_governs_its_operator() {
     // A constant initializer is lowered like any other expression, so the
-    // annotation means there exactly what it means elsewhere.
-    const PLAIN: &str = "pub fn op() -> i32 { const K: i32 = 2147483647 + 1; return K; }";
+    // annotation means there exactly what it means elsewhere. The sum lands on
+    // `i32::MAX` rather than one past it: an initializer whose result leaves the
+    // type is refused by analysis before this question can be asked, and the
+    // question is about the annotation, not about the value.
+    const PLAIN: &str = "pub fn op() -> i32 { const K: i32 = 2147483646 + 1; return K; }";
     assert_same_as_default(
         PLAIN,
         &format!(
-            "pub fn op() -> i32 {{ const K: i32 = {}(2147483647 + 1); return K; }}",
+            "pub fn op() -> i32 {{ const K: i32 = {}(2147483646 + 1); return K; }}",
             default_mode()
         ),
     );
@@ -465,7 +468,7 @@ fn an_annotation_in_a_const_initializer_governs_its_operator() {
     assert_differs_from_default(
         PLAIN,
         &format!(
-            "pub fn op() -> i32 {{ const K: i32 = {}(2147483647 + 1); return K; }}",
+            "pub fn op() -> i32 {{ const K: i32 = {}(2147483646 + 1); return K; }}",
             other_mode()
         ),
     );
@@ -597,9 +600,9 @@ const POOL_DECLARATION_BYTES: usize = 2;
 
 /// The expression written with its arithmetic guarded, and written without it.
 ///
-/// Which spelling carries the guard follows the language's default: while the
-/// default is wrapping, `checked(...)` is what adds one; after the flip the bare
-/// operator carries it and `wrapping(...)` is what takes it away. Every
+/// Which spelling carries the guard follows the language's default: under the
+/// checked default the bare operator carries one and `wrapping(...)` is what
+/// takes it away; under the other, `checked(...)` is what adds one. Every
 /// measurement below is guarded minus unguarded, so the catalogue's costs stay
 /// positive at either polarity.
 fn guarded_and_unguarded(expr: &str) -> (String, String) {

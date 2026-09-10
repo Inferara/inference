@@ -2,7 +2,7 @@
 
 Inference compiles to WebAssembly. WebAssembly integer arithmetic wraps silently on overflow for add, subtract, and multiply. This document explains what that means exactly, how it differs from other languages, what Inference's codegen does, and why this matters for a language that targets formal verification.
 
-Inference gives an author a choice at each site. `checked(e)` makes every `+`, `-`, `*` and unary `-` written between its parentheses trap when the result leaves the operand type; `wrapping(e)` makes them wrap. An operator no annotation encloses wraps, which is what the rest of this chapter's lowering examples show. [Checked and Wrapping Arithmetic](#checked-and-wrapping-arithmetic) is the surface, the guard shapes it emits, and what a proof can say about them.
+Inference does not pass that behavior through. `+`, `-`, `*` and unary `-` trap when the result leaves the operand type, and `wrapping(e)` is how a program asks for the machine's answer instead: it makes every one of those operators written between its parentheses wrap. `checked(e)` names the other direction, which is what an operator no annotation encloses already does. [Checked and Wrapping Arithmetic](#checked-and-wrapping-arithmetic) is the surface, the guard shapes it emits, and what a proof can say about them. The lowering examples before it are the wrapping ones, and each carries the annotation that selects them.
 
 ## The Problem
 
@@ -68,7 +68,7 @@ Shift amounts are masked to the bit width of the value being shifted. For `i32`,
 
 ## Inference's Current Approach
 
-An unannotated `+`, `-`, `*` or unary `-` inherits WASM's wrapping semantics: it emits the bare arithmetic instruction with no overflow guard, and no compile-time check reports its result leaving the type. Enclosing it in `checked(...)` replaces that bare instruction with a guard sequence that traps instead, in both compilation modes; see [Checked and Wrapping Arithmetic](#checked-and-wrapping-arithmetic). The lowerings shown in the rest of this section are the unannotated ones.
+A `+`, `-`, `*` or unary `-` written inside a `wrapping(...)` inherits WASM's semantics: it emits the bare arithmetic instruction with no overflow guard. Everywhere else — which is everywhere the source has not asked for the wrap — the same operator emits a guard sequence that traps instead, in both compilation modes; see [Checked and Wrapping Arithmetic](#checked-and-wrapping-arithmetic). The lowerings shown in the rest of this section are the wrapping ones.
 
 Division stands apart from both spellings — signed division overflow (`MIN / -1`) traps at every width whatever encloses it, natively for `i32`/`i64` and via a compiler-added guard for the narrow types (see [Division and Modulo](#division-and-modulo)). Separately, a dynamic (runtime-index) array access and a failing `assert` emit their own runtime traps.
 
@@ -77,31 +77,31 @@ Division stands apart from both spellings — signed division overflow (`MIN / -
 `lower_binary_expression` in `core/wasm-codegen/src/compiler.rs` dispatches to the appropriate WASM instruction based on the left operand's type. Where the operator's effective mode is wrapping it emits that instruction and nothing else:
 
 ```wat
-;; Inference: return 2147483647 + 1
+;; Inference: return wrapping(2147483647 + 1)
 i32.const 2147483647
 i32.const 1
 i32.add          ;; wraps to -2147483648 — no trap, no check
 return
 ```
 
-No overflow check precedes the `i32.add`. The result is exactly what WASM's specification says: `-2147483648`. Writing the same expression as `checked(2147483647 + 1)` puts a guard around that instruction instead, and the function traps.
+No overflow check precedes the `i32.add`. The result is exactly what WASM's specification says: `-2147483648`. Drop the annotation and this particular expression never reaches code generation: both operands are constants and the sum leaves `i32`, which analysis rule **A052** refuses. Written over values the compiler cannot fold, the same addition compiles to a guard and traps.
 
 ### Negation Lowering
 
 `lower_prefix_unary_expression` lowers the unary negation operator `-x` as `0 - x`:
 
 ```wat
-;; Inference: return -min  (where min = i32::MIN)
+;; Inference: return wrapping(-min)  (where min = i32::MIN)
 i32.const 0
 local.get $min   ;; pushes -2147483648
 i32.sub          ;; 0 - (-2147483648) wraps to -2147483648
 return
 ```
 
-Negating `i32::MIN` produces `i32::MIN` — the one input at which negation has no representable result, and the one input a `checked(-x)` traps on. This is verifiable against the golden WAT output in `tests/test_data/codegen/wasm/arith_overflow/arith_overflow.wat`:
+Negating `i32::MIN` produces `i32::MIN` — the one input at which negation has no representable result, and the one input an unmarked `-x` traps on. This is verifiable against the golden WAT output in `tests/test_data/codegen/wasm/arith_overflow/arith_overflow.wat`:
 
 ```wat
-(func $i32_neg_min (;6;) (type 6) (result i32)
+(func $i32_neg_min_wrap (;6;) (type 6) (result i32)
   (local $min i32)
   i32.const -2147483648
   local.set $min
@@ -148,7 +148,7 @@ This narrowing is emitted at every place a sub-i32 value is produced, not just a
 
 Signed division is the one producer whose *promoted* result can fall outside the narrow type's range in a way this re-narrowing would silently mask rather than merely truncate: for `(MIN, -1)` the promoted quotient is `+128`/`+32768`, which the `shl`/`shr_s` re-narrowing would wrap back to `MIN` — the wrong answer, with no failure signal. That case is caught by an overflow guard emitted *before* the re-narrowing, so division overflow traps instead of wrapping. See [Division and Modulo](#division-and-modulo).
 
-The current behavior therefore matches C's integer promotion rule (arithmetic is done in the promoted width) *and* truncates back to the sub-type's width immediately afterward, so a sub-i32 local never holds a value outside its declared range.
+The current behavior therefore matches C's integer promotion rule (arithmetic is done in the promoted width) *and* truncates back to the sub-type's width immediately afterward, so a sub-i32 local never holds a value outside its declared range. Where the operator is guarded rather than wrapping, this re-narrowing is also the overflow test: the guard runs it, compares, and traps exactly when it would have changed the promoted result — see [The guard shapes](#the-guard-shapes).
 
 ### Division and Modulo
 
@@ -194,13 +194,13 @@ The rule is lexical and it is about the parentheses. An annotation reaches the `
 - **The inner expression may be any scalar.** `checked(a + b > c)` is a boundary shape authors write, and the `bool` the comparison yields is a fine thing to annotate — the arithmetic being governed is inside it. A struct, an array, a unit value or a function has no arithmetic to govern and is a type error.
 - **A `const` initializer is an ordinary expression.** `const SCALE: i32 = wrapping(2147483647 + 1);` is how a wrapped constant is written.
 
-An operator no annotation encloses has the language's default mode, which is wrapping. Writing `checked(...)` around the arithmetic you mean to be exact is therefore the opt-in, and `wrapping(...)` around already-wrapping arithmetic changes nothing — reported as a warning (**A054**) rather than an error, because which spelling is redundant is decided by the default rather than by the expression.
+An operator no annotation encloses has the language's default mode, which is checked. `wrapping(...)` is therefore the opt-out — the one way to ask for the machine's own answer — and a `checked(...)` that no `wrapping(...)` encloses names the mode already in force and changes nothing. That is reported as a warning (**A054**) rather than an error, because which spelling is redundant is decided by the default rather than by the expression.
 
 ### The guard shapes
 
 A guarded operator is emitted inline: the operation, then a test of what it produced, then `unreachable` on the failing side. Nothing is factored into a helper function, because a synthetic function would renumber every index an obligation names its callee by.
 
-There is no wider width to compute a candidate result in — an `i64` product has nowhere to be checked — so each row saves its operands or its result in a scratch local and recomputes the question from those. The scratch is one shared pool per function, reserved before the body is emitted and holding at most three slots per width class present; a function with no checked arithmetic reserves none and its bytes are what they were before the annotation existed.
+There is no wider width to compute a candidate result in — an `i64` product has nowhere to be checked — so each row saves its operands or its result in a scratch local and recomputes the question from those. The scratch is one shared pool per function, reserved before the body is emitted and holding at most three slots per width class present; a function whose governed operators are all inside a `wrapping(...)`, or that has none, reserves nothing.
 
 | Operator | Overflow test | Added code bytes |
 |----------|---------------|------------------|
@@ -213,15 +213,17 @@ There is no wider width to compute a candidate result in — an `i64` product ha
 | unsigned `*` at u32/u64 | `b != 0 && (r /u b) != a` | +30 |
 | any of them at i8/i16/u8/u16 | re-narrowing the promoted result changes it | +13 |
 
-Each width class the pool holds costs a further 2 bytes of locals declarations. The figures are instruction bytes over the same source compiled without the annotation. There is no unsigned negation row because there is no unsigned negation: `-x` at a `u32` is a type error, not an operation that could overflow.
+Each width class the pool holds costs a further 2 bytes of locals declarations. The figures are instruction bytes over the same source with the operator written `wrapping(...)`. There is no unsigned negation row because there is no unsigned negation: `-x` at a `u32` is a type error, not an operation that could overflow.
 
-Three things about that table are worth a sentence each.
+Four things about that table are worth a sentence each.
 
 **Multiply is checked by dividing back.** There is no wider width and no conversion opcode in the emitter's vocabulary, so the product is recovered by `r /s b` and compared against `a`. That check has two inputs it must not be handed: `b == 0`, where the division traps, and `(a, b) = (MIN, -1)`, where the division would reach WebAssembly's own `integer overflow` trap. Both arms are therefore explicit and both come before any division runs. Without the `b == -1` arm the multiply would still refuse the overflow, but by the wrong trap.
 
 **Narrow widths are cheap because the promoted value is still there.** An `i8` operator runs at `i32` and is re-narrowed afterwards, so overflow is exactly "re-narrowing changes the result". The guard runs the same re-narrowing every narrow operation already ends with and leaves its value behind, which is why the lowering site does not emit that re-narrowing a second time.
 
 **Every guard traps through `unreachable`.** That is a design constraint, not an accident of the shapes: the Rocq contract enumerates the roles `BI_unreachable` is emitted in, and a guard that reached a native trap instead would be a trap kind that table does not describe. The execution matrix over the catalogue asserts the trap *kind* for exactly this reason.
+
+**The annotation and the default are two spellings of one thing.** `wrapping(e)` emits what the operator emitted before either keyword existed and nothing else, and `checked(e)` emits what an operator with no annotation around it emits. Both directions are pinned by compiling one source under each fallback and comparing bytes, which is also what makes the figures above measurable: each is the difference between one module and the module the same source produces with `wrapping(...)` written around the operator. The catalogue fixture is the case in point: it writes `wrapping(...)` only where a row needs modular arithmetic to be about something else, and every other guard in it comes from the default alone.
 
 Here is the signed `+` row as the golden emits it at i32:
 
@@ -256,7 +258,7 @@ Q20.20 fixed point multiplies two scaled numbers and divides the product back by
 ```inference
 pub fn fixmul(a: i64, b: i64) -> i64 {
   const ONE: i64 = 1048576;
-  return checked(a * b) / ONE;
+  return a * b / ONE;
 }
 
 pub fn run() -> i64 {
@@ -265,7 +267,7 @@ pub fn run() -> i64 {
 }
 ```
 
-Without the annotation `run` returns -814970044416 for a true value of 16777216000000, which is the failure mode this surface exists for. With it, `run` traps. The language cannot compute the right answer here — there is no wider type, no cast and no widening multiply — so what the annotation buys is a loud failure in place of a quiet wrong number.
+`run` traps. Write the multiply as `wrapping(a * b)` and it returns -814970044416 for a true value of 16777216000000, which is the failure mode this design exists to end. The language cannot compute the right answer here — there is no wider type, no cast and no widening multiply — so what the guard buys is a loud failure in place of a quiet wrong number.
 
 ### What a proof can say about it
 
@@ -283,7 +285,7 @@ spec OverflowRealization {
 }
 ```
 
-The guard is the whole of what makes that claim informative. Over an unmarked `fixmul` the emitted obligation is byte-for-byte the same text and is unconditionally true: with no trap in the callee every argument pair reduces to a value, and each conjunct of the envelope can be ignored. An `HA_app_ok` over wrapping arithmetic constrains nothing about overflow, and its silence must not be read as coverage.
+The guard is the whole of what makes that claim informative. Over a `fixmul` whose multiply is written `wrapping(a * b)` the emitted obligation is byte-for-byte the same text and is unconditionally true: with no trap in the callee every argument pair reduces to a value, and each conjunct of the envelope can be ignored. An `HA_app_ok` over wrapping arithmetic constrains nothing about overflow, and its silence must not be read as coverage.
 
 The envelope is exact rather than generous. 3037000499 is the largest N with N² inside `i64`, and an `i64` declaration contributes only a width to the obligation, never a range, so the `assume` is the sole source of the bound and both halves of each pair are load-bearing. `core/wasm-codegen/docs/specification-obligations.md` sets out the emitted obligation and how it is read.
 
@@ -311,9 +313,9 @@ Letting an overflow guard reach WebAssembly's native `integer overflow` trap wou
 | Zig (safe) | Panic via safety check | Panic | `@addWithOverflow` available explicitly |
 | Zig (unsafe) | Wrapping | Panic | `+%` wrapping operators available |
 | WASM | Defined wrapping | Trap | Full specification in WASM core spec §4.3.2 |
-| Inference | Defined wrapping, or a trap inside `checked(...)` | Trap | The mode is fixed per expression by `checked(e)` / `wrapping(e)`; an unannotated add/sub/mul/neg wraps. Signed division overflow traps at every width (narrow types via a compiler-added guard) |
+| Inference | Trap, or defined wrapping inside `wrapping(...)` | Trap | The mode is fixed per expression by `checked(e)` / `wrapping(e)`; an unannotated add/sub/mul/neg traps. Signed division overflow traps at every width (narrow types via a compiler-added guard) |
 
-Inference's spelling is closest to Zig's `+%` and Rust's `wrapping_add`: the two behaviors are both written down, and neither is reached by a build profile. It differs from both in scoping the choice to a parenthesized expression rather than to an operator or a method call, which is the only form available in a language with no methods on primitives and no width-generic functions. It also differs from every row above in that the choice is not a safety switch: a proof is what the trap is for, and [What a proof can say about it](#what-a-proof-can-say-about-it) is where that cashes out.
+Inference's default is Rust's debug behavior and Zig's safe-mode behavior, with the difference that no build profile takes it away: there is no release mode in which the same source stops trapping. Its spelling of the escape is closest to Zig's `+%` and Rust's `wrapping_add` — both behaviors are written down, and neither is reached by a build setting — but it scopes the choice to a parenthesized expression rather than to an operator or a method call, which is the only form available in a language with no methods on primitives and no width-generic functions. It also differs from every row above in that the choice is not a safety switch: a proof is what the trap is for, and [What a proof can say about it](#what-a-proof-can-say-about-it) is where that cashes out.
 
 The critical distinction is between *defined* behavior and *undefined* behavior. C's undefined behavior for signed overflow means the optimizer is allowed to assume overflow never occurs, leading to deleted bounds checks, eliminated branches, and silent wrong results. WASM has no such latitude — the specification fully defines every overflow result, making the behavior predictable regardless of optimization level.
 
@@ -380,12 +382,12 @@ For Inference's WASM-to-Rocq translation, every `i32.add` in the WASM binary mus
 
 ### Proof Obligations for Overflow-Free Code
 
-When writing a Rocq proof about Inference code, the user must either:
+Which of two jobs a proof faces is decided by the source, not by the prover:
 
-1. Prove that no overflow can occur (typically by establishing bounds on inputs), or
-2. Account for wrapping in the proof (the result is defined, so the proof is possible, but it may be unexpected).
+1. Where the operator is guarded, prove that no overflow can occur — typically by establishing bounds on the inputs.
+2. Where it is written `wrapping(...)`, account for the wrap: the result is defined, so the proof is possible, but it may be unexpected.
 
-Option 1 is more common. A function that receives an `i32` parameter and returns `param + 1` requires the user to prove that the input is less than `i32::MAX` before the proof obligation `result == input + 1` can be discharged over integers. If that precondition is missing, the proof must instead discharge `result == (input + 1) mod 2^32`, which is a different and weaker claim about the function's behavior.
+The first is the ordinary case. A function that receives an `i32` parameter and returns `param + 1` traps at `i32::MAX`, so a specification that calls it has to bound the argument below `i32::MAX` before the claim that the call is realized can close — and if that bound is missing or too wide, the claim is false rather than weaker. Written `wrapping(param + 1)` the function cannot trap, and what a proof has to discharge instead is `result == (input + 1) mod 2^32`, a different and weaker statement about the function's behavior.
 
 ### Overflow Checks as Proof Obligations
 
@@ -431,7 +433,7 @@ let val = number_literal.value.parse::<u32>()
 func.instruction(&Instruction::I32Const(val));
 ```
 
-The test suite for wrapping behavior is in `tests/src/codegen/wasm/arith_overflow.rs`. It covers eight cases: `i32::MAX + 1`, `i32::MIN - 1`, `i64::MAX + 1`, `i64::MIN - 1`, `u32::MAX + 1`, `i32::MAX * 2`, `-i32::MIN`, and `-i64::MIN`. Each case is verified against a golden WAT file and executed via Wasmtime to confirm the wrapping result at runtime.
+The boundary suite is `tests/src/codegen/wasm/arith_overflow.rs`, and it carries eight cases twice. `i32::MAX + 1`, `i32::MIN - 1`, `i64::MAX + 1`, `i64::MIN - 1`, `u32::MAX + 1`, `i32::MAX * 2`, `-i32::MIN` and `-i64::MIN` are each written once with `wrapping(...)` over constants, asserting the modular value, and once over parameters with no annotation, asserting that the call traps on the vector its twin wraps at. Parameters are what makes the second half writable at all: a constant whose result leaves its type is refused by A052 before code generation, and the golden path runs analysis.
 
 The guarded half is `tests/src/codegen/wasm/checked_arith.rs`, over a fixture carrying one exported function per catalogue row plus the reproducer. Its execution matrix runs each row at its boundary vectors and asserts the trap *kind* rather than merely that a trap occurred — the vector that makes that necessary is `(MIN, -1)` at a signed multiply, which is the one an unguarded round-trip check would fail through the machine's `integer overflow` trap instead. It also pins the vectors that must **not** trap, `2^62 * -2` landing exactly on `i64::MIN` among them.
 
@@ -445,9 +447,9 @@ The narrow types are the same shape of problem at the other end. `i8` and `u8` a
 
 ### Constant Folding and Compile-Time Detection
 
-A constant-folding pass could evaluate constant *expressions* at compile time and report an error when the result overflows. This does not require runtime guards — it is purely a front-end diagnostic.
+An operation whose operands are known before the program runs can be evaluated at compile time and reported there when the result overflows. That needs no runtime guard: it is purely a front-end diagnostic, and it is the compile-time half of the trap.
 
-The literal case is already closed: analysis rule **A022 (Literal out of range)** rejects `let a: i8 = 200` at compile time, because 200 exceeds `i8::MAX` (127) and the value could never round-trip through its declared type (see [Static Analysis](static-analysis.md)). What remains open is folding *computed* constants: unannotated, `127 + 1` assigned to an `i8` wraps and nothing reports it, and under `checked(...)` it traps at run time where the operands were knowable at build time.
+Both halves are closed. Analysis rule **A022 (Literal out of range)** rejects `let a: i8 = 200` at compile time, because 200 exceeds `i8::MAX` (127) and the value could never round-trip through its declared type. **A052 (Constant arithmetic overflow)** takes the computed case: `let a: i8 = 127 + 1;` is refused, because both operands fold and the sum leaves the type it is performed at, so the operation is not a value the program computes but a trap it takes on every run that reaches it. Literals, a body's `const` bindings, parentheses, annotations and nested arithmetic fold; a `let` binding and a call do not. An operator inside a `wrapping(...)` folds modularly and is exempt, which after this rule makes `wrapping(127 + 1)` the only way to write a constant that wraps. What stays outside the front end is everything that does not fold — a parameter, a `let` binding, a value a call returns — and for those the emitted guard is the only answer. See [Static Analysis](static-analysis.md).
 
 ### Overflow Checks in Non-Deterministic Blocks
 
@@ -461,7 +463,7 @@ The framing this section used to carry — that checks would have to be stripped
 
 ### Sub-i32 Truncation
 
-Sub-i32 truncation after arithmetic is implemented (see [Sub-i32 Types](#sub-i32-types-i8-i16-u8-u16) above); for an unannotated `i8` addition, the emitted sequence is:
+Sub-i32 truncation after arithmetic is implemented (see [Sub-i32 Types](#sub-i32-types-i8-i16-u8-u16) above); for an `i8` addition written `wrapping(...)`, the emitted sequence is:
 
 ```wat
 local.get $a     ;; i8 stored as i32

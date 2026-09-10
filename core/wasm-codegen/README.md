@@ -59,8 +59,8 @@ Typed AST (TypedContext)
    detailed explanation. The same pass reserves the scratch locals a body's overflow guards
    write, asking `overflow_guard::guard_kind` about each `+`, `-`, `*` and unary `-` — the
    same classifier emission asks — so a guard cannot reach a scratch slot that was never
-   reserved. A body with no effectively checked arithmetic reserves none, which is every
-   body of a program that writes no `checked(...)`.
+   reserved. A body whose governed operators are all written inside a `wrapping(...)`, or
+   that has none, reserves nothing.
 5. **Instruction Emission** - Lower functions, statements, and expressions to WASM
    instructions. `let` definitions are lowered via a push instruction followed by
    `local.set`; `const` definitions use the same path. Supported initializer expression
@@ -425,7 +425,7 @@ Detailed design documents live in `docs/`:
   function becomes in proof mode: aggregates as ordered scalar leaves, the slot-allocation
   rule that fixes every `T_local` index in an emitted goal, one fully expanded obligation,
   the definedness rule for `a[i]` (and the both-bounds requirement a signed index carries),
-  no-overflow as a realization claim (what `checked(...)` adds to an `HA_app_ok` and why an
+  no-overflow as a realization claim (what the guard adds to an `HA_app_ok` and why an
   envelope alone adds nothing), quantifier alternation, the caps, and the table of kept
   rejections.
 

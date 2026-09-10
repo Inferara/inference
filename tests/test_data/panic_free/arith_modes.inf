@@ -1,16 +1,15 @@
-// `checked(...)` and `wrapping(...)` in every position that lowers one: a free
+// An arithmetic-mode annotation in every position that lowers one: a free
 // function's return expression, a method body, a comparison whose operands are
 // sums, one annotation nested inside another, and a `const` initializer. The
 // annotation is an expression form, so each of these is a separate lowering
 // path rather than a repetition of one.
 //
-// Two of the annotations here are `wrapping(...)` under a wrapping default, so
-// analysis reports A054 against them. That is deliberate and the warnings are
-// expected: the coverage this fixture exists for is the *lowering* of each
-// position, and an annotation naming the default mode lowers exactly as one
-// naming the other does. Rewriting them to silence A054 would replace the
-// method-body and `const`-initializer paths with a second copy of the checked
-// ones and lose the halves nothing else covers.
+// Every annotation below names the mode its position is not already in, so none
+// of them is reported as redundant: `wrapping(...)` against the language's
+// checked default, and the one `checked(...)` against the `wrapping(...)` it is
+// written inside. The coverage this fixture exists for is the *lowering* of each
+// position, and both spellings lower alike, so choosing the non-redundant one
+// costs nothing and keeps the file free of findings it is not named for.
 
 struct Meter {
     ticks: i32;
@@ -21,18 +20,18 @@ struct Meter {
 }
 
 fn scaled(a: i32, b: i32) -> i32 {
-    return checked(a * b);
+    return wrapping(a * b);
 }
 
 // The boundary shape: what the annotation encloses is the `bool` the comparison
 // yields, and the arithmetic it governs is inside that comparison.
 fn exceeds(a: i32, b: i32, c: i32) -> bool {
-    return checked(a + b > c);
+    return wrapping(a + b > c);
 }
 
-// The innermost annotation wins, so the `*` is checked and the `+` is not.
+// The innermost annotation wins, so the `+` is checked and the `*` is not.
 fn nested(a: i32, b: i32, c: i32) -> i32 {
-    return checked(a * wrapping(b + c));
+    return wrapping(a * checked(b + c));
 }
 
 pub fn main() -> i32 {

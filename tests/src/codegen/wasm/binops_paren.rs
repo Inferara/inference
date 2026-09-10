@@ -146,7 +146,6 @@ mod regenerate {
             .join("codegen")
             .join("wasm")
             .join("binops_paren")
-            .join("binops_paren")
     }
 
     #[test]

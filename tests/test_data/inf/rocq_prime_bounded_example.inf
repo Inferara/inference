@@ -1,17 +1,28 @@
 // The canonical PrimeExample with the source-visible signed bound needed by
 // the dischargeability gate. Keep the executable body and the remainder of the
 // specification logically identical to rocq_prime_example.inf.
+//
+// The loop's two operators are written modular, and under this specification's
+// envelope that spelling changes no value it ever computes. `n <= 2000000000`
+// stops the loop at the first `i` whose square passes `n`: the largest square
+// evaluated is 44722 * 44722 = 2000057284 and the largest sum is 44721 + 1,
+// both well inside `i32`, so neither operator can leave its type on any run
+// this specification admits. What the spelling does buy is that the emitted
+// module carries no overflow guard, and so stays byte-for-byte the module the
+// committed `.v` golden holds and the dischargeability gate's companion proof
+// is written against — a guard here would cost that proof a rewrite to buy a
+// trap that cannot fire.
 fn is_prime(n: i32) -> bool {
     if n < 2 {
         return false;
     }
     let mut result: bool = true;
     let mut i: i32 = 2;
-    loop i * i <= n {
+    loop wrapping(i * i) <= n {
         if (n % i) == 0 {
             result = false;
         }
-        i = i + 1;
+        i = wrapping(i + 1);
     }
     return result;
 }

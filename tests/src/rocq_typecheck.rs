@@ -85,11 +85,12 @@ pub(crate) mod gate {
     /// this entry to staying in this list.
     ///
     /// `spec_overflow_realization.inf` is the same argument one trap kind over,
-    /// and the only entry whose executable bodies carry an *overflow* guard: a
-    /// `checked(...)` multiply at `i64`, whose guard divides the product back
-    /// by an operand, and a `checked(...)` increment at `i8`, whose guard
-    /// re-narrows the promoted result and compares. Both are the only producers
-    /// in this list of the nested `BI_if` shape a division round-trip needs.
+    /// and the entry whose executable bodies carry the *overflow* guard the
+    /// obligations here are about: a multiply at `i64`, whose guard divides the
+    /// product back by an operand, and an increment at `i8`, whose guard
+    /// re-narrows the promoted result and compares. Together they are the only
+    /// producers in this list of the nested `BI_if` shape a division round-trip
+    /// needs.
     /// It is checked by
     /// [`spec_overflow_realization_matches_committed_v_golden`].
     ///

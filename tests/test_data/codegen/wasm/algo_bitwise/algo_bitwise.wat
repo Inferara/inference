@@ -20,7 +20,7 @@
   (export "count_leading_zeros" (func $count_leading_zeros))
   (export "byte_swap_16" (func $byte_swap_16))
   (func $popcount (;0;) (type 0) (param $n i32) (result i32)
-    (local $count i32) (local $x i32)
+    (local $count i32) (local $x i32) (local i32 i32 i32)
     i32.const 0
     local.set $count
     local.get $n
@@ -35,12 +35,40 @@
         local.get $x
         local.get $x
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.sub
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.gt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         i32.and
         local.set $x
         local.get $count
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $count
         br 0 (;@2;)
       end
@@ -50,6 +78,7 @@
     unreachable
   )
   (func $is_power_of_2 (;1;) (type 1) (param $n i32) (result i32)
+    (local i32 i32 i32)
     local.get $n
     i32.const 0
     i32.le_s
@@ -60,7 +89,21 @@
     local.get $n
     local.get $n
     i32.const 1
+    local.set 2
+    local.tee 1
+    local.get 2
     i32.sub
+    local.tee 3
+    local.get 1
+    i32.lt_s
+    local.get 2
+    i32.const 0
+    i32.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     i32.and
     i32.const 0
     i32.eq
@@ -106,16 +149,24 @@
     unreachable
   )
   (func $lowest_set_bit (;6;) (type 6) (param $n i32) (result i32)
+    (local i32 i32 i32)
     local.get $n
     i32.const 0
     local.get $n
     i32.sub
+    local.tee 3
+    i32.const -2147483648
+    i32.eq
+    if ;; label = @1
+      unreachable
+    end
+    local.get 3
     i32.and
     return
     unreachable
   )
   (func $rotate_left_8 (;7;) (type 7) (param $x i32) (param $r i32) (result i32)
-    (local $shift i32)
+    (local $shift i32) (local i32 i32 i32)
     local.get $r
     i32.const 7
     i32.and
@@ -126,7 +177,21 @@
     local.get $x
     i32.const 8
     local.get $shift
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.sub
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.gt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     i32.shr_s
     i32.or
     i32.const 255
@@ -135,7 +200,7 @@
     unreachable
   )
   (func $count_leading_zeros (;8;) (type 8) (param $n i32) (result i32)
-    (local $count i32) (local $bit i32)
+    (local $count i32) (local $bit i32) (local i32 i32 i32)
     local.get $n
     i32.const 0
     i32.eq
@@ -160,11 +225,39 @@
         br_if 1 (;@1;)
         local.get $count
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.add
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.lt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $count
         local.get $bit
         i32.const 1
+        local.set 4
+        local.tee 3
+        local.get 4
         i32.sub
+        local.tee 5
+        local.get 3
+        i32.lt_s
+        local.get 4
+        i32.const 0
+        i32.gt_s
+        i32.ne
+        if ;; label = @3
+          unreachable
+        end
+        local.get 5
         local.set $bit
         br 0 (;@2;)
       end
@@ -193,4 +286,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\05\00\01\06\07\08")
 )

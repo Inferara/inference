@@ -5,7 +5,14 @@
 // It carries no `spec` of its own and no data segment — the corpus rejects a
 // data segment in any module it gates, and the failure would be reported against
 // the main fixture's name rather than this one.
+//
+// Doubling is modular by construction here, and the `wrapping(...)` spelling is
+// what keeps that true of every program this library is merged into. Two of
+// them state reachability obligations whose retained bodies reach `double`
+// across the merge, where a trap empties the observation set instead of
+// narrowing the claim; two more claim `double(x) == x + x` for every `i32`, a
+// claim a trap at `x = 1073741824` would falsify.
 
 pub fn double(a: i32) -> i32 {
-  return a + a;
+  return wrapping(a + a);
 }

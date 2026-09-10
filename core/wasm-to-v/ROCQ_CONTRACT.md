@@ -71,7 +71,7 @@ collapsed:
    every normal generated theorem skeleton contains `Admitted.`, so even a
    false statement can elaborate.
 3. **Exact-artifact discharge** is the stronger, narrowly scoped claim for the
-   six artifacts below. It requires fresh producer output to equal its
+   seven artifacts below. It requires fresh producer output to equal its
    committed golden byte-for-byte, compiles those unchanged bytes as
    `DischargeCase.Raw`, proves or refutes the exact generated theorem types in
    verifier-owned companions, rebinds those types to closed `Qed` endpoints,
@@ -81,12 +81,16 @@ collapsed:
 
 Inference pins the independent companions, manifest, discharger, and Docker
 adapters at wasm-verifier B (`fb0b2dd56bd451960197cf7e7ccdc513eea47d8b`), which
-certifies all six cases: thirteen proved endpoints and the false fixture's
-refuted one. `linked-extern` reached that state through a second A -> B -> C
-round: this repository published the artifact first (A), B proved it against
-those exact bytes and admitted it to its manifest, and the pin bump to B is
-the C that lets the configured lane require the six-case marker and pass it.
-Nothing certified thirteen endpoints before that bump. Absence of the
+certifies the first six cases: thirteen proved endpoints and the false
+fixture's refuted one. `linked-extern` reached that state through a second
+A -> B -> C round: this repository published the artifact first (A), B proved
+it against those exact bytes and admitted it to its manifest, and the pin bump
+to B is the C that lets the configured lane require the six-case marker and
+pass it. Nothing certified thirteen endpoints before that bump. `overflow` is
+now in that same first position: its artifact is published here, its
+companion is written against these exact bytes in the verifier repository, and
+the configured lane requires the seven-case marker and stays red until its own
+pin bump. Absence of the
 configured executable is reported as
 `Selected-artifact dischargeability: SKIPPED`, never as proof success.
 
@@ -100,12 +104,13 @@ The initial ordered floor is exact:
 | `narrow-domain` | `spec_narrow_discharge.v` | `valid_spec_narrow_discharge` -> `checked_valid_module`; `valid_spec_narrow_discharge__NarrowDischarge` -> `checked_valid_spec` | 2 proved, 0 refuted |
 | `false-spec` | `rocq_false_certificate.v` | `valid_rocq_false_certificate` -> `checked_valid_module`; `valid_rocq_false_certificate__FalseCertificate` -> `checked_valid_spec_is_false` | 1 proved, 1 refuted |
 | `linked-extern` | `spec_linked_extern.v` | `valid_spec_linked_extern` -> `checked_valid_module`; `valid_spec_linked_extern__DoubleSpec` -> `checked_valid_spec` | 2 proved, 0 refuted |
+| `overflow` | `spec_overflow_realization.v` | `valid_spec_overflow_realization` -> `checked_valid_module`; `valid_spec_overflow_realization__OverflowRealization` -> `checked_valid_spec` | 2 proved, 0 refuted |
 
-The aggregate is exactly six cases, thirteen proved endpoints, one refuted
-endpoint, and fourteen audited rebound endpoints. The false companion's
+The aggregate is exactly seven cases, fifteen proved endpoints, one refuted
+endpoint, and sixteen audited rebound endpoints. The false companion's
 endpoint name is exactly `checked_valid_spec_is_false`; the manifest names it
 directly, and `Rebind.v` uses that name directly. There is no compatibility
-alias and no fifteenth endpoint. The historical `rocq_prime_example.inf`
+alias, and the refuted endpoint has no positive twin. The historical `rocq_prime_example.inf`
 source and `rocq_prime_example.v` golden remain byte-identical, outside this
 manifest, and uncertified. They are a preserved regression artifact, not the
 negative case; the explicit `assert(false)` artifact is the negative
@@ -120,11 +125,16 @@ separately, merges them with `core/wasm-linker`, and translates the merged
 module. So it is the only endpoint in this table proved over a body the
 compiler never emitted — `valid_spec_linked_extern__DoubleSpec` applies
 `mathlib_double`, spliced in at its post-merge `mod_funcs` ordinal — which is
-the claim the five compiled cases cannot make at all.
+the claim the six compiled cases cannot make at all.
+
+`overflow` is appended after it for the same wire-order reason. It is the only
+case whose executable body carries an overflow guard, so it is the only one
+whose obligation is discharged over arithmetic that can trap; its envelope is
+what makes that obligation true rather than vacuous.
 
 Phase A's export accepts a new empty absolute exchange directory, freshly
-generates the six artifacts in the order above, requires byte identity with
-the six committed goldens, and publishes exactly `request.json` plus `raw/`.
+generates the seven artifacts in the order above, requires byte identity with
+the seven committed goldens, and publishes exactly `request.json` plus `raw/`.
 The protocol-1 request is strict JSON: duplicate and unknown keys fail. It
 contains the pinned wasm-verifier revision, `coq_wasm_tag`, canonical
 `coq_wasm_revision`, `coq_series`, the assumption-allowlist ceiling, exact
@@ -148,7 +158,7 @@ shell wrapper owns the directory/file identity evidence and requires each
 receipt to remain a regular nonsymlink, single-link `0600` file. Rust
 independently requires the exact nonsymlink regular-file set, strictly parses
 each receipt, rejects duplicate and unknown JSON keys, checks every
-raw/pin/count/audit/result field, and requires the aggregate six/thirteen/one
+raw/pin/count/audit/result field, and requires the aggregate seven/fifteen/one
 floor. Receipt `coq_version` accepts only the whole-string grammar
 `major.minor`, `major.minor.<numeric-patch>`, or
 `major.minor+<nonempty-safe-suffix>`, and its parsed major/minor must be `8.20`;
@@ -182,7 +192,7 @@ test offline and locked with networking disabled. The ignored checkout-root
 `Cargo.lock` is neither read nor accepted as evidence. Opaque copying uses
 `busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0`.
 The wrapper exposes `batch`, `single`, and `both` adapter modes, with `both` as
-the verification default. Fresh export, six-golden equality, the selected
+the verification default. Fresh export, seven-golden equality, the selected
 adapter path, and receipt verification always run; `--full` only adds focused
 tests and the complete `inference-tests` crate suite, not the full workspace.
 The explicitly authorized host-Rust evidence lane used during implementation
@@ -195,9 +205,9 @@ does not enable a live lane and still names the pre-B verifier revision. B pins
 A, reads A's goldens with `git show A:<path>`, and constructs its own request
 for clean B rather than consuming A's stale request. C pins B and only then
 enables live fresh-output discharge through B's single-case adapter. Adding a
-selected artifact re-enters that sequence at A: the `linked-extern` case above
-is such an A, so `wasm-verifier-pin.txt` still names the previous B and the
-live lane cannot pass until its own C.
+selected artifact re-enters that sequence at A: the `overflow` case above is
+such an A, so `wasm-verifier-pin.txt` still names the previous B and the live
+lane cannot pass until its own C.
 
 ## Required Rocq context
 
@@ -1351,7 +1361,7 @@ sixth in `core/wasm-codegen/src/overflow_guard.rs`:
 | `emit_bounds_check_guard` | `index >=u length`, before a dynamic array element's offset multiply. Emitted in **both** modes | Only on an out-of-range index |
 | `emit_narrow_div_overflow_guard` | Signed `i8`/`i16` division at the one quotient the narrow width cannot hold. Emitted in **both** modes, and never was mode-gated | Only at `MIN / -1` |
 | `emit_entry_enum_tag_guard` | An exported entry's `enum` parameter carrying a tag outside the declared variant range — a host may pass any `i32` | Only on an out-of-range host argument; on *every* call for a variantless enum, which is uninhabited |
-| `overflow_guard::emit` | A source-level `+`, `-`, `*` or unary `-` whose effective arithmetic mode is checked, at a result the operand type cannot hold. Emitted in **both** modes, and only where the source's own effective mode says checked | Only on an operand pair whose true result leaves the type |
+| `overflow_guard::emit` | A source-level `+`, `-`, `*` or unary `-` at a result the operand type cannot hold — every one of them the source did not write inside a `wrapping(...)`. Emitted in **both** modes | Only on an operand pair whose true result leaves the type |
 
 A blanket "no reachable `BI_unreachable`" component on a module-level
 judgment would therefore be **false by construction** for programs the
@@ -1370,10 +1380,12 @@ only at the arguments some specification actually named.
 The overflow row is the only one whose presence is decided by the
 source. `+`, `-`, `*` and unary `-` have an *effective* arithmetic mode:
 the innermost `checked(…)`/`wrapping(…)` enclosing the operator, or, for
-an operator no annotation encloses, the language's default. Under a
-wrapping effective mode the emitter produces the bare WebAssembly
-operator and **no trap site at all**, exactly as it did before the
-annotation existed. Under a checked one it produces the guard.
+an operator no annotation encloses, the language's default, which is
+checked. Under a checked effective mode the emitter produces the guard;
+under a wrapping one it produces the bare WebAssembly operator and **no
+trap site at all**. So the guard stands at every governed operator a
+program has not written inside a `wrapping(...)`, and a body free of trap
+sites from this row is one that asked to be.
 
 Silence must not be read as coverage. An `HA_app_ok` over a callee whose
 arithmetic is all effectively wrapping constrains **nothing about
@@ -2188,7 +2200,12 @@ The binary-operator table (`+`, `-`, `*`, `/`, `%`, bitwise, shifts,
 comparisons) mirrors `lower_binary_expression` exactly: number class and
 signedness come from the left operand's type, sub-word results are
 narrowed with the same `shl`/`shr_s` (signed) or `and`-mask (unsigned)
-sequences codegen emits, and `**` has no encoding (`P002`).
+sequences codegen emits, and `**` has no encoding (`P002`). The mirroring
+is of the operator, not of the guard around it: a term's `+`, `-` and `*`
+are the modular machine operators at every effective mode, because that is
+the only arithmetic this language has, so a compiled operator that traps
+on overflow has no counterpart here. That divergence is what the rules
+above fence — see [Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot).
 
 `&&` and `||` are the exception, because they are the two operators
 `lower_binary_expression` does not lower itself — it delegates them to

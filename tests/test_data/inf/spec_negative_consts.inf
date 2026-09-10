@@ -60,11 +60,25 @@ spec Negatives {
     // record's instruction terms.
     fn bias_moves_down() forall {
         let a: i32 = @;
+        // Adding a negative constant can only move down, so one bound is
+        // enough: `-2147413648 + -70000` is exactly `i32::MIN`, and
+        // `-2147413649` is the concrete argument at which the claim below is
+        // false without it. The bound is itself a negative constant in the
+        // antecedent, which is the shape this fixture is about.
+        assume {
+            assert(a >= -2147413648);
+        }
         assert(bias_i32(a) == a + -70000);
     }
 
     fn wide_bias_moves_down() forall {
         let b: i64 = @;
+        // `-9223372032559808512 + -4294967296` is exactly `i64::MIN`; one less
+        // is the concrete argument at which the claim below is false without
+        // this bound.
+        assume {
+            assert(b >= -9223372032559808512);
+        }
         assert(bias_i64(b) == b + -4294967296);
     }
 }

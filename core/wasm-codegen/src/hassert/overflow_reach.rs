@@ -203,7 +203,7 @@ fn direct_facts(
         spec_name: entry.spec_name.as_deref(),
     };
     let mut guard = None;
-    Compiler::visit_body_guarded_operators(arena, ctx, body, default_mode, &mut |expr_id, _| {
+    Compiler::visit_body_guarded_operators(arena, ctx, body, default_mode, &mut |expr_id, _, _| {
         guard.get_or_insert_with(|| GuardReason::Guard {
             name: arena.def_name(entry.def_id).to_string(),
             module_path: entry.module_path.clone(),

@@ -22,6 +22,15 @@ pub fn main() -> i32 {
 spec SumSpec {
     fn sum_prop() forall {
         let n: i32 = @;
+        // `sum_to` accumulates only the even `i`, so its result is
+        // `k * (k + 1)` with `k = floor(n / 2)`. At 92681 that is
+        // `46340 * 46341` = 2147441940, inside `i32`; at 92682 it is
+        // `46341 * 46342` = 2147534622, past it — the concrete argument at
+        // which the claim below is false without this bound. No lower bound is
+        // needed, since the loop never runs below 1.
+        assume {
+            assert(n <= 92681);
+        }
         assert(sum_to(n) == sum_to(n));
     }
 }

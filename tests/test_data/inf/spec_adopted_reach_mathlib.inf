@@ -12,9 +12,15 @@
 // the same program links against either library — which is what makes the two
 // fixtures a controlled pair: the only difference a test can observe between
 // linking one and linking the other is the reachability obligation.
+//
+// Scaling is modular by construction here, and the `wrapping(...)` spelling is
+// what keeps that true of the program that ships: `reaches_zero` is a retained
+// body calling `scale`, which a reachability judgment reduces along with it, and
+// `scales` claims the identity for every `i32` — false at `x = 214599`, where
+// the product leaves the type, if the call trapped there instead.
 
 pub fn scale(a: i32) -> i32 {
-  return a * 10007;
+  return wrapping(a * 10007);
 }
 
 spec Bounds {

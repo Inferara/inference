@@ -1094,6 +1094,11 @@ spec Reach {
     /// Constant *arithmetic* is the second spelling in the gap: the translator
     /// folds `1 + 0`, code generation lowers both operands and the `i32.add`,
     /// and the guard tees the result.
+    ///
+    /// The sum is marked modular because a retained body may carry no operator
+    /// that traps on overflow, which `P017` refuses; the annotation is
+    /// byte-transparent, so what reaches the emitter is the same `i32.add` the
+    /// unmarked spelling produced.
     #[test]
     fn proof_mode_guards_a_const_arithmetic_index_in_a_reachability_body() {
         cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
@@ -1103,7 +1108,7 @@ spec Reach {
   fn f() exists {
     let a: [i32; 2] = [1, 2];
     let n: i32 = @;
-    assert(a[1 + 0] == n);
+    assert(a[wrapping(1 + 0)] == n);
   }
 }
 "#,

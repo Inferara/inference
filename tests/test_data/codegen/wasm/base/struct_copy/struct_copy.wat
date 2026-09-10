@@ -61,7 +61,7 @@
     unreachable
   )
   (func $copy_values_match (;1;) (type 1) (result i32)
-    (local $p i32) (local $q i32) (local $__frame_ptr i32) (local i32 i32)
+    (local $p i32) (local $q i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -87,10 +87,10 @@
     i32.const 8
     i32.add
     local.get $p
-    local.set 4
-    local.set 3
-    local.get 3
-    local.get 4
+    local.set 7
+    local.set 6
+    local.get 6
+    local.get 7
     i64.load align=1
     i64.store align=1
     local.get $__frame_ptr
@@ -103,7 +103,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 4
+    local.tee 3
+    local.get 4
     i32.add
+    local.tee 5
+    local.get 3
+    i32.lt_s
+    local.get 4
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 5
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -112,7 +126,7 @@
     unreachable
   )
   (func $independent_copies (;2;) (type 2) (result i32)
-    (local $p i32) (local $a i32) (local $b i32) (local $__frame_ptr i32) (local i32 i32)
+    (local $p i32) (local $a i32) (local $b i32) (local $__frame_ptr i32) (local i32 i32 i32 i32 i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -144,10 +158,10 @@
     i32.const 8
     i32.add
     local.get $p
-    local.set 5
-    local.set 4
-    local.get 4
-    local.get 5
+    local.set 8
+    local.set 7
+    local.get 7
+    local.get 8
     i64.load align=1
     i64.store align=1
     local.get $__frame_ptr
@@ -158,10 +172,10 @@
     i32.const 16
     i32.add
     local.get $p
-    local.set 5
-    local.set 4
-    local.get 4
-    local.get 5
+    local.set 8
+    local.set 7
+    local.get 7
+    local.get 8
     i64.load align=1
     i64.store align=1
     local.get $__frame_ptr
@@ -182,7 +196,21 @@
     i32.const 4
     i32.add
     i32.load
+    local.set 5
+    local.tee 4
+    local.get 5
     i32.add
+    local.tee 6
+    local.get 4
+    i32.lt_s
+    local.get 5
+    i32.const 0
+    i32.lt_s
+    i32.ne
+    if ;; label = @1
+      unreachable
+    end
+    local.get 6
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -248,4 +276,5 @@
     return
     unreachable
   )
+  (@custom "inference.checked" (after code) "\01\02\01\02")
 )

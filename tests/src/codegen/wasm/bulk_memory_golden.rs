@@ -342,8 +342,9 @@ mod bulk_memory_golden_tests {
     /// The scratch check reads each function's own local declarations rather than
     /// the whole module: a scratch slot is an *anonymous* local, and so is the
     /// temporary a bounds check spills its index into, which no instruction set
-    /// removes. The four functions below index their frames by constants, so their
-    /// anonymous locals can only be region scratch.
+    /// removes. The four functions below index their frames by constants and
+    /// compute in `i64`, so the only anonymous `i32` any of them declares is
+    /// region scratch.
     #[test]
     fn opt_in_frame_fill_drops_the_loop_and_its_scratch_locals() {
         let path = codegen_wasm_dir()
@@ -370,7 +371,7 @@ mod bulk_memory_golden_tests {
                 "{name} must use the fill loop at the default level:\n{default_fill}"
             );
             assert!(
-                declares_anonymous_local(&default_fill),
+                declares_anonymous_i32_local(&default_fill),
                 "...driven by an anonymous scratch local:\n{default_fill}"
             );
 
@@ -379,7 +380,7 @@ mod bulk_memory_golden_tests {
                 "the opt-in fill must leave no loop in {name}'s prologue:\n{opt_in_fill}"
             );
             assert!(
-                !declares_anonymous_local(&opt_in_fill),
+                !declares_anonymous_i32_local(&opt_in_fill),
                 "...and must reach the bulk branch before any scratch is allocated:\n{opt_in_fill}"
             );
             assert!(
@@ -389,15 +390,25 @@ mod bulk_memory_golden_tests {
         }
     }
 
-    /// Whether a function's local declarations include an unnamed slot. Named
-    /// locals are the program's own variables and the frame pointer; the compiler
-    /// names neither its region scratch nor its bounds-check temporaries.
-    fn declares_anonymous_local(function_wat: &str) -> bool {
+    /// Whether a function's local declarations include an unnamed `i32` slot.
+    ///
+    /// Named locals are the program's own variables and the frame pointer; the
+    /// compiler names neither its region scratch nor its bounds-check
+    /// temporaries, and it prints every unnamed slot of a body in one grouped
+    /// declaration. The type is part of the question because that group holds
+    /// more than the region scratch: a body whose arithmetic can overflow also
+    /// reserves a guard pool there. These bodies compute in `i64` and index
+    /// their frames by constants, so the pool they reserve is the `i64` class
+    /// and the only unnamed `i32` any of them can declare is the region
+    /// scratch.
+    fn declares_anonymous_i32_local(function_wat: &str) -> bool {
         function_wat
             .lines()
             .skip(1)
             .take_while(|line| line.trim_start().starts_with("(local"))
-            .any(|line| line.contains("(local i32"))
+            .flat_map(|line| line.split("(local"))
+            .filter(|declaration| !declaration.contains('$'))
+            .any(|declaration| declaration.contains("i32"))
     }
 
     /// Regeneration helpers for this family's goldens.

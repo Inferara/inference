@@ -29,12 +29,20 @@
 // discharging `unique` requires characterizing every reduction of the retained
 // body, and the exists fixture already covers calls (`T_app`) in reachability
 // payloads.
+//
+// Cubing that choice is modular by construction — the `assume` holds `bit` in
+// {-1, 0, 1}, where neither multiplication can leave `i32` — and the
+// `wrapping(...)` spelling is what keeps the theorem about the program that
+// ships: a retained body is reduced as written, so an operator that could trap
+// in it would empty the observation set instead of narrowing the claim, and a
+// singleton the alternatives trapped their way into is not the uniqueness this
+// fixture states.
 spec UniqueParity {
     fn uq_parity(seed: i32) unique {
         let bit: i32 = @;
         assume {
             assert(bit == seed % 2);
         }
-        assert(bit * bit * bit == bit);
+        assert(wrapping(bit * bit * bit) == bit);
     }
 }
