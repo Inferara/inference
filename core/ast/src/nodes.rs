@@ -372,6 +372,117 @@ pub enum Stmt {
 
 // Expressions
 
+/// How the arithmetic an [`Expr::ArithMode`] node encloses treats a result that
+/// does not fit its type.
+///
+/// `Wrapping` is the two's-complement wrap the machine operator performs;
+/// `Checked` traps instead. Both spellings are reserved words, so a program can
+/// name the mode it means whichever way the language's own default is set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArithMode {
+    /// `checked(e)`: an overflowing `+`, `-`, `*` or unary `-` traps.
+    Checked,
+    /// `wrapping(e)`: an overflowing `+`, `-`, `*` or unary `-` wraps.
+    Wrapping,
+}
+
+impl ArithMode {
+    /// The mode every `+`, `-`, `*` and unary `-` written outside an annotation
+    /// has.
+    ///
+    /// One value for the whole toolchain. Code generation reads it to decide
+    /// what to emit and the analysis rules read it to decide what an annotation
+    /// changes, and a program in which those two disagreed would be diagnosed
+    /// against arithmetic it does not have. It is deliberately not a build
+    /// option: which operator `a + b` denotes is a property of the language, so
+    /// one source cannot compile to two different programs.
+    pub const DEFAULT: ArithMode = ArithMode::Wrapping;
+
+    /// The source spelling of this mode, for a diagnostic that quotes back what
+    /// the author wrote.
+    #[must_use]
+    pub fn spelling(self) -> &'static str {
+        match self {
+            ArithMode::Checked => "checked",
+            ArithMode::Wrapping => "wrapping",
+        }
+    }
+
+    /// The mode this one is not.
+    ///
+    /// There are two, so a diagnostic that has to name the annotation an author
+    /// would write to change something can ask for it rather than spell out a
+    /// second `match` that a third mode would silently make wrong.
+    #[must_use]
+    pub fn other(self) -> ArithMode {
+        match self {
+            ArithMode::Checked => ArithMode::Wrapping,
+            ArithMode::Wrapping => ArithMode::Checked,
+        }
+    }
+}
+
+/// A source-level operator an arithmetic-mode annotation governs.
+///
+/// `/`, `%`, the shifts and the bitwise operators are absent because no
+/// annotation reaches them: division overflow already traps at every width, and
+/// the rest cannot leave their type. `!` and `~` map every value of a type to a
+/// value of that type, so neither can overflow either.
+///
+/// This lives beside [`ArithMode`] rather than in the emitter because it is what
+/// the annotation *means*, and more than one pass has to agree on it: the rule
+/// that reports an annotation with nothing to govern and the emitter that puts a
+/// guard on the operators it does govern must be talking about one set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GuardedOp {
+    /// Binary `+`.
+    Add,
+    /// Binary `-`.
+    Sub,
+    /// Binary `*`.
+    Mul,
+    /// Unary `-`, which only the signed types have.
+    Neg,
+}
+
+impl GuardedOp {
+    /// The governed operator a binary expression writes, or `None` when the
+    /// operator is one no annotation reaches.
+    #[must_use]
+    pub fn from_binary(op: &OperatorKind) -> Option<Self> {
+        match op {
+            OperatorKind::Add => Some(GuardedOp::Add),
+            OperatorKind::Sub => Some(GuardedOp::Sub),
+            OperatorKind::Mul => Some(GuardedOp::Mul),
+            OperatorKind::Div
+            | OperatorKind::Mod
+            | OperatorKind::Pow
+            | OperatorKind::And
+            | OperatorKind::Or
+            | OperatorKind::Eq
+            | OperatorKind::Ne
+            | OperatorKind::Lt
+            | OperatorKind::Le
+            | OperatorKind::Gt
+            | OperatorKind::Ge
+            | OperatorKind::BitAnd
+            | OperatorKind::BitOr
+            | OperatorKind::BitXor
+            | OperatorKind::Shl
+            | OperatorKind::Shr => None,
+        }
+    }
+
+    /// The governed operator a prefix unary expression writes, or `None`.
+    #[must_use]
+    pub fn from_unary(op: &UnaryOperatorKind) -> Option<Self> {
+        match op {
+            UnaryOperatorKind::Neg => Some(GuardedOp::Neg),
+            UnaryOperatorKind::Not | UnaryOperatorKind::BitNot => None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
     Binary {
@@ -406,6 +517,18 @@ pub enum Expr {
     StructLiteral {
         name: IdentId,
         fields: Vec<(IdentId, ExprId)>,
+    },
+    /// An arithmetic-mode annotation over a parenthesized expression:
+    /// `checked(e)` or `wrapping(e)`.
+    ///
+    /// The annotation is lexical and governs only the `+`, `-`, `*` and unary
+    /// `-` operators written *inside* it — not those in a callee it calls, and
+    /// never `/`, `%`, a shift or a bitwise operator. It is a primary
+    /// expression, so `checked(a) * b` governs `a` alone. The innermost
+    /// enclosing annotation wins.
+    ArithMode {
+        mode: ArithMode,
+        expr: ExprId,
     },
     Identifier(IdentId),
     NumberLiteral {

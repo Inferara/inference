@@ -1,3 +1,5 @@
+pub mod arith_mode_changes_nothing;
+pub mod arith_mode_governs_nothing;
 pub mod array_index_64bit;
 pub mod array_index_const_oob;
 pub mod array_uzumaki_as_argument;
@@ -50,6 +52,8 @@ pub mod unsupported_compound_return_expr;
 pub mod uzumaki_outside_nondet_block;
 pub mod visibility_inside_spec;
 
+use arith_mode_changes_nothing::ArithModeChangesNothing;
+use arith_mode_governs_nothing::ArithModeGovernsNothing;
 use array_index_64bit::ArrayIndex64Bit;
 use array_index_const_oob::ArrayIndexConstOob;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
@@ -156,5 +160,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UnitAsValue,
         &UnnamedParameter,
         &GenericNotSupported,
+        &ArithModeGovernsNothing,
+        &ArithModeChangesNothing,
     ]
 }

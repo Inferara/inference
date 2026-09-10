@@ -21,9 +21,9 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgData, ArgKind, BlockData, BlockKind, Def, DefData, Directive, Expr, ExprData, Field, Ident,
-    Location, ModuleRef, OperatorKind, SimpleTypeKind, SourceFileData, Stmt, StmtData, TypeData,
-    TypeNode, UnaryOperatorKind, UseDirective, Visibility,
+    ArgData, ArgKind, ArithMode, BlockData, BlockKind, Def, DefData, Directive, Expr, ExprData,
+    Field, Ident, Location, ModuleRef, OperatorKind, SimpleTypeKind, SourceFileData, Stmt, StmtData,
+    TypeData, TypeNode, UnaryOperatorKind, UseDirective, Visibility,
 };
 
 use crate::errors::ParseError;
@@ -940,6 +940,30 @@ impl<'s> Lowering<'s> {
                 location,
                 kind: Expr::Uzumaki,
             }),
+            SyntaxKind::ArithModeExpression => {
+                // guaranteed: `arith_mode` bumps the keyword that selected the
+                // rule before opening the node, so exactly one of the two is
+                // present.
+                let mode = node
+                    .first_token_of_any(&[SyntaxKind::CheckedKw, SyntaxKind::WrappingKw])
+                    .map_or(ArithMode::DEFAULT, |token| match token.kind {
+                        SyntaxKind::CheckedKw => ArithMode::Checked,
+                        _ => ArithMode::Wrapping,
+                    });
+                // The annotated expression follows `(`. Where the grammar found
+                // neither — the keyword written bare, or with empty parentheses
+                // — it has already said so in a sentence naming the fix, so this
+                // fills the slot silently rather than adding a second
+                // diagnostic about the same keystroke.
+                let expr = match node.nth_node(0) {
+                    Some(operand) => self.lower_expression(operand),
+                    None => self.create_error_expr(node),
+                };
+                self.arena.exprs.alloc(ExprData {
+                    location,
+                    kind: Expr::ArithMode { mode, expr },
+                })
+            }
             SyntaxKind::Identifier => {
                 let ident_id = self.lower_identifier(node);
                 self.arena.exprs.alloc(ExprData {
@@ -1734,6 +1758,7 @@ fn is_expression_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::NumberLiteral
             | SyntaxKind::UnitLiteral
             | SyntaxKind::UzumakiKeyword
+            | SyntaxKind::ArithModeExpression
             | SyntaxKind::Identifier
             | SyntaxKind::GenericName
             | SyntaxKind::TypeQualifiedName
@@ -1752,8 +1777,8 @@ mod tests {
     use inference_ast::arena::AstArena;
     use inference_ast::ids::{BlockId, DefId, ExprId, TypeId};
     use inference_ast::nodes::{
-        ArgData, ArgKind, BlockKind, Def, Directive, Expr, OperatorKind, SimpleTypeKind, Stmt,
-        TypeNode, UnaryOperatorKind, Visibility,
+        ArgData, ArgKind, ArithMode, BlockKind, Def, Directive, Expr, OperatorKind, SimpleTypeKind,
+        Stmt, TypeNode, UnaryOperatorKind, Visibility,
     };
 
     /// Parses `src`, asserts the parse produced no errors, and returns the arena.
@@ -2887,6 +2912,149 @@ mod tests {
             Expr::PrefixUnary { op, .. } => assert_eq!(*op, UnaryOperatorKind::BitNot),
             other => panic!("expected prefix unary, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_checked_and_wrapping_annotations() {
+        for (src, expected) in [
+            ("fn f() { checked(1 + 2); }", ArithMode::Checked),
+            ("fn f() { wrapping(1 + 2); }", ArithMode::Wrapping),
+        ] {
+            let arena = lower(src);
+            match single_expr(&arena) {
+                Expr::ArithMode { mode, expr } => {
+                    assert_eq!(*mode, expected, "wrong mode for {src:?}");
+                    assert!(
+                        matches!(arena[*expr].kind, Expr::Binary { .. }),
+                        "the annotated expression must be the addition for {src:?}"
+                    );
+                }
+                other => panic!("expected an arithmetic-mode annotation, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn arith_mode_annotations_nest_innermost_last() {
+        // The annotation is an atom, so `wrapping(b + c)` is one operand of the
+        // multiplication rather than something the outer `checked` ends at.
+        let arena = lower("fn f() { checked(a * wrapping(b + c)); }");
+        let Expr::ArithMode {
+            mode: outer,
+            expr: product,
+        } = single_expr(&arena)
+        else {
+            panic!("expected an arithmetic-mode annotation");
+        };
+        assert_eq!(*outer, ArithMode::Checked);
+        let Expr::Binary {
+            right,
+            op: OperatorKind::Mul,
+            ..
+        } = &arena[*product].kind
+        else {
+            panic!("expected the annotated expression to be a multiplication");
+        };
+        let Expr::ArithMode {
+            mode: inner_mode,
+            expr: sum,
+        } = &arena[*right].kind
+        else {
+            panic!("expected the right operand to be the inner annotation");
+        };
+        assert_eq!(*inner_mode, ArithMode::Wrapping);
+        assert!(matches!(
+            arena[*sum].kind,
+            Expr::Binary {
+                op: OperatorKind::Add,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn arith_mode_annotation_governs_only_its_own_parentheses() {
+        // `checked(a) * b` is a multiplication of an annotated operand, not an
+        // annotation over the whole product: the keyword form is a primary
+        // expression, so the annotation closes at its `)`.
+        let arena = lower("fn f() { checked(a) * b; }");
+        let Expr::Binary {
+            left,
+            op: OperatorKind::Mul,
+            ..
+        } = single_expr(&arena)
+        else {
+            panic!("expected a multiplication at the top");
+        };
+        assert!(matches!(arena[*left].kind, Expr::ArithMode { .. }));
+    }
+
+    #[test]
+    fn checked_and_wrapping_are_reserved_words() {
+        // Reserving them is what keeps `checked(x)` from ever meaning a call:
+        // a declaration spelled either way is refused where the name is written.
+        //
+        // The break reaches every position the lexer's identifier rule feeds,
+        // not only the two declaration forms: a struct field, the name after a
+        // `.`, an enum variant and a `use` path segment all read their name
+        // from the same token, so each is listed here rather than left to be
+        // discovered by whoever writes one.
+        for src in [
+            "fn checked() { }",
+            "fn wrapping() { }",
+            "fn f() { let checked: i32 = 1; }",
+            "fn f() { let wrapping: i32 = 1; }",
+            "struct S { checked: i32; }",
+            "struct S { wrapping: i32; }",
+            "fn f(s: S) -> i32 { return s.wrapping; }",
+            "fn f(s: S) -> i32 { return s.checked; }",
+            "enum E { checked, Other }",
+            "enum E { Other, wrapping }",
+            "use wrapping::helper;",
+            "use lib::checked::helper;",
+        ] {
+            let result = parse(src);
+            assert!(
+                !result.errors.is_empty(),
+                "{src:?} must be rejected now that both spellings are keywords"
+            );
+        }
+    }
+
+    #[test]
+    fn arith_mode_annotation_without_parentheses_reports_the_missing_one() {
+        // One diagnostic per mistake: the operand is still taken, so nothing
+        // downstream re-reports the same keystroke.
+        let arena = lower_rejected(
+            "fn f() { checked 1 + 2; }",
+            &["`checked` takes the expression it governs in parentheses: write `checked(a + b)`"],
+        );
+        let Expr::ArithMode { expr, .. } = single_expr(&arena) else {
+            panic!("expected an arithmetic-mode annotation");
+        };
+        assert!(matches!(arena[*expr].kind, Expr::Binary { .. }));
+        lower_rejected("fn f() { wrapping(1 + 2; }", &["expected RParen"]);
+        lower_rejected(
+            "fn f() { wrapping(); }",
+            &["`wrapping(...)` needs an expression to govern"],
+        );
+    }
+
+    #[test]
+    fn arith_mode_annotation_with_no_operand_lowers_to_an_error_expression() {
+        // The keyword alone leaves the node without an operand; lowering must
+        // still produce an expression so the statement has something to hold.
+        let arena = lower_rejected(
+            "fn f() { checked; }",
+            &["`checked` takes the expression it governs in parentheses: write `checked(a + b)`"],
+        );
+        let Expr::ArithMode { expr, .. } = single_expr(&arena) else {
+            panic!("expected an arithmetic-mode annotation");
+        };
+        assert!(matches!(
+            &arena[*expr].kind,
+            Expr::Identifier(id) if arena[*id].name == "<error>"
+        ));
     }
 
     #[test]

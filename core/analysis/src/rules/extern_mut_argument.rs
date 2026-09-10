@@ -303,21 +303,28 @@ fn param_passes_a_region(ctx: &TypedContext, ty: TypeId, module_path: &[String])
 /// Reduces an argument to the binding whose memory it denotes, or reports that
 /// it denotes none.
 ///
-/// `p`, `p.inner`, `arr[i]`, `(p)` and any nesting of those all address bytes
-/// inside `p`'s or `arr`'s own region, so the binding at the bottom is the one a
-/// foreign store would reach. Every remaining shape is enumerated rather than
-/// swept by a wildcard, so a new expression form must be classified here instead
-/// of silently defaulting to a temporary — the direction that changes what the
-/// message says.
+/// `p`, `p.inner`, `arr[i]`, `(p)`, `wrapping(p)` and any nesting of those all
+/// address bytes inside `p`'s or `arr`'s own region, so the binding at the
+/// bottom is the one a foreign store would reach. The two grouping forms come
+/// off first through the shared arena query, so a parenthesized spelling and an
+/// annotated one cannot be classified differently. Every remaining shape is
+/// enumerated rather than swept by a wildcard, so a new expression form must be
+/// classified here instead of silently defaulting to a temporary — the
+/// direction that changes what the message says.
 fn argument_root(arena: &AstArena, expr_id: ExprId) -> ArgumentRoot {
     match &arena[expr_id].kind {
         Expr::Identifier(ident_id) => ArgumentRoot::Binding {
             expr: expr_id,
             name: arena[*ident_id].name.clone(),
         },
+        // The two grouping forms peel together, as
+        // [`AstArena::transparent_inner`] defines them to; this match is
+        // exhaustive, so a third one cannot be added without being classified
+        // here.
         Expr::MemberAccess { expr, .. }
         | Expr::ArrayIndexAccess { array: expr, .. }
-        | Expr::Parenthesized { expr } => argument_root(arena, *expr),
+        | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. } => argument_root(arena, *expr),
         Expr::StructLiteral { name, .. } => {
             ArgumentRoot::Temporary(format!("{} {{ … }}", arena[*name].name))
         }

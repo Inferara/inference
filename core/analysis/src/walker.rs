@@ -6,7 +6,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Expr, Stmt, UnaryOperatorKind};
+use inference_ast::nodes::{ArithMode, BlockKind, Def, Expr, GuardedOp, Stmt, UnaryOperatorKind};
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
@@ -93,35 +93,48 @@ pub(crate) fn walk_expr(
     visitor: &mut dyn FnMut(ExprId),
 ) {
     visitor(expr_id);
+    expr_children(arena, expr_id, &mut |child| walk_expr(arena, child, visitor));
+}
+
+/// Applies `visit` to each expression `expr_id` holds directly.
+///
+/// The crate's single enumeration of an expression's children: every general
+/// descent goes through it, so a scan cannot reach a shape its siblings miss.
+pub(crate) fn expr_children(
+    arena: &AstArena,
+    expr_id: ExprId,
+    visit: &mut dyn FnMut(ExprId),
+) {
     match &arena[expr_id].kind {
         Expr::FunctionCall {
             function, args, ..
         } => {
-            walk_expr(arena, *function, visitor);
+            visit(*function);
             for (_, arg_expr) in args {
-                walk_expr(arena, *arg_expr, visitor);
+                visit(*arg_expr);
             }
         }
         Expr::Binary { left, right, .. } => {
-            walk_expr(arena, *left, visitor);
-            walk_expr(arena, *right, visitor);
+            visit(*left);
+            visit(*right);
         }
         Expr::PrefixUnary { expr, .. }
         | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. }
         | Expr::MemberAccess { expr, .. }
-        | Expr::TypeMemberAccess { expr, .. } => walk_expr(arena, *expr, visitor),
+        | Expr::TypeMemberAccess { expr, .. } => visit(*expr),
         Expr::ArrayIndexAccess { array, index } => {
-            walk_expr(arena, *array, visitor);
-            walk_expr(arena, *index, visitor);
+            visit(*array);
+            visit(*index);
         }
         Expr::StructLiteral { fields, .. } => {
             for (_, field_expr) in fields {
-                walk_expr(arena, *field_expr, visitor);
+                visit(*field_expr);
             }
         }
         Expr::ArrayLiteral { elements } => {
             for elem in elements {
-                walk_expr(arena, *elem, visitor);
+                visit(*elem);
             }
         }
         Expr::Identifier(_)
@@ -131,6 +144,78 @@ pub(crate) fn walk_expr(
         | Expr::UnitLiteral
         | Expr::Uzumaki
         | Expr::Type(_) => {}
+    }
+}
+
+/// The operator an arithmetic-mode annotation would govern at this node, or
+/// `None` when the node is not one.
+///
+/// The type is read off the node code generation reads it off — a binary
+/// operator's left operand, a negation's own node — and the operator is then put
+/// to the same `NumberType::has_operator` question the emitter's classifier
+/// asks, so what the rules call a governed operator and what the emitter puts a
+/// guard on are decided from the same fact. A `bool` or an aggregate carries no
+/// arithmetic for an annotation to reach, and a node whose type was never
+/// recorded is not one this rule can speak about.
+pub(crate) fn governed_operator(ctx: &TypedContext, expr_id: ExprId) -> Option<GuardedOp> {
+    let (op, operand) = ctx.arena().guarded_operator(expr_id)?;
+    let type_info = ctx.get_node_typeinfo(NodeId::Expr(operand))?;
+    let TypeInfoKind::Number(number) = type_info.kind else {
+        return None;
+    };
+    number.has_operator(op).then_some(op)
+}
+
+/// Whether any operator an arithmetic-mode annotation could govern is written
+/// inside `expr_id`.
+///
+/// Containment, not government: an operator with a nearer annotation of its own
+/// still counts, because the question this answers is whether the author wrote
+/// arithmetic here at all. It does not look into a callee's body — the
+/// annotation does not reach there either.
+pub(crate) fn contains_governed_operator(ctx: &TypedContext, expr_id: ExprId) -> bool {
+    let mut found = false;
+    walk_expr(ctx.arena(), expr_id, &mut |node| {
+        found = found || governed_operator(ctx, node).is_some();
+    });
+    found
+}
+
+/// Applies `visit` to every expression under `expr_id`, with the innermost
+/// arithmetic-mode annotation enclosing it.
+///
+/// The enclosure is carried down exactly as lowering carries the mode: an
+/// annotation replaces it for its own subtree, and the innermost one wins. The
+/// enclosure handed to `visit` for an annotation node is the one *outside* it,
+/// which is what a rule asking whether that annotation changes anything needs —
+/// and it is the node rather than the mode, because such a rule also has to say
+/// whether the mode it is comparing against came from source the author can see
+/// or from the language's default.
+pub(crate) fn walk_expr_with_arith_mode(
+    arena: &AstArena,
+    expr_id: ExprId,
+    enclosing: Option<ExprId>,
+    visit: &mut dyn FnMut(ExprId, Option<ExprId>),
+) {
+    visit(expr_id, enclosing);
+    let inner = match &arena[expr_id].kind {
+        Expr::ArithMode { .. } => Some(expr_id),
+        _ => enclosing,
+    };
+    expr_children(arena, expr_id, &mut |child| {
+        walk_expr_with_arith_mode(arena, child, inner, visit);
+    });
+}
+
+/// The arithmetic mode in force under `enclosing`: the annotation's own mode, or
+/// the language's default outside every annotation.
+pub(crate) fn arith_mode_under(arena: &AstArena, enclosing: Option<ExprId>) -> ArithMode {
+    match enclosing {
+        Some(node) => match &arena[node].kind {
+            Expr::ArithMode { mode, .. } => *mode,
+            _ => ArithMode::DEFAULT,
+        },
+        None => ArithMode::DEFAULT,
     }
 }
 

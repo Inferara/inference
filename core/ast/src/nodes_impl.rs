@@ -6,7 +6,7 @@
 
 use crate::arena::AstArena;
 use crate::ids::{BlockId, DefId, ExprId, StmtId};
-use crate::nodes::{Def, Expr, Stmt};
+use crate::nodes::{Def, Expr, GuardedOp, Stmt};
 
 impl AstArena {
     /// Checks whether a block (and its transitive children) contains
@@ -89,5 +89,130 @@ impl AstArena {
             Def::Function { body, .. } => self.block_is_non_det(*body),
             _ => false,
         }
+    }
+
+    /// The expression a *transparent wrapper* encloses, or `None` when
+    /// `expr_id` is not one.
+    ///
+    /// Two node kinds group an expression without contributing a value of their
+    /// own: [`Expr::Parenthesized`] and [`Expr::ArithMode`]. Both denote exactly
+    /// what they enclose, so a pass asking what an expression *is* — a literal,
+    /// a zero, a name, the root of a projection, a constant index, the operand
+    /// of a unary operator — has to look through them, and the two must never be
+    /// looked through differently: a check that peels one and not the other
+    /// changes its answer when an author writes `wrapping(…)` around a spelling
+    /// it already accepted.
+    ///
+    /// This is deliberately *not* a full peel to a non-wrapper node. A caller
+    /// that wants that uses [`Self::peel_transparent`]; a caller matching one
+    /// level at a time (a `match` arm that recurses, a `while let`) wants this.
+    #[must_use]
+    pub fn transparent_inner(&self, expr_id: ExprId) -> Option<ExprId> {
+        match &self[expr_id].kind {
+            Expr::Parenthesized { expr } | Expr::ArithMode { expr, .. } => Some(*expr),
+            _ => None,
+        }
+    }
+
+    /// The expression inside any depth of transparent wrappers, or `expr_id`
+    /// itself when it is not wrapped.
+    ///
+    /// The repeated form of [`Self::transparent_inner`], for the callers that
+    /// only want the node underneath.
+    #[must_use]
+    pub fn peel_transparent(&self, expr_id: ExprId) -> ExprId {
+        let mut current = expr_id;
+        while let Some(inner) = self.transparent_inner(current) {
+            current = inner;
+        }
+        current
+    }
+
+    /// The governed operator written at `expr_id`, paired with the expression
+    /// whose recorded type is the width it is performed at, or `None` when the
+    /// node is not an operator an arithmetic-mode annotation reaches.
+    ///
+    /// A binary operator is performed at its *left* operand's type and a
+    /// negation at its own, and that choice is what decides both which guard is
+    /// emitted and whether a rule calls the annotation meaningful. Two passes
+    /// ask, so the pair is produced once here: an operand read differently in
+    /// the two places would diagnose a program against arithmetic it does not
+    /// have.
+    #[must_use]
+    pub fn guarded_operator(&self, expr_id: ExprId) -> Option<(GuardedOp, ExprId)> {
+        match &self[expr_id].kind {
+            Expr::Binary { op, left, .. } => Some((GuardedOp::from_binary(op)?, *left)),
+            Expr::PrefixUnary { op, .. } => Some((GuardedOp::from_unary(op)?, expr_id)),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::{ArithMode, ExprData, Location};
+
+    fn push(arena: &mut AstArena, kind: Expr) -> ExprId {
+        arena.exprs.alloc(ExprData {
+            location: Location::default(),
+            kind,
+        })
+    }
+
+    fn number(arena: &mut AstArena) -> ExprId {
+        push(
+            arena,
+            Expr::NumberLiteral {
+                value: "1".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn both_wrapper_kinds_are_transparent_and_nothing_else_is() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let parenthesized = push(&mut arena, Expr::Parenthesized { expr: literal });
+        let checked = push(
+            &mut arena,
+            Expr::ArithMode {
+                mode: ArithMode::Checked,
+                expr: literal,
+            },
+        );
+        let wrapping = push(
+            &mut arena,
+            Expr::ArithMode {
+                mode: ArithMode::Wrapping,
+                expr: literal,
+            },
+        );
+        for wrapper in [parenthesized, checked, wrapping] {
+            assert_eq!(arena.transparent_inner(wrapper), Some(literal));
+        }
+        let uzumaki = push(&mut arena, Expr::Uzumaki);
+        for opaque in [literal, uzumaki] {
+            assert_eq!(arena.transparent_inner(opaque), None);
+        }
+    }
+
+    #[test]
+    fn peeling_goes_through_mixed_nestings_to_the_same_node() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let mut current = literal;
+        for mode in [ArithMode::Wrapping, ArithMode::Checked] {
+            current = push(&mut arena, Expr::Parenthesized { expr: current });
+            current = push(
+                &mut arena,
+                Expr::ArithMode {
+                    mode,
+                    expr: current,
+                },
+            );
+        }
+        assert_eq!(arena.peel_transparent(current), literal);
+        assert_eq!(arena.peel_transparent(literal), literal);
     }
 }

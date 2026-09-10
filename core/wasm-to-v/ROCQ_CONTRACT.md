@@ -1329,7 +1329,7 @@ module into a clean `HspecInconsistent` error.
 ## Trap-freedom: what carries it, and what cannot
 
 An emitted `.v` carries no module-wide "this program never traps" claim,
-and no such claim could be added. `BI_unreachable` is emitted for six
+and no such claim could be added. `BI_unreachable` is emitted for seven
 different reasons, three of which are traps the program is *supposed* to
 be able to take; the roles cannot be told apart by looking at the
 instruction. What does force trap-freedom is the application channel —
@@ -1338,9 +1338,10 @@ where a specification claimed it.
 
 ### `BI_unreachable` is overloaded
 
-`core/wasm-codegen/src/compiler.rs` emits it from five sites carrying six
-roles (the `assert` lowering serves two, one executable and one
-specificational):
+Code generation emits it from six sites carrying seven roles (the
+`assert` lowering serves two, one executable and one specificational);
+five of the sites are in `core/wasm-codegen/src/compiler.rs` and the
+sixth in `core/wasm-codegen/src/overflow_guard.rs`:
 
 | Emitter | Role | When it is reached |
 | --- | --- | --- |
@@ -1350,6 +1351,7 @@ specificational):
 | `emit_bounds_check_guard` | `index >=u length`, before a dynamic array element's offset multiply. Emitted in **both** modes | Only on an out-of-range index |
 | `emit_narrow_div_overflow_guard` | Signed `i8`/`i16` division at the one quotient the narrow width cannot hold. Emitted in **both** modes, and never was mode-gated | Only at `MIN / -1` |
 | `emit_entry_enum_tag_guard` | An exported entry's `enum` parameter carrying a tag outside the declared variant range — a host may pass any `i32` | Only on an out-of-range host argument; on *every* call for a variantless enum, which is uninhabited |
+| `overflow_guard::emit` | A source-level `+`, `-`, `*` or unary `-` whose effective arithmetic mode is checked, at a result the operand type cannot hold. Emitted in **both** modes, and only where the source's own effective mode says checked | Only on an operand pair whose true result leaves the type |
 
 A blanket "no reachable `BI_unreachable`" component on a module-level
 judgment would therefore be **false by construction** for programs the
@@ -1358,10 +1360,153 @@ way of stating a runtime precondition — unusable in proof mode, and it
 would falsify every reachability obligation at once, since a retained
 body traps on precisely the vectors its filters reject.
 
-The last three rows are the opposite case: a *conditional* trap whose
+The last four rows are the opposite case: a *conditional* trap whose
 condition is a property worth proving. Those are what an obligation can
 usefully range over — but only an obligation that reduces the body, and
 only at the arguments some specification actually named.
+
+### Where arithmetic sits in that table, and where it does not
+
+The overflow row is the only one whose presence is decided by the
+source. `+`, `-`, `*` and unary `-` have an *effective* arithmetic mode:
+the innermost `checked(…)`/`wrapping(…)` enclosing the operator, or, for
+an operator no annotation encloses, the language's default. Under a
+wrapping effective mode the emitter produces the bare WebAssembly
+operator and **no trap site at all**, exactly as it did before the
+annotation existed. Under a checked one it produces the guard.
+
+Silence must not be read as coverage. An `HA_app_ok` over a callee whose
+arithmetic is all effectively wrapping constrains **nothing about
+overflow**: the wrapping operator is total in the model, so the
+application is realized for every argument vector, and every conjunct of
+the envelope an author wrote around it can be ignored by the proof. The
+obligation is true and says only that the call returns. What makes such
+an obligation informative is a trap in the callee for the envelope to
+rule out, and for arithmetic that trap exists exactly where the source
+put a checked operator.
+
+This is also why no annotation is accepted in a body that becomes an
+obligation *term* (`P017`). A term's `+`, `-` and `*` are
+`Wasm_int.int_add`/`int_sub`/`int_mul`, modular at the operand width, and
+there is no second operator downstream for an annotation to select — so
+both spellings would translate to the identical term. The proved property
+belongs to the executable function the specification claims the
+realization of, never to the obligation's own arithmetic.
+
+### The native arithmetic traps this table does not cover
+
+Two arithmetic traps are the machine's rather than the compiler's, and
+they are outside the `BI_unreachable` enumeration entirely because no
+`BI_unreachable` is emitted for them. A plain `a / b` traps on a zero
+divisor at every width, and a signed `a / b` at `(MIN, -1)` traps with
+WebAssembly's own integer-overflow trap at `i32` and `i64` — a run of
+that program reports `wasm trap: integer overflow`, a different string
+and a different trap kind from the one every row above reports. Narrow
+signed division reaches the same fact through the `unreachable` row for
+it, because the promoted quotient is representable and the machine has
+nothing to trap on.
+
+Every overflow guard is therefore built to avoid the native trap rather
+than to reach it. The signed multiply row is checked by dividing the
+wrapped product back by `b`, which would meet the native trap at
+`(a, b) = (MIN, -1)` — where the product wraps to `MIN` and the divisor
+is `-1` — so the row carries an explicit `b == -1` arm that traps
+before any division runs. The execution matrix over the guard catalogue
+asserts the trap *kind*, not merely that a trap happened, because that is
+the only assertion that can tell the two apart.
+
+### Trap totality: a filter must leave a run standing
+
+Beside [entry
+totality](#entry-parameters-are-universally-quantified--filters-cannot-carve-out-entries)
+there is a second law of the same shape, and it is about traps rather
+than about filters: **a reachability body must, at every typed entry
+vector, admit at least one choice vector on which nothing in the whole
+activation traps.**
+
+It follows from the same place. `exists_spec_holds_at` fixes an arbitrary
+entry vector before letting the choices range, and a run that traps
+contributes no observation, so a trap taken on every choice vector at
+some entry empties that entry's observation set and makes the theorem
+**false** rather than narrowing it. For `unique` it is worse than false:
+shrinking the successful set is exactly how a claim of uniqueness comes
+to hold by accident, which is a change of meaning nothing downstream
+reports.
+
+The law is stated for **every** trap kind, not for one of them. A failing
+`assert`, a bounds guard, a division trap (native or narrow-guarded) and
+an overflow guard all end a run the same way. The three rules that
+enforce parts of it are each narrower than the law: `P016` refuses a
+non-constant index in such a body, `P017` refuses arithmetic whose
+effective mode traps in one, and `P018` refuses a body that reaches a
+guarded function through calls. Nothing enforces the rest of it, so a
+retained body whose own `assert`s can fail at every choice at some entry
+is the author's to get right.
+
+### A universal obligation over a trapping callee is false, not vacuous
+
+The mirror of that law on the universal side is worth stating as plainly.
+`assert(f(x) == e)` in a `forall` body, over a callee that traps at some
+`x` the antecedents admit, is a **false** obligation. It does not
+silently narrow to the arguments on which `f` returns.
+
+Two mechanisms make it so. `strictify` carries a negative `pred_eq` arm
+that demands `HA_defined` of the applied term, so an application that
+does not denote falsifies the equation rather than dropping out of it;
+and `interp_realized_universal` is one-directional, so there is no arm in
+which an unrealized application discharges the claim. The consequence
+reaches every obligation that applies a callee whose arithmetic can trap:
+the antecedent has to *bound* the arguments, and an envelope that leaves
+one argument free leaves the theorem false at the first vector that
+overflows.
+
+This is undecidable to diagnose from the source, so it is not a
+diagnostic. It is held by a standing audit over the emitted corpus
+(`tests/src/rocq_corpus_invariants.rs`), which reads the compiler's own
+obligation map and guarded-function list — never the emitted text — and
+requires every universal obligation applying a guarded callee to bound
+the variables it applies, or to appear on an exemption list whose entries
+must claim the obligation is *true*. A false theorem is invisible
+downstream: generated skeletons end in `Admitted.`, so the `coqc` gate
+establishes elaboration and never truth.
+
+### A merged body is judged at the link
+
+Code generation is handed a typed context and never a dependency's bytes,
+so `P018` skips an `external fn` callee. The static merge linker refuses
+a link in which a retained `exists`/`unique` specification function of
+the program reaches, through calls, **any** guarded function of the
+merged output — one a linked library supplied, and equally one of the
+program's own, since the public `link` entry point accepts main bytes
+that never went through code generation
+(`LinkError::CheckedGuardUnderReachabilitySpec`, whose message says which
+case it fired on). The two phases do not double-report: a library's
+closure that reached back into the program's imports is already refused
+as needing a relocatable build, so a path from a specification to a
+guarded main body lies wholly inside the program, where `P018` has
+already walked it.
+
+Which merged bodies trap is read off the `inference.checked` custom
+section each input carries. That section is the **only** carrier of the
+fact: no line of the emitted `.v` records it, deliberately, because the
+discharge protocol hashes the `.v` text and a header derived from the
+section would move the hash of every guarded module for no proof value.
+Its absence is the producer's statement that none of its functions
+carries an Inference-emitted overflow guard, which is exactly true of a
+module any other toolchain produced. Its second wire form says that some
+function of the module traps and that which ones can no longer be told —
+what `infs` writes over an artifact a post-build optimizer has just
+renumbered — and the linker reads that as every function of that module.
+
+Because the walk has to start somewhere, an `exists`/`unique` obligation
+whose own symbol resolves to no function of the merged module is a hard
+error (`LinkError::UnresolvedReachabilitySpecFunction`) rather than a
+skipped root: a check that skipped it would report no guard for exactly
+the modules it can say least about. The specification-prefix half of that
+resolution is shared code (`HFnRef::bare_in_spec`), read by this walk and
+by the proof translator alike, because a private copy that drifted would
+resolve nothing and make the whole check pass in silence.
+
 
 ### `ValidModule` neither asserts nor can assert it
 
@@ -1594,6 +1739,16 @@ Two custom sections carry proof-mode metadata through codegen → linker →
 `wasm-to-v`, emitted in that order in `finish_and_take` (`hspecs`
 directly after `spec_funcs`, both after the `name` section):
 
+A third `inference.*` section, `inference.checked`, is emitted after
+those two and is **not** part of this contract: it is written in both
+compilation modes, nothing in the translation reads it, and no line of
+the emitted `.v` is derived from it. It exists for the linker, which is
+where a merged body's arithmetic is judged — see
+[Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot). Like the
+other two it is omitted when it would say nothing, and for it that
+omission is the statement: no function of this module carries an
+Inference-emitted overflow guard.
+
 A **linked library's** sections travel differently from the main module's.
 The static merge does not carry a library's sections at all by default,
 and carries its universal obligations only when the build asked to adopt
@@ -1759,7 +1914,7 @@ entries are matched by name, not position.
   declaration. The check is purely lexical (mode-independent) and fires
   in both compile and proof modes, so no Inference-compiled program can
   reach the codegen stage with non-det syntax outside a spec.
-- **P001–P016** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
+- **P001–P018** (fatal, `core/wasm-codegen/src/hassert/diag.rs`): a
   specification function that cannot be encoded as an obligation — or
   whose obligation says nothing — aborts code generation
   (`CodegenError::UntranslatableSpec`) rather than silently emitting an
@@ -1784,6 +1939,8 @@ entries are matched by name, not position.
   | P014 | A constant-*folded* array index that is out of bounds — `const K: i32 = 5; a[K]`, or `a[1 + 4]`, on `[i32; 3]`. States the same fact analysis rule A037 states for a direct-literal index; A037's pattern requires the literal directly under the access, so a named or computed constant reaches the translator even with analysis on, and the codegen paths that skip analysis make this the only guard for any of the spellings |
   | P015 | A quantified introduction — a parameter, a `let … = @`, an anonymous call-argument `@`, or a leaf of an aggregate one — at an `enum` declared with no variants, in every mode including the reachability mode. The declared type admits no value, so there is nothing for the claim to range over: `HA_false` would discharge every claim over it for the wrong reason and any inhabited bound would be a lie. Analysis rule A009 only *warns* about the declaration, so such an enum compiles and a `@` over it really does reach the translator, where executable code generation's three treatments of it disagree with one another (a draw is left unconstrained since `rem_u 0` would trap; an exported entry's tag guard traps on every call; a memory round-trip constrains nothing) — there is no consistent behaviour for an antecedent to mirror |
   | P016 | A non-constant array index inside the body of an `exists`/`unique`-quantified spec function. Such a body is the one specification body the judgment *reduces*, and code generation guards every non-constant index with a trap. Because `exists_spec_holds_at`/`unique_spec_holds_at` fix an arbitrary typed entry vector before letting the choices range, a trap the index reaches at some entry empties that entry's observation set and makes the theorem **false** rather than narrowing it to the entries the guard admits — the same failure an `assume` over an entry parameter produces. Untouched: a constant index anywhere, and a non-constant index in a `forall`/plain body, whose function is omitted from `mod_funcs`, is never reduced, and keeps the symbolic range bound its element definition already states. See [Trap-freedom](#trap-freedom-what-carries-it-and-what-cannot) for why the guard exists in proof mode at all and which obligation it answers to |
+  | P017 | An arithmetic-mode annotation, or arithmetic whose effective mode traps, written where the body cannot carry it. Two wordings keyed on the quantifier of the *function*. In a `forall`/plain body — a helper `fn` declared inside a `spec` block included, since it is translated into an obligation of its own — the body becomes a term, and a term's `+`, `-` and `*` are `Wasm_int.int_add`/`int_sub`/`int_mul`, modular at the operand width; no other operator exists downstream for `checked(...)` or `wrapping(...)` to select, so both are refused rather than accepted and silently dropped. In an `exists`/`unique` body the opposite holds: the body is compiled and reduced, so an operator whose effective mode traps puts a trap on the path the judgment reduces, and `wrapping(...)` — accepted throughout such a body, its final `assert` included, and translating to the identical term — is the remedy. A nested `exists { }` block inside a `forall` function is not a reachability body and takes the first wording |
+  | P018 | An `exists`/`unique`-quantified specification function whose body reaches, through calls, a function carrying an overflow guard. `P017`'s second wording is lexical, and the judgment reduces the whole activation — callee frames included — so a guard one call deep empties the same observation set and makes the same claim false. Resolution is code generation's own, re-scoped at every hop to the callee's own file and enclosing specification, so the function inspected is the function the call lowers to. A callee code generation cannot resolve is counted as carrying a guard, because failing open would ship a false obligation through a gate that admits open proofs. `external fn` callees are skipped: code generation never receives a dependency's bytes, and the linker is the sole judge of a merged body |
 
 - **The reachability pre-scan's no-return rule** (fatal,
   `core/wasm-codegen/src/hassert/reach.rs`): an `exists`/`unique` body

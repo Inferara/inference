@@ -29,7 +29,7 @@ use std::fmt::{Display, Formatter};
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::TypeId;
-use inference_ast::nodes::{Expr, SimpleTypeKind, TypeNode};
+use inference_ast::nodes::{Expr, GuardedOp, SimpleTypeKind, TypeNode};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
@@ -78,6 +78,26 @@ impl NumberType {
             self,
             NumberType::I8 | NumberType::I16 | NumberType::I32 | NumberType::I64
         )
+    }
+
+    /// Whether this type has `op` at all.
+    ///
+    /// Every one of these types has `+`, `-` and `*`, and every one of them can
+    /// overflow at each. Unary `-` is the exception: an unsigned type does not
+    /// have it, and a `-x` written at one is a type error rather than an
+    /// operation that wraps or traps.
+    ///
+    /// The predicate lives here because two passes ask it and must not answer
+    /// differently: the rule that reports an annotation with nothing to govern
+    /// and the classifier that decides which operators carry an overflow guard.
+    /// A rule that counted an operator the emitter never guards would call an
+    /// annotation meaningful on the strength of arithmetic that does not exist.
+    #[must_use = "this is a pure check with no side effects"]
+    pub const fn has_operator(&self, op: GuardedOp) -> bool {
+        match op {
+            GuardedOp::Add | GuardedOp::Sub | GuardedOp::Mul => true,
+            GuardedOp::Neg => self.is_signed(),
+        }
     }
 }
 

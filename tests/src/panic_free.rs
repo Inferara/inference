@@ -39,19 +39,18 @@
 //! The three sources, 218 fixtures and 436 compilations between them:
 //!
 //! - `tests/test_data/inf/` — the language corpus, every `.inf` in the
-//!   directory: 49.
+//!   directory: 50.
 //! - `tests/test_data/codegen/wasm/` — the canonical paired golden fixtures,
 //!   selected by the rule that a fixture's file stem equals its parent directory
-//!   name: 147. That rule admits both paired layouts, the one with a module
+//!   name: 146. That rule admits both paired layouts, the one with a module
 //!   directory above the fixture directory and the flat one without, and the 22
 //!   files it excludes are exactly the multi-file project trees under `src/`,
 //!   whose `use` clauses need a project driver this in-process pipeline does not
 //!   have.
-//! - `tests/test_data/panic_free/` — one minimal program per construct the
-//!   compiler had no lowering for, 22 of them, each of which has since gained
-//!   either a lowering or a rule that refuses it; one is stopped by the type
-//!   checker before its rule is reached. Each is a single offence, so that the
-//!   stage it stops at is attributable to the construct it is named for.
+//! - `tests/test_data/panic_free/` — one minimal program per construct whose
+//!   verdict this sweep is written to pin, 22 of them; one is stopped by the
+//!   type checker before its rule is reached. Each is a single offence, so that
+//!   the stage it stops at is attributable to the construct it is named for.
 //!
 //! ## The single-offence constraint
 //!
@@ -125,13 +124,20 @@ mod gate {
 
     /// Every `.inf` under `tests/test_data/panic_free/`.
     ///
-    /// Six of the constructs have a lowering, so they run to a module; every
-    /// other row is refused before code generation reaches it, and each analysis
-    /// row names the rule that owns the construct. A construct in that second
-    /// group is refused by analysis rather than by code generation because
-    /// analysis runs first — the code generation backstop behind each of them is
-    /// pinned separately, by the negative codegen tests that skip analysis to
-    /// reach it.
+    /// Most of these name a construct the compiler once had no lowering for and
+    /// has since gained either a lowering or a rule that refuses it. Six run to
+    /// a module, fifteen are refused by analysis, and one is stopped by the type
+    /// checker before its rule is reached; each analysis row names the rule that
+    /// owns the construct. A construct in that group is refused by analysis
+    /// rather than by code generation because analysis runs first — the code
+    /// generation backstop behind each of them is pinned separately, by the
+    /// negative codegen tests that skip analysis to reach it.
+    ///
+    /// One row is here for the opposite reason. `arith_modes` names a construct
+    /// that lowers everywhere it can be written, and its value is the breadth:
+    /// a lowering missing from one position out of five is a `todo!()` on a
+    /// program the front end accepted, which is exactly what this sweep is
+    /// for.
     const SHAPES: &[Shape] = &[
         Shape {
             stem: "bare_type_parameter",
@@ -253,6 +259,14 @@ mod gate {
             declared: Module,
             why: "the other position the parser produces a unit literal in: the value occupies \
                   no operand stack slot, so `return;` lowers to the epilogue alone",
+        },
+        Shape {
+            stem: "arith_modes",
+            declared: Module,
+            why: "`checked(...)` and `wrapping(...)` are expression forms with a lowering in \
+                  every position one is written — a return expression, a method body, a \
+                  comparison of sums, an annotation nested in another, and a `const` \
+                  initializer — so the pipeline runs to a module through each of them",
         },
     ];
 

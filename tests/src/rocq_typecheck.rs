@@ -73,20 +73,31 @@ pub(crate) mod gate {
     /// gate failure should name the operator family it is about (#401).
     ///
     /// `spec_bounds_realization.inf` is the only entry whose *executable*
-    /// bodies carry a bounds guard, and the only entry in this list producing
-    /// the `HA_app_ok` atom that makes one a proof obligation
-    /// (`spec_linked_app_ok.inf` in [`LINKED_CORPUS`] states the same atom over
-    /// a merged body, which is a different claim — see
-    /// [`the_realization_entry_claims_a_merged_body_is_realized`]). Proof mode
-    /// emits the same `index >=u length -> unreachable` guard a deployed build
-    /// does, so the trap is present in the body the emitted `.v` describes, and
-    /// a bare statement call in a `spec` body claims that application is
-    /// *realized* — a total-correctness claim, hence a claim that the body does
-    /// not trap. The two halves only mean anything together: an assertion on
-    /// the atom alone holds just as well with the guard absent, which is the
-    /// state the emission change exists to leave behind. Both are checked by
+    /// bodies carry a bounds guard. Proof mode emits the same
+    /// `index >=u length -> unreachable` guard a deployed build does, so the
+    /// trap is present in the body the emitted `.v` describes, and a bare
+    /// statement call in a `spec` body claims that application is *realized* —
+    /// a total-correctness claim, hence a claim that the body does not trap.
+    /// The two halves only mean anything together: an assertion on the atom
+    /// alone holds just as well with the guard absent, which is the state the
+    /// emission change exists to leave behind. Both are checked by
     /// [`spec_bounds_realization_matches_committed_v_golden`], which also holds
     /// this entry to staying in this list.
+    ///
+    /// `spec_overflow_realization.inf` is the same argument one trap kind over,
+    /// and the only entry whose executable bodies carry an *overflow* guard: a
+    /// `checked(...)` multiply at `i64`, whose guard divides the product back
+    /// by an operand, and a `checked(...)` increment at `i8`, whose guard
+    /// re-narrows the promoted result and compares. Both are the only producers
+    /// in this list of the nested `BI_if` shape a division round-trip needs.
+    /// It is checked by
+    /// [`spec_overflow_realization_matches_committed_v_golden`].
+    ///
+    /// Those two entries are the only ones here producing the `HA_app_ok` atom
+    /// that makes a trap a proof obligation (`spec_linked_app_ok.inf` in
+    /// [`LINKED_CORPUS`] states the same atom over a merged body, which is a
+    /// different claim — see
+    /// [`the_realization_entry_claims_a_merged_body_is_realized`]).
     ///
     /// `rocq_name_collisions.inf` is the one entry whose module name is not just
     /// a label: it names functions after the emitted preamble's helpers, after
@@ -105,7 +116,7 @@ pub(crate) mod gate {
     /// the width of one underscore run. No other entry names two specs that way,
     /// so this is the only place the gate can observe the two list families
     /// staying apart.
-    const CORPUS: &[(&str, &str)] = &[
+    pub(crate) const CORPUS: &[(&str, &str)] = &[
         ("with_spec.inf", "with_spec"),
         ("spec_nondet_blocks.inf", "spec_nondet_blocks"),
         ("three_specs.inf", "three_specs"),
@@ -134,6 +145,10 @@ pub(crate) mod gate {
         ("spec_aggregate_values.inf", "spec_aggregate_values"),
         ("spec_bounded_iteration.inf", "spec_bounded_iteration"),
         ("spec_bounds_realization.inf", "spec_bounds_realization"),
+        (
+            "spec_overflow_realization.inf",
+            "spec_overflow_realization",
+        ),
         (
             "spec_quantifier_alternation.inf",
             "spec_quantifier_alternation",
@@ -3695,6 +3710,15 @@ End Host.
             .join("spec_bounds_realization.v")
     }
 
+    /// Committed `.v` golden for the overflow-realization fixture. Regenerate
+    /// with the `#[ignore]`d [`regenerate::regenerate_overflow_realization_v`]
+    /// after an intentional emitter change.
+    fn overflow_realization_golden_path() -> PathBuf {
+        get_test_data_path()
+            .join("rocq")
+            .join("spec_overflow_realization.v")
+    }
+
     /// The proof-mode `.v` for the bounds-realization fixture must match a
     /// committed golden byte-for-byte, and the golden must carry both halves of
     /// the property this entry exists for: the bounds guard inside an
@@ -3900,6 +3924,253 @@ End Host.
         }
     }
 
+    /// The proof-mode `.v` for the overflow-realization fixture must match a
+    /// committed golden byte-for-byte, and the golden must carry both halves of
+    /// the property this entry exists for: an overflow guard inside an
+    /// executable body, and the obligation that reaches it.
+    ///
+    /// **What this gate establishes is elaboration, not truth.** It runs `coqc`
+    /// over the emitted module and asks whether it type-checks. Generated proof
+    /// skeletons end in `Admitted.`, so a false obligation compiles exactly as
+    /// readily as a true one, and nothing here — nor anywhere else in the
+    /// toolchain — reads the assertion and decides whether it holds. The truth
+    /// of these two obligations is established downstream against the real
+    /// library, in wasm-verifier's `theories/examples/Issue316OverflowExample.v`.
+    ///
+    /// Neither half is worth asserting alone, and here the reason is sharper
+    /// than it is for a bounds guard. An obligation's own arithmetic is the
+    /// wrapping machine operator and no annotation can change that, so the
+    /// `hspec` emitted for these specifications over *unmarked* `fixmul` and
+    /// `bump` is the identical text — and unconditionally true, because a body
+    /// with no trap in it reduces to a value at every argument the envelope
+    /// admits. The atom says something about overflow only because the callee
+    /// carries a guard; the envelope is what keeps that guard untaken.
+    ///
+    /// The two specification functions are `forall`-bodied, so they are omitted
+    /// from `mod_funcs`: that list holds `fixmul` and `bump` and nothing else,
+    /// which is asserted rather than assumed because an `HA_app_ok` index is a
+    /// position in it. `mod_types` still carries their signatures, so "omitted"
+    /// is a statement about the function list and not about the record.
+    ///
+    /// Record indices are read off the module record rather than written down,
+    /// so a reordering fails as a missing definition instead of as a needle
+    /// quietly matching the wrong body.
+    #[test]
+    fn spec_overflow_realization_matches_committed_v_golden() {
+        const FIXTURE: &str = "spec_overflow_realization.inf";
+        const MODULE: &str = "spec_overflow_realization";
+
+        // Membership is what puts the module in front of `coqc`; the byte
+        // compare and the shape assertions below would all still pass with the
+        // entry deleted from the corpus, and nothing else in the suite is about
+        // this fixture.
+        assert!(
+            CORPUS.contains(&(FIXTURE, MODULE)),
+            "{FIXTURE} must stay a CORPUS entry: it is the only module this gate \
+             compiles whose executable bodies carry an overflow guard"
+        );
+
+        let generated = generate_v(FIXTURE, MODULE);
+        let golden_path = overflow_realization_golden_path();
+        let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
+            panic!(
+                "read {} ({e}); regenerate with \
+                 `cargo test -p inference-tests regenerate_overflow_realization_v -- --ignored`",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            golden,
+            "proof-mode `.v` for {FIXTURE} drifted from the committed golden {}; if the \
+             emitter change was intentional, regenerate with \
+             `cargo test -p inference-tests regenerate_overflow_realization_v -- --ignored`",
+            golden_path.display()
+        );
+
+        // Contract shape, asserted independently of the byte compare so a
+        // future regeneration cannot launder a regression into the committed
+        // file.
+        let defined = module_func_names(&golden);
+        assert_eq!(
+            defined,
+            vec!["fixmul", "bump"],
+            "a `forall`-bodied specification function is not compiled, so the record must \
+             hold the two executable functions and nothing else"
+        );
+
+        // Half one, the wide guard. The division round-trip is four
+        // conditionals, three of them nested, and each is load-bearing: the
+        // outermost excludes the divisor zero the round-trip would divide by,
+        // the next separates the `b = -1` case, and each of the remaining two
+        // is a trap — one for `MIN * -1`, one for a round trip that did not
+        // reproduce its operand. `(MIN, -1)` is the pair that reaches
+        // WebAssembly's *own* `integer overflow` trap when the `b = -1` arm is
+        // missing, which would put a trap shape in this module that the
+        // contract's roles table does not enumerate.
+        let fixmul = one_line(module_func_body(&golden, "fixmul"));
+        assert_eq!(
+            fixmul.matches("BI_if (BT_valtype None) (").count(),
+            4,
+            "the i64 signed-multiply guard is two case splits over two traps:\n{fixmul}"
+        );
+        for (needle, why) in [
+            (
+                "BI_const_num (Vi64 0) :: BI_relop T_i64 (Relop_i ROI_ne) :: \
+                 BI_if (BT_valtype None) (",
+                "the round-trip divides by an operand, so the guard runs only where that \
+                 operand is non-zero",
+            ),
+            (
+                "BI_const_num (Vi64 (-1)) :: BI_relop T_i64 (Relop_i ROI_eq) :: \
+                 BI_if (BT_valtype None) (",
+                "the `b = -1` arm is what keeps `MIN / -1` out of the division below it",
+            ),
+            (
+                "BI_const_num (Vi64 (-9223372036854775808)) :: \
+                 BI_relop T_i64 (Relop_i ROI_eq) :: BI_if (BT_valtype None) ( \
+                 BI_unreachable :: nil) ( nil)",
+                "inside that arm the one overflowing product is `MIN * -1`, and it traps \
+                 through `unreachable` like every other guard in the language",
+            ),
+            (
+                "BI_binop T_i64 (Binop_i (BOI_div SX_S)) :: BI_local_get 3%N :: \
+                 BI_relop T_i64 (Relop_i ROI_ne) :: BI_if (BT_valtype None) ( \
+                 BI_unreachable :: nil) ( nil)",
+                "the test itself: dividing the product back by one operand must reproduce \
+                 the other",
+            ),
+        ] {
+            assert!(
+                fixmul.contains(needle),
+                "`fixmul` no longer emits `{needle}` — {why}. Its body was:\n{fixmul}"
+            );
+        }
+        assert_eq!(
+            fixmul.matches("Binop_i (BOI_div SX_S)").count(),
+            2,
+            "two signed divisions: the guard's round-trip and the source's own `/ ONE`, \
+             which carries no guard because a division cannot leave its type except at \
+             `MIN / -1`, and that case traps on its own -- natively at this width:\n{fixmul}"
+        );
+
+        // Half one, the narrow guard. An `i8` operator is performed at `i32`
+        // and narrowed back, so the question its guard asks is whether the
+        // narrowing changed the value — a different shape from the wide rows,
+        // and the reason this fixture carries both.
+        let bump = one_line(module_func_body(&golden, "bump"));
+        assert!(
+            bump.contains(
+                "BI_local_tee 1%N :: BI_const_num (Vi32 24) :: BI_binop T_i32 (Binop_i BOI_shl) \
+                 :: BI_const_num (Vi32 24) :: BI_binop T_i32 (Binop_i (BOI_shr SX_S)) :: \
+                 BI_local_tee 2%N :: BI_local_get 1%N :: BI_relop T_i32 (Relop_i ROI_ne) :: \
+                 BI_if (BT_valtype None) ( BI_unreachable :: nil) ( nil)"
+            ),
+            "the narrow guard must re-narrow the promoted sum and compare it against the \
+             sum itself:\n{bump}"
+        );
+        assert_eq!(
+            bump.matches("BI_if (BT_valtype None) (").count(),
+            1,
+            "the narrow row is one comparison, not a nest:\n{bump}"
+        );
+
+        // Half two: the obligations that reach those guards. Each bare
+        // statement call claims the application is realized, under the envelope
+        // its `assume` declared — so the atom is the *consequent* of an
+        // implication, never the whole term.
+        let terms = obligation_terms(&golden);
+        assert_eq!(
+            terms.len(),
+            2,
+            "both specification functions must emit an obligation; got {terms:?}"
+        );
+        for (function, arguments, bounds, why) in [
+            (
+                "fixmul",
+                "(T_local 0%N) :: (T_local 1%N) :: nil",
+                &[
+                    "(Relop_i (ROI_le SX_S)) (T_const (Vi64 (-3037000499))) (T_local 0%N)",
+                    "(Relop_i (ROI_le SX_S)) (T_local 0%N) (T_const (Vi64 3037000499))",
+                    "(Relop_i (ROI_le SX_S)) (T_const (Vi64 (-3037000499))) (T_local 1%N)",
+                    "(Relop_i (ROI_le SX_S)) (T_local 1%N) (T_const (Vi64 3037000499))",
+                ][..],
+                "3037000499 is the largest N with N*N inside `i64`, and an `i64` \
+                 declaration states a width and no range, so all four bounds come from \
+                 the envelope and each one rules out products the guard would trap on",
+            ),
+            (
+                "bump",
+                "(T_local 0%N) :: nil",
+                &["(Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 127))"][..],
+                "a drawn `i8` carries its declared domain into the obligation already, so \
+                 the envelope has to exclude only the one value whose successor leaves \
+                 the type",
+            ),
+        ] {
+            let index = defined
+                .iter()
+                .position(|candidate| *candidate == function)
+                .unwrap_or_else(|| {
+                    panic!("{FIXTURE} must define `{function}`; it defines {defined:?}")
+                });
+            let atom = format!("(HA_app_ok {index} ({arguments}))");
+            let term = terms
+                .iter()
+                .find(|term| term.contains(&atom))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no obligation applies `{function}` at record index {index} as \
+                         `{atom}` — {why}. The obligations were:\n{terms:#?}"
+                    )
+                });
+            assert!(
+                term.starts_with("Himpl ("),
+                "the realization of `{function}` must be claimed under the envelope its \
+                 `assume` declared; an atom at the root claims the call is total on every \
+                 input, which no guarded body is:\n{term}"
+            );
+            // Everything after the atom closes the implications it sits inside,
+            // which is what makes it the consequent rather than a subterm of
+            // some antecedent — an obligation whose *hypothesis* is that the
+            // call is realized claims nothing about the call at all.
+            let (_, closers) = term
+                .rsplit_once(&atom)
+                .expect("the atom was just found in this term");
+            assert!(
+                closers.chars().all(|c| c == ')' || c == '.'),
+                "the realization of `{function}` must be the obligation's consequent; it \
+                 is nested inside `{closers}`:\n{term}"
+            );
+            for bound in bounds {
+                assert!(
+                    term.contains(bound),
+                    "the envelope `{function}` is realized under must state `{bound}`:\n{term}"
+                );
+            }
+        }
+
+        // The narrow obligation's other two bounds come from the declaration
+        // rather than from the `assume`, and they are stated at `i32` because
+        // that is the width a narrow slot is compared at. Without them the
+        // envelope would be a bare `x < 127` over the whole of `i32`, which
+        // admits values no `i8` holds.
+        let narrow = terms
+            .iter()
+            .find(|term| term.contains("(HA_app_ok 1 ((T_local 0%N) :: nil))"))
+            .expect("the narrow obligation was just matched above");
+        for bound in [
+            "(Relop_i (ROI_le SX_S)) (T_const (Vi32 (-128))) (T_local 0%N)",
+            "(Relop_i (ROI_lt SX_S)) (T_local 0%N) (T_const (Vi32 128))",
+        ] {
+            assert!(
+                narrow.contains(bound),
+                "the drawn `i8` slot must carry its declared value domain: `{bound}` is \
+                 missing from:\n{narrow}"
+            );
+        }
+    }
+
     /// Committed `.v` golden for the quantifier-alternation fixture.
     /// Regenerate with the `#[ignore]`d
     /// [`regenerate::regenerate_quantifier_alternation_v`] after an intentional
@@ -4043,8 +4314,8 @@ End Host.
             aggregate_values_golden_path, bounded_iteration_golden_path, bounded_prime_golden_path,
             bounds_realization_golden_path, exists_spec_golden_path, false_certificate_golden_path,
             generate_v, linked_corpus_entry_v, linked_extern_golden_path, literal_ctx_golden_path,
-            narrow_discharge_golden_path, prime_golden_path, quantifier_alternation_golden_path,
-            unique_spec_golden_path,
+            narrow_discharge_golden_path, overflow_realization_golden_path, prime_golden_path,
+            quantifier_alternation_golden_path, unique_spec_golden_path,
         };
         use std::path::{Path, PathBuf};
 
@@ -4136,6 +4407,13 @@ End Host.
         fn regenerate_bounds_realization_v() {
             let v = generate_v("spec_bounds_realization.inf", "spec_bounds_realization");
             write_golden(&v, &bounds_realization_golden_path());
+        }
+
+        #[test]
+        #[ignore]
+        fn regenerate_overflow_realization_v() {
+            let v = generate_v("spec_overflow_realization.inf", "spec_overflow_realization");
+            write_golden(&v, &overflow_realization_golden_path());
         }
 
         #[test]

@@ -19,6 +19,7 @@ use inf_wasmparser::{
 };
 
 use crate::LinkError;
+use crate::checked::CheckedGuards;
 
 /// A WASM function signature, owned so it survives the parse borrow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +188,23 @@ pub(crate) struct ParsedModule {
     /// external's section is not decoded, so presence is all the merge can
     /// honestly report.
     pub carries_hspecs: bool,
+    /// The decoded `inference.checked` custom section: which of this module's
+    /// functions trap on arithmetic overflow, in the *pre-link* index space.
+    /// `None` when the module carries no such section, which is the producer's
+    /// statement that no function of it does — true of every module a foreign
+    /// toolchain produced, none of which emits an Inference overflow guard.
+    ///
+    /// [`CheckedGuards::Opaque`] is the third answer: the module has at least
+    /// one guarded function and no longer records which, the shape an artifact
+    /// takes after a post-build optimizer has renumbered it.
+    ///
+    /// Decoded under **every** role, unlike the two obligation sections. Those
+    /// describe a library the merged output is not, so an external's are read
+    /// only when the caller asked to adopt them. This one describes the bodies
+    /// the merge actually splices in, and whether a merged body traps is not a
+    /// question the caller's specification policy can waive: the merged module
+    /// is what the reachability judgment reduces either way.
+    pub checked: Option<CheckedGuards>,
     /// The logical, `::`-joined module reference this module was bound under
     /// (e.g. `"crypto::sha256"`), for an external; empty for the main module.
     /// The merge matches each main-module import's recorded `(module, field)`
@@ -359,7 +377,51 @@ impl ParsedModule {
             }
         }
 
+        module.check_checked_indices_in_range()?;
         Ok(module)
+    }
+
+    /// Refuses an `inference.checked` section naming a function this module does
+    /// not have.
+    ///
+    /// Checked after the walk because the function space is only complete then.
+    /// The producer emits indices into its own module, so an out-of-range one
+    /// means the section no longer describes the bytes it travels in. Left
+    /// unchecked, a stale index would map onto whichever function now sits
+    /// there, and the merge would report a guard against a body that has none,
+    /// or miss one that does. Neither is a verdict worth reaching, so the
+    /// artifact is refused instead.
+    ///
+    /// The section's contract is that it describes the artifact as its producer
+    /// emitted it, **or** says it can no longer. That second spelling exists
+    /// because of what a post-build optimizer does to the first: Binaryen
+    /// carries an unknown custom section through untouched — measured through
+    /// `-O3`, `-Oz`, `--strip-debug` and `--strip`, which drop only the `name`
+    /// section — while inlining, removing and reordering the functions the
+    /// indices named. Removal lands here, in range and refused. A reorder that
+    /// removes nothing leaves every index in range and pointing at the wrong
+    /// body, which no check on the section alone can see, so `infs` rewrites the
+    /// section into its opaque form after running the optimizer rather than
+    /// leaving a list that has quietly stopped being true.
+    fn check_checked_indices_in_range(&self) -> Result<(), LinkError> {
+        let Some(CheckedGuards::Exact(listed)) = &self.checked else {
+            return Ok(());
+        };
+        let total = self.imported_funcs.len() + self.local_funcs.len();
+        let Some(&offender) = listed.iter().find(|&&idx| idx as usize >= total) else {
+            return Ok(());
+        };
+        let origin = if self.logical_module.is_empty() {
+            "the main module".to_string()
+        } else {
+            format!("linked module `{}`", self.logical_module)
+        };
+        Err(LinkError::Parse(format!(
+            "the `inference.checked` section of {origin} names function {offender}, but the \
+             module declares only {total}; the section no longer describes the bytes it \
+             travels in, which is what a post-build optimizer leaves behind when it removes \
+             functions without rewriting the section"
+        )))
     }
 }
 
@@ -375,23 +437,29 @@ fn collect_types(group: &RecGroup, out: &mut Vec<TypeEntry>) {
 }
 
 /// Mines a custom section for everything the merge must carry through: the
-/// `name` section's module/function/local subsections, and the
+/// `name` section's module/function/local subsections, the
 /// `inference.spec_funcs` and `inference.hspecs` sections that drive proof-mode
-/// translation.
+/// translation, and the `inference.checked` section listing the functions whose
+/// bodies trap on arithmetic overflow.
 ///
 /// The `name` subsections are best-effort (an unparseable one is skipped). The
 /// verification payloads, by contrast, are deliverables: where they are decoded
 /// at all, a malformed or duplicated one is a hard [`LinkError`], never silently
 /// dropped.
 ///
-/// Where they are decoded depends on the `role`. The main module's always are.
-/// An external's are only when the caller asked to adopt the library's
-/// obligations, because otherwise nothing reads them — the merge mines an
-/// external for the executable closure of a satisfied export and nothing else —
-/// and decoding them would let a corrupt section in a library nothing needed
-/// fail the link. Presence of `inference.hspecs` is recorded under every role,
-/// since that is what a report about dropped obligations keys on and it costs
-/// no decoding.
+/// Where the two *obligation* sections are decoded depends on the `role`. The
+/// main module's always are. An external's are only when the caller asked to
+/// adopt the library's obligations, because otherwise nothing reads them — the
+/// merge mines an external for the executable closure of a satisfied export and
+/// nothing else — and decoding them would let a corrupt section in a library
+/// nothing needed fail the link. Presence of `inference.hspecs` is recorded
+/// under every role, since that is what a report about dropped obligations keys
+/// on and it costs no decoding.
+///
+/// `inference.checked` is different on exactly that point: it is decoded under
+/// every role, because it describes the bodies the merge splices in rather than
+/// a library the output is not, and whether one of them traps decides a
+/// rejection no specification policy can waive.
 fn collect_custom_section(
     custom: &CustomSectionReader,
     module: &mut ParsedModule,
@@ -416,6 +484,25 @@ fn collect_custom_section(
         let decoded = crate::spec_funcs::decode(custom.data())
             .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
         module.spec_funcs = Some(decoded);
+        return Ok(());
+    }
+
+    if custom.name() == crate::checked::SECTION_NAME {
+        // Read under every role. A second one would silently discard the first
+        // under a last-wins assignment, leaving guarded bodies unlisted and
+        // [`crate::merge`]'s reachability check blind to them, so the duplicate
+        // is a hard error rather than an overwrite.
+        if module.checked.is_some() {
+            return Err(duplicate_section_error(
+                role,
+                &module.logical_module,
+                crate::checked::SECTION_NAME,
+                "guarded functions",
+            ));
+        }
+        let decoded = crate::checked::decode(custom.data())
+            .map_err(|e| qualify_external_error(role, &module.logical_module, e))?;
+        module.checked = Some(decoded);
         return Ok(());
     }
 
@@ -497,10 +584,17 @@ fn decodes_verification_sections(role: ModuleRole) -> bool {
     }
 }
 
-/// The rejection for a module declaring one verification section twice, whose
-/// repair differs by role: the main module's producer emitted a program it must
-/// fix, while a library's is only ever read to adopt from, so the message says
-/// what adopting would have lost.
+/// The rejection for a module declaring one verification section twice.
+///
+/// Both arms say the same thing — a last-wins assignment would discard the first
+/// section's `contents` without a word — and differ only in naming the library,
+/// which is what the reader needs to find the offending artifact among the
+/// dependencies. There is one main module, so naming it adds nothing.
+///
+/// `contents` is what that section carries, because the three sections this
+/// covers carry different things: two hold proof obligations read only under
+/// adoption, and `inference.checked` holds the guarded functions every role
+/// reads. A message framed around adoption would be wrong about the third.
 fn duplicate_section_error(
     role: ModuleRole,
     logical_module: &str,
@@ -510,11 +604,11 @@ fn duplicate_section_error(
     match role {
         ModuleRole::Main => LinkError::Parse(format!(
             "main module declares more than one {section} section; \
-             its proof obligations would be silently dropped"
+             the first section's {contents} would be silently dropped"
         )),
         ModuleRole::External { .. } => LinkError::Parse(format!(
             "linked module `{logical_module}` declares more than one {section} section; \
-             adopting from it would silently drop the first section's {contents}"
+             the first section's {contents} would be silently dropped"
         )),
     }
 }

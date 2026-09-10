@@ -320,6 +320,141 @@ catch a wrong operator choice for you. A *narrow* index would differ — it stat
 its declaration admits alongside the width — but a narrow index needs no source guard at all
 where its whole domain is already in bounds.
 
+## No-Overflow as a Realization Claim
+
+Arithmetic overflow has no term in the assertion language and could not have one: every
+term is machine-width, `HBinop` **is** the wrapping WASM operator, and there is no width
+above `i64` for a true product to be compared at. What can be stated is that a call is
+*realized* — and that is `HA_app_ok`, the same atom a bare call statement already emits.
+So no-overflow reaches a proof the same way bounds do: the executable function gets a
+trap, and the obligation says the trap is not taken on the arguments the specification
+admits.
+
+`checked(e)` is what puts the trap there. Written around an operator, it emits a guard
+that traps through `unreachable` when the result leaves the operand type; without it the
+operator wraps and there is no trap site at all.
+
+```inference
+pub fn fixmul(a: i64, b: i64) -> i64 {
+  const ONE: i64 = 1048576;
+  return checked(a * b) / ONE;
+}
+
+spec OverflowRealization {
+  fn fixmul_is_realized() forall {
+    let a: i64 = @;
+    let b: i64 = @;
+    assume { assert(-3037000499 <= a && a <= 3037000499); }
+    assume { assert(-3037000499 <= b && b <= 3037000499); }
+    fixmul(a, b);
+  }
+}
+```
+
+The emitted obligation, from `tests/test_data/rocq/spec_overflow_realization.v` (line
+breaks added, nothing else changed):
+
+```coq
+Himpl (HA_and (HA_has_type (T_local 0%N) T_i64)
+      (HA_and (HA_has_type (T_local 1%N) T_i64)
+      (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_le SX_S))
+                                 (T_const (Vi64 (-3037000499))) (T_local 0%N))
+                               (T_const (Vi32 0))))
+              (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_le SX_S))
+                                 (T_local 0%N) (T_const (Vi64 3037000499)))
+                               (T_const (Vi32 0)))))))
+ (Himpl (HA_and (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_le SX_S))
+                                   (T_const (Vi64 (-3037000499))) (T_local 1%N))
+                                 (T_const (Vi32 0))))
+                (HA_not (term_eq (T_relop T_i64 (Relop_i (ROI_le SX_S))
+                                   (T_local 1%N) (T_const (Vi64 3037000499)))
+                                 (T_const (Vi32 0)))))
+        (HA_app_ok 0 ((T_local 0%N) :: (T_local 1%N) :: nil))).
+```
+
+Four structural facts a reader should take from it. Two `assume` blocks nest as two
+`Himpl`s rather than joining into one antecedent. The `HA_has_type` slot guards fuse into
+the **first** antecedent only, one per `@` binder in declaration order, so the second and
+later antecedents are the bare conjunction. `&&` inside one `assert` is a plain `HA_and`.
+And the relops are emitted at the operand width with their result compared against
+`T_const (Vi32 0)`, which is what `HA_not (term_eq … (Vi32 0))` is doing: the comparison
+did not yield false.
+
+### The guard is what makes the claim informative
+
+Compile the same specification against an unmarked `fixmul` and the emitted payload is
+**byte-for-byte the text above** — and unconditionally true. The unguarded body multiplies
+and then divides by `ONE`, which is neither zero nor `-1`, so nothing in it can trap for
+any `(a, b)`, the application is realized everywhere, and a proof may
+discharge the claim while ignoring every conjunct the author wrote. **P010** does not
+catch this: it tests for the exactly vacuous `HA_true`, and this obligation is not that.
+
+So the reading to avoid is that an envelope plus a bare call proves no-overflow. It
+proves no-overflow only where the callee has a trap for the envelope to rule out. An
+`HA_app_ok` over wrapping arithmetic is a true statement that the call returns, and
+nothing more.
+
+### Both halves of both bounds are load-bearing
+
+An `i64` declaration contributes only `HA_has_type … T_i64` — a width, never a range — so
+the `assume` blocks are the sole source of a bound, and the bound is exact rather than
+generous. 3037000499 is the largest N with N² inside `i64`.
+
+Widening a *single* bound by one does not break it: 3037000500 × 3037000499 is
+9223372033963249500, which still fits. What breaks it is widening both, or one of them by
+two — either admits a pair whose product leaves the type, the guard traps, and the claim
+that the application is realized becomes **false** rather than weaker. That asymmetry is
+worth knowing before reading a failing goal: a proof that stops closing after a one-bound
+edit failed for some other reason.
+
+A narrow operand needs less. `bump(x: i8) -> i8 { return checked(x + 1); }` under
+`assume { assert(x < 127); }` closes with one bound, because a drawn `i8` slot carries its
+declared value domain into the obligation already: the translator states `-128 <= x < 128`
+from the declaration, so the only value the envelope has to exclude is the one whose
+successor leaves the type.
+
+### The relops carry the signedness; the guard does not read them
+
+A full-width slot's `HA_has_type` records a width and no signedness, so the only tokens in
+the whole obligation that fix signedness are the `SX_S` on the relops the author wrote.
+The guard, meanwhile, picks its own shape from the operand's declared type — a signed
+multiply and an unsigned one are different rows of the catalogue.
+
+Those two are independent, and nothing downstream reconciles them. An envelope written
+with signed comparisons over an unsigned operand describes a different set from the one
+the guard tests, and the result is a goal that will not close rather than a diagnostic.
+Write each bound in the operand's own signedness.
+
+### Where arithmetic is refused outright
+
+Two positions cannot carry this at all, and both are rejected rather than silently
+reinterpreted.
+
+**A body that becomes a term** — `forall`, plain, and a helper `fn` declared inside a
+`spec` block, which is translated into an obligation of its own — may not carry either
+annotation (**P017**, first wording). Its `+`, `-` and `*` are the modular machine
+operators and no second operator exists downstream, so both spellings would translate
+identically and whichever was written would vanish. State the range as an `assume` over
+the operands and leave the guard in the executable function whose realization the
+specification claims.
+
+**An `exists`/`unique` body** is the opposite case. It is compiled, and the judgment
+reduces it, so an operator whose effective mode traps puts a trap on the reduced path.
+Because the judgment fixes an arbitrary typed entry vector before letting the choices
+range, that trap makes the theorem false rather than narrowing it — and in a `unique` body
+worse than false, since a trapping choice shrinks the successful set. Such an operator is
+refused by P017's second wording, with `wrapping(...)` accepted throughout as the remedy,
+and a body that *reaches* a guarded function through calls is refused by **P018**.
+
+### What the corpus gate can and cannot say
+
+The `coqc` gate over `spec_overflow_realization` establishes that the emitted `.v`
+elaborates. It cannot establish that either obligation is **true**: generated skeletons
+end in `Admitted.`, so a false obligation compiles exactly as readily as a true one. Truth
+is established downstream against the real library. The one shape the toolchain can
+recognise on its own is the audit in `tests/src/rocq_corpus_invariants.rs`, which requires
+a universal obligation applying a guarded callee to bound the variables it applies.
+
 ## Alternating Quantifiers
 
 A `forall` block nested inside an `exists` or `assume` block of a universal spec function
@@ -380,6 +515,7 @@ function.
 
 | Code | Construct | Reason |
 | --- | --- | --- |
+| P001 | an `assume`-quantified body | `assume` is not a quantifier — it only reinterprets a failing path as a filtered-out one for an enclosing `forall` — so a standalone `assume` body states no property |
 | P002 | `loop`, `break` | a loop states a property only through an invariant this translation cannot infer; quantify an index and constrain it instead |
 | P002 | `**`, string literals, nested `unique` blocks | no assertion encoding |
 | P002 | an array/struct literal read in scalar term position, or written at an out-of-surface shape | a literal becomes one term per scalar leaf, so there is neither a whole-value term nor a leaf tree to build |
@@ -389,11 +525,19 @@ function.
 | P004 | an aggregate read whole in term position, an aggregate call argument included | an aggregate is not a term; name the component you mean |
 | P004 | an *aggregate* parameter of an `exists`/`unique` body | the obligation denotes against a real frame, where the parameter is one pointer local |
 | P005 | a call that is not a `T_app`: an *unbound* `extern` callee (no `use … from` binding, so no module supplies a body), an instance method, one that does not resolve to a function this module defines or links, a non-deterministic-bodied callee, or — in term position only — one whose result is not a single scalar, compound or `unit` alike | the symbol has to name a function of the emitted module, applied at its real signature; a bare call *statement* is unaffected, becoming `HA_app_ok` at any result arity |
+| P006 | a bare `@` outside a `let` right-hand side or a call-argument position | a choice needs a name or a parameter slot for the obligation to read it back |
 | P007 | `forall` inside an `exists`/`unique` body | see *Alternating Quantifiers* |
 | P008 | an out-of-surface compound `@` in **any** body; any compound `@` in an `exists`/`unique` body | out of surface, there is no leaf tree to build; in a reachability body a choice arrives as one scalar parameter of the run |
+| P009 | a specification *method* carrying a proof obligation — quantified at any kind, or plain with an `assert` at any depth | a method has no obligation channel, and dropping the claim silently is worse than refusing it; a plain method that asserts nothing stays a helper |
+| P010 | an obligation that collapses to the vacuous `HA_true` | an obligation any proof discharges without reading the program is indistinguishable from no verification at all |
+| P011 | a call from any specification body to an `exists`/`unique`-quantified spec function | such a function is the subject of a judgment about running its own body with its own choices, not a callable predicate, and its compiled form carries trailing choice parameters no call site supplies |
+| P012 | an anonymous (call-argument) `@` in a `unique` body | a choice nothing names has no source-visible face, so it cannot distinguish exit states; bind it first |
+| P013 | an aggregate introduction whose scalar leaves pass `SPEC_FN_MAX_QUANTIFIED_LEAVES` | each leaf brings a binder and a hypothesis, so the tree grows one level per leaf and the budget is the resource |
 | P014 | a constant-folded out-of-bounds index | the same fact analysis rule A037 states, at the spelling A037 cannot see |
 | P015 | a parameter, a `@`, or an aggregate leaf at an `enum` declared with no variants | an uninhabited type has no value for the claim to range over, so the obligation would either say nothing or be unprovable for a reason unrelated to the program; A009 only *warns* about the declaration, so such an enum really does reach here |
 | P016 | a non-constant array index inside an `exists`/`unique` body | code generation guards the access with a trap, and a reachability judgment fixes the entry vector before the choices range — an entry whose index trips the guard leaves no successful run, making the claim false rather than narrowing it |
+| P017 | `checked(...)` or `wrapping(...)` in a `forall`/plain body; arithmetic whose effective mode traps in an `exists`/`unique` body | an obligation's arithmetic *is* the wrapping machine operator, so an annotation over it would be silently dropped; a reachability body is reduced, so a trap in it empties the observation set and makes the claim false. `wrapping(...)` is the remedy in the second case and the refusal in the first |
+| P018 | an `exists`/`unique` body that reaches a function carrying an overflow guard through calls | the judgment reduces callee activations too, so a guard one call deep is this body's trap; a callee code generation cannot resolve counts as carrying one, and `external fn` callees are skipped for the linker to judge |
 
 Memory-content assertions — addresses, points-to, iterated heaps — are out of scope entirely.
 The surface language cannot express them, and the properties this encoding *can* state are
@@ -403,7 +547,7 @@ scalar leaves express exactly.
 ## Related Documents
 
 - [`core/wasm-to-v/ROCQ_CONTRACT.md`](../../wasm-to-v/ROCQ_CONTRACT.md) — the emitted `.v`
-  contract, including the full `P001`–`P016` registry
+  contract, including the full `P001`–`P018` registry
 - [`docs/arrays-and-memory.md`](arrays-and-memory.md) — the executable lowering of the same
   aggregates, including `compute_struct_field_layout`, whose order the leaf enumeration
   shares

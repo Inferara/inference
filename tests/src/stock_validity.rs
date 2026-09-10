@@ -263,6 +263,12 @@ mod gate {
                   specification bodies draw scalar indices",
         },
         Fixture {
+            stem: "spec_overflow_realization",
+            expected: StockValid(ScalarChoice),
+            why: "the only fixture whose executable bodies carry an overflow guard; its \
+                  specification bodies draw scalar operands and bound them",
+        },
+        Fixture {
             stem: "spec_calls_top",
             expected: StockValid(WrapperSuppression),
             why: "a `forall` body whose only content is a call to a top-level helper; it draws \

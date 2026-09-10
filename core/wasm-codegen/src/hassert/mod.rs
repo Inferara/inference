@@ -119,6 +119,7 @@
 
 mod claim;
 mod diag;
+mod overflow_reach;
 pub(crate) mod reach;
 mod translate;
 
@@ -127,7 +128,7 @@ mod tests;
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
-use inference_ast::nodes::{BlockKind, Def};
+use inference_ast::nodes::{ArithMode, BlockKind, Def};
 use inference_fn_key::FnKey;
 use inference_hassert::{HAssert, HFnRef, HSpecEntry, HSpecMap, ReachMeta, SpecKind};
 use inference_type_checker::typed_context::TypedContext;
@@ -146,7 +147,20 @@ use diag::PCode;
 /// body here, and are resolved through
 /// [`ExternIndex`](inference_type_checker::ExternIndex) instead.
 pub(crate) struct CalleeIndex {
-    defs: FxHashMap<FnKey, DefId>,
+    defs: FxHashMap<FnKey, CalleeEntry>,
+}
+
+/// One function in [`CalleeIndex`], with the scope its own body resolves calls
+/// in.
+///
+/// The scope is the callee's, not the caller's: a walk that follows a call into
+/// this function has to resolve *its* bare names against the file it is written
+/// in and the specification enclosing it, which for a top-level function is no
+/// specification at all.
+pub(crate) struct CalleeEntry {
+    pub(crate) def_id: DefId,
+    pub(crate) module_path: Vec<String>,
+    pub(crate) spec_name: Option<String>,
 }
 
 impl CalleeIndex {
@@ -157,7 +171,11 @@ impl CalleeIndex {
         for entry in &buckets.funcs {
             defs.insert(
                 FnKey::free_in(entry.module_path.clone(), arena.def_name(entry.def_id)),
-                entry.def_id,
+                CalleeEntry {
+                    def_id: entry.def_id,
+                    module_path: entry.module_path.clone(),
+                    spec_name: None,
+                },
             );
         }
         for entry in &buckets.methods {
@@ -167,7 +185,11 @@ impl CalleeIndex {
                     entry.struct_name.clone(),
                     arena.def_name(entry.def_id),
                 ),
-                entry.def_id,
+                CalleeEntry {
+                    def_id: entry.def_id,
+                    module_path: entry.module_path.clone(),
+                    spec_name: None,
+                },
             );
         }
         for entry in &buckets.spec_funcs {
@@ -177,7 +199,11 @@ impl CalleeIndex {
                     &entry.spec_name,
                     arena.def_name(entry.def_id),
                 ),
-                entry.def_id,
+                CalleeEntry {
+                    def_id: entry.def_id,
+                    module_path: entry.module_path.clone(),
+                    spec_name: Some(entry.spec_name.clone()),
+                },
             );
         }
         for entry in &buckets.spec_methods {
@@ -188,14 +214,29 @@ impl CalleeIndex {
                     entry.struct_name.clone(),
                     arena.def_name(entry.def_id),
                 ),
-                entry.def_id,
+                CalleeEntry {
+                    def_id: entry.def_id,
+                    module_path: entry.module_path.clone(),
+                    spec_name: Some(entry.spec_name.clone()),
+                },
             );
         }
         Self { defs }
     }
 
     fn get(&self, key: &FnKey) -> Option<DefId> {
-        self.defs.get(key).copied()
+        self.defs.get(key).map(|entry| entry.def_id)
+    }
+
+    /// Whether `key` names a function this module compiles, which is the
+    /// registry predicate code generation's own resolution consults.
+    fn registered(&self, key: &FnKey) -> bool {
+        self.defs.contains_key(key)
+    }
+
+    /// Every compiled function, with the key it was registered under.
+    fn iter(&self) -> impl Iterator<Item = (&FnKey, &CalleeEntry)> {
+        self.defs.iter()
     }
 }
 
@@ -221,10 +262,16 @@ pub(crate) fn translate_spec_fns<'a>(
     ctx: &'a TypedContext,
     buckets: &EmittableFunctions,
     reach_plans: &reach::ReachPlans<'a>,
+    default_arith_mode: ArithMode,
 ) -> (HSpecMap, Vec<HassertDiagnostic>) {
     let arena = ctx.arena();
     let callee = CalleeIndex::build(arena, buckets);
     let externs = ctx.extern_index();
+    // Once for the module: every reachability specification asks the same
+    // question of the same call graph, and the closure does not depend on which
+    // one is asking.
+    let guard_reach =
+        overflow_reach::GuardReach::build(ctx, &callee, externs, default_arith_mode, reach_plans);
     let mut map = HSpecMap::default();
     let mut diagnostics = Vec::new();
 
@@ -236,6 +283,8 @@ pub(crate) fn translate_spec_fns<'a>(
             &entry.spec_name,
             &callee,
             externs,
+            &guard_reach,
+            default_arith_mode,
         );
         let hassert = translator.translate_fn(entry.def_id, plan);
         let fn_diagnostics = translator.take_diagnostics();

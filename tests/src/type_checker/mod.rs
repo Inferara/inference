@@ -1,6 +1,7 @@
 #[allow(clippy::module_inception)]
 mod type_checker;
 
+mod arith_mode;
 mod array_tests;
 mod associated_functions;
 mod coverage;

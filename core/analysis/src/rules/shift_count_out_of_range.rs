@@ -98,24 +98,17 @@ fn check_shift_count(
 /// count). Returns `None` for dynamic counts and for literals that do not parse
 /// as `i128` (A022 owns those).
 fn literal_shift_count(arena: &AstArena, right: ExprId) -> Option<i128> {
-    match &arena[strip_parens(arena, right)].kind {
+    match &arena[arena.peel_transparent(right)].kind {
         Expr::NumberLiteral { value } => value.parse::<i128>().ok(),
         Expr::PrefixUnary {
             expr,
             op: UnaryOperatorKind::Neg,
-        } => match &arena[strip_parens(arena, *expr)].kind {
+        } => match &arena[arena.peel_transparent(*expr)].kind {
             Expr::NumberLiteral { value } => value.parse::<i128>().ok().map(|v| -v),
             _ => None,
         },
         _ => None,
     }
-}
-
-fn strip_parens(arena: &AstArena, mut expr: ExprId) -> ExprId {
-    while let Expr::Parenthesized { expr: inner } = &arena[expr].kind {
-        expr = *inner;
-    }
-    expr
 }
 
 fn name_and_bit_width(number_type: NumberType) -> (&'static str, u32) {

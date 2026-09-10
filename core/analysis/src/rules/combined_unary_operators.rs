@@ -74,9 +74,8 @@ fn check_prefix_unary(
 }
 
 fn inner_unary_op(arena: &AstArena, expr_id: ExprId) -> Option<UnaryOperatorKind> {
-    match &arena[expr_id].kind {
+    match &arena[arena.peel_transparent(expr_id)].kind {
         Expr::PrefixUnary { op, .. } => Some(op.clone()),
-        Expr::Parenthesized { expr } => inner_unary_op(arena, *expr),
         Expr::NumberLiteral { value } if value.starts_with('-') => Some(UnaryOperatorKind::Neg),
         _ => None,
     }

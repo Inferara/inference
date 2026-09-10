@@ -35,6 +35,7 @@
 //! - [`TypeCheckError::InvalidBinaryOperand`] - Invalid types for binary operator
 //! - [`TypeCheckError::InvalidUnaryOperand`] - Invalid type for unary operator
 //! - [`TypeCheckError::BinaryOperandTypeMismatch`] - Operand types don't match
+//! - [`TypeCheckError::ArithModeOnNonScalar`] - `checked`/`wrapping` over a non-scalar
 //!
 //! **Function and Method Errors**:
 //! - [`TypeCheckError::ArgumentCountMismatch`] - Wrong number of arguments
@@ -81,10 +82,61 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use inference_ast::nodes::{Location, OperatorKind, UnaryOperatorKind};
+use inference_ast::nodes::{ArithMode, Location, OperatorKind, UnaryOperatorKind};
 use thiserror::Error;
 
-use crate::type_info::TypeInfo;
+use crate::type_info::{TypeInfo, TypeInfoKind};
+
+/// How a diagnostic names the kind of value an arithmetic-mode annotation was
+/// written over, together with the clause saying why the annotation has nothing
+/// to govern there.
+///
+/// Read off the type the annotation encloses rather than carried beside it, so
+/// the phrase and the rendered type cannot describe different things.
+///
+/// The clause travels with the noun because it is not the same clause for every
+/// kind. Only the unit value has no value in expression position; a struct or an
+/// array is a perfectly good value, and saying otherwise of one would be a
+/// sentence the reader can see is false about the code in front of them. What is
+/// true of every kind here is narrower: `+`, `-`, `*` and unary `-` do not apply
+/// to it.
+fn arith_mode_inner_clause(found: &TypeInfo) -> &'static str {
+    match &found.kind {
+        // The one kind the "no value in expression position" clause is true of.
+        TypeInfoKind::Unit => {
+            "the unit value, which those operators never combine and which has no value in \
+             expression position here"
+        }
+        TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) => {
+            "an aggregate, which those operators never combine"
+        }
+        // Not reachable from source at this position: a function type is
+        // recorded on the callee of a call, and a call expression's own type is
+        // its return type, so nothing an annotation can enclose carries one. The
+        // arm is here for totality and says what would be true of one.
+        TypeInfoKind::Function(_) => {
+            "a function value, which is not a number those operators apply to"
+        }
+        TypeInfoKind::Enum(_, _) => {
+            "an enumeration value, which is not a number those operators apply to"
+        }
+        TypeInfoKind::String => "a string value, which is not a number those operators apply to",
+        TypeInfoKind::Generic(_) => {
+            "a type variable, which is not a number those operators apply to"
+        }
+        TypeInfoKind::QualifiedName(_) | TypeInfoKind::Qualified(_) => {
+            "a named type, which is not a number those operators apply to"
+        }
+        TypeInfoKind::Spec(_) => "a specification, which is not a number those operators apply to",
+        // Both are accepted by the rule that raises this, so neither reaches the
+        // message; the arms keep the classification total and say something true
+        // rather than something convenient.
+        TypeInfoKind::Bool => "a truth value, which is not a number those operators apply to",
+        TypeInfoKind::Number(_) => {
+            "a number, which those operators do apply to — a scalar never reaches this message"
+        }
+    }
+}
 
 /// Kind of symbol registration for registration error context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +477,36 @@ pub enum TypeCheckError {
         expected_kind: &'static str,
         operand_desc: &'static str,
         found_types: (TypeInfo, TypeInfo),
+        location: Location,
+    },
+
+    /// `checked(e)` / `wrapping(e)` over an expression that is not scalar.
+    ///
+    /// Both annotations say how the `+`, `-`, `*` and unary `-` written inside
+    /// them treat a result that does not fit its type. A `bool` expression is
+    /// squarely in scope — `checked(a + b == c)` and `wrapping(a * b > c)` are
+    /// the comparison-of-sums shapes an author writes at a boundary — so the
+    /// line is drawn at the scalar types: a struct, an array, a unit value or a
+    /// function has no arithmetic anywhere inside it to govern.
+    ///
+    /// Whether the annotation actually reaches an operator is a separate
+    /// question, and not this one: `wrapping(x)` is well-typed here and is
+    /// reported by the analysis rule that owns decorative annotations.
+    #[error(
+        "{location}: `{spelling}(...)` cannot be applied to `{found_type}`; the annotation fixes \
+         how `+`, `-`, `*` and unary `-` behave when their result leaves the operand type, which \
+         is a property of the scalar number types, and `{found_type}` is {clause}\nnote: \
+         annotate the arithmetic on the scalar leaves instead, as in \
+         `P {{ x: {spelling}(a + b) }}` or `arr[{spelling}(i + 1)]`",
+        spelling = .mode.spelling(),
+        clause = arith_mode_inner_clause(.found_type)
+    )]
+    ArithModeOnNonScalar {
+        /// The annotation as written. Carried as the mode rather than as its
+        /// spelling so this variant holds what every other diagnostic about an
+        /// arithmetic-mode annotation holds, and the rendering is one call.
+        mode: ArithMode,
+        found_type: TypeInfo,
         location: Location,
     },
 
@@ -990,6 +1072,7 @@ impl TypeCheckError {
             | TypeCheckError::TypeParameterCountMismatch { location, .. }
             | TypeCheckError::InvalidBinaryOperand { location, .. }
             | TypeCheckError::InvalidUnaryOperand { location, .. }
+            | TypeCheckError::ArithModeOnNonScalar { location, .. }
             | TypeCheckError::BinaryOperandTypeMismatch { location, .. }
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }

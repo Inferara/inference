@@ -156,6 +156,16 @@ impl<'a> ReachPlans<'a> {
     pub(crate) fn get(&self, def_id: DefId) -> Option<ReachPlan<'a>> {
         self.by_def.get(&def_id).copied()
     }
+
+    /// Whether no function in this module is reachability-quantified.
+    ///
+    /// The whole of the reachability half of the obligation pass — the retained
+    /// bodies, the `unique` frame view, the walk that refuses a body reaching an
+    /// overflow guard — has nothing to say about such a module, so a caller can
+    /// use this to skip work rather than compute an answer no one asks for.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_def.is_empty()
+    }
 }
 
 /// Selects the `exists`/`unique`-bodied specification free functions out of the

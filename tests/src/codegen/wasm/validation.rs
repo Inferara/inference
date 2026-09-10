@@ -1890,6 +1890,230 @@ pub fn take(mut e: Nothing) -> i32 { e = e; return 0; }
         );
     }
 
+    // The `inference.checked` section ---
+
+    /// The `inference.checked` payload of `wasm`, or `None` when the module
+    /// carries no such section.
+    fn checked_section_payload(wasm: &[u8]) -> Option<Vec<u8>> {
+        for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+            let inf_wasmparser::Payload::CustomSection(reader) =
+                payload.expect("a golden artifact parses")
+            else {
+                continue;
+            };
+            if reader.name() == inference_wasm_codegen::CHECKED_SECTION_NAME {
+                return Some(reader.data().to_vec());
+            }
+        }
+        None
+    }
+
+    /// The function indices an `inference.checked` payload lists.
+    ///
+    /// Decoded rather than measured: the count and the indices are what the
+    /// linker reads, so a payload whose head does not say what its body holds
+    /// has to fail here rather than downstream.
+    fn decode_checked_payload(data: &[u8], label: &str) -> Vec<u32> {
+        let mut reader = inf_wasmparser::BinaryReader::new(data, 0);
+        let version = reader
+            .read_var_u32()
+            .unwrap_or_else(|e| panic!("{label}: truncated version: {e}"));
+        assert_eq!(
+            version,
+            inference_wasm_codegen::CHECKED_SECTION_VERSION,
+            "{label}: unexpected section version"
+        );
+        let count = reader
+            .read_var_u32()
+            .unwrap_or_else(|e| panic!("{label}: truncated count: {e}"));
+        let mut indices = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            indices.push(
+                reader
+                    .read_var_u32()
+                    .unwrap_or_else(|e| panic!("{label}: truncated index: {e}")),
+            );
+        }
+        assert_eq!(
+            reader.bytes_remaining(),
+            0,
+            "{label}: trailing bytes after the declared indices"
+        );
+        indices
+    }
+
+    /// The number of functions a module declares: its imported functions
+    /// followed by its own.
+    ///
+    /// The space `inference.checked` indexes into, so an index this number does
+    /// not cover names nothing.
+    fn declared_function_count(wasm: &[u8], label: &str) -> u32 {
+        let mut total = 0u32;
+        for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+            match payload.unwrap_or_else(|e| panic!("{label}: {e}")) {
+                inf_wasmparser::Payload::ImportSection(reader) => {
+                    for import in reader {
+                        let import = import.unwrap_or_else(|e| panic!("{label}: {e}"));
+                        if matches!(import.ty, inf_wasmparser::TypeRef::Func(_)) {
+                            total += 1;
+                        }
+                    }
+                }
+                inf_wasmparser::Payload::FunctionSection(reader) => {
+                    total += reader.count();
+                }
+                _ => {}
+            }
+        }
+        total
+    }
+
+    /// Every `inference.checked` section in the committed corpus is one the
+    /// linker can read: non-empty, strictly ascending, and naming only functions
+    /// its own module declares.
+    ///
+    /// The section's absence is a statement, not a default: it says the module
+    /// holds no Inference-emitted overflow guard, which is what lets the linker
+    /// read a foreign toolchain's artifact — none of which emits one — without
+    /// treating the missing section as unknown. That reading is only sound while
+    /// the emitter leaves the section out of every module with nothing to list.
+    ///
+    /// *Which* goldens carry one is not asserted here, and deliberately so: each
+    /// golden is pinned byte for byte by its own module's test, which is a
+    /// stronger statement than any predicate over its sources could be — a
+    /// golden that started or stopped carrying the section fails there first.
+    /// What that pinning cannot say is whether the bytes are *readable*, since a
+    /// section naming a function the module does not have is byte-identical to
+    /// itself. The linker refuses such an artifact at parse time; nothing in the
+    /// corpus may be one.
+    ///
+    /// The condition the emitter is actually held to is the recompile gate
+    /// below, which asks the compiler for its own guarded set rather than
+    /// reading the fixture sources.
+    #[test]
+    fn every_committed_checked_section_is_one_the_linker_can_read() {
+        let artifacts = all_golden_wasm_artifacts();
+        assert!(
+            artifacts.len() >= 180,
+            "expected at least 180 golden modules, found {}",
+            artifacts.len()
+        );
+        let mut carriers = 0usize;
+        for path in &artifacts {
+            let label = path.display().to_string();
+            let wasm = std::fs::read(path)
+                .unwrap_or_else(|e| panic!("failed to read {label}: {e}"));
+            let Some(data) = checked_section_payload(&wasm) else {
+                continue;
+            };
+            let indices = decode_checked_payload(&data, &label);
+            assert!(
+                !indices.is_empty(),
+                "{label}: the section is never emitted with nothing to list"
+            );
+            let mut ascending = indices.clone();
+            ascending.sort_unstable();
+            ascending.dedup();
+            assert_eq!(
+                indices, ascending,
+                "{label}: the indices must be strictly ascending, so the payload is \
+                 byte-stable across builds"
+            );
+            let declared = declared_function_count(&wasm, &label);
+            let out_of_range: Vec<u32> = indices
+                .iter()
+                .copied()
+                .filter(|&idx| idx >= declared)
+                .collect();
+            assert!(
+                out_of_range.is_empty(),
+                "{label}: the section names function(s) {out_of_range:?} of a module that \
+                 declares only {declared}, which the linker refuses at parse time"
+            );
+            carriers += 1;
+        }
+        assert!(
+            carriers >= 1,
+            "no committed golden carries the section, so this gate observed nothing"
+        );
+    }
+
+    /// The emitter writes the section exactly when it guarded something, over
+    /// every fixture the corpus holds.
+    ///
+    /// The expected answer comes from the compiler, not from the source text.
+    /// [`CodegenOutput::guarded_functions`] is the set the emitter records at
+    /// the same point it reserves a guard's scratch slot, so this compares the
+    /// two halves of one decision — the keys the proof-mode diagnostics name a
+    /// function by, and the indices the linker acts on — and nothing that reads
+    /// a source has an opinion. A textual predicate could not do this job at
+    /// all: `checked(f(x))` asks for a guard and governs none, a fixture
+    /// directory holding several sources marks every golden in it, and the
+    /// polarity of the whole test would invert the day the default arithmetic
+    /// mode changed.
+    ///
+    /// Proof mode, because it lowers the `spec` bodies compile mode drops and
+    /// those bodies carry arithmetic of their own; analysis is skipped so a
+    /// fixture written to exercise something a rule rejects still reaches code
+    /// generation.
+    #[test]
+    fn a_recompiled_fixture_carries_the_checked_section_only_when_the_compiler_guarded_something() {
+        let sources = single_file_corpus_sources();
+        assert!(
+            sources.len() >= 100,
+            "expected at least 100 single-file fixtures, found {}",
+            sources.len()
+        );
+        let mut compiled = 0usize;
+        let mut carriers = 0usize;
+        for (label, source) in &sources {
+            let Ok(output) = codegen_with_full_config_no_analysis(
+                source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+                Target::Wasm32.default_opt_level(),
+            ) else {
+                continue;
+            };
+            compiled += 1;
+            let guarded = output.guarded_functions();
+            match checked_section_payload(output.wasm()) {
+                None => assert!(
+                    guarded.is_empty(),
+                    "{label}: code generation guarded {guarded:?}, but the module lists no \
+                     guarded function"
+                ),
+                Some(data) => {
+                    assert!(
+                        !guarded.is_empty(),
+                        "{label}: code generation guarded nothing, so the module must carry no \
+                         `inference.checked` section at all"
+                    );
+                    let indices = decode_checked_payload(&data, label);
+                    assert_eq!(
+                        indices.len(),
+                        guarded.len(),
+                        "{label}: the section lists {} function(s) while code generation \
+                         recorded {} ({guarded:?}); the index a linker acts on and the key a \
+                         diagnostic names a callee by are written at one place and must \
+                         describe one set",
+                        indices.len(),
+                        guarded.len()
+                    );
+                    carriers += 1;
+                }
+            }
+        }
+        assert!(
+            compiled >= 100,
+            "expected at least 100 fixtures to reach proof-mode codegen, only {compiled} did"
+        );
+        assert!(
+            carriers >= 1,
+            "no recompiled fixture carried the section, so this gate observed nothing"
+        );
+    }
+
     // Helper functions ---
 
     /// Renders a module as WAT, for assertions about a section's shape rather

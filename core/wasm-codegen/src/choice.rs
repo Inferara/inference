@@ -444,6 +444,7 @@ impl PlanBuilder<'_> {
             }
             Expr::PrefixUnary { expr, .. }
             | Expr::Parenthesized { expr }
+            | Expr::ArithMode { expr, .. }
             | Expr::MemberAccess { expr, .. }
             | Expr::TypeMemberAccess { expr, .. } => self.walk_expr(*expr),
             Expr::FunctionCall { function, args, .. } => {

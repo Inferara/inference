@@ -259,6 +259,22 @@ Function types (`fn(i32) -> i32`) are refused for their own reason, with or with
 
 Only the declaration half is a gate on an unimplemented feature, and it is deleted the day monomorphization lands, which is tracked in issue #76. **The type-application and expression-position halves survive that day** and must not be deleted with it: no type declaration accepts type arguments whether or not functions can be monomorphized. The architecturally correct home for that half is the type checker's own validation of a written type; A051 is the gate until it moves there.
 
+### Arithmetic-Mode Annotations
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A052 | *(unassigned)* | — | *(no rule holds this id)* |
+| A053 | `ArithModeGovernsNothing` | error | a `checked(...)` or `wrapping(...)` with no `+`, `-`, `*` or unary `-` at an overflowable type inside it |
+| A054 | `ArithModeChangesNothing` | warning | an annotation naming the mode already in force where it is written |
+
+`checked(e)` and `wrapping(e)` say how the `+`, `-`, `*` and unary `-` written *between their own parentheses* treat a result that leaves the operand type. Two ways to write one that does nothing, split by severity because they are different mistakes.
+
+A053 is the typo: nothing inside the annotation is an operator it could govern. Two shapes account for nearly all instances and the message names both, because neither is visible from the site the rule fires on. A **call** — `wrapping(mix(s))` annotates the call, and the annotation does not reach into `mix`'s body, which is the mistake authors of hashes, mixers and pseudo-random generators make most often. And a **glued negative literal** — `-2147483648` is one token carrying its own sign rather than a negation applied to a value, so `wrapping(-2147483648)` governs nothing; the detached spelling is a negation, and A046 rejects that spelling for its own reasons. Two wordings, because a `wrapping(...)` that governs nothing is inert while a `checked(...)` that governs nothing reads as a guarantee no guard backs. An error rather than a warning: the annotation is somewhere other than where it was meant to go, and no default makes it right.
+
+A054 is the redundancy: the mode the annotation names is already the mode in force. It is a **warning** because which spelling is redundant is decided by the language's default, so the same source is redundant under one default and meaningful under the other; a hard error there would break source the previous release taught people to write, with no deprecation window. This is the position rustc takes on `unused_attributes`, and languages whose opt-out is an operator (`+%`, `&+`) have no such rule at all, because such a spelling cannot be redundant. The comparison is against the **enclosing** effective mode, never the default alone, so `checked(a * wrapping(b + c))` is redundant nowhere: the outer annotation changes the `*` and the inner restores wrapping inside the region the outer made checked. A stack of same-mode annotations reports its outermost member and stops — the convention A048 and A049 already use for nested array annotations. An annotation A053 owns is skipped, through the same containment predicate both rules read, so the handoff cannot drift.
+
+Both rules read one definition of which operators an annotation governs, and so does code generation's guard classifier, so what a rule calls a governed operator and what the emitter puts a guard on are one set. The definition is in three pieces, each where it can see what it needs: `GuardedOp` in `inference-ast` names the four operators; `AstArena::guarded_operator`, beside it, is the one place an expression node is turned into a `GuardedOp` and its operand; and `NumberType::has_operator(GuardedOp)` in `inference-type-checker` decides whether a type has that operator at all — the one asymmetry being unary `-`, which an unsigned type does not have, so `wrapping(-x)` at a `u32` is a type error rather than an operator to govern. A rule that counted an operator the emitter never guards would call an annotation meaningful on the strength of arithmetic that does not exist.
+
 ## Diagnostic Output Format
 
 ```
@@ -380,6 +396,8 @@ Test files are organized by rule group:
 | `rules_a049.rs` | A049 (unit values) |
 | `rules_a050.rs` | A050 (unnamed parameter on a defined function) |
 | `rules_a051.rs` | A051 (generic declarations and type applications) |
+| `rules_a053.rs` | A053 (arithmetic-mode annotation with nothing to govern) |
+| `rules_a054.rs` | A054 (arithmetic-mode annotation that changes nothing) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

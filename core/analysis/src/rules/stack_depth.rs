@@ -438,6 +438,7 @@ fn expr_reads_var(arena: &AstArena, expr_id: ExprId, dest: &str) -> bool {
         }
         Expr::PrefixUnary { expr, .. }
         | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. }
         | Expr::MemberAccess { expr, .. }
         | Expr::TypeMemberAccess { expr, .. } => expr_reads_var(arena, *expr, dest),
         Expr::FunctionCall { function, args, .. } => {

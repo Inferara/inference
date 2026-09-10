@@ -67,7 +67,8 @@ pub struct CompletionItem {
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "spec", "struct", "enum", "const", "external", "return", "loop", "if",
     "else", "assert", "break", "use", "from", "self", "pub", "assume", "forall", "exists",
-    "unique", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "bool", "true", "false",
+    "unique", "checked", "wrapping", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "bool",
+    "true", "false",
 ];
 
 /// Computes completions for byte `offset` in the entry file.

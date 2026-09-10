@@ -10,6 +10,7 @@ mod hassert_translation;
 mod panic_free;
 mod parser_literal_diagnostics;
 mod robustness;
+mod rocq_corpus_invariants;
 mod rocq_decls;
 pub mod rocq_dischargeability;
 mod rocq_stub_drift;

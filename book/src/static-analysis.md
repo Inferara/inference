@@ -297,11 +297,11 @@ This custom traversal is explicitly documented in a module-level comment in `cor
 
 ## Current Rules
 
-Forty-eight rules are registered in `all_rules()`. Forty-three are
-error-severity — they block compilation — and five are warnings; no
-info-severity rule has been defined yet. Three ids in the numbering range
-(A013, A021, A030) are currently unassigned, so the assigned ids run from
-A001 to A051. The tables below group the rules by the invariant family they
+Fifty rules are registered in `all_rules()`. Forty-four are
+error-severity — they block compilation — and six are warnings; no
+info-severity rule has been defined yet. Four ids in the numbering range
+(A013, A021, A030, A052) are currently unassigned, so the assigned ids run from
+A001 to A054. The tables below group the rules by the invariant family they
 protect; the descriptions are condensed from the rules' own doc comments.
 
 ### Control flow and termination
@@ -385,10 +385,16 @@ as a pure method namespace, stays legal.
 | A022 | a numeric literal must fit the valid range of its target type |
 | A037 | a constant array index must be within the array's bounds |
 | A044 | a literal shift count must fit the operand type's bit width |
+| A053 | a `checked(...)` or `wrapping(...)` must contain an operator it can govern |
+| A054 | an annotation naming the mode already in force is redundant *(warning)* |
 
-A022 exists because WebAssembly arithmetic wraps silently — the rule closes
+A022 exists because an unannotated `+`, `-`, `*` or unary `-` wraps silently, as
+the WebAssembly operator it lowers to does — the rule closes
 the front door on values that could never round-trip through their declared
-type (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)).
+type (see [Arithmetic Overflow](arithmetic-overflow-in-wasm-codegen.md)). Its
+premise is unaffected by `checked(...)`, which changes what an *operator* does
+with a result and never what a literal means: a literal outside its type's range
+is out of range under either annotation and under none.
 A037 turns a guaranteed runtime trap into a compile-time error when the index
 is statically known. A044 closes the same front door as A022, aimed at a
 shift's count operand rather than an assigned or compared value: WebAssembly's
@@ -397,6 +403,23 @@ runtime shift already takes the count modulo the operand's bit width, so `x <<
 literal count outside `0..width` as a program error instead of letting it fold
 to a value the source never wrote. Dynamic and const-declared counts are out
 of its scope, the same statically-known-literal boundary A022 draws.
+
+A053 and A054 are the two ways to write an arithmetic-mode annotation that does
+nothing, split by severity because they are different mistakes. A053 is a typo:
+there is no `+`, `-`, `*` or unary `-` inside the annotation for it to govern.
+Two shapes account for nearly every instance, and the message names both because
+neither is visible from the site the rule fires on — a **call**, since
+`wrapping(mix(s))` annotates the call and the annotation does not reach into
+`mix`'s body, and a **glued negative literal**, since `-2147483648` is one token
+carrying its own sign rather than a negation applied to a value. It is an error
+because no default makes it right: the annotation is somewhere other than where
+it was meant to go, and a `checked(...)` that governs nothing reads as a
+guarantee no guard backs. A054 is the redundancy — the mode named is already the
+mode in force — and it is a **warning** because which spelling is redundant is
+decided by the language's default rather than by the expression. The comparison
+is against the *enclosing* effective mode, so `checked(a * wrapping(b + c))` is
+redundant nowhere, and a stack of same-mode annotations reports its outermost
+member once, the convention A048 and A049 already use.
 
 ### Language restrictions
 

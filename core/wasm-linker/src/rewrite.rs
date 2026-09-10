@@ -150,6 +150,61 @@ pub(crate) fn reencode_body(
     Ok(function)
 }
 
+/// The functions one body may transfer control to.
+///
+/// `direct` holds the operands of the operators that name a callee, in the
+/// body's own index space; `indirect` says whether the body performs a call the
+/// operand cannot name.
+pub(crate) struct BodyCalls {
+    /// Every function index the body names as a call target, in source order.
+    pub(crate) direct: Vec<u32>,
+    /// Whether the body performs a `call_indirect`, whose target is a table
+    /// entry chosen at run time and so names no function at all.
+    pub(crate) indirect: bool,
+}
+
+/// The call edges of one function body, read off the same operator stream
+/// [`reencode_body`] re-encodes.
+///
+/// The two walks share this module because they share a premise: a call operator
+/// the re-encoder failed to remap would name the wrong function, and a call
+/// operator this walk failed to see would leave an edge out of the call graph a
+/// reachability check reasons over. Both faults are silent, and a new
+/// call-bearing operator has to be answered in both places at once.
+///
+/// `ref_func` counts as a direct edge. It does not itself call anything, but the
+/// function it references can only be reached through it, so counting it is
+/// what keeps the edge from vanishing; a body that references a function it
+/// never calls is over-approximated, which is the direction that fails closed.
+/// The tail-call forms are answered here too, even though the merge rejects
+/// them as an unmodeled family: this walk runs before that rejection, and a
+/// contract about "the functions this body may reach" that quietly excluded
+/// them would be false on its own terms.
+pub(crate) fn call_edges(body: &[u8]) -> Result<BodyCalls, LinkError> {
+    let reader = BinaryReader::new(body, 0);
+    let func_body = FunctionBody::new(reader);
+    let mut calls = BodyCalls {
+        direct: Vec::new(),
+        indirect: false,
+    };
+    for item in func_body
+        .get_operators_reader()
+        .map_err(|e| LinkError::Parse(e.to_string()))?
+    {
+        let op = item.map_err(|e| LinkError::Parse(e.to_string()))?;
+        match op {
+            Operator::Call { function_index }
+            | Operator::ReturnCall { function_index }
+            | Operator::RefFunc { function_index } => calls.direct.push(function_index),
+            Operator::CallIndirect { .. } | Operator::ReturnCallIndirect { .. } => {
+                calls.indirect = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(calls)
+}
+
 /// Reads the locals declarations from a body into the `(count, ValType)` form
 /// `wasm-encoder::Function::new` expects.
 fn read_locals(body: &FunctionBody) -> Result<Vec<(u32, wasm_encoder::ValType)>, LinkError> {
@@ -581,6 +636,136 @@ mod tests {
             matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("unmapped global")),
             "expected the map's own error to propagate, got {err:?}"
         );
+    }
+
+    // `call_edges` ---
+
+    #[test]
+    fn call_edges_reads_every_direct_call_in_source_order() {
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (func (;0;) (type 0)
+                call 2
+                call 1
+                call 2)
+              (func (;1;) (type 0))
+              (func (;2;) (type 0))
+              (export "f" (func 0)))
+            "#,
+        )
+        .expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert_eq!(
+            calls.direct,
+            vec![2, 1, 2],
+            "the operands are read as written, repeats included"
+        );
+        assert!(!calls.indirect);
+    }
+
+    #[test]
+    fn call_edges_reports_no_edge_for_a_body_that_calls_nothing() {
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (result i32)))
+              (func (;0;) (type 0) i32.const 7)
+              (export "f" (func 0)))
+            "#,
+        )
+        .expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert!(calls.direct.is_empty());
+        assert!(!calls.indirect);
+    }
+
+    #[test]
+    fn call_edges_flags_an_indirect_call_and_names_no_target_for_it() {
+        // The target is a table entry chosen at run time, so there is no operand
+        // to record and the flag is the whole answer.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (table (;0;) 1 funcref)
+              (func (;0;) (type 0)
+                call 1
+                i32.const 0
+                call_indirect (type 0))
+              (func (;1;) (type 0))
+              (export "f" (func 0)))
+            "#,
+        )
+        .expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert_eq!(calls.direct, vec![1]);
+        assert!(calls.indirect);
+    }
+
+    #[test]
+    fn call_edges_counts_a_ref_func_as_an_edge() {
+        // `ref_func` calls nothing on its own, but the function it names can be
+        // reached only through it, so counting it is what keeps the edge from
+        // vanishing. Over-approximating a reference that is never called is the
+        // direction that fails closed.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (table (;0;) 1 funcref)
+              (func (;0;) (type 0)
+                ref.func 1
+                drop)
+              (func (;1;) (type 0))
+              (export "f" (func 0)))
+            "#,
+        )
+        .expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert_eq!(calls.direct, vec![1]);
+        assert!(!calls.indirect);
+    }
+
+    #[test]
+    fn call_edges_answers_the_tail_call_forms_the_merge_rejects_later() {
+        // The walk runs before the re-encoder's allow-list refuses these, so a
+        // contract about "the functions this body may reach" that excluded them
+        // would be false on its own terms for as long as the body is still under
+        // consideration.
+        let direct = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (func (;0;) (type 0) (param i32) (result i32)
+                local.get 0
+                return_call 1)
+              (func (;1;) (type 0) (param i32) (result i32)
+                local.get 0)
+              (export "f" (func 0)))
+            "#,
+        );
+        let module = direct.expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert_eq!(calls.direct, vec![1]);
+        assert!(!calls.indirect);
+
+        let indirect = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (table (;0;) 1 funcref)
+              (func (;0;) (type 0)
+                i32.const 0
+                return_call_indirect (type 0))
+              (export "f" (func 0)))
+            "#,
+        );
+        let module = indirect.expect("the fixture assembles");
+        let calls = call_edges(&body_bytes(&module, 0)).expect("the body parses");
+        assert!(calls.direct.is_empty());
+        assert!(calls.indirect);
     }
 
     #[test]

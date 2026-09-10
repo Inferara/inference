@@ -2164,15 +2164,20 @@ impl TypeChecker {
     /// type expected of it can reach every one of its leaves.
     ///
     /// Closure is syntactic and needs no types: an integer literal is closed,
-    /// and parentheses, `-`, `~` and the arithmetic, bitwise and shift
-    /// operators preserve closure. Nothing else does — `!` takes a boolean
-    /// operand, and comparison, equality and logical operators produce `bool`
-    /// whatever their operands are, so a type expected of them says nothing
-    /// about the operands.
+    /// and parentheses, an arithmetic-mode annotation, `-`, `~` and the
+    /// arithmetic, bitwise and shift operators preserve closure. Nothing else
+    /// does — `!` takes a boolean operand, and comparison, equality and logical
+    /// operators produce `bool` whatever their operands are, so a type expected
+    /// of them says nothing about the operands.
     fn is_literal_closed(arena: &AstArena, expr_id: ExprId) -> bool {
+        // The grouping forms come off through the shared arena query, so a
+        // literal written inside `wrapping(…)` is as reachable as one written
+        // inside plain parentheses.
+        if let Some(inner) = arena.transparent_inner(expr_id) {
+            return Self::is_literal_closed(arena, inner);
+        }
         match &arena[expr_id].kind {
             Expr::NumberLiteral { .. } => true,
-            Expr::Parenthesized { expr } => Self::is_literal_closed(arena, *expr),
             Expr::PrefixUnary { expr, op } => {
                 matches!(op, UnaryOperatorKind::Neg | UnaryOperatorKind::BitNot)
                     && Self::is_literal_closed(arena, *expr)
@@ -2736,6 +2741,35 @@ impl TypeChecker {
                 }
                 inner_type
             }
+            Expr::ArithMode { mode, expr } => {
+                // The annotation selects how the arithmetic inside it treats a
+                // result that does not fit; it does not change the value's type,
+                // so it takes the annotated expression's own type and passes an
+                // expected type straight through to it — which is what lets an
+                // integer literal inside one still be typed by its context.
+                //
+                // A `bool` result is admitted alongside the integer widths: the
+                // arithmetic an annotation governs is often inside a comparison
+                // (`checked(a + b == c)`), and the value that comparison yields
+                // is what the annotation encloses. Only a type with no
+                // arithmetic anywhere inside it is refused. Whether any operator
+                // was actually reached is the analysis pass's question, not this
+                // one.
+                let annotated_type = self.infer_expression_expecting(expr, expected, ctx)?;
+                if !matches!(
+                    annotated_type.kind,
+                    TypeInfoKind::Number(_) | TypeInfoKind::Bool
+                ) {
+                    self.push_error(TypeCheckError::ArithModeOnNonScalar {
+                        mode,
+                        found_type: annotated_type,
+                        location,
+                    });
+                    return None;
+                }
+                ctx.set_node_typeinfo(NodeId::Expr(expr_id), annotated_type.clone());
+                Some(annotated_type)
+            }
             Expr::Binary { left, right, op } => {
                 // A recorded type answers unconditionally. Re-deriving it would
                 // re-run every check below and report the subtree's diagnostics
@@ -2978,16 +3012,6 @@ impl TypeChecker {
             }
             Expr::Uzumaki => ctx.get_node_typeinfo(NodeId::Expr(expr_id)),
         }
-    }
-
-    /// Returns the expression a chain of parentheses encloses, or `expr_id`
-    /// itself when it is not parenthesized.
-    fn peel_parentheses(arena: &AstArena, expr_id: ExprId) -> ExprId {
-        let mut current = expr_id;
-        while let Expr::Parenthesized { expr } = &arena[current].kind {
-            current = *expr;
-        }
-        current
     }
 
     /// Flattens a chain of `TypeMemberAccess` nodes whose deepest base is an
@@ -3783,7 +3807,7 @@ impl TypeChecker {
             // and left for code generation to refuse as a call to a proof-only
             // specification function the program never declared. Parenthesization
             // is not part of a callee's identity, so the head is read through it.
-            let inner_expr = Self::peel_parentheses(ctx.arena(), *inner_expr);
+            let inner_expr = ctx.arena().peel_transparent(*inner_expr);
             let method_name_id = *method_name_id;
 
             let type_name = match &ctx.arena()[inner_expr].kind {
@@ -5417,7 +5441,9 @@ mod literal_closure_tests {
     use super::TypeChecker;
     use inference_ast::arena::AstArena;
     use inference_ast::ids::ExprId;
-    use inference_ast::nodes::{Expr, ExprData, Location, OperatorKind, UnaryOperatorKind};
+    use inference_ast::nodes::{
+        ArithMode, Expr, ExprData, Location, OperatorKind, UnaryOperatorKind,
+    };
 
     fn push(arena: &mut AstArena, kind: Expr) -> ExprId {
         arena.exprs.alloc(ExprData {
@@ -5486,6 +5512,61 @@ mod literal_closure_tests {
         let name = identifier(&mut arena);
         let around_name = push(&mut arena, Expr::Parenthesized { expr: name });
         assert!(!TypeChecker::is_literal_closed(&arena, around_name));
+    }
+
+    /// One wrapper of each grouping form around `inner`, in a fixed order:
+    /// parentheses, `checked(…)`, `wrapping(…)`.
+    ///
+    /// Closure has to be the same answer for all three. An expected type that
+    /// stopped at an annotation would type the literals inside `wrapping(100 +
+    /// 27)` at a different width from the same sum written bare, and the two
+    /// would emit different bytes.
+    fn each_grouping_form(arena: &mut AstArena, inner: ExprId) -> Vec<ExprId> {
+        vec![
+            push(arena, Expr::Parenthesized { expr: inner }),
+            push(
+                arena,
+                Expr::ArithMode {
+                    mode: ArithMode::Checked,
+                    expr: inner,
+                },
+            ),
+            push(
+                arena,
+                Expr::ArithMode {
+                    mode: ArithMode::Wrapping,
+                    expr: inner,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_grouping_form_answers_closure_the_same_way() {
+        let mut arena = AstArena::default();
+        for (inner, expected) in [(number(&mut arena), true), (identifier(&mut arena), false)] {
+            assert_eq!(TypeChecker::is_literal_closed(&arena, inner), expected);
+            for wrapper in each_grouping_form(&mut arena, inner) {
+                assert_eq!(
+                    TypeChecker::is_literal_closed(&arena, wrapper),
+                    expected,
+                    "a grouping form changed the closure answer for {:?}",
+                    arena[inner].kind,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grouping_forms_nest_without_changing_closure() {
+        let mut arena = AstArena::default();
+        let literal = number(&mut arena);
+        let mut current = literal;
+        for _ in 0..2 {
+            current = each_grouping_form(&mut arena, current)[1];
+            current = each_grouping_form(&mut arena, current)[0];
+        }
+        assert!(TypeChecker::is_literal_closed(&arena, current));
     }
 
     #[test]

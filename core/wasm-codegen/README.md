@@ -56,7 +56,11 @@ Typed AST (TypedContext)
    emitted. This step is mandatory because the WebAssembly binary format requires all local
    declarations to appear at the very start of a function body, before the instruction
    sequence. See [docs/local-variables-lowering.md](docs/local-variables-lowering.md) for a
-   detailed explanation.
+   detailed explanation. The same pass reserves the scratch locals a body's overflow guards
+   write, asking `overflow_guard::guard_kind` about each `+`, `-`, `*` and unary `-` — the
+   same classifier emission asks — so a guard cannot reach a scratch slot that was never
+   reserved. A body with no effectively checked arithmetic reserves none, which is every
+   body of a program that writes no `checked(...)`.
 5. **Instruction Emission** - Lower functions, statements, and expressions to WASM
    instructions. `let` definitions are lowered via a push instruction followed by
    `local.set`; `const` definitions use the same path. Supported initializer expression
@@ -127,10 +131,14 @@ Typed AST (TypedContext)
    TypeSection first, then ImportSection (only if at least one `external fn` is present;
    sits between Type and Function per WASM spec), FunctionSection, MemorySection and
    GlobalSection (only when at least one function uses arrays or structs), ExportSection,
-   CodeSection, NameSection, and (proof mode, when non-empty) the `inference.spec_funcs` and
-   `inference.hspecs` custom sections. The import section placement is
-   mandatory because imported functions occupy the lowest indices and the section ordering
-   is enforced by the binary format.
+   CodeSection, NameSection, then up to three `inference.*` custom sections in that order:
+   (proof mode, when non-empty) `inference.spec_funcs` and `inference.hspecs`, and, in
+   either mode when the module carries at least one overflow guard, `inference.checked`.
+   Each is omitted when it would say nothing, and for each the omission is the statement:
+   no `inference.checked` section means no function of this module traps on arithmetic
+   overflow, which is also true of every module a foreign toolchain produced. The import
+   section placement is mandatory because imported functions occupy the lowest indices and
+   the section ordering is enforced by the binary format.
 
 ### Entry Parameter Normalization
 
@@ -381,7 +389,7 @@ The `codegen` function:
 - **Type system** - Generic code is rejected by analysis rule A051 before it reaches codegen (monomorphization is tracked in issue #76); function types have no value representation and are refused by signature lowering as an unsupported type
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
-- **Specification obligations** - A quantified variable states the class its readouts ride in *and* the values its declared type admits, as one hypothesis: a `u8` slot is `HA_and (HA_has_type x T_i32) (x <u 256)`, the domains being exactly those code generation's normalization of a draw produces. Universally that hypothesis is an antecedent, existentially the bound is a conjunct inside the binder, and a bound over a variable the claim never reads is dropped so a vacuous specification stays P010's. A variantless enum admits nothing and is refused (P015). A specification names aggregates by their ordered scalar leaves, each leaf stating its own element or field type's hypothesis, over the same surface the executable aggregate `@` supports: arrays of scalars at any rank, and structs whose fields are scalars or one-dimensional scalar arrays. Arrays of structs (A028) and structs with struct or multidimensional-array fields (A027) are rejected on every specification path — `@`, parameters, literals. One access chain may carry one non-constant index in a `forall`/plain body and none in an `exists`/`unique` one, where the guard code generation emits for it would trap and empty the observation set of every entry it rejects (P016); a spec function may quantify 64 scalar leaves in total (P013). Compound `@` and compound parameters are rejected inside `exists`/`unique`-quantified functions, where each choice arrives as one scalar parameter of the run the obligation talks about, and so is a nested `forall` (P008/P004/P007) — inside a `forall`/plain function the same nesting emits a real universal binder. Reassignment, `loop`/`break`, `**`, string literals, and aggregate call arguments and compound call results stay rejected. Memory-content assertions (addresses, points-to, iterated heaps) are out of scope. See [docs/specification-obligations.md](docs/specification-obligations.md).
+- **Specification obligations** - A quantified variable states the class its readouts ride in *and* the values its declared type admits, as one hypothesis: a `u8` slot is `HA_and (HA_has_type x T_i32) (x <u 256)`, the domains being exactly those code generation's normalization of a draw produces. Universally that hypothesis is an antecedent, existentially the bound is a conjunct inside the binder, and a bound over a variable the claim never reads is dropped so a vacuous specification stays P010's. A variantless enum admits nothing and is refused (P015). A specification names aggregates by their ordered scalar leaves, each leaf stating its own element or field type's hypothesis, over the same surface the executable aggregate `@` supports: arrays of scalars at any rank, and structs whose fields are scalars or one-dimensional scalar arrays. Arrays of structs (A028) and structs with struct or multidimensional-array fields (A027) are rejected on every specification path — `@`, parameters, literals. One access chain may carry one non-constant index in a `forall`/plain body and none in an `exists`/`unique` one, where the guard code generation emits for it would trap and empty the observation set of every entry it rejects (P016); a spec function may quantify 64 scalar leaves in total (P013). Compound `@` and compound parameters are rejected inside `exists`/`unique`-quantified functions, where each choice arrives as one scalar parameter of the run the obligation talks about, and so is a nested `forall` (P008/P004/P007) — inside a `forall`/plain function the same nesting emits a real universal binder. Reassignment, `loop`/`break`, `**`, string literals, and aggregate call arguments and compound call results stay rejected. An arithmetic-mode annotation is rejected in any body that becomes an obligation term, where both spellings would translate to the identical modular operator, and arithmetic whose effective mode traps is rejected in an `exists`/`unique` body, where the trap would falsify the claim rather than narrow it (P017); such a body reaching a guarded function through calls is rejected too (P018). Memory-content assertions (addresses, points-to, iterated heaps) are out of scope. See [docs/specification-obligations.md](docs/specification-obligations.md).
 
 ## Documentation
 
@@ -417,7 +425,9 @@ Detailed design documents live in `docs/`:
   function becomes in proof mode: aggregates as ordered scalar leaves, the slot-allocation
   rule that fixes every `T_local` index in an emitted goal, one fully expanded obligation,
   the definedness rule for `a[i]` (and the both-bounds requirement a signed index carries),
-  quantifier alternation, the caps, and the table of kept rejections.
+  no-overflow as a realization claim (what `checked(...)` adds to an `HA_app_ok` and why an
+  envelope alone adds nothing), quantifier alternation, the caps, and the table of kept
+  rejections.
 
 ## Module Organization
 
@@ -427,8 +437,10 @@ Detailed design documents live in `docs/`:
 - `errors.rs` - `CodegenError` enum for function call lowering failures, spec-name validation, and proof-mode `hassert` translation failures (`UntranslatableSpec`, `HspecTreeTooDeep`)
 - `output.rs` - `CodegenOutput` containing WASM bytes, metadata, and (proof mode only) the per-spec `hassert` obligation map (`hspecs()`)
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`) and the requestable post-MVP instruction families (`EmitFeatures`)
-- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`UnivLvl`/`Exist`/`Reach` modes, the `AggValue` leaf tree that aggregate values translate to, and the pinned-witness machinery short-circuit operators and non-constant indices share; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `diag.rs`: the `P001`–`P016` diagnostic registry). See [`docs/specification-obligations.md`](docs/specification-obligations.md) for the obligation shapes a specification author reads, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
+- `overflow_guard.rs` - The overflow-guard catalogue: `guard_kind`, the single classifier both the two arithmetic lowering sites and the pre-body scratch reservation ask about a `+`, `-`, `*` or unary `-`; the per-row instruction sequences, every one of which traps through `unreachable`; and `GuardScratchPool`, the per-function scratch shared by all of a body's guards
+- `hassert/` - Proof-mode-only pass translating each `spec` free function into a `hassert` verification obligation — kind-tagged, so a `forall`/plain body yields a `ValidSpec` payload and an `exists`/`unique` body a reachability payload with its entry arity and source-visible slots — read-only over the typed AST (`mod.rs`: `translate_spec_fns` entry point and callee resolution index; `translate.rs`: the right-folded statement/term translator with its `Univ`/`UnivLvl`/`Exist`/`Reach` modes, the `AggValue` leaf tree that aggregate values translate to, and the pinned-witness machinery short-circuit operators and non-constant indices share; `reach.rs`: the reachability pre-scan whose `ChoicePlan` maps each scalar `@` to its appended choice parameter, shared by signature registration, body lowering, and payload translation; `overflow_reach.rs`: the per-hop re-scoped call walk that decides whether a reachability body reaches a function carrying an overflow guard, reusing code generation's own call resolution, counting an unresolvable callee as guarded and skipping `external fn` callees for the linker to judge; `diag.rs`: the `P001`–`P018` diagnostic registry). See [`docs/specification-obligations.md`](docs/specification-obligations.md) for the obligation shapes a specification author reads, and [`core/wasm-to-v/ROCQ_CONTRACT.md`](../wasm-to-v/ROCQ_CONTRACT.md) for the full translation scheme
 - `hspecs_section.rs` - Encodes the obligation map into the `inference.hspecs` custom WASM section (via the shared `inference-hassert` codec) and the fail-closed pre-encode depth guard
+- `checked_section.rs` - Encodes the guarded-function list into the `inference.checked` custom WASM section, emitted in both compilation modes and only when non-empty, so its absence is the statement that no function of the module traps on arithmetic overflow. Nothing in the Rocq translation reads it; it exists for the static merge linker, which is the sole judge of a merged body
 
 ## Testing
 
@@ -582,6 +594,11 @@ Test data includes:
   array; validated and executed via wasmtime
 - `enum_in_struct.inf` - Enum-typed struct field: struct literal with an enum field,
   reading the field and comparing it to a variant; validated and executed via wasmtime
+- `checked_arith.inf` - One exported function per overflow-guard row, at every width and
+  signedness, plus the fixed-point reproducer, nested annotations of the same and of
+  opposite modes, a function carrying both width classes, and a guard inside a loop with a
+  `break` after it. The execution matrix asserts the trap *kind* at each row's boundary
+  vectors, and the same source compiled in both modes is byte-identical
 - Multi-file golden fixtures in `tests/test_data/codegen/wasm/multi_file_golden/`
   (tests in `tests/src/codegen/wasm/multi_file_golden.rs` and `multi_file.rs`):
   - `two_file` - Entry calls a function in one imported file; verifies file-qualified

@@ -2,6 +2,8 @@
 
 The Inference compiler emits a WebAssembly `unreachable` instruction before the `end` of every non-void function body. This document explains why, how other compilers handle the same problem, and why the alternatives are worse.
 
+That function-tail instruction is **one of seven roles** `unreachable` is emitted in, and it is the only one this chapter is about. The others are an ordinary `assert`, a reachability filter inside a retained specification body, a dynamic array access's bounds guard, a narrow signed division's overflow guard, an exported entry's enum tag guard, and an arithmetic overflow guard under `checked(...)`. They cannot be told apart by looking at the instruction, which matters to anyone reading a trap at run time and to anyone writing a proof about a module: `core/wasm-to-v/ROCQ_CONTRACT.md` § *Trap-freedom* enumerates all seven and says which of them a proof obligation can usefully range over. The distinction that section draws is between a trap that is never meant to be reached and a conditional trap whose condition is a property worth proving; the function tail is the first kind, and the four guards are the second.
+
 ## The Problem
 
 WebAssembly is a stack-typed bytecode format. When a function declares a return type, the WASM validator requires a matching value on the stack at the function's `end` instruction. Consider a function where all control-flow paths exit via explicit `return`:
@@ -167,7 +169,7 @@ No production compiler does this. Every compiler listed above enforces returns i
 
 | Metric | Impact |
 |--------|--------|
-| Code size | 1 byte per non-void function (opcode `0x00`). rustc measured 0.0%–0.1% increase across std. |
+| Code size | 1 byte per non-void function (opcode `0x00`) for *this* role. rustc measured 0.0%–0.1% increase across std. It is not the module's whole `unreachable` budget: each `assert`, bounds guard, narrow division guard, enum tag guard and overflow guard emits one of its own. |
 | Runtime performance | Zero when dead code. WASM runtimes eliminate dead code after unconditional branches during JIT compilation. |
 | Debugging | Positive — traps produce clear `RuntimeError: unreachable executed` with stack traces in all major WASM runtimes. |
 | wasm-opt compatibility | Compatible — Binaryen preserves `unreachable` as a terminator; dead code elimination operates on instructions before it, not on the `unreachable` itself. |

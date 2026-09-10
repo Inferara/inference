@@ -279,19 +279,10 @@ fn check_stmt(
 fn is_exempt_unit_statement(arena: &AstArena, stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return { expr } | Stmt::Expr(expr) => {
-            matches!(&arena[peel_parens(arena, *expr)].kind, Expr::UnitLiteral)
+            matches!(&arena[arena.peel_transparent(*expr)].kind, Expr::UnitLiteral)
         }
         _ => false,
     }
-}
-
-/// The expression inside any depth of parentheses.
-fn peel_parens(arena: &AstArena, expr_id: ExprId) -> ExprId {
-    let mut current = expr_id;
-    while let Expr::Parenthesized { expr } = &arena[current].kind {
-        current = *expr;
-    }
-    current
 }
 
 /// Reports every unit literal reachable from `expr_id`, including `expr_id`

@@ -128,6 +128,7 @@ fn check_expr(
         }
         Expr::PrefixUnary { expr, .. }
         | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. }
         | Expr::MemberAccess { expr, .. }
         | Expr::TypeMemberAccess { expr, .. } => {
             check_expr(arena, module_path, *expr, false, errors);

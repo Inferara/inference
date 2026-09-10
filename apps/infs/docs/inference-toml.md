@@ -275,6 +275,11 @@ The resolved binary must report **Binaryen 116 or newer** (`wasm-opt --version`)
 
 - **Function names are dropped.** `wasm-opt` strips the WASM names custom section, so stack traces and any tooling that resolves function names from an optimized `out/main.wasm` will not see them. There is currently no flag to preserve it.
 - **Deterministic per Binaryen version, not across versions.** The same source, flags, and Binaryen version always produce identical optimized bytes, but upgrading Binaryen can change the output even for unchanged input. Do not treat an optimized `.wasm` as a stable byte-for-byte reference across toolchain upgrades.
+- **An optimized library can no longer be verified against precisely.** A compiled module records which of its functions trap rather than wrap on arithmetic overflow, by function index, in the `inference.checked` custom section — and the static-merge linker reads that record out of every library it links, to refuse an `exists`/`unique` specification that reaches a body which traps. `wasm-opt` carries the section through untouched while inlining, removing and reordering the functions its indices name, so the record survives the optimizer and stops being true. That is measured against the Binaryen `infs` manages, not inferred: inline one private guarded helper at `-Oz` and the record comes back byte-identical over a function space it no longer describes.
+
+  `infs` therefore rewrites the record after optimizing, into a form that says only that *some* function of the module traps. A later link reads that as *every* function of the module and refuses any reachability specification reaching it, rather than checking a list that has quietly gone stale. The build prints a line saying so whenever it marks an artifact.
+
+  This costs nothing for a program you build and run. It matters for a library: if some other project links yours and states an `exists`- or `unique`-quantified specification over a call into it, build the library without `[build.wasm-opt]` (or with `--no-wasm-opt`) so its record stays exact. A module whose arithmetic is written `wrapping(...)` throughout records nothing, is never marked, and is unaffected.
 
 ### [verification]
 

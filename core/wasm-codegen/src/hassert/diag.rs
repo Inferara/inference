@@ -192,6 +192,73 @@ pub(crate) enum PCode {
     /// anywhere — it selects an element outright, and [`PCode::P014`] already
     /// rejects the out-of-bounds ones.
     P016,
+    /// An arithmetic-mode annotation written where the obligation language has
+    /// no mode to select, or arithmetic that traps on overflow written inside a
+    /// body the downstream judgment reduces. Two wordings, keyed on which of
+    /// those the body is.
+    ///
+    /// A `forall` or plain specification function — a helper `fn` declared
+    /// inside a `spec` block included, since it is translated into an
+    /// obligation of its own — becomes a *term*, and a term's `+`, `-` and `*`
+    /// are the wrapping machine operators: `HBinop` denotes
+    /// `Wasm_int.int_add`/`int_sub`/`int_mul`, modular at the operand width,
+    /// and no other operator exists downstream for an annotation to select.
+    /// Both spellings would therefore translate to the identical term and be
+    /// silently dropped, so both are refused rather than accepted and ignored.
+    /// The refusal covers every position in such a body, not only the ones the
+    /// term walk reaches: an annotation in an array index or an aggregate
+    /// literal is folded through on its way to a value, so a check that lived
+    /// on the term path alone would accept exactly the spellings that vanish
+    /// most quietly.
+    ///
+    /// An `exists`/`unique`-quantified body is the opposite case. It is
+    /// compiled, and its obligation is a claim about running it, so arithmetic
+    /// whose effective mode traps puts a trap on the path the judgment reduces.
+    /// The judgment fixes an arbitrary typed entry vector before letting the
+    /// choices range, so a trap does not narrow the claim to the entries whose
+    /// arithmetic fits: at an entry that overflows, no choice reaches an exit
+    /// state, the observation set is empty and the theorem is false. In a
+    /// `unique` body it is worse, because a trapping choice shrinks the
+    /// successful set and can make a uniqueness claim hold for a reason the
+    /// source does not state. `wrapping(...)` is accepted throughout such a
+    /// body — including inside its final `assert`, whose arithmetic is both
+    /// compiled and translated — and translates to the identical term, which is
+    /// what makes it a remedy rather than a second rejection.
+    ///
+    /// The two wordings are keyed on the *quantifier of the function being
+    /// translated*, never on lexical containment in a `spec` block. A nested
+    /// `exists { }` block inside a `forall` function is not a reachability
+    /// body: nothing reduces it, and its annotation is as meaningless as one
+    /// written at the top of the same function.
+    P017,
+    /// An `exists`/`unique`-quantified specification function whose body
+    /// reaches, through calls, a function carrying an overflow guard.
+    ///
+    /// [`PCode::P017`]'s second wording is lexical, and the trap it describes
+    /// does not have to be written in the body to be taken by it: the judgment
+    /// reduces the whole activation, callee frames included, so a guard in a
+    /// function the body calls empties exactly the same observation set and
+    /// makes exactly the same claim false. This rule is the interprocedural
+    /// half, computed over code generation's own call resolution so the
+    /// function it inspects is the function the call actually lowers to.
+    ///
+    /// It is deliberately a reachability question and not a dataflow one. Only
+    /// an entry-derived operand can really trip a guard, but whether a given
+    /// value is entry-derived is not visible at the call, and a rule whose
+    /// reach a reader cannot determine from the site it fires on is worse than
+    /// a stricter one they can.
+    ///
+    /// A callee code generation cannot resolve is counted as carrying a guard.
+    /// Failing open there would ship a false obligation through a gate that
+    /// admits open proofs, which is precisely the outcome the rule exists to
+    /// prevent.
+    ///
+    /// `external fn` callees are skipped. Code generation never receives a
+    /// dependency's bytes — they arrive at link time, after this pass has run —
+    /// so nothing here can say whether a foreign body traps, and guessing
+    /// either way would be a claim about bytes this compiler has not seen. The
+    /// linker is the sole judge of a merged body.
+    P018,
 }
 
 impl fmt::Display for PCode {
@@ -213,6 +280,8 @@ impl fmt::Display for PCode {
             PCode::P014 => "P014",
             PCode::P015 => "P015",
             PCode::P016 => "P016",
+            PCode::P017 => "P017",
+            PCode::P018 => "P018",
         };
         f.write_str(code)
     }

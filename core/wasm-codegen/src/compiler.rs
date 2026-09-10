@@ -70,15 +70,17 @@
 
 use crate::choice::{ChoiceClass, ChoiceCursor, ChoicePlan, ChoiceRun, FrameContract};
 use crate::errors::CodegenError;
+use crate::overflow_guard::{
+    self, GuardKind, GuardScratchDemand, GuardScratchPool, GuardedOp, guard_kind,
+};
 use crate::target::{EmitFeatures, MemoryLayout};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgData, ArgKind, BlockKind, Def, Expr, Location, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
-    UnaryOperatorKind,
-    Visibility,
+    ArgData, ArgKind, ArithMode, BlockKind, Def, Expr, Location, OperatorKind, SimpleTypeKind, Stmt,
+    TypeNode, UnaryOperatorKind, Visibility,
 };
 use inference_hassert::HSpecMap;
 use inference_type_checker::{
@@ -283,7 +285,7 @@ struct ResolvedField {
 /// applies spec-aware preference (try `SpecFree` then `Free`) at the lookup
 /// site. For the method variants, the [`FnKey`] is already resolved by the
 /// method-name lookup helpers, which encode the spec-vs-top-level decision.
-enum ResolvedCallee {
+pub(crate) enum ResolvedCallee {
     /// Plain same-file (or spec-local) function call via `Expr::Identifier`.
     /// Resolved with spec-aware preference against the current file's module
     /// path at the lookup site.
@@ -303,6 +305,22 @@ enum ResolvedCallee {
         receiver_expr_id: ExprId,
         method_name_id: IdentId,
     },
+}
+
+/// The identity a call resolves against: the file the calling body lives in and
+/// the specification enclosing it, when there is one.
+///
+/// Code generation rebinds this for every function it compiles, and that
+/// rebinding is what makes a bare name inside a `spec` block find the
+/// specification's own definition before a top-level one, and the same bare name
+/// in another file find that file's. Any pass that must answer "which function
+/// does this call reach" resolves against one of these rather than against
+/// whichever function it started from — a walk that followed calls while holding
+/// its first scope fixed would resolve hop two's bare names in hop zero's file.
+#[derive(Clone, Copy)]
+pub(crate) struct CalleeScope<'a> {
+    pub(crate) module_path: &'a [String],
+    pub(crate) spec_name: Option<&'a str>,
 }
 
 impl ResolvedCallee {
@@ -437,6 +455,25 @@ pub(crate) struct Compiler {
     /// collapse two distinct functions whose keys render to the same string
     /// into one slot.
     frame_sizes: FxHashMap<FnKey, u32>,
+    /// Every function whose body carries an overflow guard, by the key it was
+    /// registered under.
+    ///
+    /// Recorded where the guard scratch is reserved rather than derived by a
+    /// later scan: the reservation is keyed on the same classifier the emitter
+    /// branches on, so a function appears here exactly when its body contains
+    /// an operator that traps on overflow. The key rather than the index,
+    /// because that is the identity an obligation's `T_app`/`HA_app_ok` names
+    /// its callee by.
+    guarded_functions: FxHashSet<FnKey>,
+    /// The WASM function index of every function whose body carries an overflow
+    /// guard, in the instantiated space (imports first).
+    ///
+    /// The same fact as [`Self::guarded_functions`], under the other identity.
+    /// The key is what an obligation names a callee by, and the index is what a
+    /// custom section can carry across a module boundary — a `FnKey` says
+    /// nothing to a linker holding only bytes. Both are recorded at the one site
+    /// that decides a body is guarded, so neither can drift from the other.
+    guarded_func_indices: Vec<u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
     /// bounds-check guard (`index >= length → unreachable`). Default `false`;
     /// see [`Self::set_emit_bounds_checks`] for who enables it and why.
@@ -461,6 +498,38 @@ pub(crate) struct Compiler {
     /// guard is mode-gated — both emit in Compile and Proof modes alike.
     /// Reset per function alongside the rest of the per-function state.
     narrow_div_scratch_local: Option<u32>,
+    /// The arithmetic mode every operator this compiler lowers falls back to
+    /// when no annotation encloses it.
+    ///
+    /// Always [`ArithMode::DEFAULT`] in a production build — which operator
+    /// `a + b` denotes is a property of the language rather than a setting, so
+    /// it is absent from [`CodegenOptions`](crate::CodegenOptions), the CLI, the
+    /// manifest and the ABI. It is equally not gated on [`CompilationMode`]: the
+    /// invariant [`EmitFeatures`](crate::EmitFeatures) states applies to
+    /// arithmetic just as it does to the region lowerings, because a proof about
+    /// the emitted `.v` has to be a proof about the module that ships.
+    ///
+    /// Writable only through [`Compiler::set_default_arith_mode`], which exists
+    /// in test builds alone so one source can be compiled under both polarities.
+    default_arith_mode: ArithMode,
+    /// The `checked(…)`/`wrapping(…)` annotations enclosing the expression being
+    /// lowered, innermost last; empty outside any annotation.
+    ///
+    /// [`Self::effective_arith_mode`] reads the top of it — or
+    /// [`Self::default_arith_mode`] when it is empty — for each `+`, `-`, `*` and
+    /// unary `-` it lowers. A stack rather than a single mode because the
+    /// annotations nest and the innermost one wins, and because an annotation
+    /// ends where its parentheses do rather than at the end of the statement.
+    /// Reset per function alongside the rest of the per-function state.
+    arith_mode: Vec<ArithMode>,
+    /// The scratch locals this function's overflow guards write.
+    ///
+    /// Reserved before the body is emitted, because a guard at `i64` needs an
+    /// `i64` local and [`RegionEmit`] hands out only `i32` ones. Empty in a
+    /// function with no effectively-checked arithmetic, which is every function
+    /// of a program that writes no annotation. Reset per function alongside the
+    /// rest of the per-function state.
+    overflow_guard_pool: GuardScratchPool,
     /// Names of the compound (array or struct) parameters of the function
     /// currently being compiled, including a `self` receiver.
     ///
@@ -742,9 +811,14 @@ impl Compiler {
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
+            guarded_functions: FxHashSet::default(),
+            guarded_func_indices: Vec::new(),
             emit_bounds_checks: false,
             bounds_check_scratch_local: None,
             narrow_div_scratch_local: None,
+            default_arith_mode: ArithMode::DEFAULT,
+            arith_mode: Vec::new(),
+            overflow_guard_pool: GuardScratchPool::default(),
             compound_params: FxHashSet::default(),
             local_declarations: Vec::new(),
             emit_features: EmitFeatures::default(),
@@ -764,6 +838,71 @@ impl Compiler {
     /// makes continuing safe.
     fn poison(&mut self, error: CodegenError) {
         let _ = self.poisoned.get_or_insert(error);
+    }
+
+    /// The arithmetic mode in force at the point being lowered: the innermost
+    /// enclosing `checked(…)`/`wrapping(…)`, or [`Self::default_arith_mode`]
+    /// outside every annotation.
+    ///
+    /// Only `+`, `-`, `*` and unary `-` written in the source ask for it.
+    /// Division, remainder, the shifts and the bitwise operators are never
+    /// governed by an annotation, and neither is any of the frame, offset and
+    /// index arithmetic this compiler generates for itself.
+    fn effective_arith_mode(&self) -> ArithMode {
+        self.arith_mode.last().copied().unwrap_or(self.default_arith_mode)
+    }
+
+    /// The arithmetic mode in force *inside* `expr_id`, given the mode
+    /// `incoming` in force at it.
+    ///
+    /// The whole rule of the annotation in one place: a `checked(…)` /
+    /// `wrapping(…)` node replaces the mode for its own subtree and every other
+    /// node inherits, so the innermost annotation wins. Lowering applies it by
+    /// pushing the answer onto [`Self::arith_mode`]; the pre-body scratch scan
+    /// applies it by carrying the answer down its own descent. The two have to
+    /// reach the same verdict about every operator — one decides what scratch
+    /// exists and the other decides what reads it — so both ask here rather than
+    /// each restating the rule.
+    fn mode_at(arena: &AstArena, expr_id: ExprId, incoming: ArithMode) -> ArithMode {
+        match &arena[expr_id].kind {
+            Expr::ArithMode { mode, .. } => *mode,
+            _ => incoming,
+        }
+    }
+
+    /// Every function whose body carries an overflow guard, by registered key,
+    /// in a deterministic order.
+    ///
+    /// Read before the module is finished, because finishing consumes the
+    /// compiler.
+    pub(crate) fn guarded_functions(&self) -> Vec<FnKey> {
+        let mut keys: Vec<FnKey> = self.guarded_functions.iter().cloned().collect();
+        keys.sort_unstable_by_key(ToString::to_string);
+        keys
+    }
+
+    /// The arithmetic mode this module's unannotated operators are compiled at.
+    ///
+    /// The specification-translation pass reads it so its diagnostics describe
+    /// the arithmetic the emitted module actually has, rather than the one the
+    /// language ships by default — the two differ only under the test-only
+    /// override below, and a diagnostic that ignored it would name a guard the
+    /// bytes do not carry.
+    pub(crate) fn default_arith_mode(&self) -> ArithMode {
+        self.default_arith_mode
+    }
+
+    /// Compiles the rest of this module as though the language's default
+    /// arithmetic mode were `mode`.
+    ///
+    /// Test-only, and gated so no production path can reach it: the default is a
+    /// property of the language rather than of a build, and a caller able to set
+    /// it would make one source compile to two different programs. What it buys
+    /// a test is the ability to observe an unannotated operator under the
+    /// polarity the language does not currently ship.
+    #[cfg(test)]
+    pub(crate) fn set_default_arith_mode(&mut self, mode: ArithMode) {
+        self.default_arith_mode = mode;
     }
 
     /// Attaches `location` to a refusal that was raised against a type rather
@@ -926,6 +1065,18 @@ impl Compiler {
     /// number of entries before any body compilation begins.
     pub(crate) fn registered_function_count(&self) -> usize {
         self.func_name_to_idx.len()
+    }
+
+    /// Every key this module assigned a function index to.
+    ///
+    /// Test-facing, and the reason it exists is that this map is not the only
+    /// registry of the module's own functions: the specification pass builds a
+    /// second one, from the same buckets, to decide which calls it can follow.
+    /// The two are built by different code from different inputs and are only
+    /// useful while they agree, so one test compares them.
+    #[cfg(test)]
+    pub(crate) fn registered_function_keys(&self) -> Vec<FnKey> {
+        self.func_name_to_idx.keys().cloned().collect()
     }
 
     /// Registers sret metadata for a function that returns a compound type (array or struct).
@@ -2030,6 +2181,42 @@ impl Compiler {
             );
         }
 
+        // Reserve the overflow-guard scratch pool. Which width classes it holds
+        // is decided by scanning the body with the same classifier the two
+        // arithmetic lowering sites ask, so the pool holds slots for exactly the
+        // guards that will be emitted -- a body whose arithmetic is all
+        // effectively wrapping reserves nothing and stays byte-identical to an
+        // unguarded build. `RegionEmit` cannot supply these: it hands out i32
+        // locals only, and a guard at i64 needs i64 ones.
+        //
+        // The pool sits after the named locals, the optional frame-pointer temp
+        // and both existing scratches, so every index those already handed out
+        // -- and every `T_local` an obligation names -- is where it was.
+        // The scan seeds its descent with the fallback mode, which is the mode
+        // emission is in at the body root only while no annotation is open. That
+        // holds because a function body is never lowered from inside one — the
+        // stack is cleared per function — and the two must agree about every
+        // operator, so the precondition is stated rather than assumed.
+        debug_assert!(
+            self.arith_mode.is_empty(),
+            "a body's guard scratch is reserved outside every annotation"
+        );
+        let guard_pool = GuardScratchPool::reserve(
+            self.body_guard_scratch_demand(arena, body_id, ctx),
+            local_idx
+                + u32::from(has_frame)
+                + u32::from(self.bounds_check_scratch_local.is_some())
+                + u32::from(self.narrow_div_scratch_local.is_some()),
+        );
+        local_declarations.extend(guard_pool.declarations());
+        if guard_pool.len() > 0 {
+            self.guarded_func_indices.push(self.func_idx);
+            if let Some(key) = &self.current_fn_key {
+                self.guarded_functions.insert(key.clone());
+            }
+        }
+        self.overflow_guard_pool = guard_pool;
+
         // The body is emitted into a function with an empty locals vector: the
         // region fill and copy lowerings allocate scratch locals on demand while
         // it is being built, so the complete declaration list is not known until
@@ -2039,7 +2226,8 @@ impl Compiler {
             local_idx
                 + u32::from(has_frame)
                 + u32::from(self.bounds_check_scratch_local.is_some())
-                + u32::from(self.narrow_div_scratch_local.is_some()),
+                + u32::from(self.narrow_div_scratch_local.is_some())
+                + guard_pool.len(),
             self.emit_features,
         );
         self.local_declarations = local_declarations;
@@ -2282,6 +2470,8 @@ impl Compiler {
         self.locals_map.clear();
         self.bounds_check_scratch_local = None;
         self.narrow_div_scratch_local = None;
+        self.arith_mode.clear();
+        self.overflow_guard_pool = GuardScratchPool::default();
         self.compound_params.clear();
         self.unnamed_params.clear();
         self.loop_ctx = LoopContext::default();
@@ -2443,17 +2633,20 @@ impl Compiler {
         });
     }
 
-    /// Reports whether any expression reachable from `block_id`'s statements
-    /// satisfies `pred`.
+    /// Applies `visit` to every expression a statement of `block_id` holds
+    /// directly, descending into nested blocks through
+    /// [`Self::walk_statements`].
     ///
-    /// This is the shared shape of every body-level scan that asks a yes/no
-    /// question about the *expressions* a body contains: block descent through
-    /// [`Self::walk_statements`], then each statement's own expression positions
-    /// handed to [`Self::expr_any`]. One walk means the facts codegen derives
-    /// that way — does the body index dynamically, does it divide narrow signed
-    /// values, does a parameter reach an `external fn` — are read off exactly the
-    /// same set of nodes, so no such scan can miss a shape its siblings see.
-    /// Whatever extra context a scan needs is captured by `pred`'s closure.
+    /// This is the compiler's single enumeration of the *expression positions* a
+    /// statement has. One walk means the facts codegen derives from a body — does
+    /// it index dynamically, does it divide narrow signed values, does a
+    /// parameter reach an `external fn`, what guard scratch does it need — are
+    /// read off exactly the same set of nodes, so no such scan can miss a shape
+    /// its siblings see.
+    ///
+    /// A `const` binding's initializer is one of those positions: it lowers
+    /// through the same `lower_named_binding_init` → `lower_expression` path as a
+    /// `let`, so an expression there is as real as one anywhere else.
     ///
     /// Two body-level scans deliberately sit outside it, because neither is a
     /// question about an expression. [`Self::param_is_written`] matches on
@@ -2463,10 +2656,73 @@ impl Compiler {
     /// [`Self::nested_blocks`] — the first via [`Self::walk_statements`], the
     /// second driving it directly — so a new block-bearing statement kind is
     /// still taught to the compiler once.
+    fn body_root_expressions(arena: &AstArena, block_id: BlockId, visit: &mut impl FnMut(ExprId)) {
+        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
+            match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    visit(*e);
+                }
+                Stmt::Assign { left, right } => {
+                    visit(*left);
+                    visit(*right);
+                }
+                Stmt::VarDef { value, .. } => {
+                    if let Some(value) = value {
+                        visit(*value);
+                    }
+                }
+                Stmt::If { condition, .. } => visit(*condition),
+                Stmt::Loop { condition, .. } => {
+                    if let Some(condition) = condition {
+                        visit(*condition);
+                    }
+                }
+                Stmt::ConstDef(def_id) => {
+                    if let Def::Constant { value, .. } = &arena[*def_id].kind {
+                        visit(*value);
+                    }
+                }
+                Stmt::Block(_) | Stmt::Break => {}
+            }
+        });
+    }
+
+    /// Applies `visit` to every expression a body contains, in pre-order,
+    /// visiting all of them.
     ///
-    /// A `const` binding's initializer is one of those expression positions: it
-    /// lowers through the same `lower_named_binding_init` → `lower_expression`
-    /// path as a `let`, so an expression there is as real as one anywhere else.
+    /// [`Self::body_has_expr`]'s exhaustive twin, for a scan that reports a
+    /// finding per node rather than a yes/no answer about the body. It reaches
+    /// the same nodes through the same two enumerations, so a scan cannot be
+    /// exhaustive here and short of a shape there.
+    pub(crate) fn visit_body_expressions(
+        arena: &AstArena,
+        block_id: BlockId,
+        visit: &mut impl FnMut(&AstArena, ExprId),
+    ) {
+        Self::body_root_expressions(arena, block_id, &mut |expr_id| {
+            Self::visit_expr_tree(arena, expr_id, visit);
+        });
+    }
+
+    /// Applies `visit` to `expr_id` and every expression underneath it.
+    fn visit_expr_tree(
+        arena: &AstArena,
+        expr_id: ExprId,
+        visit: &mut impl FnMut(&AstArena, ExprId),
+    ) {
+        visit(arena, expr_id);
+        Self::expr_children(arena, expr_id, &mut |child| {
+            Self::visit_expr_tree(arena, child, visit);
+        });
+    }
+
+    /// Reports whether any expression reachable from `block_id`'s statements
+    /// satisfies `pred`.
+    ///
+    /// The shared shape of every body-level scan that asks a yes/no question
+    /// about the expressions a body contains: [`Self::body_root_expressions`]
+    /// for the positions, [`Self::expr_any`] for the descent into each one.
+    /// Whatever extra context a scan needs is captured by `pred`'s closure.
     ///
     /// The walk short-circuits: once `pred` answers `true` no further node is
     /// visited.
@@ -2476,43 +2732,23 @@ impl Compiler {
         pred: &mut impl FnMut(&AstArena, ExprId) -> bool,
     ) -> bool {
         let mut found = false;
-        Self::walk_statements(arena, block_id, &mut |arena, stmt_id| {
-            if found {
-                return;
-            }
-            found = match &arena[stmt_id].kind {
-                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
-                    Self::expr_any(arena, *e, pred)
-                }
-                Stmt::Assign { left, right } => {
-                    Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
-                }
-                Stmt::VarDef { value, .. } => value
-                    .as_ref()
-                    .is_some_and(|&v| Self::expr_any(arena, v, pred)),
-                Stmt::If { condition, .. } => Self::expr_any(arena, *condition, pred),
-                Stmt::Loop { condition, .. } => condition
-                    .as_ref()
-                    .is_some_and(|&c| Self::expr_any(arena, c, pred)),
-                Stmt::ConstDef(def_id) => match &arena[*def_id].kind {
-                    Def::Constant { value, .. } => Self::expr_any(arena, *value, pred),
-                    _ => false,
-                },
-                Stmt::Block(_) | Stmt::Break => false,
-            };
+        Self::body_root_expressions(arena, block_id, &mut |expr_id| {
+            found = found || Self::expr_any(arena, expr_id, pred);
         });
         found
     }
 
-    /// Reports whether `expr_id` itself or any of its sub-expressions satisfies
-    /// `pred`, in pre-order and short-circuiting on the first `true`.
+    /// Applies `visit` to every direct sub-expression of `expr_id`, left to
+    /// right.
     ///
     /// This is the compiler's single *exhaustive* enumeration of expression
     /// children: every variant carrying sub-expressions names all of them here,
     /// and every leaf is listed explicitly rather than swept by a wildcard, so a
     /// new `Expr` variant has to be classified instead of silently becoming a node
-    /// no scan can reach. The predicates in [`Self::body_has_expr`]'s family and
-    /// the alias test in [`Self::expr_reads_var`] all run through this one match.
+    /// no scan can reach. [`Self::expr_any`], the predicates in
+    /// [`Self::body_has_expr`]'s family, the alias test in
+    /// [`Self::expr_reads_var`] and the guard-scratch scan all descend through
+    /// this one match.
     ///
     /// Other descents over expression children exist, and each is partial by
     /// design rather than a second general walk: [`Self::lower_expression`] and
@@ -2522,6 +2758,52 @@ impl Compiler {
     /// stops at a wildcard arm, and the `hassert` translator re-walks the same
     /// nodes into its own term language. A scan that must not miss a node belongs
     /// here.
+    fn expr_children(arena: &AstArena, expr_id: ExprId, visit: &mut impl FnMut(ExprId)) {
+        match &arena[expr_id].kind {
+            Expr::Binary { left, right, .. } => {
+                visit(*left);
+                visit(*right);
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                visit(*array);
+                visit(*index);
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::ArithMode { expr, .. }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => visit(*expr),
+            Expr::FunctionCall { function, args, .. } => {
+                visit(*function);
+                for (_, arg) in args {
+                    visit(*arg);
+                }
+            }
+            Expr::StructLiteral { fields, .. } => {
+                for (_, value) in fields {
+                    visit(*value);
+                }
+            }
+            Expr::ArrayLiteral { elements } => {
+                for &element in elements {
+                    visit(element);
+                }
+            }
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => {}
+        }
+    }
+
+    /// Reports whether `expr_id` itself or any of its sub-expressions satisfies
+    /// `pred`, in pre-order and short-circuiting on the first `true`.
+    ///
+    /// The descent is [`Self::expr_children`]'s, so this and every other general
+    /// scan reach exactly the same nodes.
     fn expr_any(
         arena: &AstArena,
         expr_id: ExprId,
@@ -2530,37 +2812,11 @@ impl Compiler {
         if pred(arena, expr_id) {
             return true;
         }
-        match &arena[expr_id].kind {
-            Expr::Binary { left, right, .. } => {
-                Self::expr_any(arena, *left, pred) || Self::expr_any(arena, *right, pred)
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_any(arena, *array, pred) || Self::expr_any(arena, *index, pred)
-            }
-            Expr::PrefixUnary { expr, .. }
-            | Expr::Parenthesized { expr }
-            | Expr::MemberAccess { expr, .. }
-            | Expr::TypeMemberAccess { expr, .. } => Self::expr_any(arena, *expr, pred),
-            Expr::FunctionCall { function, args, .. } => {
-                Self::expr_any(arena, *function, pred)
-                    || args
-                        .iter()
-                        .any(|(_, arg)| Self::expr_any(arena, *arg, pred))
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, value)| Self::expr_any(arena, *value, pred)),
-            Expr::ArrayLiteral { elements } => {
-                elements.iter().any(|&e| Self::expr_any(arena, e, pred))
-            }
-            Expr::Identifier(_)
-            | Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
+        let mut found = false;
+        Self::expr_children(arena, expr_id, &mut |child| {
+            found = found || Self::expr_any(arena, child, pred);
+        });
+        found
     }
 
     /// Returns `true` if the function body contains at least one array index
@@ -2634,6 +2890,101 @@ impl Compiler {
                 Some(TypeInfoKind::Number(NumberType::I8 | NumberType::I16))
             )
         })
+    }
+
+    /// The overflow-guard scratch this body needs.
+    ///
+    /// The scan carries the arithmetic mode down the expression tree exactly as
+    /// lowering does — an annotation replaces the mode for its own subtree and
+    /// the innermost one wins — and asks [`overflow_guard::guard_kind`], the
+    /// function the two lowering sites themselves branch on, about every
+    /// governed operator it reaches. Restating the guard condition here instead
+    /// would be the one way the reservation and the emission could come to
+    /// different answers, and a disagreement in the direction of "no scratch"
+    /// aborts code generation at the guard's `expect`.
+    ///
+    /// A body whose arithmetic is all effectively wrapping demands nothing and
+    /// declares no locals, which is why annotating no program leaves every
+    /// emitted module exactly as it was.
+    fn body_guard_scratch_demand(
+        &self,
+        arena: &AstArena,
+        block_id: BlockId,
+        ctx: &TypedContext,
+    ) -> GuardScratchDemand {
+        let mut demand = GuardScratchDemand::default();
+        Self::visit_body_guarded_operators(
+            arena,
+            ctx,
+            block_id,
+            self.default_arith_mode,
+            &mut |_, kind| demand.add(kind),
+        );
+        demand
+    }
+
+    /// Applies `visit` to every operator in `block_id`'s body that carries an
+    /// overflow guard, with the guard it carries.
+    ///
+    /// `default_mode` is the mode an operator outside every annotation has, so a
+    /// caller compiling under one polarity and a caller asking about the other
+    /// read the same set of operators through one descent.
+    ///
+    /// The specification-translation pass asks this the two questions it needs
+    /// about a compiled body — does an operator inside a reachability body trap,
+    /// and does a function a reachability body calls contain one — so what the
+    /// rules reject and what the emitter emits are decided by the same walk over
+    /// the same classifier.
+    pub(crate) fn visit_body_guarded_operators(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        block_id: BlockId,
+        default_mode: ArithMode,
+        visit: &mut impl FnMut(ExprId, GuardKind),
+    ) {
+        Self::body_root_expressions(arena, block_id, &mut |expr_id| {
+            Self::visit_guarded_operators(arena, ctx, expr_id, default_mode, visit);
+        });
+    }
+
+    /// Applies `visit` to every guarded operator in one expression tree, `mode`
+    /// being the arithmetic mode in force at its root.
+    ///
+    /// The mode is carried down exactly as lowering carries it: an annotation
+    /// replaces it for its own subtree, and the innermost one wins.
+    fn visit_guarded_operators(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        expr_id: ExprId,
+        mode: ArithMode,
+        visit: &mut impl FnMut(ExprId, GuardKind),
+    ) {
+        let mode = Self::mode_at(arena, expr_id, mode);
+        if let Some(kind) = Self::node_guard_kind(arena, ctx, expr_id, mode) {
+            visit(expr_id, kind);
+        }
+        Self::expr_children(arena, expr_id, &mut |child| {
+            Self::visit_guarded_operators(arena, ctx, child, mode, visit);
+        });
+    }
+
+    /// The guard this node's operator needs under `mode`, or `None` when the
+    /// node is not a governed operator or needs no guard at its type.
+    ///
+    /// The type is read off the node emission reads it off — a binary
+    /// operator's left operand, a negation's own node — so the classification is
+    /// made from the same fact in both places. A node with no recorded type
+    /// answers `None` and reserves nothing, which is safe because emission
+    /// resolves that same type with an `expect` that fires first.
+    fn node_guard_kind(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        expr_id: ExprId,
+        mode: ArithMode,
+    ) -> Option<GuardKind> {
+        let (op, operand) = arena.guarded_operator(expr_id)?;
+        let type_info = ctx.get_node_typeinfo(NodeId::Expr(operand))?;
+        guard_kind(op, &type_info.kind, mode)
     }
 
     /// Reports what the parameter `param_name` — or a projection of it — reaches
@@ -2756,8 +3107,9 @@ impl Compiler {
     /// decides whether a compound parameter needs a private copy at all.
     ///
     /// Root extraction goes through [`Self::expr_root_is`], which additionally
-    /// peels `Expr::Parenthesized` where the type checker's own
-    /// `extract_root_variable_name` does not. That asymmetry is deliberate and
+    /// peels the grouping forms — parentheses and the arithmetic-mode
+    /// annotations — where the type checker's own `extract_root_variable_name`
+    /// does not. That asymmetry is deliberate and
     /// safe in one direction only: peeling more shapes makes *more* assignments
     /// count as writes, which keeps a copy the type checker's shorter list would
     /// have dropped. The reverse — codegen concluding "not written" where the
@@ -2786,14 +3138,27 @@ impl Compiler {
     /// in a read position and lowers identically to `p`. Every remaining shape is
     /// enumerated rather than swept by a wildcard so that a new projection form
     /// must be classified here instead of silently defaulting to "not this
-    /// binding" — the direction that would drop a copy.
+    /// binding" — the direction that would drop a copy. An arithmetic-mode
+    /// annotation peels with the parentheses, because it groups an expression
+    /// the same way and contributes no value of its own.
     fn expr_root_is(arena: &AstArena, expr_id: ExprId, name: &str) -> bool {
+        // The grouping forms come off through the shared arena query, so
+        // `(p).x` and `wrapping(p).x` cannot be classified differently.
+        if let Some(inner) = arena.transparent_inner(expr_id) {
+            return Self::expr_root_is(arena, inner, name);
+        }
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => arena[*ident_id].name == name,
-            Expr::MemberAccess { expr, .. }
-            | Expr::ArrayIndexAccess { array: expr, .. }
-            | Expr::Parenthesized { expr } => Self::expr_root_is(arena, *expr, name),
-            Expr::Binary { .. }
+            Expr::MemberAccess { expr, .. } | Expr::ArrayIndexAccess { array: expr, .. } => {
+                Self::expr_root_is(arena, *expr, name)
+            }
+            // The two grouping forms are handled above and reach this arm only
+            // if the shared query stops recognizing one of them; answering
+            // `false` there would silently drop a copy, so they are listed here
+            // rather than swept, and the test matrix walks both spellings.
+            Expr::Parenthesized { .. }
+            | Expr::ArithMode { .. }
+            | Expr::Binary { .. }
             | Expr::PrefixUnary { .. }
             | Expr::FunctionCall { .. }
             | Expr::TypeMemberAccess { .. }
@@ -3498,17 +3863,6 @@ impl Compiler {
         }
     }
 
-    /// Strips redundant parentheses, returning the expression they wrap.
-    ///
-    /// `(())` and `()` denote the same value, so a check that keys on an
-    /// expression's shape must not be defeated by a spelling.
-    fn peel_parenthesized(arena: &AstArena, mut expr_id: ExprId) -> ExprId {
-        while let Expr::Parenthesized { expr } = &arena[expr_id].kind {
-            expr_id = *expr;
-        }
-        expr_id
-    }
-
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
     fn lower_statement(
@@ -3558,7 +3912,7 @@ impl Compiler {
                 // defense for a caller that ignored it.
                 if self.current_fn_returns_value
                     && matches!(
-                        arena[Self::peel_parenthesized(arena, expr)].kind,
+                        arena[arena.peel_transparent(expr)].kind,
                         Expr::UnitLiteral
                     )
                 {
@@ -4124,6 +4478,19 @@ impl Compiler {
                 cov_mark::hit!(wasm_codegen_emit_parenthesized_expression);
                 self.lower_expression(arena, expr, ctx, enclosing_var_name);
             }
+            Expr::ArithMode { expr, .. } => {
+                cov_mark::hit!(wasm_codegen_emit_arith_mode_expression);
+                // The annotation emits nothing of its own: it only decides how
+                // the arithmetic underneath it lowers, so a `wrapping(…)` build
+                // is byte-identical to the same source without it. The depth is
+                // recorded and restored rather than popped, so a nested lowering
+                // that left the stack deeper cannot leak its mode outward.
+                let inner = Self::mode_at(arena, expr_id, self.effective_arith_mode());
+                let depth = self.arith_mode.len();
+                self.arith_mode.push(inner);
+                self.lower_expression(arena, expr, ctx, enclosing_var_name);
+                self.arith_mode.truncate(depth);
+            }
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
                 // The same slot argument as the struct literal above: elements
@@ -4352,6 +4719,34 @@ impl Compiler {
         function_expr_id: ExprId,
         ctx: &TypedContext,
     ) -> Option<ResolvedCallee> {
+        Self::resolve_function_callee_in(arena, ctx, function_expr_id, self.scope(), &|key| {
+            self.func_name_to_idx.contains_key(key)
+        })
+    }
+
+    /// The scope the function currently being compiled resolves its calls in.
+    fn scope(&self) -> CalleeScope<'_> {
+        CalleeScope {
+            module_path: &self.current_module_path,
+            spec_name: self.current_spec.as_deref(),
+        }
+    }
+
+    /// [`Self::resolve_function_callee`] against an explicit scope and an
+    /// explicit registry of the keys that name a compiled function.
+    ///
+    /// The two parameters are exactly the state the `&self` form reads, lifted
+    /// out so a caller other than the emitter — one walking a call chain, whose
+    /// scope changes at every hop and whose registry is the specification
+    /// pass's own index — resolves a call the same way the emitter does instead
+    /// of re-deriving the rule and drifting from it.
+    pub(crate) fn resolve_function_callee_in(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        function_expr_id: ExprId,
+        scope: CalleeScope<'_>,
+        registered: &impl Fn(&FnKey) -> bool,
+    ) -> Option<ResolvedCallee> {
         // The type checker resolved every cross-file call — including paths that
         // cross `pub use` re-exports — to the callee's defining file. When the
         // callee lives in a *different* file than the one being compiled, trust
@@ -4381,7 +4776,7 @@ impl Compiler {
         // `method_in` key here would miss that registration.
         if let Some(target) = ctx.call_target(function_expr_id)
             && let Some(struct_name) = &target.receiver_struct
-            && target.module_path != self.current_module_path
+            && target.module_path != scope.module_path
             && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
         {
             let key = FnKey::method_in(
@@ -4398,7 +4793,7 @@ impl Compiler {
         // not a free function — so this free-function branch excludes it.
         if let Some(target) = ctx.call_target(function_expr_id)
             && target.receiver_struct.is_none()
-            && target.module_path != self.current_module_path
+            && target.module_path != scope.module_path
         {
             let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
             return Some(ResolvedCallee::QualifiedFunction(key));
@@ -4427,7 +4822,14 @@ impl Compiler {
                 expr: type_expr,
                 name: method_name,
             } => {
-                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name, ctx)?;
+                let key = Self::associated_fn_key_in(
+                    arena,
+                    ctx,
+                    *type_expr,
+                    *method_name,
+                    scope,
+                    registered,
+                )?;
                 Some(ResolvedCallee::AssociatedFunction { key })
             }
             Expr::MemberAccess {
@@ -4435,7 +4837,7 @@ impl Compiler {
                 name: method_name,
             } => {
                 let key =
-                    self.resolve_method_fn_key(arena, *receiver, *method_name, ctx)?;
+                    Self::method_fn_key_in(arena, ctx, *receiver, *method_name, scope, registered)?;
                 Some(ResolvedCallee::InstanceMethod {
                     key,
                     receiver_expr_id: *receiver,
@@ -4552,14 +4954,32 @@ impl Compiler {
     /// the type checker did not record a target for; cross-file targets resolve
     /// through [`ResolvedCallee::QualifiedFunction`].
     fn resolve_free_callee_idx(&self, callee_name: &str) -> Option<u32> {
-        if let Some(spec) = self.current_spec.as_deref() {
-            let key = FnKey::spec_free_folded(&self.current_module_path, spec, callee_name);
-            if let Some(idx) = self.func_name_to_idx.get(&key).copied() {
-                return Some(idx);
+        let key = Self::free_callee_key_in(self.scope(), callee_name, &|key| {
+            self.func_name_to_idx.contains_key(key)
+        });
+        self.func_name_to_idx.get(&key).copied()
+    }
+
+    /// The [`FnKey`] a bare free-function name resolves to in `scope`: the
+    /// specification-mangled sibling key when one is registered, otherwise the
+    /// scope's own file-qualified free key.
+    ///
+    /// The fallback is returned whether or not it names anything, so the caller
+    /// that owns the registry decides what a miss means — an unknown callee is
+    /// an aborted lowering for the emitter and a fail-closed rejection for the
+    /// reachability rule, and neither answer belongs here.
+    pub(crate) fn free_callee_key_in(
+        scope: CalleeScope<'_>,
+        callee_name: &str,
+        registered: &impl Fn(&FnKey) -> bool,
+    ) -> FnKey {
+        if let Some(spec) = scope.spec_name {
+            let key = FnKey::spec_free_folded(scope.module_path, spec, callee_name);
+            if registered(&key) {
+                return key;
             }
         }
-        let key = FnKey::free_in(self.current_module_path.clone(), callee_name);
-        self.func_name_to_idx.get(&key).copied()
+        FnKey::free_in(scope.module_path.to_vec(), callee_name)
     }
 
     /// Resolves a callee `FnKey` directly to its WASM function index. Used
@@ -4629,6 +5049,25 @@ impl Compiler {
         method_name_id: IdentId,
         ctx: &TypedContext,
     ) -> Option<FnKey> {
+        Self::method_fn_key_in(
+            arena,
+            ctx,
+            receiver_expr_id,
+            method_name_id,
+            self.scope(),
+            &|key| self.func_name_to_idx.contains_key(key),
+        )
+    }
+
+    /// [`Self::resolve_method_fn_key`] against an explicit scope and registry.
+    fn method_fn_key_in(
+        arena: &AstArena,
+        ctx: &TypedContext,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+        scope: CalleeScope<'_>,
+        registered: &impl Fn(&FnKey) -> bool,
+    ) -> Option<FnKey> {
         let method_name = &arena[method_name_id].name;
         let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
         // The receiver carries its struct's canonical identity (`Struct(bare, key)`).
@@ -4638,11 +5077,16 @@ impl Compiler {
         // (spec-inner or forward reference) has no canonical key, so it falls back to
         // the call-site bare-name path.
         match &receiver_type.kind {
-            TypeInfoKind::Struct(struct_name, canonical_key) => {
-                self.lookup_method_fn_key_by_key(struct_name, canonical_key, method_name, ctx)
-            }
+            TypeInfoKind::Struct(struct_name, canonical_key) => Self::lookup_method_fn_key_by_key(
+                struct_name,
+                canonical_key,
+                method_name,
+                ctx,
+                scope,
+                registered,
+            ),
             TypeInfoKind::Custom(struct_name) => {
-                self.lookup_method_fn_key(struct_name, method_name, ctx)
+                Self::lookup_method_fn_key(struct_name, method_name, ctx, scope, registered)
             }
             _ => None,
         }
@@ -4653,9 +5097,13 @@ impl Compiler {
     /// is qualified by the struct's defining file; if the struct can't be
     /// resolved (it should always resolve post-type-check) the current file is
     /// assumed so single-file behavior is unaffected.
-    fn struct_defining_module_path(&self, struct_name: &str, ctx: &TypedContext) -> Vec<String> {
-        ctx.struct_module_path(struct_name, &self.current_module_path)
-            .unwrap_or_else(|| self.current_module_path.clone())
+    fn struct_defining_module_path(
+        struct_name: &str,
+        ctx: &TypedContext,
+        scope: CalleeScope<'_>,
+    ) -> Vec<String> {
+        ctx.struct_module_path(struct_name, scope.module_path)
+            .unwrap_or_else(|| scope.module_path.to_vec())
     }
 
     /// Spec-aware method lookup. Constructs the candidate [`FnKey`] directly
@@ -4668,23 +5116,22 @@ impl Compiler {
     /// qualified by the struct's defining file so a method on a struct in an
     /// imported file resolves to that file's registration.
     fn lookup_method_fn_key(
-        &self,
         struct_name: &str,
         method_name: &str,
         ctx: &TypedContext,
+        scope: CalleeScope<'_>,
+        registered: &impl Fn(&FnKey) -> bool,
     ) -> Option<FnKey> {
-        if let Some(spec) = self.current_spec.as_deref() {
+        if let Some(spec) = scope.spec_name {
             let candidate =
-                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
-            if self.func_name_to_idx.contains_key(&candidate) {
+                FnKey::spec_method_folded(scope.module_path, spec, struct_name, method_name);
+            if registered(&candidate) {
                 return Some(candidate);
             }
         }
-        let module_path = self.struct_defining_module_path(struct_name, ctx);
+        let module_path = Self::struct_defining_module_path(struct_name, ctx, scope);
         let candidate = FnKey::method_in(module_path, struct_name, method_name);
-        self.func_name_to_idx
-            .contains_key(&candidate)
-            .then_some(candidate)
+        registered(&candidate).then_some(candidate)
     }
 
     /// Spec-aware method lookup keyed by the receiver's **canonical struct key**.
@@ -4709,11 +5156,12 @@ impl Compiler {
     /// post-type-check) falls back to the bare-name path so behavior is never
     /// worse than before.
     fn lookup_method_fn_key_by_key(
-        &self,
         struct_name: &str,
         canonical_key: &str,
         method_name: &str,
         ctx: &TypedContext,
+        scope: CalleeScope<'_>,
+        registered: &impl Fn(&FnKey) -> bool,
     ) -> Option<FnKey> {
         let Some(module_path) = ctx.module_path_of_struct_key(canonical_key) else {
             // A struct receiver always carries a key that resolves post-type-check;
@@ -4724,18 +5172,18 @@ impl Compiler {
                 "struct receiver `{struct_name}` has canonical key `{canonical_key}` \
                  with no resolvable defining struct after type-checking"
             );
-            return self.lookup_method_fn_key(struct_name, method_name, ctx);
+            return Self::lookup_method_fn_key(struct_name, method_name, ctx, scope, registered);
         };
         let method_candidate = FnKey::method_in(module_path, struct_name, method_name);
-        if self.func_name_to_idx.contains_key(&method_candidate) {
+        if registered(&method_candidate) {
             return Some(method_candidate);
         }
         // No top-level method for this struct identity: the receiver is the active
         // spec's own inner struct (its methods register only as `SpecMethod`).
-        if let Some(spec) = self.current_spec.as_deref() {
+        if let Some(spec) = scope.spec_name {
             let candidate =
-                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
-            if self.func_name_to_idx.contains_key(&candidate) {
+                FnKey::spec_method_folded(scope.module_path, spec, struct_name, method_name);
+            if registered(&candidate) {
                 return Some(candidate);
             }
         }
@@ -4829,7 +5277,7 @@ impl Compiler {
     /// A type application is deliberately unreadable here, so that a head naming one
     /// reaches a refusal rather than being lowered through its base.
     fn extract_type_name_from_type_expr(arena: &AstArena, type_expr_id: ExprId) -> Option<String> {
-        match &arena[Self::peel_parenthesized(arena, type_expr_id)].kind {
+        match &arena[arena.peel_transparent(type_expr_id)].kind {
             Expr::Type(ty_id) => match &arena[*ty_id].kind {
                 TypeNode::Custom(ident_id) => Some(arena[*ident_id].name.clone()),
                 _ => None,
@@ -4845,16 +5293,17 @@ impl Compiler {
     /// spec-aware [`FnKey`] candidate probe as [`Self::lookup_method_fn_key`].
     /// Returns `None` if the type name cannot be extracted or the method is
     /// not registered in either scope.
-    fn resolve_associated_fn_key(
-        &self,
+    fn associated_fn_key_in(
         arena: &AstArena,
+        ctx: &TypedContext,
         type_expr_id: ExprId,
         method_name_id: IdentId,
-        ctx: &TypedContext,
+        scope: CalleeScope<'_>,
+        registered: &impl Fn(&FnKey) -> bool,
     ) -> Option<FnKey> {
         let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
         let method_name = &arena[method_name_id].name;
-        self.lookup_method_fn_key(&type_name, method_name, ctx)
+        Self::lookup_method_fn_key(&type_name, method_name, ctx, scope, registered)
     }
 
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
@@ -5520,7 +5969,15 @@ impl Compiler {
         self.loop_ctx.loop_exit_depths.pop();
     }
 
-    fn is_unsigned_type(kind: &TypeInfoKind) -> bool {
+    /// Whether `kind` is one of the unsigned integer types, which decides the
+    /// signedness of every comparison, division and shift emitted for it.
+    ///
+    /// Visible to the crate rather than to this module because the obligation
+    /// translator keeps a second signedness predicate of its own, over its own
+    /// type language, and a test holds the two to answering alike at every
+    /// width. Unifying them is not available: neither type language is
+    /// expressible in the other's crate.
+    pub(crate) fn is_unsigned_type(kind: &TypeInfoKind) -> bool {
         matches!(
             kind,
             TypeInfoKind::Number(
@@ -5752,8 +6209,12 @@ impl Compiler {
     /// own `div_s` trap cannot fire, and the re-narrowing that follows would silently
     /// sign-wrap it back to MIN: a wrong answer with no failure signal. Division
     /// overflow must instead trap at every width, exactly as wasm itself traps
-    /// i32/i64 MIN / -1 (add/sub/mul wrap by policy; division overflow does not).
-    /// The guard tests the promoted quotient before narrowing:
+    /// i32/i64 MIN / -1. This is not the arithmetic-mode question: `/` and `%`
+    /// are governed by neither `checked(…)` nor `wrapping(…)`, so this guard is
+    /// emitted whatever encloses the expression, where the four guarded
+    /// operators take [`crate::overflow_guard`]'s rows only where the source's
+    /// effective mode says checked. The guard tests the promoted quotient
+    /// before narrowing:
     ///
     /// ```wat
     /// local.tee $scratch    ;; [q]; $scratch = q
@@ -5793,6 +6254,41 @@ impl Compiler {
         self.loop_ctx.wasm_block_depth -= 1;
         self.func().instruction(&Instruction::End);
         self.func().instruction(&Instruction::LocalGet(scratch));
+    }
+
+    /// Emits the overflow guard for one effectively-checked operator.
+    ///
+    /// The scratch comes from the function's pool, reserved before the body by
+    /// the same classifier that chose this guard. A pool without slots for this
+    /// guard's width class is therefore not a program to keep compiling but a
+    /// contradiction between the two, and it would show up as a guard writing a
+    /// local belonging to something else.
+    ///
+    /// The block depth travels in and out by value because the guard needs the
+    /// function and the depth at once: the sequences balance every `if` they
+    /// open, so the value written back is the value read, and it is the
+    /// bookkeeping *during* emission that a nested guard would depend on.
+    fn emit_overflow_guard(&mut self, kind: GuardKind) {
+        // Aborts rather than poisoning, and must stay that way. The poison slot
+        // is for a construct the front end accepted and this phase has no
+        // lowering for — an input shape, with a source location to report it
+        // against. This is not one: the pool was sized by a descent that asked
+        // the same classifier this guard came from, so an empty slot means those
+        // two descents disagreed about the program, which no input can cause and
+        // no diagnostic can help with.
+        //
+        // Returning quietly instead would emit the arithmetic unguarded while
+        // the function stays listed in `inference.checked` — a module claiming a
+        // guard it does not carry, which is the one outcome this phase exists to
+        // prevent. A caller downstream would then read that claim and let a
+        // reachability specification through over a body that wraps.
+        let scratch = self.overflow_guard_pool.scratch(kind).expect(
+            "overflow-guard scratch must be reserved: body_guard_scratch_demand asks the same \
+             classifier that chose this guard",
+        );
+        let mut depth = self.loop_ctx.wasm_block_depth;
+        overflow_guard::emit(self.func(), &mut depth, kind, scratch);
+        self.loop_ctx.wasm_block_depth = depth;
     }
 
     /// Resolves an exported parameter's type kind to its [`EnumInfo`], or `None`
@@ -6273,6 +6769,16 @@ impl Compiler {
             cov_mark::hit!(wasm_codegen_shift_count_mask);
         }
 
+        // `+`, `-` and `*` are the governed binary operators: in checked mode
+        // each of them trades its bare instruction for a sequence that traps on
+        // a result the type cannot hold. Division, remainder, the shifts and the
+        // bitwise operators are never governed, so the classifier answers `None`
+        // for them whatever the mode is, and so does every operator whose
+        // effective mode is wrapping.
+        let guard = GuardedOp::from_binary(&op).and_then(|governed| {
+            guard_kind(governed, &left_type_info.kind, self.effective_arith_mode())
+        });
+
         let instruction = match op {
             OperatorKind::Add => {
                 if is_i64 {
@@ -6397,7 +6903,20 @@ impl Compiler {
             }
         };
 
-        self.func().instruction(&instruction);
+        // A guard for one of the full-width binary rows emits the operation
+        // itself, because its test reads operands the operation consumes and so
+        // has to save them first. Every other guard is a post-check on the value
+        // the operation left behind.
+        match guard {
+            Some(kind) if kind.replaces_the_operation() => self.emit_overflow_guard(kind),
+            Some(kind) => {
+                self.func().instruction(&instruction);
+                self.emit_overflow_guard(kind);
+            }
+            None => {
+                self.func().instruction(&instruction);
+            }
+        }
 
         // A narrow (i8/i16) signed division computes in the promoted i32 width,
         // where the (MIN, -1) pair yields a quotient (+128 / +32768) that the
@@ -6410,6 +6929,9 @@ impl Compiler {
             self.emit_narrow_div_overflow_guard(&left_type_info.kind);
         }
 
+        // A narrow row's own test *is* the re-narrowing and it leaves that
+        // value, so running the re-narrowing again here would recompute the
+        // value from itself: same result, more bytes.
         if !matches!(
             op,
             OperatorKind::Eq
@@ -6420,7 +6942,8 @@ impl Compiler {
                 | OperatorKind::Ge
                 | OperatorKind::Mod
                 | OperatorKind::Shr
-        ) {
+        ) && !guard.is_some_and(GuardKind::narrows_the_result)
+        {
             memory::emit_sub_i32_narrowing(self.func(), &left_type_info.kind);
         }
     }
@@ -6510,6 +7033,13 @@ impl Compiler {
         match op {
             UnaryOperatorKind::Neg => {
                 cov_mark::hit!(wasm_codegen_emit_unary_neg);
+                // Negation is the one governed unary operator: at every signed
+                // width `-MIN` does not fit, so in checked mode it takes a guard
+                // like the governed binary operators do. `!` and `~` cannot
+                // leave their type and are never governed, and neither is
+                // negation at an unsigned type, which the type checker refuses.
+                let guard = GuardedOp::from_unary(&op)
+                    .and_then(|governed| guard_kind(governed, &kind, self.effective_arith_mode()));
                 if is_i64 {
                     self.func().instruction(&Instruction::I64Const(0));
                 } else {
@@ -6520,6 +7050,15 @@ impl Compiler {
                     self.func().instruction(&Instruction::I64Sub);
                 } else {
                     self.func().instruction(&Instruction::I32Sub);
+                }
+                // The guard reads the subtraction's result, so it follows the
+                // subtraction. At the narrow widths its own test is the
+                // re-narrowing and it leaves that value, so the re-narrowing
+                // below would recompute the value from itself.
+                if let Some(row) = guard {
+                    self.emit_overflow_guard(row);
+                }
+                if !is_i64 && !guard.is_some_and(GuardKind::narrows_the_result) {
                     memory::emit_sub_i32_narrowing(self.func(), &kind);
                 }
             }
@@ -6647,18 +7186,21 @@ impl Compiler {
     /// Recognized patterns:
     /// - `NumberLiteral { value: "0" }` or `NumberLiteral { value: "-0" }`
     /// - `BoolLiteral { value: false }` (stored as 0)
-    /// - `Parenthesized { expr }` wrapping a zero literal
+    /// - a grouping form (parentheses or an arithmetic-mode annotation)
+    ///   wrapping a zero literal
     /// - `PrefixUnary { op: Neg, expr }` wrapping a zero literal
     ///
     /// This is a conservative, local check with no side effects in any matched
     /// pattern. Only false negatives are possible (e.g., `0x0`, `0_0`), which
     /// result in a redundant store -- never a missing one.
     fn is_syntactic_zero(arena: &AstArena, expr_id: ExprId) -> bool {
+        if let Some(inner) = arena.transparent_inner(expr_id) {
+            return Self::is_syntactic_zero(arena, inner);
+        }
         match &arena[expr_id].kind {
             Expr::NumberLiteral { value } => value == "0" || value == "-0",
             Expr::BoolLiteral { value } => !value,
-            Expr::Parenthesized { expr }
-            | Expr::PrefixUnary {
+            Expr::PrefixUnary {
                 op: UnaryOperatorKind::Neg,
                 expr,
             } => Self::is_syntactic_zero(arena, *expr),
@@ -7640,26 +8182,40 @@ impl Compiler {
 
         module.section(&name_section);
 
-        if !self.spec_func_indices_by_spec.is_empty() {
-            let spec_section =
-                crate::spec_section::SpecFuncSection::new(&self.spec_func_indices_by_spec);
-            module.section(&spec_section);
-        }
-
-        // The `inference.hspecs` obligation section is a sibling of
-        // `inference.spec_funcs`, emitted right after it so the two verification
-        // deliverables sit adjacently. It is populated only in proof mode; the
-        // map is empty otherwise, so the section is absent from compile-mode
-        // output.
-        if !hspecs.is_empty() {
-            module.section(&crate::hspecs_section::HspecsSection::new(hspecs));
-        }
+        self.attach_verification_sections(&mut module, hspecs);
 
         (
             module.finish(),
             self.spec_func_indices_by_spec,
             self.frame_sizes,
         )
+    }
+
+    /// Appends the three `inference.*` custom sections, in the order a reader
+    /// finds them: the per-spec function indices, the obligations that apply
+    /// them, then the guarded-function list.
+    ///
+    /// Each is omitted when it would say nothing, and for each the omission is
+    /// the statement rather than a saving. A compile-mode build records no
+    /// specifications and no obligations, so it emits neither of the first two;
+    /// a program that names no arithmetic mode has no function that traps on
+    /// overflow, so it emits none of the third — and *that* absence is what a
+    /// linker reads as "no Inference-emitted overflow guard in this module",
+    /// which is also true of every module a foreign toolchain produced.
+    fn attach_verification_sections(&self, module: &mut Module, hspecs: &HSpecMap) {
+        if !self.spec_func_indices_by_spec.is_empty() {
+            module.section(&crate::spec_section::SpecFuncSection::new(
+                &self.spec_func_indices_by_spec,
+            ));
+        }
+        if !hspecs.is_empty() {
+            module.section(&crate::hspecs_section::HspecsSection::new(hspecs));
+        }
+        if !self.guarded_func_indices.is_empty() {
+            module.section(&crate::checked_section::CheckedSection::new(
+                &self.guarded_func_indices,
+            ));
+        }
     }
 }
 
@@ -9419,6 +9975,11 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
         /// Placing `p` inside every variant is what makes the negative answers
         /// mean something: a shape that is not a projection must report "not
         /// this binding" even with `p` sitting directly inside it.
+        ///
+        /// One named binding per variant, so a reader of the returned list sees
+        /// which shape each entry is; the length is the number of `Expr`
+        /// variants and grows by one line whenever the AST does.
+        #[allow(clippy::too_many_lines)]
         fn one_expression_of_each_variant(arena: &mut AstArena) -> Vec<ExprId> {
             let base = identifier(arena, "p");
             let field = ident(arena, "a");
@@ -9502,6 +10063,13 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
             let unit = expr(arena, Expr::UnitLiteral);
             let uzumaki = expr(arena, Expr::Uzumaki);
             let type_expr = expr(arena, Expr::Type(type_id));
+            let arith_mode = expr(
+                arena,
+                Expr::ArithMode {
+                    mode: ArithMode::Checked,
+                    expr: base,
+                },
+            );
 
             vec![
                 identifier_expr,
@@ -9520,11 +10088,13 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 unit,
                 uzumaki,
                 type_expr,
+                arith_mode,
             ]
         }
 
         /// Whether [`Compiler::expr_root_is`] must peel this shape down to the
-        /// binding underneath it.
+        /// binding underneath it. The two grouping forms are peeled together,
+        /// as [`AstArena::transparent_inner`] defines them to be.
         ///
         /// Exhaustive over `Expr` on purpose: a new variant fails to compile
         /// here as well as in `expr_root_is`, so it cannot be classified as a
@@ -9534,7 +10104,8 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 Expr::Identifier(_)
                 | Expr::MemberAccess { .. }
                 | Expr::ArrayIndexAccess { .. }
-                | Expr::Parenthesized { .. } => true,
+                | Expr::Parenthesized { .. }
+                | Expr::ArithMode { .. } => true,
                 Expr::Binary { .. }
                 | Expr::PrefixUnary { .. }
                 | Expr::FunctionCall { .. }
@@ -9693,6 +10264,7 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 Expr::Binary { .. } => Some("p.a + q.a"),
                 Expr::PrefixUnary { .. } => Some("-p.a"),
                 Expr::FunctionCall { .. } => Some("helper(p)"),
+                Expr::ArithMode { .. } => Some("wrapping(p.a)"),
                 Expr::NumberLiteral { .. } => Some("5"),
                 // A type-qualified name, a compound literal, and the remaining
                 // literals are values rather than places: the parser accepts no
@@ -9705,6 +10277,55 @@ fn assigns(mut e: Nothing, p: Pair) -> i32 {{
                 | Expr::UnitLiteral
                 | Expr::Uzumaki
                 | Expr::Type(_) => None,
+            }
+        }
+
+        /// Every grouping spelling of one target roots at the same binding.
+        ///
+        /// The parenthesized and annotated spellings denote the same place, so
+        /// a pass that peeled one and not the other would call `p` unwritten
+        /// under one spelling and written under the other — and the unwritten
+        /// answer drops the private copy that keeps a caller's memory intact.
+        #[test]
+        fn every_grouping_form_roots_at_the_same_binding() {
+            let mut arena = AstArena::default();
+            let base = identifier(&mut arena, "p");
+            let field = ident(&mut arena, "a");
+            let member = expr(
+                &mut arena,
+                Expr::MemberAccess {
+                    expr: base,
+                    name: field,
+                },
+            );
+            let other = identifier(&mut arena, "q");
+            for inner in [base, member, other] {
+                let expected = Compiler::expr_root_is(&arena, inner, "p");
+                let wrappers = vec![
+                    expr(&mut arena, Expr::Parenthesized { expr: inner }),
+                    expr(
+                        &mut arena,
+                        Expr::ArithMode {
+                            mode: ArithMode::Checked,
+                            expr: inner,
+                        },
+                    ),
+                    expr(
+                        &mut arena,
+                        Expr::ArithMode {
+                            mode: ArithMode::Wrapping,
+                            expr: inner,
+                        },
+                    ),
+                ];
+                for wrapper in wrappers {
+                    assert_eq!(
+                        Compiler::expr_root_is(&arena, wrapper, "p"),
+                        expected,
+                        "a grouping form changed the root of {:?}",
+                        arena[inner].kind,
+                    );
+                }
             }
         }
 
@@ -9763,10 +10384,279 @@ fn f(p: S, q: S) -> i32 {{
             extra_codegen_roots.sort_unstable();
             assert_eq!(
                 extra_codegen_roots,
-                ["(p)", "(p).a", "(p.a)", "(p.b)[0]"],
-                "codegen peels parentheses and the type checker does not; that is the \
-                 safe direction, but which shapes it covers is pinned so losing one \
+                ["(p)", "(p).a", "(p.a)", "(p.b)[0]", "wrapping(p.a)"],
+                "codegen peels the grouping forms and the type checker does not; that is \
+                 the safe direction, but which shapes it covers is pinned so losing one \
                  is a failure rather than a silent narrowing",
+            );
+        }
+    }
+
+    /// The language's default arithmetic mode, observed from both sides.
+    ///
+    /// [`ArithMode::DEFAULT`] is what every unannotated `+`, `-`, `*` and unary
+    /// `-` falls back to, and flipping it is the whole of a future change to
+    /// what this language means by those operators. Compiling one source under
+    /// each polarity is what shows the fallback is actually consulted: with the
+    /// shipped default an unannotated program builds, and with the other one the
+    /// same program reaches the checked path.
+    mod default_arith_mode {
+        use super::*;
+        use crate::overflow_guard::SCRATCH_SLOTS_PER_WIDTH;
+        use crate::target::CompilationMode;
+        use inference_type_checker::TypeCheckerBuilder;
+        use inference_type_checker::typed_context::TypedContext;
+
+        const UNANNOTATED: &str = "pub fn op(a: i32, b: i32) -> i32 { return a + b; }";
+
+        fn type_check(source: &str) -> TypedContext {
+            let parsed = inference_parser::parse(source);
+            assert!(parsed.errors.is_empty(), "parse errors: {:?}", parsed.errors);
+            TypeCheckerBuilder::build_typed_context(parsed.arena)
+                .expect("type checking should succeed")
+                .typed_context()
+        }
+
+        /// Compiles `source` with the fallback mode set to `mode`, returning the
+        /// module bytes.
+        fn compile_under(source: &str, mode: ArithMode) -> Vec<u8> {
+            compile_under_in(source, mode, CompilationMode::Compile)
+        }
+
+        /// [`compile_under`] at an explicit compilation mode, for the bodies
+        /// only one of the two modes lowers.
+        fn compile_under_in(
+            source: &str,
+            mode: ArithMode,
+            compilation_mode: CompilationMode,
+        ) -> Vec<u8> {
+            let ctx = type_check(source);
+            let mut compiler = Compiler::new("default_arith_mode_test");
+            compiler.set_emit_bounds_checks(true);
+            compiler.set_default_arith_mode(mode);
+            let hspecs =
+                crate::traverse_t_ast_with_compiler(&ctx, &mut compiler, compilation_mode)
+                    .expect("code generation should succeed");
+            compiler.finish_and_take(&hspecs).0
+        }
+
+        #[test]
+        fn the_shipped_default_is_the_one_the_language_has_always_had() {
+            assert_eq!(ArithMode::DEFAULT, ArithMode::Wrapping);
+        }
+
+        #[test]
+        fn an_unannotated_operator_takes_the_fallback_mode() {
+            // Nothing in this source names a mode, so the guard in the second
+            // module can only have come from the fallback -- and it is the same
+            // module the annotation produces, which is what makes the annotation
+            // and the default two spellings of one thing rather than two
+            // features.
+            cov_mark::check!(wasm_codegen_overflow_guard_add);
+            let wrapping = compile_under(UNANNOTATED, ArithMode::Wrapping);
+            let checked = compile_under(UNANNOTATED, ArithMode::Checked);
+            assert!(
+                checked.len() > wrapping.len(),
+                "a checked fallback must grow the module the guard is emitted into"
+            );
+            let annotated = compile_under(
+                "pub fn op(a: i32, b: i32) -> i32 { return checked(a + b); }",
+                ArithMode::Wrapping,
+            );
+            assert_eq!(
+                checked, annotated,
+                "the fallback and the annotation must say the same thing"
+            );
+        }
+
+        #[test]
+        fn an_annotation_still_overrides_the_fallback_in_both_directions() {
+            let plain_wrapping = compile_under(UNANNOTATED, ArithMode::Wrapping);
+            let plain_checked = compile_under(UNANNOTATED, ArithMode::Checked);
+            assert_eq!(
+                compile_under(
+                    "pub fn op(a: i32, b: i32) -> i32 { return wrapping(a + b); }",
+                    ArithMode::Checked,
+                ),
+                plain_wrapping,
+                "`wrapping(…)` must name the mode the fallback does not"
+            );
+            assert_eq!(
+                compile_under(
+                    "pub fn op(a: i32, b: i32) -> i32 { return checked(a + b); }",
+                    ArithMode::Wrapping,
+                ),
+                plain_checked,
+                "`checked(…)` must name the mode the fallback does not"
+            );
+        }
+
+        #[test]
+        fn the_ungoverned_operators_ignore_the_fallback_mode() {
+            // Division, remainder, the shifts and the bitwise operators are
+            // never governed, so flipping the fallback must leave their modules
+            // byte-for-byte alone -- scratch declarations included, since a pool
+            // reserved for a guard that is never emitted would show up here.
+            for op in ["/", "%", "<<", ">>", "&", "|", "^"] {
+                let source = format!("pub fn op(a: u32, b: u32) -> u32 {{ return a {op} b; }}");
+                assert_eq!(
+                    compile_under(&source, ArithMode::Checked),
+                    compile_under(&source, ArithMode::Wrapping),
+                    "`{op}` must not consult the mode"
+                );
+            }
+        }
+
+        /// The name a locals declaration's value type carries in an assertion.
+        ///
+        /// The pool is the only source of `i64` locals in these bodies, so
+        /// spelling the type is what separates "reserved the class it guards"
+        /// from "reserved a class".
+        fn valtype_name(ty: inf_wasmparser::ValType) -> &'static str {
+            match ty {
+                inf_wasmparser::ValType::I32 => "i32",
+                inf_wasmparser::ValType::I64 => "i64",
+                other => panic!("these bodies declare no {other:?} local"),
+            }
+        }
+
+        /// Each defined function's locals declarations, as `(count, type)` pairs
+        /// in the order the code section carries them.
+        ///
+        /// Read back out of the emitted module rather than inferred from its
+        /// length. A pool that reserved a class the body never guards costs the
+        /// same number of bytes wherever it appears, so a comparison of module
+        /// sizes is satisfied by a reservation that ignores what the body asked
+        /// for; only the declaration list itself distinguishes the two.
+        fn local_declarations(wasm: &[u8]) -> Vec<Vec<(u32, &'static str)>> {
+            let mut out = Vec::new();
+            for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+                let inf_wasmparser::Payload::CodeSectionEntry(body) =
+                    payload.expect("the emitted module parses")
+                else {
+                    continue;
+                };
+                let mut locals = Vec::new();
+                for entry in body.get_locals_reader().expect("a locals reader") {
+                    let (count, ty) = entry.expect("a locals declaration");
+                    locals.push((count, valtype_name(ty)));
+                }
+                out.push(locals);
+            }
+            out
+        }
+
+        /// The pool's declarations for a body that guards the i32 class alone.
+        const I32_POOL: &[(u32, &str)] = &[(SCRATCH_SLOTS_PER_WIDTH, "i32")];
+        /// The pool's declarations for a body that guards the i64 class alone.
+        const I64_POOL: &[(u32, &str)] = &[(SCRATCH_SLOTS_PER_WIDTH, "i64")];
+        /// The pool's declarations for a body that guards both classes.
+        const BOTH_POOLS: &[(u32, &str)] = &[
+            (SCRATCH_SLOTS_PER_WIDTH, "i32"),
+            (SCRATCH_SLOTS_PER_WIDTH, "i64"),
+        ];
+
+        #[test]
+        fn a_function_with_no_guard_declares_no_pool() {
+            // The reservation is per function, so a guarded function's neighbour
+            // pays nothing for it. These bodies need no frame, no bounds scratch
+            // and no narrow-division scratch, so whatever they declare is the
+            // pool and nothing else.
+            const MIXED: &str = "pub fn guarded(a: i32, b: i32) -> i32 { return checked(a + b); } \
+                                 pub fn plain(a: i32, b: i32) -> i32 { return a * b; }";
+            const NEITHER: &str =
+                "pub fn guarded(a: i32, b: i32) -> i32 { return a + b; } \
+                 pub fn plain(a: i32, b: i32) -> i32 { return a * b; }";
+            assert_eq!(
+                local_declarations(&compile_under(MIXED, ArithMode::Wrapping)),
+                vec![I32_POOL.to_vec(), Vec::new()],
+                "only the guarded function may declare a pool"
+            );
+            assert_eq!(
+                local_declarations(&compile_under(NEITHER, ArithMode::Wrapping)),
+                vec![Vec::new(), Vec::new()],
+                "a program with no effectively-checked arithmetic declares no pool at all"
+            );
+            assert_eq!(
+                local_declarations(&compile_under(NEITHER, ArithMode::Checked)),
+                vec![I32_POOL.to_vec(), I32_POOL.to_vec()],
+                "under a checked fallback each function reserves its own pool"
+            );
+        }
+
+        #[test]
+        fn a_specification_body_reserves_its_own_guard_scratch() {
+            // A specification function's body is lowered to WebAssembly in proof
+            // mode like any other, so its arithmetic reaches the same
+            // reservation and the same emitter. A guard gets there only through
+            // the fallback: the obligation translator refuses an annotation
+            // written inside a specification, so an unannotated body under a
+            // checked fallback is the one route by which one arrives. A
+            // reservation that skipped these bodies would abort at the guard's
+            // `expect` instead of returning a module.
+            //
+            // The body is universal on purpose. A guard inside an
+            // `exists`/`unique` body is what `P017` rejects — the judgment
+            // reduces that body, so a trap in it makes the claim false — so the
+            // one specification body that both carries a guard and translates is
+            // one no judgment reduces.
+            const SPEC: &str = "fn main() -> i32 { return 0; } \
+                                spec S { fn f(x: i32) forall { assert(x + 1 >= x); } }";
+            let wrapping = compile_under_in(SPEC, ArithMode::Wrapping, CompilationMode::Proof);
+            let checked = compile_under_in(SPEC, ArithMode::Checked, CompilationMode::Proof);
+            assert!(
+                checked.len() > wrapping.len(),
+                "the retained body's `+` must carry a guard under a checked fallback: \
+                 wrapping={} checked={}",
+                wrapping.len(),
+                checked.len()
+            );
+        }
+
+        #[test]
+        fn a_body_reserves_only_the_width_classes_it_guards() {
+            // Three sources whose guarded arithmetic differs only in its width
+            // class, each held to the exact declarations its class asks for. A
+            // reservation that took both classes whenever it took either would
+            // satisfy every size comparison between these three and fail here on
+            // the two single-class bodies.
+            let cases: &[(&str, &[(u32, &str)])] = &[
+                (
+                    "pub fn op(a: i32, b: i32) -> i32 { return checked(a + b); }",
+                    I32_POOL,
+                ),
+                (
+                    "pub fn op(a: i64, b: i64) -> i64 { return checked(a + b); }",
+                    I64_POOL,
+                ),
+                (
+                    "pub fn op(a: i32, b: i32, c: i64, d: i64) -> i64 { \
+                     if checked(a + b) > 0 { return checked(c + d); } return 0; }",
+                    BOTH_POOLS,
+                ),
+            ];
+            for (source, expected) in cases {
+                assert_eq!(
+                    local_declarations(&compile_under(source, ArithMode::Wrapping)),
+                    vec![expected.to_vec()],
+                    "the pool must hold the classes this body guards and no others: {source}"
+                );
+            }
+
+            // The pool is laid out after the locals the body names, so a `let`
+            // keeps the index it would have had with no guard anywhere -- which
+            // is what lets an obligation naming a slot survive the arrival of a
+            // guard elsewhere in the same function.
+            let mut named_then_pool = vec![(1, "i64")];
+            named_then_pool.extend_from_slice(BOTH_POOLS);
+            assert_eq!(
+                local_declarations(&compile_under(
+                    "pub fn op(a: i32, b: i32, c: i64, d: i64) -> i32 { \
+                     let n: i64 = checked(c + d); return checked(a + b); }",
+                    ArithMode::Wrapping,
+                )),
+                vec![named_then_pool],
+                "the pool must follow every local the body names"
             );
         }
     }
