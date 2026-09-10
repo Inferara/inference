@@ -31,7 +31,7 @@
 use inference_ast::ids::{ExprId, NodeId};
 use inference_ast::nodes::Expr;
 use inference_type_checker::errors::TypeMismatchContext;
-use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashSet;
 
@@ -104,18 +104,9 @@ fn validate_literal_range(
     let TypeInfoKind::Number(number_type) = target_kind else {
         return;
     };
-    let (type_name, min, max): (&str, i128, i128) = match number_type {
-        NumberType::I8 => ("i8", i128::from(i8::MIN), i128::from(i8::MAX)),
-        NumberType::I16 => ("i16", i128::from(i16::MIN), i128::from(i16::MAX)),
-        NumberType::I32 => ("i32", i128::from(i32::MIN), i128::from(i32::MAX)),
-        NumberType::I64 => ("i64", i128::from(i64::MIN), i128::from(i64::MAX)),
-        NumberType::U8 => ("u8", i128::from(u8::MIN), i128::from(u8::MAX)),
-        NumberType::U16 => ("u16", i128::from(u16::MIN), i128::from(u16::MAX)),
-        NumberType::U32 => ("u32", i128::from(u32::MIN), i128::from(u32::MAX)),
-        NumberType::U64 => ("u64", i128::from(u64::MIN), i128::from(u64::MAX)),
-    };
+    let range = number_type.range();
     let out_of_range = match value.parse::<i128>() {
-        Ok(parsed) => parsed < min || parsed > max,
+        Ok(parsed) => !range.contains(&parsed),
         Err(_) => true,
     };
     if out_of_range {
@@ -123,12 +114,69 @@ fn validate_literal_range(
             module_path.to_vec(),
             AnalysisDiagnostic::LiteralOutOfRange {
                 value: value.to_string(),
-                type_name: type_name.to_string(),
-                min,
-                max,
+                type_name: number_type.as_str().to_string(),
+                min: *range.start(),
+                max: *range.end(),
                 type_source: type_source.cloned(),
                 location,
             },
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_ast::nodes::Location;
+    use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+
+    use super::validate_literal_range;
+
+    /// This rule measures a literal against [`NumberType::range`] and nothing of
+    /// its own.
+    ///
+    /// It once carried its own copy of the eight widths' bounds, and the
+    /// specification translator carried a second. The bounds decide whether a
+    /// program compiles, so a width read one way here and another way there
+    /// would let the same literal be an error in one pass and a value in the
+    /// next. The boundary is walked at every width — the last value inside the
+    /// range and the first outside it at each end — because a copy that differed
+    /// by one is exactly what a spot check misses, and the reported bounds are
+    /// compared too, since they are what the message tells the author.
+    #[test]
+    fn the_accepted_literals_are_exactly_the_range() {
+        for number in NumberType::ALL {
+            let range = number.range();
+            let kind = TypeInfoKind::Number(*number);
+            let verdict = |value: i128| {
+                let mut errors = Vec::new();
+                validate_literal_range(
+                    &value.to_string(),
+                    &[],
+                    &kind,
+                    None,
+                    Location::default(),
+                    &mut errors,
+                );
+                errors
+            };
+            let name = number.as_str();
+            assert!(verdict(*range.start()).is_empty(), "`{name}` minimum");
+            assert!(verdict(*range.end()).is_empty(), "`{name}` maximum");
+            assert!(
+                !verdict(*range.start() - 1).is_empty(),
+                "`{name}` below its minimum"
+            );
+            let above = verdict(*range.end() + 1);
+            assert_eq!(above.len(), 1, "`{name}` above its maximum");
+            let rendered = above[0].diagnostic.to_string();
+            assert!(
+                rendered.contains(&format!(
+                    "out of range for type `{name}` (valid range: {}..={})",
+                    range.start(),
+                    range.end()
+                )),
+                "the reported bounds are the range's own: {rendered}"
+            );
+        }
     }
 }

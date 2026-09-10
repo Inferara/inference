@@ -4354,18 +4354,11 @@ fn number_value(width: NumberType, value: &str) -> i128 {
 /// Whether a width can name a number, at the same reading [`number_value`]
 /// gives: an unsigned width names from zero up, a signed one names its
 /// two's-complement range.
+///
+/// The bounds are the type's own, so a value this pass folds and a literal the
+/// analysis rules measure are held against one table.
 fn width_names(width: NumberType, value: i128) -> bool {
-    let range = match width {
-        NumberType::I8 => i128::from(i8::MIN)..=i128::from(i8::MAX),
-        NumberType::I16 => i128::from(i16::MIN)..=i128::from(i16::MAX),
-        NumberType::I32 => i128::from(i32::MIN)..=i128::from(i32::MAX),
-        NumberType::I64 => i128::from(i64::MIN)..=i128::from(i64::MAX),
-        NumberType::U8 => 0..=i128::from(u8::MAX),
-        NumberType::U16 => 0..=i128::from(u16::MAX),
-        NumberType::U32 => 0..=i128::from(u32::MAX),
-        NumberType::U64 => 0..=i128::from(u64::MAX),
-    };
-    range.contains(&value)
+    width.range().contains(&value)
 }
 
 /// A literal's text read at the width recorded for it. A value that does not fit
@@ -5053,5 +5046,38 @@ mod tests {
         // The obligation side additionally has to answer for a node whose type
         // was never recorded, where it reads signed.
         assert!(!kind_is_unsigned(None));
+    }
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::width_names;
+    use inference_type_checker::type_info::NumberType;
+
+    /// The values this pass will name at a width are exactly the values that
+    /// width holds.
+    ///
+    /// The predicate carried its own copy of the eight widths' bounds while the
+    /// literal-range analysis rule carried another, and both decide whether a
+    /// program compiles: a bound read one way here and another way there would
+    /// let a constant this pass folds disagree with the literal the rule
+    /// measured. The boundary is walked at each end of each width, because a
+    /// copy off by one is what a spot check misses.
+    #[test]
+    fn the_named_values_are_exactly_the_range() {
+        for number in NumberType::ALL {
+            let range = number.range();
+            let name = number.as_str();
+            assert!(width_names(*number, *range.start()), "`{name}` minimum");
+            assert!(width_names(*number, *range.end()), "`{name}` maximum");
+            assert!(
+                !width_names(*number, *range.start() - 1),
+                "`{name}` below its minimum"
+            );
+            assert!(
+                !width_names(*number, *range.end() + 1),
+                "`{name}` above its maximum"
+            );
+        }
     }
 }
