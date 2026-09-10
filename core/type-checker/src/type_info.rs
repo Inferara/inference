@@ -25,6 +25,7 @@
 //! - Generic functions: Functions with type parameters
 
 use core::fmt;
+use core::ops::RangeInclusive;
 use std::fmt::{Display, Formatter};
 
 use inference_ast::arena::AstArena;
@@ -97,6 +98,33 @@ impl NumberType {
         match op {
             GuardedOp::Add | GuardedOp::Sub | GuardedOp::Mul => true,
             GuardedOp::Neg => self.is_signed(),
+        }
+    }
+
+    /// Every value this type can hold, as the mathematical integers.
+    ///
+    /// One table for the whole compiler. Three passes need to know whether a
+    /// number fits a width — the rule that reports a literal out of range, the
+    /// specification translator deciding whether a folded value is one the
+    /// source names, and the rule that reports an arithmetic result that leaves
+    /// its type — and each of them decides whether a program compiles. Two of
+    /// them once carried a copy of these bounds, so a width read one way in one
+    /// place and another way in the next was a single typo away.
+    ///
+    /// `i128` is the arithmetic they share: it holds every value of every width
+    /// here, and the products and sums of any two of them, so a fold can
+    /// compute exactly and ask this afterwards.
+    #[must_use = "returns the range without modifying self"]
+    pub fn range(&self) -> RangeInclusive<i128> {
+        match self {
+            NumberType::I8 => i128::from(i8::MIN)..=i128::from(i8::MAX),
+            NumberType::I16 => i128::from(i16::MIN)..=i128::from(i16::MAX),
+            NumberType::I32 => i128::from(i32::MIN)..=i128::from(i32::MAX),
+            NumberType::I64 => i128::from(i64::MIN)..=i128::from(i64::MAX),
+            NumberType::U8 => i128::from(u8::MIN)..=i128::from(u8::MAX),
+            NumberType::U16 => i128::from(u16::MIN)..=i128::from(u16::MAX),
+            NumberType::U32 => i128::from(u32::MIN)..=i128::from(u32::MAX),
+            NumberType::U64 => i128::from(u64::MIN)..=i128::from(u64::MAX),
         }
     }
 }
@@ -547,4 +575,45 @@ fn extract_array_size_from_arena(arena: &AstArena, size_expr_id: inference_ast::
         return value.parse::<u32>().unwrap_or(0);
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NumberType;
+
+    /// [`NumberType::range`] is the machine range of the type it names.
+    ///
+    /// Derived here from Rust's own primitives rather than restated, so the one
+    /// table the compiler folds against cannot drift from the widths the emitted
+    /// module actually has. Every variant is listed: a width added to the enum
+    /// without a row here would leave the fold measuring against nothing.
+    #[test]
+    fn range_is_the_machine_range_at_every_width() {
+        let expected: Vec<(NumberType, i128, i128)> = vec![
+            (NumberType::I8, i128::from(i8::MIN), i128::from(i8::MAX)),
+            (NumberType::I16, i128::from(i16::MIN), i128::from(i16::MAX)),
+            (NumberType::I32, i128::from(i32::MIN), i128::from(i32::MAX)),
+            (NumberType::I64, i128::from(i64::MIN), i128::from(i64::MAX)),
+            (NumberType::U8, 0, i128::from(u8::MAX)),
+            (NumberType::U16, 0, i128::from(u16::MAX)),
+            (NumberType::U32, 0, i128::from(u32::MAX)),
+            (NumberType::U64, 0, i128::from(u64::MAX)),
+        ];
+        assert_eq!(
+            expected.len(),
+            NumberType::ALL.len(),
+            "every numeric type needs a range"
+        );
+        for (number, min, max) in expected {
+            let range = number.range();
+            assert_eq!(
+                (*range.start(), *range.end()),
+                (min, max),
+                "range of `{}`",
+                number.as_str()
+            );
+            assert!(!range.contains(&(min - 1)), "`{}` below", number.as_str());
+            assert!(!range.contains(&(max + 1)), "`{}` above", number.as_str());
+        }
+    }
 }
