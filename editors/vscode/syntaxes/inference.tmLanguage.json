@@ -169,6 +169,14 @@
           "match": "\\bpub\\b"
         },
         {
+          "name": "keyword.other.overflow.checked.inference",
+          "match": "\\bchecked\\b"
+        },
+        {
+          "name": "keyword.other.overflow.wrapping.inference",
+          "match": "\\bwrapping\\b"
+        },
+        {
           "name": "storage.modifier.mut.inference",
           "match": "\\bmut\\b"
         },

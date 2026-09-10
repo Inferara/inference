@@ -492,7 +492,10 @@ mod tests {
     #[test]
     fn control_and_nondet_keywords() {
         assert_eq!(
-            kinds("return loop if else assert break use from self pub assume forall exists unique"),
+            kinds(
+                "return loop if else assert break use from self pub assume forall exists unique \
+                 checked wrapping"
+            ),
             [
                 SyntaxKind::ReturnKw,
                 SyntaxKind::Whitespace,
@@ -521,6 +524,10 @@ mod tests {
                 SyntaxKind::ExistsKw,
                 SyntaxKind::Whitespace,
                 SyntaxKind::UniqueKw,
+                SyntaxKind::Whitespace,
+                SyntaxKind::CheckedKw,
+                SyntaxKind::Whitespace,
+                SyntaxKind::WrappingKw,
                 SyntaxKind::Eof,
             ]
         );

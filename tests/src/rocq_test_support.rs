@@ -31,6 +31,44 @@ pub(crate) fn compile_fixture(file: &str, module_name: &str, mode: CompilationMo
     .to_vec()
 }
 
+/// Compiles one fixture under `tests/test_data/inf/` and returns the whole
+/// code-generation output, for a caller that needs the compiler's own records
+/// — the obligation map, the guarded-function list — rather than the bytes.
+///
+/// Analysis is not run, exactly as [`compile_fixture`] does not run it: a
+/// `P0xx` diagnostic is the only gate on an emitted obligation, and a corpus
+/// audit over obligations has to see the same set the proof build produces.
+///
+/// The refusal is returned rather than raised because a caller sweeping the
+/// whole corpus needs to say *which* fixture the compiler refused and why,
+/// alongside whatever else it found — a panic out of a helper reads like a
+/// broken harness rather than a finding about a fixture.
+pub(crate) fn compile_fixture_output(
+    file: &str,
+    module_name: &str,
+    mode: CompilationMode,
+) -> Result<inference_wasm_codegen::CodegenOutput, String> {
+    let path = get_test_data_path().join("inf").join(file);
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let arena = build_ast(source);
+    let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap_or_else(|e| panic!("type check failed for {file}: {e}"))
+        .typed_context();
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        module_name,
+        inference_wasm_codegen::CodegenOptions {
+            target: Target::Wasm32,
+            mode,
+            opt_level: OptLevel::O3,
+            features: inference_wasm_codegen::EmitFeatures::default(),
+            layout: inference_wasm_codegen::MemoryLayout::default(),
+        },
+    )
+    .map_err(|e| format!("{e}"))
+}
+
 /// Proof-mode `.v` for one single-file fixture, driven entirely in-process.
 pub(crate) fn generate_v(file: &str, module_name: &str) -> String {
     let wasm = compile_fixture(file, module_name, CompilationMode::Proof);

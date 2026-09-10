@@ -195,7 +195,9 @@ fn expr_children(arena: &AstArena, id: ExprId) -> Vec<NodeId> {
             out.push(NodeId::Expr(*left));
             out.push(NodeId::Expr(*right));
         }
-        Expr::PrefixUnary { expr, .. } | Expr::Parenthesized { expr } => {
+        Expr::PrefixUnary { expr, .. }
+        | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. } => {
             out.push(NodeId::Expr(*expr));
         }
         Expr::FunctionCall { function, args, .. } => {

@@ -100,6 +100,17 @@ pub struct CodegenOutput {
     /// codegen entry point.
     frame_sizes: FxHashMap<FnKey, u32>,
 
+    /// Every emitted function whose body carries an overflow guard, by the
+    /// structured [`FnKey`] shared with the analysis passes and named by an
+    /// obligation's `T_app`/`HA_app_ok`.
+    ///
+    /// A guarded body traps rather than wrapping when a `+`, `-`, `*` or unary
+    /// `-` leaves its type, which is what a caller reasoning about whether a
+    /// compiled body can trap needs to know. Empty for a module none of whose
+    /// arithmetic is effectively checked, which is every module built from
+    /// source that names no mode.
+    guarded_functions: Vec<FnKey>,
+
     /// Per-spec `hassert` verification obligations, keyed by folded spec name.
     ///
     /// Empty in `compile` mode (specs are stripped). In `proof` mode, each
@@ -130,6 +141,7 @@ impl CodegenOutput {
             has_main,
             spec_func_indices_by_spec,
             frame_sizes: FxHashMap::default(),
+            guarded_functions: Vec::new(),
             hspecs: HSpecMap::default(),
         }
     }
@@ -143,6 +155,20 @@ impl CodegenOutput {
     pub fn with_frame_sizes(mut self, frame_sizes: FxHashMap<FnKey, u32>) -> Self {
         self.frame_sizes = frame_sizes;
         self
+    }
+
+    /// Attaches the guarded-function list. Builder-style so adding it was
+    /// non-breaking, mirroring [`Self::with_frame_sizes`].
+    #[must_use = "returns the updated output"]
+    pub fn with_guarded_functions(mut self, guarded_functions: Vec<FnKey>) -> Self {
+        self.guarded_functions = guarded_functions;
+        self
+    }
+
+    /// Every emitted function whose body carries an overflow guard.
+    #[must_use = "returns the guarded functions without modifying the output"]
+    pub fn guarded_functions(&self) -> &[FnKey] {
+        &self.guarded_functions
     }
 
     /// Returns the per-function shadow-stack frame sizes in bytes, keyed by the

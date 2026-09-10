@@ -344,6 +344,19 @@ pub use inference_wasm_linker::ImportWriteSet;
 /// of truth with the codegen and translator crates.
 pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VERSION};
 
+/// Re-export of the linker's own `inference.checked` identifiers, so a test can
+/// hold them and code generation's copies to agreement without taking a direct
+/// dependency on `inference-wasm-linker`.
+///
+/// Renamed on the way out because the two are deliberately *not* one constant:
+/// the linker's decoder keeps a hand-synchronised copy rather than depend on the
+/// crate whose output it checks, and a re-export that let them collide under one
+/// name here would hide exactly the drift the test looks for.
+pub use inference_wasm_linker::{
+    CHECKED_SECTION_NAME as LINKER_CHECKED_SECTION_NAME,
+    CHECKED_SECTION_VERSION as LINKER_CHECKED_SECTION_VERSION,
+};
+
 /// Re-export of the per-program `hassert` obligation map so consumers of
 /// [`wasm_to_v`] can construct the argument (empty post-link, populated for the
 /// pre-link cross-check) without depending on `inference-hassert` directly.

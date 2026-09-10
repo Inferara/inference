@@ -185,6 +185,115 @@ directly after the rebuilt `name` section. A main module carrying an *empty*
 `inference.spec_funcs` section still re-emits an empty one, because the
 section's presence is itself a producer's statement.
 
+### The `inference.checked` section and the reachability check
+
+A third `inference.*` section crosses the link, and it is the only one this
+crate *reads* rather than merely carries. `inference.checked` lists the
+functions of a module whose bodies trap when a `+`, `-`, `*` or unary `-`
+leaves its type. Its **absence means the module holds no Inference-emitted
+overflow guard**, which is exactly true of a module produced by any other
+toolchain — none of them emits one — so a foreign `.wasm` with no section is
+read correctly rather than merely conservatively. The producer never writes an
+empty section, so presence and a non-empty list say the same thing.
+
+The section has a second wire form, told apart by its leading version: version 1
+names the guarded functions, version 2 names none of them and says only that
+*some* function of the module carries a guard. The linker decodes both. An
+opaque input is read as guarded **everywhere** — every function that module
+contributed is a candidate — and a merge that absorbed one re-emits the opaque
+form rather than a list, since a list naming only the exact inputs' functions
+would state that the opaque input's bodies are unguarded. Code generation never
+writes version 2; `infs` does, and [the paragraph on post-build
+optimization](#post-build-optimization-and-the-sections-contract) says why.
+
+It differs from the other two on three points:
+
+- **It is decoded under every role**, not only under adoption. The obligation
+  sections describe a library the output is not; this one describes the bodies
+  the merge actually splices in, and whether one of them traps is not a question
+  the caller's specification policy can waive.
+- **It is remapped like `inference.spec_funcs`**, through `map_main_func` for
+  the main module's entries and through the merge's own closure index for each
+  external's, and re-emitted as one merged list. A library's guarded function
+  that no closure pulled in is simply not in the output and contributes nothing.
+- **It drives a rejection.** For every retained `exists`/`unique` specification
+  function of the program, the merge walks the merged module's `call` edges and
+  raises `LinkError::CheckedGuardUnderReachabilitySpec` if the walk reaches a
+  guarded function.
+
+That rejection exists because a reachability obligation is a claim about
+*running* the retained body: the downstream judgment fixes an entry vector first
+and only then lets the choices range, so a trap anywhere in the activation
+leaves no successful run at all and the claim becomes false rather than
+narrowing to the entries that avoid it. For `unique` it is worse than false —
+shrinking the set of successful runs is how a claim of uniqueness comes to hold
+by accident. Code generation refuses the same reach for every callee whose body
+it can see (`P018`), and it can never see an `external fn`'s: it is handed a
+typed context, while the dependency bytes arrive one phase later, here.
+
+**Every** guarded function of the output is a rejection, whichever module
+supplied it. Narrowing to the library-supplied ones would rest on the program's
+own having been refused already, which holds on the compiler driver — `P018`
+reports it against the source line that wrote the arithmetic, a better place to
+hear it than a link diagnostic naming two output functions — and does not hold
+on the public `link`, whose main bytes are whatever a caller handed over. The
+two phases still do not double-report: a library's closure can never call back
+into the program, because a closure reaching the external's own imports is
+already refused as needing a relocatable build, so a path from a specification
+to a guarded main body lies wholly inside the program and `P018` has already
+walked it. The message says which of the two cases it fired on, and names the
+logical module a library-supplied body was bound under rather than the library's
+own name for itself, because that is the name the program wrote.
+
+The walk itself is not narrowed to any module — it follows every edge, whichever
+module the body came from — because a path from the specification into a library
+may run through the program's own functions.
+
+The walk has to start somewhere, and its roots are the merged module's own
+`exists`/`unique` obligations, each resolved from its `fn_symbol` through the
+merged `name` section, narrowed to the functions `inference.spec_funcs` lists
+under that specification. A symbol that resolves to nothing is
+`LinkError::UnresolvedReachabilitySpecFunction` rather than a skipped root: a
+check that skipped it would report no guard for exactly the modules it can say
+least about. The specification-prefix half of that resolution is shared code
+(`HFnRef::bare_in_spec`), read here and by the proof translator alike, so a
+private copy cannot drift and quietly resolve nothing.
+
+A `call_indirect` anywhere in the walked set makes the reachable set unbounded
+(the target is a table entry chosen at run time), and the check then treats the
+specification as reaching every function of the module. Nothing in this pipeline
+produces one: Inference code generation emits no `call_indirect`, and an
+external whose closure names the table space is Tier C.
+
+#### Post-build optimization and the section's contract
+
+The contract is that the section describes the artifact **as its producer
+emitted it**, *or* says that it can no longer.
+
+The second half exists because of what a post-build optimizer does to the first.
+Binaryen's `wasm-opt` carries an unknown custom section through untouched —
+measured through `-O3`, `-Oz`, `--strip-debug` and `--strip`, which drop only the
+`name` section — while inlining, removing and reordering the very functions the
+indices name. The exact list survives the optimizer and stops being true.
+
+The exposure is real rather than theoretical: this linker runs on
+code-generation output, but a *library* is an ordinary compile-mode artifact, and
+`infs` optimizes one whenever its manifest declares `[build.wasm-opt]`. A later
+link then reads a stale list out of it. Reproduced against the managed Binaryen
+(version_130): a module whose private guarded helper is inlined at `-Oz` comes
+back with its `name` section gone and its payload still the three bytes
+`1, 1, 0` — version 1, one guarded function, index 0 — over a function space
+those indices no longer describe. `infs` writes the single byte `2` over it
+instead.
+
+Two things close that. An index naming a function the module does not have is
+refused at parse time, which catches removal. A reorder that removes nothing
+leaves every index in range and naming the wrong body, which no check on the
+section alone can see — so `infs` rewrites the section into the opaque form after
+running the optimizer, and this crate reads that as "every function of this
+module". `--no-wasm-opt`, and `enabled = false` under `[build.wasm-opt]`, are
+how a library keeps an exact record.
+
 ### External specification adoption
 
 Under `ExternalSpecPolicy::Adopt` — `infc --adopt-external-specs`, or
@@ -648,7 +757,7 @@ to a same-named `sum` exported by a different module.
 
 | Error | Meaning |
 |-------|---------|
-| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section. An external's two sections are decoded **only** when adoption is requested, in which case a malformed or duplicate one is reported here with the logical module named; under every other policy they are not decoded at all and cannot fail a link |
+| `LinkError::Parse(msg)` | A module's bytes could not be parsed as valid WASM. Also covers a malformed, out-of-range-indexed, or duplicate main-module `inference.spec_funcs`/`inference.hspecs` section, and a malformed, duplicate or out-of-range `inference.checked` section in *any* module (that one is decoded under every role). A duplicate names what a second copy would cost — the first section's guarded functions, dropped without a word by a last-wins assignment — rather than being framed around adoption, which is true of the other two sections and not of this one. An external's two sections are decoded **only** when adoption is requested, in which case a malformed or duplicate one is reported here with the logical module named; under every other policy they are not decoded at all and cannot fail a link |
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
@@ -657,6 +766,8 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UndeclaredExternWrite { module, field, param_index, param_name }` | Checked mode only: a Tier-B closure's attributed write set is not covered by its `external fn` declaration's `mut` parameters. Names the offending parameter by index and, when the declaration used a named form, by name; when it used an unnamed form, the message says to name it first. See [Declared Write-Set Check](#declared-write-set-check). |
 | `LinkError::UnresolvedObligationSymbol { symbol, merged_roots }` | A function symbol the main module's `inference.hspecs` obligations apply is carried by no function of the merged output. `merged_roots` lists every `<module>::<field>` the merge did satisfy, so the message can say what was on offer. |
 | `LinkError::AmbiguousObligationSymbol { symbol, carriers }` | Two or more functions of the merged output carry one applied obligation symbol. `carriers` says where each came from — the program's own code, a satisfied import, or a linked module's private function. |
+| `LinkError::CheckedGuardUnderReachabilitySpec { spec_function, guarded_function, external }` | A retained `exists`/`unique` specification function reaches, through calls, a function of the merged output whose body traps on arithmetic overflow. The obligation is a claim about running that body, so a trap in the activation makes it false rather than narrower. `external` names the logical module a library-supplied body was bound under, and is `None` for one of the program's own. See [The `inference.checked` section and the reachability check](#the-inferencechecked-section-and-the-reachability-check) |
+| `LinkError::UnresolvedReachabilitySpecFunction { spec, symbol, reason }` | An `exists`/`unique` obligation of the main module names a specification function the merged module does not answer for. That function is where the reachability walk starts, so an unresolved symbol is not a check that passes but one that never ran. The proof translation rejects the same module one phase later; this is the earlier of the two and the only one that runs when no `.v` is asked for |
 | `LinkError::AdoptedSpecUnlisted { module, spec }` | Adoption only: the library ships obligations under a specification its own `inference.spec_funcs` section does not list, so its two verification sections disagree |
 | `LinkError::AdoptedSpecNameInvalid { module, spec, key, reason }` | Adoption only: the name an adopted specification would take is not one the proof translation can spell as an identifier; `reason` is the structural clause. The Rocq stdlib/keyword denylist is not restated here — see [External specification adoption](#external-specification-adoption) |
 | `LinkError::AdoptedSpecNameCollision { spec, module, contender }` | Adoption only: the name an adopted specification would take is already claimed by a specification the program declares (`contender: None`) or by another library's adopted specification |
@@ -717,8 +828,9 @@ The safety allow-list (`src/safety.rs`) provides an independent per-opcode backs
 | `src/tier.rs` | `classify` — Tier A/B/C feasibility decision, plus `check_write_contract`, the declared write-set check that gates Tier-B admission |
 | `src/provenance.rs` | `verify_param_addressing` — the address-provenance abstract interpretation proving Tier-B addresses are parameter-derived; also runs the root write-set attribution and returns it |
 | `src/provenance/attribution.rs` | `root_write_set` — the forward least-fixpoint pass computing, for a memory-touching closure, which of the *root export's* parameters each `Store` access's address may be attributed to |
-| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
-| `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space |
+| `src/merge.rs` | `Plan::build` + `Plan::emit` — the full merge pass; index allocation, type dedup, body re-encoding, name section, `inference.spec_funcs` remap, `inference.hspecs` re-encode, the `inference.checked` remap and its reachability check, and the external-specification policy (the dropped-obligations report, and the adoption of a library's universal obligations) |
+| `src/rewrite.rs` | `reencode_body` — operator-level re-encoding under a new index space; `call_edges` — the call targets of one body, read off the same operator stream |
+| `src/checked.rs` | Codec for the `inference.checked` custom section — the guarded-function list the reachability check in `src/merge.rs` reads, kept as a self-contained copy of `inference_wasm_codegen`'s encoder |
 | `src/spec_funcs.rs` | Codec for the `inference.spec_funcs` custom section — mirrors `inference_wasm_codegen`'s encoder as a self-contained copy rather than a cross-crate dependency (the sibling `inference.hspecs` section, by contrast, shares its codec via the `inference-hassert` crate) |
 | `tests/link.rs` | Integration tests: Tier A, Tier B, Tier C rejection, transitive closure, type dedup, name section, multiple externals, diamond closure |
 

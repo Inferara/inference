@@ -10,14 +10,15 @@
 //! `function_call_expression`, `member_access_expression`,
 //! `type_member_access_expression`, `array_index_access_expression`,
 //! `parenthesized_expression`, `struct_expression`, the literals,
-//! `uzumaki_keyword`) each emit a CST node. The hidden `_expression`,
-//! `_literal`, `_name` arms only dispatch.
+//! `uzumaki_keyword`, `arith_mode_expression`) each emit a CST node. The hidden
+//! `_expression`, `_literal`, `_name` arms only dispatch.
 
 use crate::grammar::types;
 use crate::lexer::is_ident_start;
 use crate::parser::{CompletedMarker, Parser};
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
+use inference_ast::nodes::ArithMode;
 
 /// Binding powers for binary operators. Higher binds tighter.
 mod bp {
@@ -67,6 +68,8 @@ pub(crate) const EXPR_START: TokenSet = TokenSet::new(&[
     SyntaxKind::Bang,
     SyntaxKind::Minus,
     SyntaxKind::Tilde,
+    SyntaxKind::CheckedKw,
+    SyntaxKind::WrappingKw,
 ])
 .union(types::TYPE_START)
 .union(types::IDENT_LIKE);
@@ -232,6 +235,7 @@ fn atom(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
         SyntaxKind::String => string_literal(p),
         SyntaxKind::LBracket => array_literal(p),
         SyntaxKind::At => uzumaki(p),
+        SyntaxKind::CheckedKw | SyntaxKind::WrappingKw => arith_mode(p),
         SyntaxKind::LParen => paren_or_unit(p),
         // A name atom: a plain identifier or a contextual keyword used in
         // identifier position (`self`, `type`).
@@ -359,6 +363,51 @@ fn array_literal(p: &mut Parser) -> CompletedMarker {
     }
     p.expect(SyntaxKind::RBracket);
     m.complete(p, SyntaxKind::ArrayLiteral)
+}
+
+/// `checked ( expression )` or `wrapping ( expression )`
+/// (`arith_mode_expression`).
+///
+/// An atom rather than a prefix operator: the parentheses are part of the form,
+/// so the annotation reaches exactly the expression written between them and
+/// `checked(a) * b` governs `a` alone. Both keywords are reserved, so a name
+/// spelled either way is a parse error at its declaration rather than a silent
+/// capture here.
+fn arith_mode(p: &mut Parser) -> CompletedMarker {
+    // The spelling comes from the mode itself, so the sentences below quote the
+    // same word every later phase reads. `atom` routes exactly the two keyword
+    // kinds here, and `SyntaxKind` has no type for "one of those two", so the
+    // last arm exists for the exhaustiveness check alone: it repeats the
+    // wrapping spelling rather than panicking inside a parser built to recover.
+    let keyword = match p.current() {
+        SyntaxKind::CheckedKw => ArithMode::Checked.spelling(),
+        SyntaxKind::WrappingKw => ArithMode::Wrapping.spelling(),
+        _ => ArithMode::Wrapping.spelling(),
+    };
+    let m = p.start();
+    p.bump_any();
+    if p.eat(SyntaxKind::LParen) {
+        if p.at(SyntaxKind::RParen) {
+            p.error(format!("`{keyword}(...)` needs an expression to govern"));
+        } else {
+            expr(p);
+        }
+        p.expect(SyntaxKind::RParen);
+    } else {
+        // Both likely spellings of the mistake — reading the keyword as a
+        // prefix operator (`checked a + b`) and writing it bare — land here, and
+        // both are answered by the same sentence. The operand is taken anyway
+        // where one follows, so the rest of the statement is parsed rather than
+        // re-reported token by token.
+        p.error(format!(
+            "`{keyword}` takes the expression it governs in parentheses: write \
+             `{keyword}(a + b)`"
+        ));
+        if at_expr_start(p) {
+            expr(p);
+        }
+    }
+    m.complete(p, SyntaxKind::ArithModeExpression)
 }
 
 /// The uzumaki keyword `@` (`uzumaki_keyword`).

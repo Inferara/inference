@@ -64,6 +64,7 @@
 //! | `NumberLiteral`               | `number`                         |
 //! | `UnitLiteral`                 | `unit`                           |
 //! | `UzumakiKeyword`              | `uzumaki_keyword`                |
+//! | `ArithModeExpression`         | `arith_mode_expression`          |
 //! | `Identifier`                  | `identifier`                     |
 //! | `GenericName`                 | `generic_name`                   |
 //! | `TypeQualifiedName`           | `type_qualified_name`            |
@@ -126,6 +127,8 @@ pub enum SyntaxKind {
     ForallKw,
     ExistsKw,
     UniqueKw,
+    CheckedKw,
+    WrappingKw,
 
     // -- Type keywords (token) --
     I8Kw,
@@ -231,6 +234,9 @@ pub enum SyntaxKind {
     NumberLiteral,
     UnitLiteral,
     UzumakiKeyword,
+    /// `checked ( expression )` or `wrapping ( expression )`. The leading
+    /// keyword token distinguishes the two.
+    ArithModeExpression,
     Identifier,
     GenericName,
     TypeQualifiedName,
@@ -312,6 +318,8 @@ impl SyntaxKind {
             "forall" => SyntaxKind::ForallKw,
             "exists" => SyntaxKind::ExistsKw,
             "unique" => SyntaxKind::UniqueKw,
+            "checked" => SyntaxKind::CheckedKw,
+            "wrapping" => SyntaxKind::WrappingKw,
             "i8" => SyntaxKind::I8Kw,
             "i16" => SyntaxKind::I16Kw,
             "i32" => SyntaxKind::I32Kw,
@@ -385,6 +393,14 @@ mod tests {
         assert_eq!(SyntaxKind::from_keyword("true"), Some(SyntaxKind::TrueKw));
         assert_eq!(SyntaxKind::from_keyword("false"), Some(SyntaxKind::FalseKw));
         assert_eq!(SyntaxKind::from_keyword("self"), Some(SyntaxKind::SelfKw));
+        assert_eq!(
+            SyntaxKind::from_keyword("checked"),
+            Some(SyntaxKind::CheckedKw)
+        );
+        assert_eq!(
+            SyntaxKind::from_keyword("wrapping"),
+            Some(SyntaxKind::WrappingKw)
+        );
     }
 
     #[test]

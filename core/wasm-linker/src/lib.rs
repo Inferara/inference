@@ -82,6 +82,7 @@
 //!   was bound from, with every applied symbol rewritten onto the merged body it
 //!   names. Reachability obligations are reported and left behind.
 
+mod checked;
 mod closure;
 mod merge;
 mod parse;
@@ -164,6 +165,24 @@ pub const SUPPORTED_WASM_FEATURES: WasmFeatures = WasmFeatures::GC_TYPES
     .union(WasmFeatures::MUTABLE_GLOBAL)
     .union(WasmFeatures::BULK_MEMORY)
     .union(WasmFeatures::SIGN_EXTENSION);
+
+/// The custom WASM section this crate reads to learn which functions of a module
+/// trap on arithmetic overflow, as this crate spells it.
+///
+/// Published so a test can hold this spelling and code generation's to
+/// agreement. The two are hand-synchronised copies: this crate does not depend
+/// on `inference-wasm-codegen`, for the same reason it keeps its own
+/// `inference.spec_funcs` codec, and a decoder that read the name from the
+/// encoder would be a dependency on the phase it exists to check.
+pub const CHECKED_SECTION_NAME: &str = checked::SECTION_NAME;
+
+/// The wire-format version of the exact `inference.checked` payload — the one
+/// naming every guarded function — as this crate's decoder requires it.
+/// Published alongside [`CHECKED_SECTION_NAME`] and for the same reason.
+///
+/// The opaque form's version is deliberately not published: code generation has
+/// no counterpart to agree with, since it never writes that form.
+pub const CHECKED_SECTION_VERSION: u32 = checked::VERSION;
 
 /// Why a static merge could not be produced.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -356,6 +375,83 @@ pub enum LinkError {
         carriers: Vec<String>,
     },
 
+    /// A reachability specification the program declares reaches, through
+    /// calls, a merged body that traps on arithmetic overflow.
+    ///
+    /// Raised here because this is the only phase that holds both halves of the
+    /// question. Code generation refuses the same reach for every callee whose
+    /// body it can see (`P018`), and it can never see an `external fn`'s: it is
+    /// handed a typed context, and the dependency bytes arrive at `link`, one
+    /// phase later. Which merged bodies trap is read off each input's
+    /// `inference.checked` section, whose absence is the producer's statement
+    /// that none of its functions does — true of every module a foreign
+    /// toolchain produced, none of which emits an Inference overflow guard.
+    ///
+    /// `external` is the logical module the guarded body was bound under rather
+    /// than the library's own name for itself, because that is the name the
+    /// program wrote and the one it can act on. It is `None` for a body of the
+    /// program's own, which the compiler driver never reaches: `P018` refuses
+    /// that reach against the source line that wrote the arithmetic, one phase
+    /// earlier and with a location to point at. The arm exists for [`link`],
+    /// whose main bytes never went through code generation.
+    #[error(
+        "the reachability specification function `{spec_function}` reaches {guarded_function}. \
+         An `exists`- or `unique`-quantified obligation is a claim about running that \
+         specification body: the judgment fixes an entry vector first and only then lets the \
+         choices range, so a trap anywhere in the activation — the body's own frame or any frame \
+         it calls into — leaves no successful run at all, and the claim becomes false rather than \
+         narrowing to the entries that avoid it. For `unique` it is worse than false: shrinking \
+         the set of successful runs is exactly how a claim of uniqueness comes to hold by \
+         accident. {}",
+        checked_guard_remedy(.external.as_deref())
+    )]
+    CheckedGuardUnderReachabilitySpec {
+        /// The obligation's own `fn_symbol`, which names the specification as
+        /// well as the function within it.
+        spec_function: String,
+        /// The reached function and where the merge learned that it traps: the
+        /// name the merged module's `name` section spells it by, or its index
+        /// when the section names it not at all, followed by the module that
+        /// supplied it — or, for a module that no longer names its own guarded
+        /// functions, that module alone.
+        guarded_function: String,
+        /// The logical module the guarded body was linked under, or `None` when
+        /// it is one of the program's own.
+        external: Option<String>,
+    },
+
+    /// An `exists`/`unique` obligation of the main module names a specification
+    /// function the merged module does not answer for.
+    ///
+    /// The reachability check walks from that function to decide whether a
+    /// guarded body is reachable from it, so an unresolved symbol is a walk that
+    /// cannot start — and a check that skipped it would report no guard for
+    /// exactly the modules it can say least about. Refused instead.
+    ///
+    /// The proof translation rejects the same module for the same reason one
+    /// phase later, which is where a reader gets the fuller account; this is the
+    /// earlier of the two and the only one that runs when no `.v` is asked for.
+    #[error(
+        "the `{spec}` obligation for specification function `{symbol}` cannot be resolved in the \
+         merged module: {reason}. That function is where the check that no reachability \
+         specification reaches a body trapping on arithmetic overflow starts its walk, so an \
+         unresolved symbol is not a check that passes but one that never ran. An obligation's own \
+         symbol is its specification's name, a dot, and the function's — resolved against the \
+         merged `name` section and narrowed to the functions `inference.spec_funcs` lists under \
+         that specification. A module whose two verification sections disagree this way is \
+         rejected by the proof translation as well; rebuild it, or link it without its \
+         obligations"
+    )]
+    UnresolvedReachabilitySpecFunction {
+        /// The specification the obligation belongs to.
+        spec: String,
+        /// The obligation's own `fn_symbol`, as the payload spells it.
+        symbol: String,
+        /// Which half of the resolution failed, as a lowercase unpunctuated
+        /// sentence fragment set inside the message.
+        reason: String,
+    },
+
     /// Adoption only: the library ships obligations under a specification its
     /// own `inference.spec_funcs` section does not list, so its two verification
     /// sections disagree with each other.
@@ -478,6 +574,33 @@ pub enum LinkError {
         spec: String,
         symbol: String,
     },
+}
+
+/// The closing clause of [`LinkError::CheckedGuardUnderReachabilitySpec`],
+/// which is the only part of that message the two origins do not share.
+///
+/// A guarded body a library supplied is something the reader can act on, so the
+/// clause lists the three ways out. One of the program's own is not: code
+/// generation refuses that reach against the source line that wrote the
+/// arithmetic, so no program the compiler built and left alone reaches this
+/// report at all, and the useful thing to say is which of those two premises the
+/// bytes broke. It deliberately does not repeat the source-level remedy — there
+/// is no source line here to apply it to.
+fn checked_guard_remedy(external: Option<&str>) -> &'static str {
+    match external {
+        Some(_) => {
+            "Claim the property from a `forall`-bodied specification instead, rebuild the library \
+             with the arithmetic on that path written `wrapping(...)` — and, if the library was \
+             optimized after it was built, without `[build.wasm-opt]`, so the artifact still \
+             names its guarded functions — or keep the specification off that call path"
+        }
+        None => {
+            "The function is the program's own, which code generation refuses against the source \
+             line that wrote the arithmetic, so a program the compiler built and did not optimize \
+             afterwards never reaches this report: these main-module bytes were either assembled \
+             by hand or rewritten after the compiler produced them"
+        }
+    }
 }
 
 /// Renders [`LinkError::AdoptedSpecNameCollision`], whose contenders lead to

@@ -211,6 +211,34 @@ describe("Grammar: Non-deterministic constructs", () => {
   });
 });
 
+describe("Grammar: Arithmetic mode annotations", () => {
+  it("checked is keyword.other.overflow, not a function name", () => {
+    assertTokenScope(
+      "let s: i32 = checked(a + b);",
+      "checked",
+      "keyword.other.overflow.checked"
+    );
+    assertTokenNotScope(
+      "let s: i32 = checked(a + b);",
+      "checked",
+      "entity.name.function"
+    );
+  });
+
+  it("wrapping is keyword.other.overflow, not a function name", () => {
+    assertTokenScope(
+      "let s: i32 = wrapping(a + b);",
+      "wrapping",
+      "keyword.other.overflow.wrapping"
+    );
+    assertTokenNotScope(
+      "let s: i32 = wrapping(a + b);",
+      "wrapping",
+      "entity.name.function"
+    );
+  });
+});
+
 describe("Grammar: Primitive types", () => {
   const primitives = [
     "i8",

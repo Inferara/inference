@@ -76,13 +76,42 @@ pub enum HConst {
 /// * the static-merge linker, for the body of a linked `external fn`, whose
 ///   merged name is `inference_fn_key::merged_name::root`.
 ///
-/// This crate treats the string as opaque and non-empty; it never resolves it.
-/// `wasm-to-v` maps the symbol to a `mod_funcs` (defined-function) index after
-/// linking. The reference is guaranteed by the producer never to name an
-/// import: an `external fn` is a symbol only once its body has been merged in,
-/// at which point it is defined like any other.
+/// This crate treats the string as opaque and non-empty; it never resolves a
+/// reference to a function. Two phases do, against the module each of them
+/// holds: `wasm-to-v` maps the symbol to a `mod_funcs` (defined-function) index
+/// after linking, and the static-merge linker maps an obligation's own symbol to
+/// an output function index to start a reachability walk from. The one step both
+/// of them take first is [`Self::bare_in_spec`], which lives here so the two
+/// cannot come to disagree about what a symbol spells. The reference is
+/// guaranteed by the producer never to name an import: an `external fn` is a
+/// symbol only once its body has been merged in, at which point it is defined
+/// like any other.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct HFnRef(pub String);
+
+impl HFnRef {
+    /// The name this reference carries within `spec_name`: the symbol with the
+    /// specification's own `"<spec_name>."` prefix removed where it has one, and
+    /// the symbol unchanged where it has not.
+    ///
+    /// An obligation's own function symbol is spec-folded — `Bounded.witness`
+    /// names `witness` inside `Bounded` — while the `name` section a resolver
+    /// looks it up in carries the unfolded name a function was compiled under.
+    /// A symbol written without the prefix is returned as-is rather than
+    /// rejected, because a producer that folds no prefix in has already spelled
+    /// the name the section carries.
+    ///
+    /// Total on purpose: the fallback is half of the rule, and a signature that
+    /// left it to the caller would put the same `unwrap_or` at every resolution
+    /// site — which is the drift this exists to remove.
+    #[must_use = "returns the bare name without modifying the reference"]
+    pub fn bare_in_spec(&self, spec_name: &str) -> &str {
+        let mut prefix = String::with_capacity(spec_name.len() + 1);
+        prefix.push_str(spec_name);
+        prefix.push('.');
+        self.0.strip_prefix(&prefix).unwrap_or(&self.0)
+    }
+}
 
 /// A term of the assertion language, mirroring the `term` inductive
 /// (`Assertions.v`).
@@ -482,5 +511,44 @@ mod tests {
         );
 
         assert_eq!(built, expected);
+    }
+
+    #[test]
+    fn bare_in_spec_strips_the_specification_s_own_prefix() {
+        let sym = HFnRef("Bounded.witness".to_string());
+        assert_eq!(sym.bare_in_spec("Bounded"), "witness");
+    }
+
+    #[test]
+    fn bare_in_spec_returns_an_unprefixed_symbol_unchanged() {
+        // The fallback half of the rule. A producer that folded no prefix in
+        // already spelled the name the `name` section carries, so a resolver
+        // must look that string up rather than fail.
+        let sym = HFnRef("witness".to_string());
+        assert_eq!(sym.bare_in_spec("Bounded"), "witness");
+    }
+
+    #[test]
+    fn bare_in_spec_strips_only_the_named_specification_s_prefix() {
+        // A symbol folded under one specification is not un-folded by another:
+        // the prefix is the spec's own name plus a dot, not any dotted head.
+        let sym = HFnRef("Bounded.witness".to_string());
+        assert_eq!(sym.bare_in_spec("Other"), "Bounded.witness");
+    }
+
+    #[test]
+    fn bare_in_spec_requires_the_dot() {
+        // `BoundedWitness` starts with `Bounded` but is one identifier, so the
+        // separator has to be part of what is matched.
+        let sym = HFnRef("BoundedWitness".to_string());
+        assert_eq!(sym.bare_in_spec("Bounded"), "BoundedWitness");
+    }
+
+    #[test]
+    fn bare_in_spec_strips_the_first_prefix_only() {
+        // A function whose own name repeats the specification's keeps the
+        // repetition: only the fold this specification applied comes off.
+        let sym = HFnRef("S.S.f".to_string());
+        assert_eq!(sym.bare_in_spec("S"), "S.f");
     }
 }

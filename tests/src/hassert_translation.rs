@@ -20,7 +20,10 @@ use inference_wasm_codegen::{
     CompilationMode, HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HSpecMap, HTerm, Target,
 };
 
-use crate::utils::{codegen_output, codegen_with_target_mode_no_analysis, get_test_data_path};
+use crate::utils::{
+    codegen_output, codegen_with_target_mode_no_analysis, get_test_data_path,
+    try_proof_codegen_multi_file_no_analysis,
+};
 
 /// Compiles source in proof mode (analysis skipped, so spec-only shapes are
 /// exercised directly) and returns its obligation map.
@@ -1073,6 +1076,614 @@ fn a_non_constant_index_in_a_reachability_body_fails_the_proof_build() {
 
     let accepted = proof_hspecs(&program("0"));
     assert_eq!(sole_obligation(&accepted, "S"), teq(i32c(1), local(1)));
+}
+
+/// An annotation is refused wherever in a payload body it is written, not only
+/// where the term walk would meet it.
+///
+/// The positions below are the ones a term walk never reaches: an array index
+/// and an aggregate-literal element are folded through on their way to a value,
+/// a statement-position expression yields nothing at all, and a nested
+/// quantifier block is translated by a different arm. All four accepted the
+/// annotation silently before the body scan owned the rule, which is exactly the
+/// failure mode a check on the term path cannot see.
+#[test]
+fn an_annotation_is_refused_in_every_position_of_a_payload_body() {
+    let positions = [
+        (
+            "an array index",
+            "let xs: [i32; 2] = [1, 2]; assert(xs[wrapping(0)] == 1);",
+        ),
+        (
+            "an aggregate-literal element",
+            "let xs: [i32; 2] = [checked(1 + 1), 2]; assert(xs[0] == 2);",
+        ),
+        ("statement position", "wrapping(a + b); assert(a == a);"),
+        (
+            "a nested `exists` block",
+            "exists { assert(checked(a + b) == 0); }",
+        ),
+        (
+            "a nested `forall` block",
+            "forall { assert(wrapping(a + b) == 0); }",
+        ),
+    ];
+    for (position, body) in positions {
+        let source = format!(
+            "fn main() -> i32 {{ return 0; }}
+             spec S {{
+               fn f(a: i32, b: i32) forall {{
+                 {body}
+               }}
+             }}"
+        );
+        let error =
+            codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
+                .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("error[P017]"),
+            "{position} must be refused: {rendered}"
+        );
+        assert!(
+            rendered.contains("has no meaning inside a specification body"),
+            "{position}: {rendered}"
+        );
+    }
+}
+
+/// A method declared on a struct inside a `spec` block is executable code, and
+/// an arithmetic-mode annotation is legal in it.
+///
+/// The two shapes look alike in source and differ completely in what happens to
+/// them. A helper `fn` in a `spec` block is inlined into the obligation term, so
+/// its arithmetic is a term and an annotation over it means nothing; a method is
+/// compiled to WebAssembly and called like any other, so its arithmetic is the
+/// machine operator and the annotation decides which one. The rule keeps them
+/// apart by translating only the specification *free* functions, which is a
+/// property of one loop rather than a stated rule — this holds it to the
+/// behaviour, so a future pass over specification methods cannot start refusing
+/// an annotation that governs real emitted code.
+#[test]
+fn an_annotation_in_a_spec_method_is_accepted_and_guards_its_arithmetic() {
+    let source = "pub fn main() -> i32 { return 0; }
+         spec Geometry {
+           struct Point {
+             x: i32;
+             y: i32;
+             fn sum_coords(self) -> i32 { return checked(self.x + self.y); }
+           }
+           fn claim(n: i32) forall { assert(n == n); }
+         }";
+    let output =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Proof)
+            .expect("an annotation in a specification method must compile");
+    let guarded: Vec<String> = output
+        .guarded_functions()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        guarded,
+        vec!["Geometry.Point.sum_coords"],
+        "the method's `+` must carry the guard the annotation asks for"
+    );
+}
+
+/// A helper `fn` declared inside a `spec` block is a payload body too.
+///
+/// It is not executable code that happens to live in a specification: the pass
+/// translates it into an obligation of its own, so its arithmetic is the same
+/// wrapping term every other payload body's is and an annotation over it is as
+/// meaningless there.
+#[test]
+fn an_annotation_in_a_spec_inner_helper_is_refused() {
+    let source = "fn main() -> i32 { return 0; }
+         spec S {
+           fn helper(a: i32, b: i32) -> i32 { return checked(a + b); }
+           fn claim(a: i32) forall { assert(a == a); }
+         }";
+    let error =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Proof)
+            .unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("error[P017]"), "{rendered}");
+    assert!(
+        rendered.contains("`checked(...)` has no meaning inside a specification body"),
+        "{rendered}"
+    );
+}
+
+/// The comparison-only shape: nothing inside the annotation is an operator it
+/// could govern, and it is still refused.
+///
+/// This is the spelling that reaches the translator in term position with no
+/// governed arithmetic at all, so nothing but the rule about the annotation
+/// itself can reject it — the analysis rule that reports a decorative annotation
+/// never runs on this path, because obligations are derived without it.
+#[test]
+fn an_annotation_over_a_bare_comparison_is_refused_in_a_payload_body() {
+    let source = "fn main() -> i32 { return 0; }
+         spec S {
+           fn f(a: i32, b: i32) forall { assert(checked(a > b)); }
+         }";
+    let error =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Proof)
+            .unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("error[P017]"), "{rendered}");
+}
+
+/// An annotation in index position is refused rather than folded away.
+///
+/// The index fold looks through both grouping forms, so `a[wrapping(0)]` would
+/// select the element `a[0]` selects and produce the identical obligation — the
+/// annotation would vanish without a word. That silence is the reason the rule
+/// is a body scan rather than a check on the term walk: this position never
+/// reaches the term walk at all.
+#[test]
+fn a_constant_index_under_an_annotation_is_refused() {
+    let program = |index: &str| {
+        format!(
+            "fn main() -> i32 {{ return 0; }}
+             spec S {{
+               fn f() forall {{
+                 let a: [i32; 2] = [1, 2];
+                 let n: i32 = @;
+                 assert(a[{index}] == n);
+               }}
+             }}"
+        )
+    };
+    // The unannotated program is accepted, so the rejection below is about the
+    // annotation and not about the shape it sits in.
+    let _ = sole_obligation(&proof_hspecs(&program("0")), "S");
+    for annotated in ["wrapping(0)", "checked(0)", "(wrapping(0))"] {
+        let error = codegen_with_target_mode_no_analysis(
+            &program(annotated),
+            Target::Wasm32,
+            CompilationMode::Proof,
+        )
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("error[P017]"),
+            "`a[{annotated}]` must be refused: {rendered}"
+        );
+    }
+}
+
+/// An arithmetic-mode annotation inside an obligation term fails the proof
+/// build, and the diagnostic quotes back the spelling the author wrote.
+///
+/// The reason is the same for both spellings: an obligation's arithmetic *is*
+/// the machine operator, so an annotation over it would be dropped without a
+/// word. The rejection is what turns a silently ignored annotation into
+/// something the author is told about.
+#[test]
+fn an_arithmetic_mode_annotation_in_a_spec_body_fails_the_proof_build() {
+    for quantifier in ["forall", ""] {
+        for spelling in ["checked", "wrapping"] {
+            let source = format!(
+                "fn main() -> i32 {{ return 0; }}
+                 spec S {{
+                   fn f(a: i32, b: i32) {quantifier} {{
+                     assert({spelling}(a + b) == 0);
+                   }}
+                 }}"
+            );
+            let error = codegen_with_target_mode_no_analysis(
+                &source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+            )
+            .expect_err("an arithmetic-mode annotation must fail the proof-mode build");
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("error[P017]"), "{rendered}");
+            assert!(
+                rendered.contains(&format!(
+                    "`{spelling}(...)` has no meaning inside a specification body"
+                )),
+                "{rendered}"
+            );
+        }
+    }
+}
+
+/// Borrows an owned multi-file program as the `(module path, source)` slices the
+/// multi-file helpers take.
+fn as_slices<'a>(files: &'a [(Vec<&'static str>, String)]) -> Vec<(Vec<&'static str>, &'a str)> {
+    files
+        .iter()
+        .map(|(path, source)| (path.clone(), source.as_str()))
+        .collect()
+}
+
+/// A reachability body around `body`, with a `lo` entry parameter and a `@`
+/// choice, in a spec named so it does not collide with a Rocq stdlib name.
+fn reach_program(quantifier: &str, body: &str) -> String {
+    format!(
+        "fn main() -> i32 {{ return 0; }}
+         spec Claims {{
+           fn f(lo: i32) {quantifier} {{
+             let n: i32 = @;
+             assume {{ assert(n >= lo); }}
+             {body}
+           }}
+         }}"
+    )
+}
+
+/// Effectively-checked arithmetic written in a reachability body is refused,
+/// and `wrapping(...)` is what the diagnostic tells the author to write.
+///
+/// The judgment reduces this body, so a trap in it empties the observation set
+/// at every entry that reaches it and the theorem is false rather than narrowed
+/// — the same failure `P016` describes for a dynamic index, one operator over.
+#[test]
+fn trapping_arithmetic_inline_in_a_reachability_body_is_refused() {
+    for quantifier in ["exists", "unique"] {
+        let source = reach_program(quantifier, "assert(checked(n + n) >= lo);");
+        let error =
+            codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
+                .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("error[P017]"), "{rendered}");
+        assert!(
+            rendered.contains(&format!(
+                "a `+` at `i32` inside a `checked(...)` has no place in the body of a{} \
+                 `{quantifier}`-quantified spec function",
+                if quantifier == "exists" { "n" } else { "" }
+            )),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("write `wrapping(n + n)` if this body's arithmetic is meant to be \
+                               modular"),
+            "the remedy must quote back the expression the author wrote: {rendered}"
+        );
+    }
+}
+
+/// `wrapping(...)` is accepted throughout a reachability body — the final
+/// `assert` included — and changes nothing about the obligation.
+///
+/// That equality is what makes the annotation a remedy rather than a second
+/// rejection. The `assert` is the interesting position: its arithmetic is both
+/// compiled into the reduced body and translated into the payload term, so if
+/// the annotation were rejected there the fix the diagnostic prescribes would be
+/// unspellable at the one place authors write it.
+#[test]
+fn a_wrapping_annotation_is_accepted_and_inert_in_a_reachability_body() {
+    let bare = proof_hspecs(&reach_program("exists", "assert(n + n >= lo);"));
+    let annotated = proof_hspecs(&reach_program("exists", "assert(wrapping(n + n) >= lo);"));
+    assert_eq!(
+        sole_obligation(&annotated, "Claims"),
+        sole_obligation(&bare, "Claims"),
+        "the annotation must translate to the term the unmarked spelling produces"
+    );
+}
+
+/// A nested `exists { }` block inside a `forall` function is a payload body, not
+/// a reachability one.
+///
+/// Nothing reduces it, so its arithmetic is a term like the rest of the
+/// function's and the annotation is meaningless rather than mandatory. The two
+/// rules have to agree on this, and the way they agree is that both read the
+/// *function's* quantifier: `P017`'s first wording fires here, and the second —
+/// which would have demanded the very annotation the first refuses — does not.
+#[test]
+fn a_nested_exists_block_takes_the_payload_wording() {
+    let source = "fn main() -> i32 { return 0; }
+         spec Claims {
+           fn f(a: i32, b: i32) forall {
+             exists { assert(checked(a + b) == 0); }
+           }
+         }";
+    let error =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Proof)
+            .unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("error[P017]"), "{rendered}");
+    assert!(
+        rendered.contains("has no meaning inside a specification body"),
+        "the payload wording, not the reachability one: {rendered}"
+    );
+    assert!(
+        !rendered.contains("has no place in the body of"),
+        "the reachability wording must not fire on a nested block: {rendered}"
+    );
+}
+
+/// Unmarked arithmetic in a reachability body is accepted under the wrapping
+/// default, because its effective mode is wrapping and nothing traps.
+///
+/// The rule is stated against the effective mode rather than against the
+/// spelling, which is why this program is legal now and is the one the second
+/// wording will be about when the language's default moves.
+#[test]
+fn unmarked_arithmetic_in_a_reachability_body_is_accepted() {
+    let map = proof_hspecs(&reach_program("exists", "assert(n + n >= lo);"));
+    assert!(map.contains_key("Claims"), "the obligation must be emitted");
+}
+
+/// Neither annotation is touched in executable code, which is the whole point of
+/// having them.
+#[test]
+fn both_annotations_are_accepted_in_every_executable_position() {
+    let sources = [
+        "pub fn f(a: i32, b: i32) -> i32 { return checked(a + b); }",
+        "pub fn f(a: i32, b: i32) -> i32 { return wrapping(a * b); }",
+        "struct P { x: i32; fn bump(self) -> i32 { return checked(self.x + 1); } }
+         pub fn f(p: P) -> i32 { return p.bump(); }",
+    ];
+    for source in sources {
+        for mode in [CompilationMode::Compile, CompilationMode::Proof] {
+            codegen_with_target_mode_no_analysis(source, Target::Wasm32, mode)
+                .unwrap_or_else(|e| panic!("{source:?} at {mode:?}: {e:#}"));
+        }
+    }
+}
+
+/// A reachability body that reaches an overflow guard through a call is refused,
+/// at one hop and at two, from a statement call and from a term one.
+///
+/// The lexical rule sees the operators written in the body; this one sees the
+/// ones the body reaches. The judgment reduces callee activations too, so the
+/// two describe one hazard.
+#[test]
+fn a_reachability_body_reaching_a_guard_through_calls_is_refused() {
+    let cases = [
+        (
+            "one hop, statement call",
+            "pub fn step(a: i32) -> i32 { return checked(a + 1); }",
+            "step(n);",
+        ),
+        (
+            "one hop, term call",
+            "pub fn step(a: i32) -> i32 { return checked(a + 1); }",
+            "let y: i32 = step(n); assert(y >= lo);",
+        ),
+        (
+            "two hops",
+            "pub fn inner(a: i32) -> i32 { return checked(a + 1); }
+             pub fn step(a: i32) -> i32 { return inner(a); }",
+            "step(n);",
+        ),
+    ];
+    for (case, callees, call) in cases {
+        for quantifier in ["exists", "unique"] {
+            let body = format!("{call} assert(n >= lo);");
+            let source = format!("{callees} {}", reach_program(quantifier, &body));
+            let error = codegen_with_target_mode_no_analysis(
+                &source,
+                Target::Wasm32,
+                CompilationMode::Proof,
+            )
+            .unwrap_err();
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains("error[P018]"),
+                "{case} ({quantifier}): {rendered}"
+            );
+            assert!(
+                rendered.contains("reaches arithmetic that traps on overflow, in `inner`")
+                    || rendered.contains("reaches arithmetic that traps on overflow, in `step`"),
+                "{case} ({quantifier}) must name the guarded function: {rendered}"
+            );
+        }
+    }
+}
+
+/// An instance method is an ordinary hop, not a callee the rule declines to
+/// follow.
+///
+/// The resolver the obligation *term* uses refuses a method outright, because a
+/// method has no term encoding. Reusing that refusal as a visibility answer
+/// would have rejected every reachability body that calls one; this rule uses
+/// code generation's resolution instead, where a method is a normal call.
+#[test]
+fn a_reachability_body_reaching_a_guard_through_a_method_is_refused() {
+    let source = format!(
+        "struct Counter {{
+           v: i32;
+           fn step(self) -> i32 {{ return checked(self.v + 1); }}
+         }}
+         {}",
+        reach_program(
+            "exists",
+            "let c: Counter = Counter { v: n }; c.step(); assert(n >= lo);"
+        )
+    );
+    let error =
+        codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
+            .unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("error[P018]"), "{rendered}");
+    assert!(
+        rendered.contains("reaches arithmetic that traps on overflow, in `step`"),
+        "{rendered}"
+    );
+}
+
+/// The three acceptance shapes: a universal caller, a reachable set with no
+/// guard, and a callee whose arithmetic is explicitly modular.
+///
+/// The universal case is deliberate rather than an oversight. A `forall` body is
+/// not reduced by any judgment, so a guard in what it calls does not empty an
+/// observation set — but its obligation can still be *false*, because
+/// `assert(f(x) == e)` over a callee that traps at an admitted `x` claims
+/// something the run does not deliver. Nothing here checks that; the standing
+/// corpus invariant is what covers it, and only for this repository's fixtures.
+#[test]
+fn a_body_that_reaches_no_guard_is_accepted() {
+    let guarded = "pub fn step(a: i32) -> i32 { return checked(a + 1); }";
+    let modular = "pub fn step(a: i32) -> i32 { return wrapping(a + 1); }";
+    let plain = "pub fn step(a: i32) -> i32 { return a + 1; }";
+
+    // A universal caller reaching the guard.
+    let universal = format!(
+        "{guarded}
+         fn main() -> i32 {{ return 0; }}
+         spec Claims {{
+           fn f(x: i32) forall {{ let y: i32 = step(x); assert(y >= x); }}
+         }}"
+    );
+    codegen_with_target_mode_no_analysis(&universal, Target::Wasm32, CompilationMode::Proof)
+        .expect("a `forall` body is not reduced, so a guard it reaches is not this rule's business");
+
+    for callee in [modular, plain] {
+        let source = format!(
+            "{callee} {}",
+            reach_program("exists", "step(n); assert(n >= lo);")
+        );
+        codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
+            .unwrap_or_else(|e| panic!("{callee:?}: {e:#}"));
+    }
+}
+
+/// An `external fn` callee is skipped, not counted.
+///
+/// Code generation never receives a dependency's bytes — they arrive at link
+/// time, after this pass has run — so nothing here can say whether a foreign
+/// body traps, and answering either way would be a claim about bytes this
+/// compiler has not seen.
+#[test]
+fn an_external_callee_is_skipped() {
+    let source = format!(
+        "external fn twice(a: i32) -> i32;
+         use {{ twice }} from mathlib;
+         {}",
+        reach_program("exists", "twice(n); assert(n >= lo);")
+    );
+    codegen_with_target_mode_no_analysis(&source, Target::Wasm32, CompilationMode::Proof)
+        .expect("an extern callee is skipped, not counted as trapping");
+}
+
+/// The walk resolves each hop in the *callee's* own scope, not in the scope the
+/// specification started from.
+///
+/// Both files define `inner`, and only one of the two carries a guard. `outer`
+/// lives in `lib` and calls `inner` by bare name, so the function that call
+/// reaches is `lib`'s — which is the function code generation lowers it to. A
+/// walk holding the specification's own file fixed across hops would read the
+/// entry file's namesake instead and answer the opposite way in both polarities,
+/// which is what the two directions below pin.
+#[test]
+fn each_hop_resolves_in_its_own_file() {
+    let program = |lib_guarded: bool| {
+        let (lib_inner, entry_inner) = if lib_guarded {
+            ("checked(a + 1)", "a + 1")
+        } else {
+            ("a + 1", "checked(a + 1)")
+        };
+        vec![
+            (
+                vec!["lib"],
+                format!(
+                    "pub fn inner(a: i32) -> i32 {{ return {lib_inner}; }}
+                     pub fn outer(a: i32) -> i32 {{ return inner(a); }}"
+                ),
+            ),
+            (
+                vec![],
+                format!(
+                    "use lib;
+                     pub fn inner(a: i32) -> i32 {{ return {entry_inner}; }}
+                     pub fn main() -> i32 {{ return 0; }}
+                     spec Claims {{
+                       fn f(lo: i32) exists {{
+                         let n: i32 = @;
+                         assume {{ assert(n >= lo); }}
+                         lib::outer(n);
+                         assert(n >= lo);
+                       }}
+                     }}"
+                ),
+            ),
+        ]
+    };
+
+    let guarded = program(true);
+    let error = try_proof_codegen_multi_file_no_analysis(&as_slices(&guarded)).unwrap_err();
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("error[P018]"),
+        "hop two must resolve to `lib`'s guarded `inner`: {rendered}"
+    );
+    assert!(
+        rendered.contains("reaches arithmetic that traps on overflow, in `inner`"),
+        "{rendered}"
+    );
+
+    let unguarded = program(false);
+    try_proof_codegen_multi_file_no_analysis(&as_slices(&unguarded)).expect(
+        "hop two must resolve to `lib`'s unguarded `inner`, not the entry file's namesake",
+    );
+}
+
+/// The same statement at hop zero: a bare call in the specification's own file
+/// resolves there, and the other file's namesake does not decide the verdict.
+#[test]
+fn a_bare_call_resolves_in_the_specification_s_own_file() {
+    let program = |entry_guarded: bool| {
+        let (lib_step, entry_step) = if entry_guarded {
+            ("a + 1", "checked(a + 1)")
+        } else {
+            ("checked(a + 1)", "a + 1")
+        };
+        vec![
+            (
+                vec!["lib"],
+                format!("pub fn step(a: i32) -> i32 {{ return {lib_step}; }}"),
+            ),
+            (
+                vec![],
+                format!(
+                    "pub fn step(a: i32) -> i32 {{ return {entry_step}; }}
+                     pub fn main() -> i32 {{ return 0; }}
+                     spec Claims {{
+                       fn f(lo: i32) exists {{
+                         let n: i32 = @;
+                         assume {{ assert(n >= lo); }}
+                         step(n);
+                         assert(n >= lo);
+                       }}
+                     }}"
+                ),
+            ),
+        ]
+    };
+
+    let guarded = program(true);
+    let error = try_proof_codegen_multi_file_no_analysis(&as_slices(&guarded)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("error[P018]"),
+        "{error:#}"
+    );
+
+    let unguarded = program(false);
+    try_proof_codegen_multi_file_no_analysis(&as_slices(&unguarded))
+        .expect("the other file's guarded namesake is not what this call reaches");
+}
+
+/// The same specification body builds in compile mode, where no obligation is
+/// derived and the annotation is inert in the emitted instructions.
+#[test]
+fn an_arithmetic_mode_annotation_in_a_spec_body_still_compiles_in_compile_mode() {
+    let source = "fn main() -> i32 { return 0; }
+         spec S {
+           fn f(a: i32, b: i32) forall {
+             assert(wrapping(a + b) == 0);
+           }
+         }";
+    let output =
+        codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Compile)
+            .expect("compile mode derives no obligations, so `P017` cannot reject it");
+    assert!(
+        output.hspecs().is_empty(),
+        "compile mode must derive no obligations at all"
+    );
 }
 
 /// `P016` is a proof-mode diagnostic. Compile mode derives no obligations at

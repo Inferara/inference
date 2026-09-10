@@ -1,0 +1,83 @@
+// Arithmetic that traps on overflow, and the obligation that makes the trap
+// mean something.
+//
+// `checked(...)` puts an overflow guard on the operator inside it: the
+// multiply is followed by a division that reproduces one operand, and a
+// mismatch reaches `unreachable`. Nothing in the module record says that trap
+// is unreachable — `ValidModule` is the structural typing judgment, which
+// reduces no instruction and could not carry such a clause.
+//
+// What carries it is `HA_app_ok`, the atom a bare statement call in a
+// specification body emits. Downstream it denotes that the application is
+// realized, and realization is a total-correctness judgment: its conclusion
+// requires the callee's body to reduce to a value stack, and a trapped run
+// reduces to `AI_trap` instead. So each claim below is false unless every
+// argument pair its envelope admits leaves the guard untaken, which is exactly
+// no-overflow on that envelope.
+//
+// The guard is the whole of what makes these obligations about overflow. An
+// obligation's own arithmetic is the wrapping machine operator and always
+// will be, so the emitted `hspec` of the same specification over an unmarked
+// `fixmul` is byte-for-byte the text below and is unconditionally true: with
+// no trap in the callee, every argument pair reduces to a value and the
+// envelope constrains nothing. The annotation is what puts a trap in the body
+// the claim is about; the envelope is what rules it out.
+//
+// A note on what the Rocq type-check gate can and cannot say about this file.
+// It establishes that the emitted `.v` elaborates. It cannot establish that
+// either obligation is *true*: generated proof skeletons end in `Admitted.`,
+// so a false obligation compiles exactly as readily as a true one. The truth
+// is established downstream, against the real library, in wasm-verifier's
+// `theories/examples/Issue316OverflowExample.v`.
+
+// The i64 signed-multiply guard, the most expensive row in the catalogue and
+// the one the issue's own reproducer needs. `ONE` is a fixed-point scale, and
+// the division by it carries no guard of its own: division cannot leave the
+// type except at `MIN / -1`, and that case already traps without one -- natively
+// at i32 and i64, where the WebAssembly operator itself traps, and through the
+// narrowing check at i8 and i16.
+pub fn fixmul(a: i64, b: i64) -> i64 {
+  const ONE: i64 = 1048576;
+  return checked(a * b) / ONE;
+}
+
+// The narrow row. An `i8` operator is performed at `i32` and narrowed back, so
+// its guard asks whether re-narrowing the promoted result changes it — a
+// different shape from the full-width rows above, and the cheapest one to
+// discharge.
+pub fn bump(x: i8) -> i8 {
+  return checked(x + 1);
+}
+
+spec OverflowRealization {
+  // 3037000499 is the largest N with N*N <= i64::MAX, so the envelope is the
+  // largest square one that admits no overflowing pair. An `i64` declaration
+  // contributes only `HA_has_type ... T_i64`, which states a width and no
+  // range, so this `assume` is the only source of a bound and both halves of
+  // each pair are load-bearing: the product of two admitted values must fit,
+  // and a negative operand reaches the same multiply.
+  //
+  // Widening a single bound by one does not break it — 3037000500 * 3037000499
+  // is 9223372033963249500, which still fits. What breaks it is widening both
+  // (3037000500 squared is 9223372037000250000) or one of them by two
+  // (3037000501 * 3037000499 is 9223372037000249999); either admits a pair
+  // whose product leaves the type, the guard traps, and the claim that the
+  // application is realized becomes false rather than weaker.
+  fn fixmul_is_realized() forall {
+    let a: i64 = @;
+    let b: i64 = @;
+    assume { assert(-3037000499 <= a && a <= 3037000499); }
+    assume { assert(-3037000499 <= b && b <= 3037000499); }
+    fixmul(a, b);
+  }
+
+  // The narrow companion needs one bound, not two. A drawn `i8` slot carries
+  // its declared value domain into the obligation already — the translator
+  // states `-128 <= x < 128` from the declaration — so the only value the
+  // envelope has to exclude is the one whose successor leaves the type.
+  fn bump_is_realized() forall {
+    let x: i8 = @;
+    assume { assert(x < 127); }
+    bump(x);
+  }
+}

@@ -57,6 +57,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
 
+mod checked_section;
 mod choice;
 #[cfg(test)]
 mod choice_lowering_tests;
@@ -66,6 +67,7 @@ pub use errors::NAMED_ANALYSIS_RULES;
 mod hassert;
 mod hspecs_section;
 mod memory;
+mod overflow_guard;
 pub mod output;
 mod spec_section;
 pub mod target;
@@ -94,6 +96,24 @@ pub use crate::spec_section::SECTION_NAME as SPEC_FUNCS_SECTION_NAME;
 /// Decoders must reject payloads whose leading varuint32 does not equal this
 /// constant; bumping the value is a breaking change to the section format.
 pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
+
+/// The custom WASM section name that lists the functions carrying an overflow
+/// guard, as this crate emits it.
+///
+/// Published for the test suite, which reads the section back out of a compiled
+/// module, and for the cross-crate test that holds this spelling and the static
+/// merge linker's to agreement. The linker keeps a hand-synchronised copy rather
+/// than depend on this crate, exactly as it does for `inference.spec_funcs`; it
+/// is not a constant it imports from here.
+pub use crate::checked_section::SECTION_NAME as CHECKED_SECTION_NAME;
+
+/// Wire-format version of the `inference.checked` custom section payload, as
+/// this crate emits it. Published for the same two readers as
+/// [`CHECKED_SECTION_NAME`].
+///
+/// A decoder must reject a payload whose leading varuint32 it does not
+/// recognise; bumping this value is a breaking change to the section format.
+pub use crate::checked_section::SECTION_VERSION as CHECKED_SECTION_VERSION;
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
@@ -219,6 +239,7 @@ pub fn codegen(
     // spec map alongside the WASM bytes. The obligation map is borrowed for the
     // `inference.hspecs` section and retained here to attach to the output.
     let has_main = compiler.has_main();
+    let guarded_functions = compiler.guarded_functions();
     let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take(&hspecs);
     debug_assert!(
         mode != CompilationMode::Compile
@@ -236,6 +257,7 @@ pub fn codegen(
         spec_func_indices_by_spec,
     )
     .with_frame_sizes(frame_sizes)
+    .with_guarded_functions(guarded_functions)
     .with_hspecs(hspecs))
 }
 
@@ -385,8 +407,12 @@ fn traverse_t_ast_with_compiler(
     // Every diagnostic is collected first, so a spec with several mistakes
     // surfaces them all at once.
     if mode == CompilationMode::Proof {
-        let (hspecs, diagnostics) =
-            hassert::translate_spec_fns(typed_context, &buckets, &reach_plans);
+        let (hspecs, diagnostics) = hassert::translate_spec_fns(
+            typed_context,
+            &buckets,
+            &reach_plans,
+            compiler.default_arith_mode(),
+        );
         if !diagnostics.is_empty() {
             let rendered = diagnostics
                 .iter()

@@ -22,7 +22,7 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use inference_ast::nodes::{BlockKind, Location};
+use inference_ast::nodes::{ArithMode, BlockKind, Location};
 use inference_type_checker::errors::TypeMismatchContext;
 use thiserror::Error;
 
@@ -110,6 +110,91 @@ pub enum GenericSite {
         rendered: String,
         position: &'static str,
     },
+}
+
+/// Which mode an [`AnalysisDiagnostic::ArithModeChangesNothing`] finding is
+/// redundant against.
+///
+/// The two need different sentences and there is no shared one to parameterize.
+/// A redundancy against the language's default is about a rule the author cannot
+/// see in the source, so the message states it and names the other spelling as
+/// the way to opt out; a redundancy against an enclosing annotation is about
+/// text three characters away, and any sentence about the default would be false
+/// of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedundantArithMode {
+    /// No annotation encloses the finding: it names the mode unannotated
+    /// arithmetic already has.
+    AgainstTheDefault,
+    /// An annotation of the same mode encloses the finding.
+    InsideTheSameAnnotation,
+}
+
+/// The message of [`AnalysisDiagnostic::ArithModeGovernsNothing`].
+///
+/// Two wordings, because the two spellings fail differently: a `wrapping(...)`
+/// with nothing inside it is a no-op, and a `checked(...)` is a guarantee a
+/// later reader will believe. Both name the two shapes that produce almost every
+/// instance — a call, whose body the annotation does not reach, and a glued
+/// negative literal, which is one token rather than a negation — because neither
+/// is visible from the site the rule fires on.
+fn arith_mode_governs_nothing_message(mode: ArithMode) -> String {
+    let common = "nothing written inside it is a `+`, `-`, `*` or unary `-` at a type that can \
+                  overflow";
+    let reach = "the annotation governs the operators written between its own parentheses and \
+                 nothing beyond them, so it does not reach into the body of a function called \
+                 inside it, and a negative number such as `-2147483648` is a single literal \
+                 carrying its own sign rather than a negation applied to a value";
+    match mode {
+        ArithMode::Checked => format!(
+            "this `checked(...)` has no arithmetic to check; {common}, so it emits no guard at \
+             all and a reader who takes it as a guarantee about this expression would be wrong: \
+             {reach}; move it to the expression whose arithmetic you meant, or delete it"
+        ),
+        ArithMode::Wrapping => format!(
+            "this `wrapping(...)` has no arithmetic to change; {common}, so every operator that \
+             could have wrapped is somewhere else: {reach}; move it to the expression whose \
+             arithmetic you meant, marking that function's own operators if the wrapping belongs \
+             there, or delete it"
+        ),
+    }
+}
+
+/// The message of [`AnalysisDiagnostic::ArithModeChangesNothing`].
+///
+/// The sentence about what unannotated arithmetic does is produced from the
+/// mode the finding carries, which for a redundancy against the default *is*
+/// the language's default: the rule fires exactly when an annotation names the
+/// mode already in force where it is written. So the message describes the
+/// compiler the reader is running rather than a policy it has not adopted, and
+/// moving that default moves this message and nothing else — while the text
+/// stays a function of the arguments it was handed, which is what its tests can
+/// vary.
+fn arith_mode_changes_nothing_message(mode: ArithMode, enclosure: RedundantArithMode) -> String {
+    let spelling = mode.spelling();
+    match enclosure {
+        RedundantArithMode::InsideTheSameAnnotation => format!(
+            "this `{spelling}(...)` changes nothing; the `{spelling}(...)` it is written inside \
+             already puts every operator here in that mode, so removing it changes no \
+             arithmetic: delete it, or, if these operators were meant to differ from the ones \
+             around them, write the other spelling"
+        ),
+        RedundantArithMode::AgainstTheDefault => {
+            let other = mode.other().spelling();
+            let verb = match mode {
+                ArithMode::Checked => "trap",
+                ArithMode::Wrapping => "wrap",
+            };
+            format!(
+                "this `{spelling}(...)` changes nothing; `+`, `-`, `*` and unary `-` already \
+                 {verb} on overflow everywhere except inside a `{other}(...)`, and no \
+                 `{other}(...)` encloses this expression, so the annotation restates the default \
+                 rather than restoring it: delete it, or, if you meant to restore {spelling} \
+                 arithmetic inside a region you had opted out of, move it inside the \
+                 `{other}(...)` whose operators you want exempted"
+            )
+        }
+    }
 }
 
 /// The message of [`AnalysisDiagnostic::GenericNotSupported`], which is built
@@ -530,6 +615,29 @@ pub enum AnalysisDiagnostic {
         site: GenericSite,
         location: Location,
     },
+
+    /// An arithmetic-mode annotation with no operator inside it to govern. The
+    /// mode selects the whole message: a `wrapping(...)` that governs nothing is
+    /// inert, a `checked(...)` that governs nothing reads as a guarantee nothing
+    /// backs, and the two have no shared sentence to be parameterized around.
+    #[error("{message}", message = arith_mode_governs_nothing_message(*.mode))]
+    ArithModeGovernsNothing {
+        mode: ArithMode,
+        location: Location,
+    },
+
+    /// An arithmetic-mode annotation naming the mode already in force where it
+    /// is written. `enclosure` says what it is redundant against, which decides
+    /// which of the two facts the message states.
+    #[error(
+        "{message}",
+        message = arith_mode_changes_nothing_message(*.mode, *.enclosure)
+    )]
+    ArithModeChangesNothing {
+        mode: ArithMode,
+        enclosure: RedundantArithMode,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -584,7 +692,9 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::StringNotSupported { location, .. }
             | AnalysisDiagnostic::UnitAsValue { location, .. }
             | AnalysisDiagnostic::UnnamedParameter { location, .. }
-            | AnalysisDiagnostic::GenericNotSupported { location, .. } => location,
+            | AnalysisDiagnostic::GenericNotSupported { location, .. }
+            | AnalysisDiagnostic::ArithModeGovernsNothing { location, .. }
+            | AnalysisDiagnostic::ArithModeChangesNothing { location, .. } => location,
         }
     }
 
@@ -643,6 +753,8 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UnitAsValue { .. } => "A049",
             AnalysisDiagnostic::UnnamedParameter { .. } => "A050",
             AnalysisDiagnostic::GenericNotSupported { .. } => "A051",
+            AnalysisDiagnostic::ArithModeGovernsNothing { .. } => "A053",
+            AnalysisDiagnostic::ArithModeChangesNothing { .. } => "A054",
         }
     }
 }
@@ -2264,6 +2376,131 @@ mod tests {
                 "A050 must quote the offending spelling of `{ty}`, got: {text}"
             );
         }
+    }
+
+    /// The two `A053` wordings answer two different mistakes, so each is held to
+    /// the sentence only it carries: a `wrapping(...)` with nothing to change is
+    /// inert, and a `checked(...)` with nothing to check is a guarantee a later
+    /// reader would believe. Both name the call and the glued-literal shapes,
+    /// which is where nearly every instance comes from and neither of which is
+    /// visible from the annotation itself.
+    #[test]
+    fn display_arith_mode_governs_nothing() {
+        let wrapping = AnalysisDiagnostic::ArithModeGovernsNothing {
+            mode: ArithMode::Wrapping,
+            location: test_location(),
+        };
+        assert_eq!(wrapping.rule_id(), "A053");
+        let text = wrapping.to_string();
+        assert!(
+            text.contains("this `wrapping(...)` has no arithmetic to change"),
+            "A053 must open on the spelling the author wrote, got: {text}"
+        );
+        assert!(
+            text.contains("it does not reach into the body of a function called inside it"),
+            "A053 must name the annotated-call shape, got: {text}"
+        );
+        assert!(
+            text.contains("`-2147483648` is a single literal carrying its own sign"),
+            "A053 must name the glued-literal shape, got: {text}"
+        );
+
+        let checked = AnalysisDiagnostic::ArithModeGovernsNothing {
+            mode: ArithMode::Checked,
+            location: test_location(),
+        }
+        .to_string();
+        assert!(
+            checked.contains("this `checked(...)` has no arithmetic to check"),
+            "got: {checked}"
+        );
+        assert!(
+            checked.contains("a reader who takes it as a guarantee about this expression would \
+                              be wrong"),
+            "the `checked` wording states the stake the `wrapping` one does not, got: {checked}"
+        );
+    }
+
+    /// The default-dependent sentence is produced from the mode the finding
+    /// carries, which at the top level is the language's own default: exactly
+    /// one of the two spellings can be redundant there, and the message
+    /// describes the compiler the reader is running.
+    #[test]
+    fn display_arith_mode_changes_nothing() {
+        let redundant = ArithMode::DEFAULT.spelling();
+        let other = ArithMode::DEFAULT.other().spelling();
+        let verb = if ArithMode::DEFAULT == ArithMode::Checked {
+            "trap"
+        } else {
+            "wrap"
+        };
+        let err = AnalysisDiagnostic::ArithModeChangesNothing {
+            mode: ArithMode::DEFAULT,
+            enclosure: RedundantArithMode::AgainstTheDefault,
+            location: test_location(),
+        };
+        assert_eq!(err.rule_id(), "A054");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("this `{redundant}(...)` changes nothing")),
+            "got: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "already {verb} on overflow everywhere except inside a `{other}(...)`"
+            )),
+            "the sentence about unannotated arithmetic must follow the language's default, \
+             got: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "move it inside the `{other}(...)` whose operators you want exempted"
+            )),
+            "got: {text}"
+        );
+
+        let nested = AnalysisDiagnostic::ArithModeChangesNothing {
+            mode: ArithMode::Checked,
+            enclosure: RedundantArithMode::InsideTheSameAnnotation,
+            location: test_location(),
+        }
+        .to_string();
+        assert!(
+            nested.contains("the `checked(...)` it is written inside already puts every \
+                             operator here in that mode"),
+            "a nested redundancy states the annotation above it, not the default, got: {nested}"
+        );
+        assert!(
+            !nested.contains("restates the default"),
+            "a nested redundancy must say nothing about the default, got: {nested}"
+        );
+
+        // Every part of the sentence comes from the mode the finding carries,
+        // which is what keeps the spelling, its opposite and the verb
+        // describing one language rather than two. The rule raises this
+        // enclosure only when that mode is the one already in force — the
+        // default, at the top level — so rendering the other mode is asking a
+        // question about the text alone: all three must move together.
+        let other_mode = ArithMode::DEFAULT.other();
+        let other_verb = if other_mode == ArithMode::Checked {
+            "trap"
+        } else {
+            "wrap"
+        };
+        let inverted = AnalysisDiagnostic::ArithModeChangesNothing {
+            mode: other_mode,
+            enclosure: RedundantArithMode::AgainstTheDefault,
+            location: test_location(),
+        }
+        .to_string();
+        assert!(
+            inverted.contains(&format!(
+                "this `{}(...)` changes nothing; `+`, `-`, `*` and unary `-` already \
+                 {other_verb} on overflow everywhere except inside a `{redundant}(...)`",
+                other_mode.spelling()
+            )),
+            "the sentence follows the mode the finding carries, got: {inverted}"
+        );
     }
 
     /// The A051 declaration message is the only place a reader is told that a

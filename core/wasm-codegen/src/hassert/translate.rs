@@ -8,6 +8,27 @@
 //! obligation speaks the same numeric language as the compiled body it
 //! constrains.
 //!
+//! ## The one place a term and the body it constrains say different things
+//!
+//! That mirroring is exact for every operator but the four an arithmetic-mode
+//! annotation governs. A term's `+`, `-` and `*` are `Wasm_int.int_add`/
+//! `int_sub`/`int_mul` — modular at the operand width, always — because that is
+//! the only arithmetic the assertion language has. A compiled `+` whose
+//! effective mode is checked traps instead. The divergence is real and cannot
+//! be closed here: there is no second operator downstream to translate a
+//! checked one to.
+//!
+//! So the rules are stated rather than papered over. An annotation is refused
+//! in any body that becomes a term ([`PCode::P017`], first wording), because
+//! both spellings would produce the identical term and whichever the author
+//! wrote would vanish. Effective-checked arithmetic is refused in an
+//! `exists`/`unique` body (second wording) and so is reaching one through a
+//! call ([`PCode::P018`]), because that body *is* reduced and a trap on the
+//! reduced path falsifies the claim. What is left — unmarked arithmetic in a
+//! `forall` body denoting the wrapping operator — is the divergence itself, and
+//! it is documented in `docs/specification-obligations.md` rather than
+//! diagnosed, since there is nothing for the author to do differently.
+//!
 //! ## Alternating quantifiers need a real universal binder
 //!
 //! A `forall` block nested inside an existential context — an `exists` block, an
@@ -239,7 +260,8 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgKind, BlockKind, Def, Expr, Location, OperatorKind, Stmt, UnaryOperatorKind,
+    ArgKind, ArithMode, BlockKind, Def, Expr, Location, OperatorKind, Stmt, UnaryOperatorKind,
+    file_label,
 };
 use inference_fn_key::{FnKey, merged_name};
 use inference_hassert::{HAssert, HBinop, HConst, HFnRef, HNumType, HRelop, HTerm};
@@ -248,8 +270,11 @@ use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 
+use crate::compiler::{CalleeScope, Compiler};
+
 use super::CalleeIndex;
 use super::diag::{HassertDiagnostic, PCode};
+use super::overflow_reach::{GuardReach, GuardReason};
 use super::reach::ReachPlan;
 
 /// Polarity of the surrounding quantification.
@@ -629,6 +654,13 @@ pub(super) struct SpecFnTranslator<'a> {
     spec_name: &'a str,
     callee: &'a CalleeIndex,
     externs: &'a ExternIndex,
+    /// Which functions reach arithmetic that traps on overflow, computed once
+    /// for the whole module.
+    guard_reach: &'a GuardReach,
+    /// The arithmetic mode an operator written outside every annotation is
+    /// compiled at, read from the compiler that is emitting this module so the
+    /// diagnostics describe the arithmetic the bytes actually carry.
+    default_arith_mode: ArithMode,
     /// Next universal slot number. Parameters take `0..P-1`; each universal `@`
     /// takes the next in encounter order. Never rewound — slots are global to
     /// the function.
@@ -679,6 +711,8 @@ impl<'a> SpecFnTranslator<'a> {
         spec_name: &'a str,
         callee: &'a CalleeIndex,
         externs: &'a ExternIndex,
+        guard_reach: &'a GuardReach,
+        default_arith_mode: ArithMode,
     ) -> Self {
         Self {
             arena: ctx.arena(),
@@ -687,6 +721,8 @@ impl<'a> SpecFnTranslator<'a> {
             spec_name,
             callee,
             externs,
+            guard_reach,
+            default_arith_mode,
             slots: 0,
             depth: 0,
             pending: Vec::new(),
@@ -752,6 +788,15 @@ impl<'a> SpecFnTranslator<'a> {
                 return HAssert::True;
             }
         };
+
+        // Ahead of the translation, not inside it: an annotation reaches a
+        // value through paths that fold it away — an array index, an aggregate
+        // literal element — so a check that lived on the term walk would accept
+        // exactly the spellings that vanish most quietly. Translation still
+        // runs afterwards, and its result is discarded because the function has
+        // a diagnostic, which is what lets the rest of the body report its own
+        // mistakes in the same pass.
+        self.reject_untranslatable_arithmetic(body);
 
         self.bind_parameters(&args, mode);
 
@@ -1591,9 +1636,16 @@ impl<'a> SpecFnTranslator<'a> {
     /// there, or they would be demanded on both arms.
     fn p_expr(&mut self, expr: ExprId, mode: Mode) -> HAssert {
         match &self.arena[expr].kind {
-            Expr::Parenthesized { expr } => {
-                let expr = *expr;
-                return self.p_expr(expr, mode);
+            // Both grouping forms are peeled, and for the same reason: neither
+            // contributes a value of its own, so a predicate written inside one
+            // has to read as the predicate it is rather than collapsing into a
+            // term. Whether an arithmetic-mode annotation belongs in this body
+            // at all is settled before translation begins, by the scan that owns
+            // `P017`; by the time a predicate reaches here the annotation is
+            // either accepted and transparent or already reported.
+            Expr::Parenthesized { expr: inner } | Expr::ArithMode { expr: inner, .. } => {
+                let inner = *inner;
+                return self.p_expr(inner, mode);
             }
             Expr::PrefixUnary {
                 expr,
@@ -1639,9 +1691,10 @@ impl<'a> SpecFnTranslator<'a> {
     /// the dual arm, for the same reason.
     fn n_expr(&mut self, expr: ExprId, mode: Mode) -> HAssert {
         match &self.arena[expr].kind {
-            Expr::Parenthesized { expr } => {
-                let expr = *expr;
-                return self.n_expr(expr, mode);
+            // Both grouping forms, for the reason [`Self::p_expr`] gives.
+            Expr::Parenthesized { expr: inner } | Expr::ArithMode { expr: inner, .. } => {
+                let inner = *inner;
+                return self.n_expr(inner, mode);
             }
             Expr::PrefixUnary {
                 expr,
@@ -1838,6 +1891,16 @@ impl<'a> SpecFnTranslator<'a> {
             Expr::StringLiteral { .. } => {
                 self.error_no_encoding(self.arena[expr].location, "a string literal");
                 zero_sentinel()
+            }
+            // Transparent, deliberately. An annotation that has no business in
+            // this body was already reported by the scan that owns `P017`, and
+            // the obligation of a function that raised a diagnostic is thrown
+            // away — so the only annotation that reaches a term for real is the
+            // one a reachability body is allowed to write, whose whole purpose
+            // is that the term be the one the unmarked spelling produces.
+            Expr::ArithMode { expr: inner, .. } => {
+                let inner = *inner;
+                self.term(inner, mode)
             }
             Expr::UnitLiteral | Expr::Type(_) => {
                 self.error(
@@ -2862,11 +2925,10 @@ impl<'a> SpecFnTranslator<'a> {
     /// raises (a compound call result stays [`PCode::P005`], a string literal
     /// [`PCode::P002`], …) and resolves to the sentinel.
     fn agg_value(&mut self, expr: ExprId, mode: Mode) -> AggValue {
+        if let Some(inner) = self.arena.transparent_inner(expr) {
+            return self.agg_value(inner, mode);
+        }
         match &self.arena[expr].kind {
-            Expr::Parenthesized { expr: inner } => {
-                let inner = *inner;
-                self.agg_value(inner, mode)
-            }
             Expr::Identifier(ident_id) => {
                 let name = self.arena[*ident_id].name.clone();
                 if let Some(Binding::Aggregate(value)) = self.env.get(&name) {
@@ -2918,13 +2980,16 @@ impl<'a> SpecFnTranslator<'a> {
     }
 
     /// Peels an access chain into the expression it reads from and its steps,
-    /// outermost last. Parentheses are transparent at every level.
+    /// outermost last. The grouping forms are transparent at every level.
     fn split_access_chain(&self, expr: ExprId) -> (ExprId, Vec<AccessStep>) {
         let mut steps = Vec::new();
         let mut current = expr;
         loop {
+            if let Some(inner) = self.arena.transparent_inner(current) {
+                current = inner;
+                continue;
+            }
             match &self.arena[current].kind {
-                Expr::Parenthesized { expr: inner } => current = *inner,
                 Expr::MemberAccess { expr: base, name } => {
                     steps.push(AccessStep::Field {
                         at: current,
@@ -3049,6 +3114,191 @@ impl<'a> SpecFnTranslator<'a> {
             ),
         );
         None
+    }
+
+    /// Rejects arithmetic this specification body cannot carry, before the body
+    /// is translated.
+    ///
+    /// Two rules under one code, keyed on the quantifier of the *function*
+    /// rather than on where an expression sits inside it. A `forall` or plain
+    /// body — a helper `fn` declared inside a `spec` block included, since it is
+    /// translated into an obligation of its own — becomes a term, and a term's
+    /// arithmetic is the wrapping machine operator with no second operator for
+    /// an annotation to select, so either spelling is refused. An
+    /// `exists`/`unique`-quantified body is compiled and reduced by its own
+    /// obligation, so an operator whose effective mode traps is refused instead
+    /// and the annotation that makes arithmetic modular is exactly the remedy.
+    ///
+    /// A nested `exists { }` block inside a `forall` function is not a
+    /// reachability body: nothing reduces it, so an annotation written there is
+    /// as meaningless as one written at the top of the same function and takes
+    /// the first rule.
+    fn reject_untranslatable_arithmetic(&mut self, body: BlockId) {
+        let arena = self.arena;
+        if self.reach.is_none() {
+            let mut sites: Vec<(Location, &'static str)> = Vec::new();
+            Compiler::visit_body_expressions(arena, body, &mut |arena, expr_id| {
+                if let Expr::ArithMode { mode, .. } = &arena[expr_id].kind {
+                    sites.push((arena[expr_id].location, mode.spelling()));
+                }
+            });
+            for (location, spelling) in sites {
+                self.error(
+                    PCode::P017,
+                    location,
+                    arith_mode_in_payload_message(spelling, self.default_arith_mode),
+                );
+            }
+            return;
+        }
+        let mut sites: Vec<ExprId> = Vec::new();
+        Compiler::visit_body_guarded_operators(
+            arena,
+            self.ctx,
+            body,
+            self.default_arith_mode,
+            &mut |expr_id, _| sites.push(expr_id),
+        );
+        for expr_id in sites {
+            let message = self.trapping_arithmetic_in_reach_message(expr_id);
+            self.error(PCode::P017, arena[expr_id].location, message);
+        }
+        self.reject_reachable_overflow_guards(body);
+    }
+
+    /// The [`PCode::P017`] message for a trapping operator written inline in a
+    /// reachability body.
+    ///
+    /// The clause that says what unmarked arithmetic does elsewhere is produced
+    /// from the mode this module is compiled at, so the sentence stays true when
+    /// the language's default moves and only the expected strings have to.
+    fn trapping_arithmetic_in_reach_message(&self, expr_id: ExprId) -> String {
+        let kind = self.reach_kind();
+        let article = quantifier_article(kind);
+        let (op, type_node) = match &self.arena[expr_id].kind {
+            Expr::Binary { op, left, .. } => (binary_operator_spelling(op), *left),
+            _ => ("-", expr_id),
+        };
+        let ty = self
+            .ctx
+            .get_node_typeinfo(node_expr(type_node))
+            .map_or_else(|| "an integer type".to_string(), |info| info.to_string());
+        let rendered = render_expr(self.arena, expr_id);
+        let (opening, elsewhere) = if self.default_arith_mode == ArithMode::Checked {
+            (
+                "has no place unmarked in the body of",
+                "arithmetic traps on overflow everywhere else in the language",
+            )
+        } else {
+            (
+                "inside a `checked(...)` has no place in the body of",
+                "a `checked(...)` here would emit a trap",
+            )
+        };
+        format!(
+            "a `{op}` at `{ty}` {opening} {article} `{kind}`-quantified spec function: \
+             {elsewhere}, and this is the one specification body the downstream judgment \
+             reduces, so this operator's trap is the claim's trap — the judgment fixes an \
+             arbitrary typed entry vector first and only then lets the choices range, so a trap \
+             does not narrow the claim to the entries whose arithmetic fits: at every entry that \
+             overflows here, no choice reaches an exit state, the observation set is empty, and \
+             the theorem is false rather than restricted; in a `unique` body it is worse than \
+             false, because a trapping choice shrinks the successful set and can make a \
+             uniqueness claim hold for a reason the source does not state, and the Rocq \
+             type-check gate sees neither outcome because it admits open proofs; write \
+             `wrapping({rendered})` if this body's arithmetic is meant to be modular, which is \
+             the only reading the obligation language can describe anyway, or move the claim to \
+             a `forall`-bodied spec function, whose body no judgment reduces and where the same \
+             expression is written unmarked"
+        )
+    }
+
+    /// Rejects every call in this reachability body that reaches arithmetic
+    /// trapping on overflow, wherever in the call graph it sits.
+    ///
+    /// The lexical rule above sees the operators written in the body; this one
+    /// sees the ones the body reaches. The judgment reduces callee activations
+    /// too, so the two describe one hazard and the interprocedural half is the
+    /// one an author cannot spot by reading the body.
+    fn reject_reachable_overflow_guards(&mut self, body: BlockId) {
+        let arena = self.arena;
+        let scope = CalleeScope {
+            module_path: self.module_path,
+            spec_name: Some(self.spec_name),
+        };
+        let mut calls: Vec<(ExprId, ExprId)> = Vec::new();
+        Compiler::visit_body_expressions(arena, body, &mut |arena, expr_id| {
+            if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind {
+                calls.push((expr_id, *function));
+            }
+        });
+        let mut findings: Vec<(Location, GuardReason)> = Vec::new();
+        for (call_id, function) in calls {
+            if let Some(reason) = self.guard_reach.reason_for_call(
+                self.ctx,
+                self.callee,
+                self.externs,
+                function,
+                scope,
+            ) {
+                findings.push((arena[call_id].location, reason));
+            }
+        }
+        for (location, reason) in findings {
+            let message = self.reachable_guard_message(&reason);
+            self.error(PCode::P018, location, message);
+        }
+    }
+
+    /// The [`PCode::P018`] message, in the arm the finding calls for.
+    ///
+    /// Both arms name the call site and the far end of the path. A reader shown
+    /// only one of the two cannot act: the call is where the rule fired and the
+    /// arithmetic is what has to change.
+    fn reachable_guard_message(&self, reason: &GuardReason) -> String {
+        let kind = self.reach_kind();
+        let article = quantifier_article(kind);
+        match reason {
+            GuardReason::Guard {
+                name,
+                module_path,
+                location,
+            } => {
+                let site = match file_label(module_path) {
+                    Some(label) => format!("{label}:{}", location.start_line),
+                    None => format!("line {}", location.start_line),
+                };
+                format!(
+                    "this call from the body of {article} `{kind}`-quantified spec function \
+                     reaches arithmetic that traps on overflow, in `{name}` at {site}: the \
+                     judgment reduces the callee's activation too, so that trap is this body's \
+                     trap, and an entry value that trips it leaves no successful choice vector \
+                     at all — the observation set is empty and the theorem is false rather than \
+                     narrowed; the rule asks only whether such a site is reachable, not whether \
+                     the value that reaches it comes from an entry, because the second question \
+                     is dataflow this pass deliberately does not do and the first is enough to \
+                     keep a false obligation out of the emitted `.v`, and a callee whose body \
+                     code generation cannot see is counted as reaching one; claim `{name}`'s \
+                     realization from a `forall`-bodied spec function instead, which is where a \
+                     trap on overflow is exactly what `HA_app_ok` is for — marking `{name}`'s \
+                     own operators `wrapping(...)` also silences this, but it changes what \
+                     `{name}` computes for every caller and in the shipped binary, so it is a \
+                     decision about the program rather than about this specification"
+                )
+            }
+            GuardReason::Unresolvable { spelling } => format!(
+                "this call from the body of {article} `{kind}`-quantified spec function reaches \
+                 a call whose callee code generation cannot resolve, {spelling}: a callee this \
+                 pass cannot look inside is counted as containing arithmetic that traps on \
+                 overflow, because the alternative is a false obligation shipping green through \
+                 a Rocq gate that admits open proofs — the judgment reduces the callee's \
+                 activation too, so a trap there is this body's trap, and an entry value that \
+                 trips it leaves no successful choice vector at all, the observation set empty \
+                 and the theorem false rather than narrowed; name a callee this module compiles, \
+                 or claim the property from a `forall`-bodied spec function, whose body no \
+                 judgment reduces"
+            ),
+        }
     }
 
     /// Takes the chain's one non-constant index step: the array's elements
@@ -3292,10 +3542,7 @@ impl<'a> SpecFnTranslator<'a> {
     /// introduction, so it bypasses the budget re-count; anything else
     /// aggregate-shaped resolves as a value.
     fn literal_child(&mut self, expr: ExprId, shape: &AggShape, mode: Mode) -> AggValue {
-        let mut child = expr;
-        while let Expr::Parenthesized { expr: inner } = &self.arena[child].kind {
-            child = *inner;
-        }
+        let child = self.arena.peel_transparent(expr);
         if let AggShape::Scalar(..) = shape {
             let term = self.term(child, mode);
             return AggValue::Scalar(term);
@@ -3333,8 +3580,15 @@ impl<'a> SpecFnTranslator<'a> {
     /// evaluates at the source's own width, wrapping exactly where the source
     /// wraps.
     fn fold_const_index(&self, index: ExprId) -> Option<i128> {
+        // The grouping forms fold through: an index is evaluated at the source's
+        // own machine width whichever spelling encloses it, so a `wrapping(…)`
+        // around a constant index names the same element a bare one does. The
+        // annotation is still refused where the obligation would carry it — the
+        // term translation is what raises that — so folding here loses nothing.
+        if let Some(inner) = self.arena.transparent_inner(index) {
+            return self.fold_const_index(inner);
+        }
         match &self.arena[index].kind {
-            Expr::Parenthesized { expr } => self.fold_const_index(*expr),
             Expr::NumberLiteral { value } => {
                 let Some(TypeInfoKind::Number(width)) =
                     self.ctx.get_node_typeinfo(node_expr(index)).map(|t| t.kind)
@@ -3782,6 +4036,154 @@ enum Ordered {
     Ge,
 }
 use Ordered::{Ge, Gt, Le, Lt};
+
+/// The [`PCode::P017`] message for either annotation written in a body that
+/// becomes an obligation term.
+///
+/// One text for both spellings. The identical-term fact answers both mistakes at
+/// once — an author who wrote `checked` believes the claim gains
+/// overflow-freedom, one who wrote `wrapping` believes they are opting out of
+/// something — so splitting it in two would repeat the same sentence under one
+/// code.
+///
+/// The clause about what unmarked operators mean here is produced from the
+/// `default` the module is being compiled at rather than from the compiled-in
+/// constant. The two differ only under the test-only override, which is the one
+/// thing that could make this message describe one language while the
+/// reachability wording beside it describes another.
+///
+/// Under a checked default a specification body is the one place unmarked
+/// arithmetic does not trap, which is a surprise worth naming. Under a wrapping
+/// default it is what unmarked arithmetic does everywhere, so the sentence has
+/// nothing further to say and stops: a message that described the language the
+/// compiler will have instead of the one it has would be read as a promise.
+fn arith_mode_in_payload_message(annotation: &str, default: ArithMode) -> String {
+    let elsewhere = match default {
+        ArithMode::Checked => {
+            " and it is the one place in the language where they do not trap on overflow,"
+        }
+        ArithMode::Wrapping => "",
+    };
+    format!(
+        "`{annotation}(...)` has no meaning inside a specification body: an obligation's \
+         arithmetic is the wrapping machine operator and there is no other one for it to denote \
+         to — the term for `a * b` is `T_binop ... BOI_mul`, which is `Wasm_int.int_mul`, \
+         modular at the operand width — so `checked(a * b)` and `wrapping(a * b)` translate to \
+         the identical term and whichever you wrote would be silently dropped, leaving a claim \
+         about the wrapped value; that is also what unmarked `+`, `-` and `*` mean \
+         here,{elsewhere} because a bound on the true mathematical result is not statable at any \
+         width; state the range over the operands instead — one \
+         `assume {{ assert(lo <= a && a <= hi); }}` per operand — and leave the arithmetic whose \
+         overflow you want proved absent in the executable function this specification claims \
+         the realization of, where the trap is emitted and where `HA_app_ok` is what carries it"
+    )
+}
+
+/// The source spelling of a binary operator, for a diagnostic that quotes back
+/// the operator the author wrote.
+fn binary_operator_spelling(op: &OperatorKind) -> &'static str {
+    match op {
+        OperatorKind::Add => "+",
+        OperatorKind::Sub => "-",
+        OperatorKind::Mul => "*",
+        OperatorKind::Div => "/",
+        OperatorKind::Mod => "%",
+        OperatorKind::Pow => "**",
+        OperatorKind::And => "&&",
+        OperatorKind::Or => "||",
+        OperatorKind::Eq => "==",
+        OperatorKind::Ne => "!=",
+        OperatorKind::Lt => "<",
+        OperatorKind::Le => "<=",
+        OperatorKind::Gt => ">",
+        OperatorKind::Ge => ">=",
+        OperatorKind::BitAnd => "&",
+        OperatorKind::BitOr => "|",
+        OperatorKind::BitXor => "^",
+        OperatorKind::Shl => "<<",
+        OperatorKind::Shr => ">>",
+    }
+}
+
+/// The source spelling of a prefix unary operator.
+fn unary_operator_spelling(op: &UnaryOperatorKind) -> &'static str {
+    match op {
+        UnaryOperatorKind::Neg => "-",
+        UnaryOperatorKind::Not => "!",
+        UnaryOperatorKind::BitNot => "~",
+    }
+}
+
+/// An expression written back out as source, from the arena.
+///
+/// A diagnostic that says "write `wrapping(x)` instead" has to name an `x` the
+/// parser accepts, so the spelling comes from the nodes the author wrote rather
+/// than from a type the checker recorded — a recorded type renders in a
+/// vocabulary the grammar does not have. Every `Expr` variant is covered, so a
+/// nested call or projection inside the arithmetic comes back whole.
+fn render_expr(arena: &AstArena, expr_id: ExprId) -> String {
+    match &arena[expr_id].kind {
+        Expr::Binary { left, right, op } => format!(
+            "{} {} {}",
+            render_expr(arena, *left),
+            binary_operator_spelling(op),
+            render_expr(arena, *right)
+        ),
+        Expr::PrefixUnary { expr, op } => format!(
+            "{}{}",
+            unary_operator_spelling(op),
+            render_expr(arena, *expr)
+        ),
+        Expr::Parenthesized { expr } => format!("({})", render_expr(arena, *expr)),
+        Expr::ArithMode { mode, expr } => {
+            format!("{}({})", mode.spelling(), render_expr(arena, *expr))
+        }
+        Expr::MemberAccess { expr, name } => {
+            format!("{}.{}", render_expr(arena, *expr), arena[*name].name)
+        }
+        Expr::TypeMemberAccess { expr, name } => {
+            format!("{}::{}", render_expr(arena, *expr), arena[*name].name)
+        }
+        Expr::ArrayIndexAccess { array, index } => format!(
+            "{}[{}]",
+            render_expr(arena, *array),
+            render_expr(arena, *index)
+        ),
+        Expr::FunctionCall { function, args, .. } => {
+            let args: Vec<String> = args
+                .iter()
+                .map(|(label, arg)| match label {
+                    Some(label) => {
+                        format!("{}: {}", arena[*label].name, render_expr(arena, *arg))
+                    }
+                    None => render_expr(arena, *arg),
+                })
+                .collect();
+            format!("{}({})", render_expr(arena, *function), args.join(", "))
+        }
+        Expr::StructLiteral { name, fields } => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|(field, value)| {
+                    format!("{}: {}", arena[*field].name, render_expr(arena, *value))
+                })
+                .collect();
+            format!("{} {{ {} }}", arena[*name].name, fields.join(", "))
+        }
+        Expr::ArrayLiteral { elements } => {
+            let elements: Vec<String> =
+                elements.iter().map(|e| render_expr(arena, *e)).collect();
+            format!("[{}]", elements.join(", "))
+        }
+        Expr::Identifier(ident_id) => arena[*ident_id].name.clone(),
+        Expr::NumberLiteral { value } => value.clone(),
+        Expr::BoolLiteral { value } => value.to_string(),
+        Expr::StringLiteral { value } => format!("\"{value}\""),
+        Expr::UnitLiteral => "()".to_string(),
+        Expr::Uzumaki => "@".to_string(),
+        Expr::Type(type_id) => TypeInfo::from_type_id(arena, *type_id).to_string(),
+    }
+}
 
 /// The indefinite article a quantifier word takes when a diagnostic names it:
 /// *an* `exists`-quantified function, *a* `unique`-quantified one. A reader
@@ -4480,7 +4882,16 @@ mod tests {
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
         let externs = ctx.extern_index();
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, externs);
+        let guard_reach = GuardReach::default();
+        let mut translator = SpecFnTranslator::new(
+            &ctx,
+            &[],
+            "S",
+            &callee,
+            externs,
+            &guard_reach,
+            ArithMode::DEFAULT,
+        );
         let unwound = catch_unwind(AssertUnwindSafe(|| translator.number_literal(orphan, "7")));
         let payload = unwound.expect_err("an untyped literal must abort translation");
         let text = panic_text(payload.as_ref());
@@ -4502,7 +4913,16 @@ mod tests {
         let buckets = EmittableFunctions::default();
         let callee = CalleeIndex::build(ctx.arena(), &buckets);
         let externs = ctx.extern_index();
-        let mut translator = SpecFnTranslator::new(&ctx, &[], "S", &callee, externs);
+        let guard_reach = GuardReach::default();
+        let mut translator = SpecFnTranslator::new(
+            &ctx,
+            &[],
+            "S",
+            &callee,
+            externs,
+            &guard_reach,
+            ArithMode::DEFAULT,
+        );
         assert_eq!(
             translator.number_literal(orphan, "7"),
             zero_sentinel(),
@@ -4608,5 +5028,30 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The two signedness predicates in this crate answer the same question the
+    /// same way, at every width.
+    ///
+    /// They were written independently and neither calls the other:
+    /// `kind_is_unsigned` decides which relational operator an obligation's term
+    /// carries and how a constant is read back, while
+    /// `Compiler::is_unsigned_type` decides which machine instruction an
+    /// operator lowers to and, now, which overflow guard it takes. A width they
+    /// disagreed about would emit a guard testing one signedness under an
+    /// obligation stating the other, and nothing else in the tree would notice.
+    #[test]
+    fn both_signedness_predicates_agree_at_every_width() {
+        for &number in NumberType::ALL {
+            let kind = TypeInfoKind::Number(number);
+            assert_eq!(
+                kind_is_unsigned(Some(&kind)),
+                crate::compiler::Compiler::is_unsigned_type(&kind),
+                "the two signedness predicates disagree at {number:?}"
+            );
+        }
+        // The obligation side additionally has to answer for a node whose type
+        // was never recorded, where it reads signed.
+        assert!(!kind_is_unsigned(None));
     }
 }

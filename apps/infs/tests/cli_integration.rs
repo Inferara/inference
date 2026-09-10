@@ -5460,6 +5460,179 @@ fn wasm_is_valid(bytes: &[u8]) -> bool {
         .is_ok()
 }
 
+/// A project source whose arithmetic is guarded, so the compiler records it in
+/// the `inference.checked` custom section.
+const GUARDED_PROJECT_MAIN_SRC: &str = "pub fn twice(x: i32) -> i32 {\n    return checked(x + x);\n}\n\n\
+     pub fn main() -> i32 {\n    return twice(1);\n}\n";
+
+/// The custom-section name recording which functions of a module trap on
+/// arithmetic overflow, spelled out here rather than imported: this is the
+/// black-box side of the marking, and taking the name from the code under test
+/// would let a rename pass unnoticed.
+const CHECKED_SECTION: &str = "inference.checked";
+
+/// The payload of `inference.checked` in `wasm`, or `None` when the module
+/// carries no such section.
+fn overflow_guard_record(wasm: &[u8]) -> Option<Vec<u8>> {
+    for payload in inf_wasmparser::Parser::new(0).parse_all(wasm) {
+        let inf_wasmparser::Payload::CustomSection(reader) = payload.expect("the artifact parses")
+        else {
+            continue;
+        };
+        if reader.name() == CHECKED_SECTION {
+            return Some(reader.data().to_vec());
+        }
+    }
+    None
+}
+
+/// A guarded project built with `[build.wasm-opt]` ships an artifact whose
+/// overflow-guard record has been rewritten into the opaque form.
+///
+/// The optimizer moves the functions the record's indices name while carrying
+/// the unknown custom section through untouched, so an unrewritten record would
+/// keep naming bodies that are no longer there — and the static-merge linker
+/// reads that record out of every library it links. Marking it turns a silently
+/// wrong list into an admission the linker can act on.
+///
+/// The fake `wasm-opt` copies its input to its output byte for byte, so
+/// everything the artifact differs by is this rewrite: the assertion below pins
+/// the size delta to exactly the payload the record shrank by.
+#[test]
+fn wasm_opt_marks_the_overflow_guard_record_as_opaque() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let unoptimized = {
+        let temp = assert_fs::TempDir::new().unwrap();
+        scaffold_project(&temp, "demo", GUARDED_PROJECT_MAIN_SRC);
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+        cmd.env("INFC_PATH", &infc_path)
+            .current_dir(temp.path())
+            .arg("build");
+        cmd.assert().success();
+        read_project_artifact(&temp)
+    };
+    let exact = overflow_guard_record(&unoptimized)
+        .expect("a guarded program records its guarded functions");
+    assert_eq!(
+        exact.first().copied(),
+        Some(1),
+        "the compiler writes the exact form: {exact:?}"
+    );
+    assert!(
+        exact.len() > 1,
+        "the exact form carries a count and an index list: {exact:?}"
+    );
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        GUARDED_PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("records overflow guards"))
+        .stdout(predicate::str::contains("--no-wasm-opt"));
+
+    let optimized = read_project_artifact(&temp);
+    assert_eq!(
+        overflow_guard_record(&optimized),
+        Some(vec![2]),
+        "the shipped record is the opaque form"
+    );
+    assert!(
+        wasm_is_valid(&optimized),
+        "the marked artifact must still be a valid module"
+    );
+    assert_eq!(
+        optimized.len() + exact.len() - 1,
+        unoptimized.len(),
+        "the fake optimizer copies its input verbatim, so the only byte the marked artifact \
+         differs by is the record it shrank"
+    );
+}
+
+/// `--no-wasm-opt` is the documented way to keep an exact record, so it must
+/// leave one: without this pair the marking above could be a rewrite that
+/// happens on every build.
+#[test]
+fn wasm_opt_disabled_keeps_the_exact_overflow_guard_record() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        GUARDED_PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--no-wasm-opt");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("records overflow guards").not());
+
+    let record = overflow_guard_record(&read_project_artifact(&temp))
+        .expect("an unoptimized guarded artifact keeps its record");
+    assert_eq!(
+        record.first().copied(),
+        Some(1),
+        "the exact form survives when the optimizer never ran: {record:?}"
+    );
+}
+
+/// An unguarded project is not marked. The record states a fact about the input,
+/// and an input that recorded nothing has nothing to admit — a marker appended
+/// here would claim a guard the program never asked for, and refuse a link the
+/// section exists to allow.
+#[test]
+fn wasm_opt_leaves_an_unguarded_artifact_unmarked() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build.wasm-opt]\nlevel = \"z\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .env("WASM_OPT_PATH", fake_wasm_opt_binary())
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("wasm-opt -Oz: main.wasm"))
+        .stdout(predicate::str::contains("records overflow guards").not());
+
+    assert_eq!(
+        overflow_guard_record(&read_project_artifact(&temp)),
+        None,
+        "an artifact that recorded no guard is shipped without one"
+    );
+}
+
 /// The file name of `raw`, as a `&str`, for asserting an argument path points at
 /// the expected artifact regardless of the (absolute, platform-specific) parent.
 fn file_name_of(raw: &str) -> Option<&str> {

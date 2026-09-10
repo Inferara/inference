@@ -119,6 +119,7 @@ fn check_expr_children_only(
         }
         Expr::PrefixUnary { expr, .. }
         | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. }
         | Expr::MemberAccess { expr, .. }
         | Expr::TypeMemberAccess { expr, .. } => {
             check_expr(ctx, module_path, *expr, errors);

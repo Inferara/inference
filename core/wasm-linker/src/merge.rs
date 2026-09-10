@@ -57,16 +57,17 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use inf_wasmparser::ExternalKind;
-use inference_hassert::{HAssert, HFnRef, HSpecMap, HTerm};
+use inference_hassert::{HAssert, HFnRef, HSpecMap, HTerm, SpecKind};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection, GlobalSection,
     GlobalType as EncGlobalType, MemorySection, MemoryType as EncMemoryType, Module, NameMap,
     NameSection, TypeSection, ValType as EncValType,
 };
 
+use crate::checked::CheckedGuards;
 use crate::closure;
 use crate::parse::{FuncSig, GlobalDef, GlobalInit, ParsedModule, TypeEntry};
-use crate::rewrite::{reencode_body, BodyOrigin, IndexMap};
+use crate::rewrite::{call_edges, reencode_body, BodyOrigin, IndexMap};
 use crate::tier::{self, Tier, WriteContract};
 use crate::{
     ExternalSpecPolicy, ImportWriteSet, LinkError, LinkOptions, LinkOutput, LinkWarning,
@@ -143,6 +144,12 @@ pub(crate) fn link(
     // and the plan is the last place that still knows what each name was
     // supposed to refer to.
     plan.check_obligation_symbols(&main, &externals)?;
+
+    // And the merged bodies are cleared against the program's reachability
+    // claims, for the same reason and at the same phase: whether a merged body
+    // traps on overflow is a fact only this phase holds, because the dependency
+    // bytes reach the process here and nowhere earlier.
+    plan.check_checked_guards_under_reachability_specs(&main, &externals)?;
 
     let merged = plan.emit(&main, &externals)?;
 
@@ -274,6 +281,93 @@ struct MergedFunc {
     /// satisfying several imports records the least of its root names, and
     /// [`Plan::root_symbols`] is what keeps the rest resolvable.
     name: Option<String>,
+}
+
+/// The merged module's functions that trap on arithmetic overflow, in output
+/// index space, against where the merge learned it of each.
+///
+/// One set, not two. It is what the merged `inference.checked` section carries,
+/// so a downstream link against this artifact reads the same fact about it that
+/// this one read about its inputs, and it is also the set the reachability check
+/// searches — every entry, whichever module supplied it. Narrowing that search
+/// to the library-supplied entries would rest on the compiler driver having
+/// refused the program's own already, which is true of the driver and not of the
+/// public [`crate::link`], whose main bytes never went through code generation
+/// at all.
+#[derive(Default)]
+struct MergedGuards {
+    /// Every guarded function of the output, ascending, against its origin.
+    all: BTreeMap<u32, GuardOrigin>,
+}
+
+impl MergedGuards {
+    /// Whether any input said only that *some* of its functions trap. The merged
+    /// section then says the same of the output: a list naming the exact inputs'
+    /// functions alone would state that the opaque input's bodies are unguarded,
+    /// which is the one thing it denies.
+    fn is_opaque(&self) -> bool {
+        self.all.values().any(|origin| origin.opaque)
+    }
+}
+
+/// Where the merge learned that one output function traps on arithmetic
+/// overflow.
+#[derive(Clone)]
+struct GuardOrigin {
+    /// The logical module a linked library supplied the body under; `None` for
+    /// one of the program's own.
+    external: Option<String>,
+    /// Whether the input said only that some function of it traps, rather than
+    /// which. Every function that module contributed is then an entry here, the
+    /// fail-closed reading of a producer that can no longer name its own.
+    opaque: bool,
+}
+
+/// The merged module's direct call graph, in output index space.
+#[derive(Default)]
+struct MergedCallGraph {
+    /// `output function index -> the functions it names as call targets`.
+    edges: BTreeMap<u32, Vec<u32>>,
+    /// Output functions performing at least one `call_indirect`, whose target
+    /// no operand names.
+    indirect: BTreeSet<u32>,
+}
+
+impl MergedCallGraph {
+    /// Every function reachable from `root` through calls, or `None` when the
+    /// walk crosses a `call_indirect` and the reachable set is therefore not
+    /// bounded by any edge this graph holds.
+    ///
+    /// `None` means "reaches everything", not "reaches nothing": a caller that
+    /// treated it as an empty set would turn the one construct this graph cannot
+    /// follow into a licence to conclude nothing is reached.
+    fn reachable_from(&self, root: u32) -> Option<BTreeSet<u32>> {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(idx) = stack.pop() {
+            if !seen.insert(idx) {
+                continue;
+            }
+            if self.indirect.contains(&idx) {
+                return None;
+            }
+            if let Some(targets) = self.edges.get(&idx) {
+                stack.extend(targets.iter().copied());
+            }
+        }
+        Some(seen)
+    }
+}
+
+/// One retained reachability specification function of the output: the symbol
+/// its obligation names it by, and the function that symbol resolves to.
+struct ReachabilityRoot {
+    /// The obligation's own `fn_symbol`, as the payload spells it — the
+    /// specification-folded name, so it names the specification as well as the
+    /// function.
+    symbol: String,
+    /// The output function index the walk starts from.
+    index: u32,
 }
 
 /// The fully-resolved merge plan: which imports are satisfied, the output type
@@ -1108,6 +1202,39 @@ impl Plan {
             });
         }
 
+        // `inference.checked` section: one merged list, gathered from every
+        // input and rewritten into the output space, so a later link against
+        // this artifact reads the same fact about it that this link read about
+        // its inputs. Unknown custom sections are dropped by design — carrying
+        // one forward would restate, about the merged module, a claim its
+        // producer made about a different one — and this one is kept for the
+        // reason `inference.spec_funcs` is: its claim survives the merge exactly
+        // once its indices are rewritten.
+        //
+        // Emitted only when some function of the output is guarded. Absence is
+        // the statement that none is, which is what makes a foreign module's
+        // missing section readable rather than merely unknown, so an empty
+        // section would say the same thing at a cost and leave the two spellings
+        // to be told apart by every future reader.
+        //
+        // A merge that absorbed an input which could no longer name its own
+        // guarded functions re-emits that same admission rather than a list:
+        // the exact inputs' indices are all known, but a section naming only
+        // them would state that the opaque input's bodies are unguarded.
+        let guards = self.merged_guards(main, externals)?;
+        if !guards.all.is_empty() {
+            let payload = if guards.is_opaque() {
+                crate::checked::encode_opaque()
+            } else {
+                let listed: Vec<u32> = guards.all.keys().copied().collect();
+                crate::checked::encode(&listed)
+            };
+            module.section(&wasm_encoder::CustomSection {
+                name: crate::checked::SECTION_NAME.into(),
+                data: (&payload[..]).into(),
+            });
+        }
+
         Ok(module.finish())
     }
 
@@ -1213,6 +1340,387 @@ impl Plan {
             }
         }
         Ok(indices)
+    }
+
+    /// The merged module's guarded functions, in output index space.
+    ///
+    /// Gathered from every input's `inference.checked` section through the same
+    /// index mappings the bodies themselves are re-encoded under, so a listed
+    /// index names the same function after the merge that it named before it.
+    /// An external's guarded function that no closure pulled in simply is not in
+    /// the output, and contributes nothing.
+    ///
+    /// An input carrying the opaque form has no list to map. It contributes
+    /// every function it contributed *at all* — main's own locals, or the bodies
+    /// this merge folded in from that external — because "some function of this
+    /// module traps and I can no longer say which" leaves each of them a
+    /// candidate. An opaque external that no closure drew from contributes
+    /// nothing, exactly as an exact one whose guarded bodies stayed behind does.
+    fn merged_guards(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+    ) -> Result<MergedGuards, LinkError> {
+        let mut guards = MergedGuards::default();
+        match &main.checked {
+            Some(CheckedGuards::Exact(listed)) => {
+                for &idx in listed {
+                    guards.all.insert(
+                        self.map_main_func(main, idx)?,
+                        GuardOrigin {
+                            external: None,
+                            opaque: false,
+                        },
+                    );
+                }
+            }
+            Some(CheckedGuards::Opaque) => {
+                for local_idx in 0..main.local_funcs.len() as u32 {
+                    guards.all.insert(
+                        self.main_local_base + local_idx,
+                        GuardOrigin {
+                            external: None,
+                            opaque: true,
+                        },
+                    );
+                }
+            }
+            None => {}
+        }
+        let merged_base = self.merged_base(main);
+        for (ext_idx, external) in externals.iter().enumerate() {
+            match &external.checked {
+                Some(CheckedGuards::Exact(listed)) => {
+                    for &idx in listed {
+                        let Some(&out) = self.merged_index.get(&(ext_idx, idx)) else {
+                            continue;
+                        };
+                        guards.all.insert(
+                            out,
+                            GuardOrigin {
+                                external: Some(external.logical_module.clone()),
+                                opaque: false,
+                            },
+                        );
+                    }
+                }
+                Some(CheckedGuards::Opaque) => {
+                    for (position, merged) in self.merged.iter().enumerate() {
+                        if merged.external_idx != ext_idx {
+                            continue;
+                        }
+                        guards.all.insert(
+                            merged_base + position as u32,
+                            GuardOrigin {
+                                external: Some(external.logical_module.clone()),
+                                opaque: true,
+                            },
+                        );
+                    }
+                }
+                None => {}
+            }
+        }
+        Ok(guards)
+    }
+
+    /// The merged module's direct call graph, in output index space.
+    ///
+    /// Built from the source bodies under the same index maps `emit` re-encodes
+    /// them with, rather than from the emitted bytes, so the graph exists before
+    /// a byte of the output does — which is what lets a rejection be raised at
+    /// the phase that still knows which external supplied each body.
+    fn merged_call_graph(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+    ) -> Result<MergedCallGraph, LinkError> {
+        let mut graph = MergedCallGraph::default();
+        for (local_idx, local) in main.local_funcs.iter().enumerate() {
+            let out = self.main_local_base + local_idx as u32;
+            let calls = call_edges(&local.body)?;
+            let mut targets = Vec::with_capacity(calls.direct.len());
+            for target in calls.direct {
+                targets.push(self.map_main_func(main, target)?);
+            }
+            if calls.indirect {
+                graph.indirect.insert(out);
+            }
+            graph.edges.insert(out, targets);
+        }
+        let merged_base = self.merged_base(main);
+        for (position, m) in self.merged.iter().enumerate() {
+            let out = merged_base + position as u32;
+            let external = &externals[m.external_idx];
+            let local = external
+                .local_funcs
+                .get((m.source_func_idx - external.local_func_base()) as usize)
+                .ok_or_else(|| {
+                    LinkError::Parse(format!(
+                        "merged external function index {} is out of range",
+                        m.source_func_idx
+                    ))
+                })?;
+            let calls = call_edges(&local.body)?;
+            let mut targets = Vec::with_capacity(calls.direct.len());
+            for target in calls.direct {
+                let mapped = self
+                    .merged_index
+                    .get(&(m.external_idx, target))
+                    .copied()
+                    .ok_or_else(|| {
+                        LinkError::Parse(format!(
+                            "merged body references function index {target} not in its closure"
+                        ))
+                    })?;
+                targets.push(mapped);
+            }
+            if calls.indirect {
+                graph.indirect.insert(out);
+            }
+            graph.edges.insert(out, targets);
+        }
+        Ok(graph)
+    }
+
+    /// The retained reachability specification functions of the output, each
+    /// against the symbol its obligation names it by.
+    ///
+    /// The obligation carries a symbol, not an index: its own function is a
+    /// name-section string, and which function that string names is decided by
+    /// stripping the specification's own prefix and intersecting the name
+    /// section's carriers of the result with the indices `inference.spec_funcs`
+    /// lists under that specification.
+    ///
+    /// The stripping half is [`inference_hassert::HFnRef::bare_in_spec`], shared
+    /// with the proof translator rather than spelled again here. Both phases
+    /// have to spell it the same way, and a copy that drifted would resolve
+    /// nothing — which, before this returned an error for that, meant the whole
+    /// check silently passed. The intersecting half stays local: it works in the
+    /// output's index space, which the translator does not have, and
+    /// `wasm-to-v`'s `classify_reachability_targets` is the authority on the
+    /// rule both implement.
+    ///
+    /// That intersection exists here to pick where a walk starts, and for
+    /// nothing else. The translator resolves the same symbol under its own rule
+    /// and rejects a module whose symbol resolves to several; this does not
+    /// re-decide that. It walks from **every** candidate, so a module the
+    /// translator will reject for ambiguity is judged fail-closed here rather
+    /// than skipped, and a module the translator accepts has exactly one
+    /// candidate for the walk to start from either way.
+    ///
+    /// Resolving to **no** candidate is refused instead of skipped. A walk that
+    /// cannot start reaches no guarded function, so leaving it out would turn
+    /// every way of failing to resolve — a producer that spells its symbols
+    /// differently, a specification section that lost its index list, a name
+    /// section an optimizer dropped — into a silent pass of the one check the
+    /// section exists for.
+    ///
+    /// An adopted specification is not such a case and cannot reach the error:
+    /// only a library's **universal** obligations are adopted, and a universal
+    /// obligation needs no root because nothing about it is judged by running
+    /// the retained body.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::UnresolvedReachabilitySpecFunction`] for an `exists`- or
+    /// `unique`-quantified obligation whose symbol names no function of the
+    /// merged module under its own specification.
+    fn reachability_spec_roots(
+        &self,
+        main: &ParsedModule,
+    ) -> Result<Vec<ReachabilityRoot>, LinkError> {
+        let Some(hspecs) = &self.hspecs else {
+            return Ok(Vec::new());
+        };
+        let entries = self.func_name_entries(main);
+        let mut spec_names: Vec<&String> = hspecs.keys().collect();
+        spec_names.sort_unstable();
+        let mut roots = Vec::new();
+        for spec_name in spec_names {
+            let listed: &[u32] = match &main.spec_funcs {
+                Some(spec_funcs) => spec_funcs
+                    .iter()
+                    .find(|(name, _)| name == spec_name)
+                    .map_or(&[][..], |(_, indices)| indices.as_slice()),
+                None => &[],
+            };
+            let mut listed_out = BTreeSet::new();
+            for &idx in listed {
+                listed_out.insert(self.map_main_func(main, idx)?);
+            }
+            for entry in &hspecs[spec_name] {
+                if matches!(entry.kind, SpecKind::Forall) {
+                    continue;
+                }
+                let symbol = entry.fn_symbol.0.as_str();
+                let bare = entry.fn_symbol.bare_in_spec(spec_name);
+                let before = roots.len();
+                for (idx, name) in &entries {
+                    if *name == bare && listed_out.contains(idx) {
+                        roots.push(ReachabilityRoot {
+                            symbol: symbol.to_string(),
+                            index: *idx,
+                        });
+                    }
+                }
+                if roots.len() == before {
+                    let named = entries.iter().any(|(_, name)| *name == bare);
+                    let reason = if named {
+                        format!(
+                            "the functions the merged module names `{bare}` are not the ones its \
+                             `inference.spec_funcs` section lists under `{spec_name}`"
+                        )
+                    } else {
+                        format!("no function of the merged module is named `{bare}`")
+                    };
+                    return Err(LinkError::UnresolvedReachabilitySpecFunction {
+                        spec: spec_name.clone(),
+                        symbol: symbol.to_string(),
+                        reason,
+                    });
+                }
+            }
+        }
+        Ok(roots)
+    }
+
+    /// Rejects a merge in which a reachability specification reaches, through
+    /// calls, a merged body that traps on arithmetic overflow.
+    ///
+    /// An `exists`/`unique` obligation is a claim about *running* the retained
+    /// body: the judgment fixes an entry vector first and only then lets the
+    /// choices range, so a trap anywhere in that activation — the body's own
+    /// frame or any frame it calls into — leaves no successful run at all and
+    /// makes the claim false rather than narrowing it to the entries that avoid
+    /// the trap. For `unique` it is worse than false: shrinking the successful
+    /// set is exactly how a claim of uniqueness becomes true by accident.
+    ///
+    /// Code generation refuses that reach for every callee it can see, and it
+    /// cannot see an `external fn`'s: `codegen` receives a typed context, and a
+    /// dependency's bytes arrive at `link`, one phase later. So the compiler
+    /// records what its own bodies carry and this is where a merged one is
+    /// judged.
+    ///
+    /// **Every** guarded function of the output is a rejection here, whichever
+    /// module supplied it. Narrowing to the library-supplied ones would rest on
+    /// the program's own having been refused already, which holds on the
+    /// compiler driver — `P018` reports it against the source line that wrote
+    /// the arithmetic, a better place to hear it than a link diagnostic naming
+    /// two output functions — and does not hold on [`crate::link`], whose main
+    /// bytes are whatever a caller handed over. The two phases do not
+    /// double-report even so: a library's closure can never call back into main,
+    /// because a closure that reaches the external's own imports is refused as
+    /// needing a relocatable build (`LinkError::TransitiveHostImport`), so the
+    /// path from a specification to a guarded main body lies wholly inside the
+    /// program and `P018` has already walked it. The message says as much where
+    /// it fires on one.
+    ///
+    /// An input that can no longer name its own guarded functions makes every
+    /// function it contributed a hit. That is the fail-closed reading of the
+    /// opaque section form, and it is what makes optimizing a library with
+    /// `[build.wasm-opt]` a refusal to *verify* against it rather than a silent
+    /// loss of the guard facts the verification turns on.
+    ///
+    /// The walk is deliberately not narrowed to any module — it follows every
+    /// edge, whichever module the body came from — because a path from the
+    /// specification into a library may run through the program's own functions,
+    /// and a walk that stopped at them would miss it.
+    ///
+    /// A `call_indirect` anywhere in the walked set makes the reachable set
+    /// unbounded: the target is a table entry chosen at run time, so no operand
+    /// names it and no walk can exclude anything. The check then treats the
+    /// specification as reaching every function of the module, which is the
+    /// fail-closed reading. Nothing in this pipeline produces one today —
+    /// Inference code generation emits no `call_indirect`, and an external whose
+    /// closure names the table space is refused as needing a relocatable build —
+    /// so the arm stands for the public library API, which accepts arbitrary
+    /// main bytes.
+    fn check_checked_guards_under_reachability_specs(
+        &self,
+        main: &ParsedModule,
+        externals: &[ParsedModule],
+    ) -> Result<(), LinkError> {
+        let guards = self.merged_guards(main, externals)?;
+        // Nothing anywhere in the output traps, so no walk can reach one and the
+        // call graph is never built. Kept ahead of the root resolution because a
+        // link with no guard at all owes the caller no opinion about how its
+        // obligation symbols resolve.
+        if guards.all.is_empty() {
+            return Ok(());
+        }
+        let roots = self.reachability_spec_roots(main)?;
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let graph = self.merged_call_graph(main, externals)?;
+        for root in roots {
+            let hit = match graph.reachable_from(root.index) {
+                Some(set) => guards.all.keys().find(|idx| set.contains(idx)).copied(),
+                None => guards.all.keys().next().copied(),
+            };
+            if let Some(idx) = hit {
+                let origin = &guards.all[&idx];
+                return Err(LinkError::CheckedGuardUnderReachabilitySpec {
+                    spec_function: root.symbol,
+                    guarded_function: self.describe_reached_guard(main, idx, origin),
+                    external: origin.external.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// How a diagnostic names the reached function at `idx`, and says where the
+    /// merge learned that it traps.
+    ///
+    /// The output's own `name` section is the answer wherever it has one, since
+    /// that is the name every other report about the merged module uses. A
+    /// merged body a foreign module left unnamed has only its index.
+    ///
+    /// An opaque origin is named by its module instead. The index is honest —
+    /// the walk really did reach that function — but reporting it would say the
+    /// merge knows this one traps, and what it knows is that the module no
+    /// longer says which of its functions do.
+    fn describe_reached_guard(
+        &self,
+        main: &ParsedModule,
+        idx: u32,
+        origin: &GuardOrigin,
+    ) -> String {
+        if origin.opaque {
+            return match &origin.external {
+                Some(module) => format!(
+                    "a function of linked module `{module}`, an optimized module whose guarded \
+                     functions can no longer be named: its `inference.checked` section records \
+                     only that some function of it traps when its arithmetic overflows, so every \
+                     function it supplies is read as one that does"
+                ),
+                None => "a function of the program's own bytes, which no longer name their \
+                     guarded functions: the `inference.checked` section they carry records only \
+                     that some function traps when its arithmetic overflows, so every one of \
+                     them is read as one that does"
+                    .to_string(),
+            };
+        }
+        let name = self
+            .func_name_entries(main)
+            .into_iter()
+            .find(|(entry_idx, _)| *entry_idx == idx)
+            .map_or_else(
+                || format!("the unnamed function at index {idx}"),
+                |(_, name)| format!("`{name}`"),
+            );
+        match &origin.external {
+            Some(module) => format!(
+                "{name}, a function linked module `{module}` supplies whose body traps when its \
+                 arithmetic overflows"
+            ),
+            None => format!(
+                "{name}, a function of the program's own whose body traps when its arithmetic \
+                 overflows"
+            ),
+        }
     }
 
     /// Rejects a merge whose obligation payload applies a function symbol the
@@ -3134,6 +3642,76 @@ mod tests {
             merged_output_symbol(&merged, &merged_index, merged_base, (0, 4)),
             Some("mathlib::double")
         );
+    }
+
+    /// A call graph built from `(caller, callees)` pairs, with no indirect call
+    /// anywhere.
+    fn graph(edges: &[(u32, &[u32])]) -> MergedCallGraph {
+        MergedCallGraph {
+            edges: edges
+                .iter()
+                .map(|(from, to)| (*from, to.to_vec()))
+                .collect(),
+            indirect: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn the_walk_follows_calls_transitively() {
+        // The two-hop case the check exists for: a specification calls into the
+        // program, and the program calls into the library.
+        let g = graph(&[(0, &[1]), (1, &[2]), (2, &[]), (3, &[4])]);
+        assert_eq!(
+            g.reachable_from(0),
+            Some([0, 1, 2].into_iter().collect::<BTreeSet<u32>>())
+        );
+        assert_eq!(
+            g.reachable_from(3),
+            Some([3, 4].into_iter().collect::<BTreeSet<u32>>()),
+            "a root reaches only what its own edges lead to"
+        );
+    }
+
+    #[test]
+    fn the_walk_terminates_on_a_call_cycle() {
+        // Mutual recursion is ordinary in a linked library, and a walk that
+        // revisited a function it had already seen would not return at all.
+        let g = graph(&[(0, &[1]), (1, &[2]), (2, &[1, 0])]);
+        assert_eq!(
+            g.reachable_from(0),
+            Some([0, 1, 2].into_iter().collect::<BTreeSet<u32>>())
+        );
+    }
+
+    #[test]
+    fn a_function_with_no_recorded_edges_reaches_only_itself() {
+        // An imported function has no body in the output and so no entry in the
+        // graph; a walk that reached one must not treat the missing entry as a
+        // reason to stop looking at anything else.
+        let g = graph(&[(0, &[7])]);
+        assert_eq!(
+            g.reachable_from(0),
+            Some([0, 7].into_iter().collect::<BTreeSet<u32>>())
+        );
+    }
+
+    #[test]
+    fn a_call_indirect_anywhere_on_the_path_makes_the_reach_unbounded() {
+        // The target of a `call_indirect` is a table entry chosen at run time,
+        // so no operand names it and the walk can exclude nothing. `None` is
+        // "reaches everything": a caller that read it as an empty set would turn
+        // the one construct the graph cannot follow into a licence to conclude
+        // nothing is reached.
+        let mut g = graph(&[(0, &[1]), (1, &[]), (2, &[])]);
+        g.indirect.insert(1);
+        assert_eq!(g.reachable_from(0), None, "an indirect call one hop down");
+        assert_eq!(
+            g.reachable_from(2),
+            Some([2].into_iter().collect::<BTreeSet<u32>>()),
+            "a root that reaches no indirect call is still bounded"
+        );
+        g.indirect.insert(2);
+        assert_eq!(g.reachable_from(2), None, "the root's own indirect call");
     }
 
     /// The adopted key namespaces a library's specification under the logical

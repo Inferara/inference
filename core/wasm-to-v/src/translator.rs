@@ -960,6 +960,15 @@ impl WasmParseData<'_> {
     /// is the one function that both carries the bare name and is listed
     /// under the obligation's spec.
     ///
+    /// The stripping step is [`inference_hassert::HFnRef::bare_in_spec`], not a
+    /// local `strip_prefix`, because the static-merge linker takes the same step
+    /// to pick where its reachability walk starts. That walk decides whether a
+    /// merged body carrying an overflow guard is reachable, and a spelling that
+    /// drifted from this one would make it resolve nothing and reach the
+    /// fail-open verdict. The narrowing half stays here: it works in the emitted
+    /// defined-function space this translator owns, and this function is the
+    /// authority on it.
+    ///
     /// The reachability judgment looks its function up in the emitted module
     /// (`reach_func`) and evaluates its payload against the frame an actual
     /// execution reaches, so an obligation whose target cannot be located —
@@ -1001,7 +1010,7 @@ impl WasmParseData<'_> {
                          WASM `name` section, but the module carries no function names"
                     ))));
                 }
-                let bare = sym.strip_prefix(&format!("{spec_name}.")).unwrap_or(sym);
+                let bare = entry.fn_symbol.bare_in_spec(spec_name);
                 let name_matches = by_name.get(bare).map_or(&[][..], Vec::as_slice);
                 if name_matches.is_empty() {
                     return Err(anyhow::anyhow!(WasmToVError::HspecInconsistent(format!(

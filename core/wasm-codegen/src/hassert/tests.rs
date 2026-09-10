@@ -71,11 +71,20 @@ fn buckets_of(ctx: &TypedContext) -> EmittableFunctions {
 /// generation runs, so the pass sees exactly what it would see in a real
 /// proof-mode build.
 fn translate(ctx: &TypedContext) -> (HSpecMap, Vec<String>) {
+    translate_under(ctx, inference_ast::nodes::ArithMode::DEFAULT)
+}
+
+/// [`translate`] with the language's default arithmetic mode set to `default`,
+/// for the diagnostics whose text depends on what an unmarked operator means.
+fn translate_under(
+    ctx: &TypedContext,
+    default: inference_ast::nodes::ArithMode,
+) -> (HSpecMap, Vec<String>) {
     let buckets = buckets_of(ctx);
     let choice_plans = crate::choice::plan_choice_lowering(ctx, &buckets);
     let reach_plans = super::reach::reachability_plans(ctx, &buckets, &choice_plans)
         .expect("the reachability view should accept every translation-test body");
-    let (map, diagnostics) = super::translate_spec_fns(ctx, &buckets, &reach_plans);
+    let (map, diagnostics) = super::translate_spec_fns(ctx, &buckets, &reach_plans, default);
     (map, diagnostics.iter().map(ToString::to_string).collect())
 }
 
@@ -95,6 +104,14 @@ fn ok(source: &str) -> HSpecMap {
 fn err(source: &str) -> String {
     let ctx = type_check(source);
     let (_, diagnostics) = translate(&ctx);
+    assert!(!diagnostics.is_empty(), "expected diagnostics but got none");
+    diagnostics.join("\n")
+}
+
+/// [`err`] with the language's default arithmetic mode set to `default`.
+fn err_under(source: &str, default: inference_ast::nodes::ArithMode) -> String {
+    let ctx = type_check(source);
+    let (_, diagnostics) = translate_under(&ctx, default);
     assert!(!diagnostics.is_empty(), "expected diagnostics but got none");
     diagnostics.join("\n")
 }
@@ -5777,5 +5794,204 @@ fn a_variantless_enum_outside_a_specification_is_untouched() {
     assert_eq!(
         sole_obligation(&ok(source), "S"),
         imp(guard(0), nz(eqs(local(0), local(0))))
+    );
+}
+
+// ----- 20. arithmetic mode in a specification body (P017, P018) -----------
+
+/// A callee this pass cannot resolve is counted as trapping.
+///
+/// Failing open would let a false obligation ship green through a gate that
+/// admits open proofs, which is the outcome the rule exists to prevent. Driving
+/// the pass without compiling the bodies is what makes the arm observable at
+/// all: executable lowering refuses an unresolvable callee first, so on the
+/// whole-compiler path this is a fallback nothing reaches — which is the point.
+/// The rule has to hold whether or not today's front end can produce the case.
+#[test]
+fn p018_counts_an_unresolvable_callee_as_trapping() {
+    // A parenthesized callee: type-checked, and none of the three shapes code
+    // generation resolves a call from.
+    let e = err(
+        "fn step(a: i32) -> i32 { return a + 1; } \
+         spec S { fn f(lo: i32) exists { let n: i32 = @; assume { assert(n >= lo); } \
+         (step)(n); assert(n >= lo); } }",
+    );
+    assert!(e.contains("error[P018]"), "{e}");
+    assert!(
+        e.contains("reaches a call whose callee code generation cannot resolve"),
+        "{e}"
+    );
+    assert!(
+        e.contains("because the alternative is a false obligation shipping green through a Rocq \
+                    gate that admits open proofs"),
+        "the arm must state the rule rather than a finding about the callee: {e}"
+    );
+}
+
+/// The same call in a `forall` body raises nothing: no judgment reduces that
+/// body, so there is no activation for a callee's trap to empty.
+#[test]
+fn p018_leaves_a_universal_body_alone() {
+    let map = ok(
+        "fn step(a: i32) -> i32 { return checked(a + 1); } \
+         spec S { fn f(x: i32) forall { let y: i32 = step(x); assert(y >= x); } }",
+    );
+    assert!(map.contains_key("S"), "the obligation must still be emitted");
+}
+
+/// A reachability body whose reachable set carries no guard is accepted, and the
+/// obligation it produces is the one the same body produces with the arithmetic
+/// spelled `wrapping(...)`.
+///
+/// The equality is the whole argument for the annotation being a remedy: it
+/// changes what the callee computes, and it changes nothing about the claim.
+#[test]
+fn p017_accepts_a_modular_reachability_body_without_changing_its_obligation() {
+    let program = |arithmetic: &str| {
+        format!(
+            "spec S {{ fn f(lo: i32) exists {{ let n: i32 = @; \
+             assume {{ assert(n >= lo); }} assert({arithmetic} >= lo); }} }}"
+        )
+    };
+    assert_eq!(
+        sole_obligation(&ok(&program("wrapping(n + n)")), "S"),
+        sole_obligation(&ok(&program("n + n")), "S")
+    );
+}
+
+/// Both `P017` wordings describe the default the module is being compiled at,
+/// not a compiled-in constant.
+///
+/// The two sentences are opposite halves of one fact: the payload wording says
+/// an obligation term is where arithmetic does *not* trap, and the reachability
+/// wording says a retained body is where it does. Reading them from different
+/// sources would let one compilation raise both and describe two languages, so
+/// the same source is compiled at each polarity here and each message is held
+/// to the clause its own polarity makes true — including where that clause is
+/// nothing at all, because under a wrapping default there is no contrast for
+/// the payload wording to draw.
+#[test]
+fn both_p017_wordings_read_the_default_the_module_is_compiled_at() {
+    use inference_ast::nodes::ArithMode;
+
+    const PAYLOAD: &str = "fn main() -> i32 { return 0; } \
+                           spec S { fn f(a: i32, b: i32) forall { assert(checked(a + b) == 0); } }";
+    const RETAINED: &str = "fn main() -> i32 { return 0; } \
+                            spec S { fn f(lo: i32) exists { let n: i32 = @; \
+                            assume { assert(n >= lo); } assert(checked(n + n) >= lo); } }";
+
+    let payload_wrapping = err_under(PAYLOAD, ArithMode::Wrapping);
+    assert!(
+        payload_wrapping.contains("mean here, because a bound on the true mathematical result"),
+        "{payload_wrapping}"
+    );
+    assert!(
+        !payload_wrapping.contains("the one place in the language"),
+        "under a wrapping default a specification body is not the one place arithmetic wraps, \
+         and the sentence says nothing about a language this module is not compiled at: \
+         {payload_wrapping}"
+    );
+    let payload_checked = err_under(PAYLOAD, ArithMode::Checked);
+    assert!(
+        payload_checked
+            .contains("and it is the one place in the language where they do not trap on overflow"),
+        "{payload_checked}"
+    );
+
+    let retained_wrapping = err_under(RETAINED, ArithMode::Wrapping);
+    assert!(
+        retained_wrapping.contains("a `checked(...)` here would emit a trap"),
+        "{retained_wrapping}"
+    );
+    let retained_checked = err_under(RETAINED, ArithMode::Checked);
+    assert!(
+        retained_checked.contains("arithmetic traps on overflow everywhere else in the language"),
+        "{retained_checked}"
+    );
+}
+
+/// The two registries of this module's own functions hold the same keys.
+///
+/// Code generation numbers functions in one map and the specification pass
+/// builds a second one from the same buckets to decide which calls it can
+/// follow. Nothing forces them to agree: they are built by different code, and
+/// the resolution both share consults the specification pass's map as the
+/// predicate that *chooses* between candidate keys for a bare name. A key
+/// present in one and absent from the other would therefore not fail — it would
+/// silently move a call to a different callee, or drop it from the walk that
+/// refuses a reachability body reaching a guard.
+///
+/// The fixture is multi-file and carries every bucket the two maps disagree
+/// about most easily: a free function and a method in each of two files, a
+/// specification free function and a specification method. External functions
+/// are in neither map, and that is the one asymmetry stated rather than
+/// asserted away — code generation never sees a dependency's bytes.
+#[test]
+fn the_two_function_registries_hold_the_same_keys() {
+    let ctx = type_check_multi(&[
+        (
+            vec!["lib", "arith"],
+            "pub struct Acc {
+               total: i32;
+               pub fn bump(self, n: i32) -> i32 { return self.total + n; }
+             }
+             pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        ),
+        (
+            Vec::new(),
+            "use lib::arith;
+             pub struct Pair {
+               a: i32;
+               b: i32;
+               pub fn sum(self) -> i32 { return self.a + self.b; }
+             }
+             pub fn twice(n: i32) -> i32 { return arith::add(n, n); }
+             fn main() -> i32 { return twice(2); }
+             spec S {
+               struct Tally {
+                 seen: i32;
+                 fn total(self) -> i32 { return self.seen; }
+               }
+               fn helper(n: i32) forall { assert(n == n); }
+               fn claim(n: i32) forall { assert(twice(n) == twice(n)); }
+             }",
+        ),
+    ]);
+
+    let mut compiler = crate::compiler::Compiler::new("registry_agreement");
+    let hspecs = crate::traverse_t_ast_with_compiler(&ctx, &mut compiler, CompilationMode::Proof)
+        .expect("the fixture compiles in proof mode");
+    assert!(!hspecs.is_empty(), "the fixture must produce an obligation");
+
+    let index = super::CalleeIndex::build(ctx.arena(), &buckets_of(&ctx));
+    let mut from_index: Vec<String> = index.iter().map(|(key, _)| key.to_string()).collect();
+    let mut from_compiler: Vec<String> = compiler
+        .registered_function_keys()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    from_index.sort();
+    from_compiler.sort();
+    // Spelled out so an equality between two sets that quietly stopped holding
+    // a whole bucket still fails: the comparison above is satisfied by two empty
+    // maps, and every key shape below is one the resolution has to choose
+    // between for a bare name.
+    assert_eq!(
+        from_index,
+        vec![
+            "Pair.sum",
+            "S.Tally.total",
+            "S.claim",
+            "S.helper",
+            "lib.arith.Acc.bump",
+            "lib.arith.add",
+            "main",
+            "twice",
+        ],
+        "the fixture must reach every bucket the two maps are built from"
+    );
+    assert_eq!(
+        from_index, from_compiler,
+        "the specification pass and code generation must register one set of functions"
     );
 }

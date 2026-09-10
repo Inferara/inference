@@ -16,6 +16,30 @@
 //! carries such an opcode is a hard error with remediation rather than a
 //! confusing `wasm-opt` parse failure.
 //!
+//! ## The overflow-guard record
+//!
+//! A compiled module records which of its functions trap rather than wrap on
+//! arithmetic overflow, in the `inference.checked` custom section, by function
+//! index. Binaryen carries an unknown custom section through untouched — through
+//! `-O3`, `-Oz`, `--strip-debug` and `--strip`, which drop only the `name`
+//! section — while inlining, removing and reordering the very functions those
+//! indices name. The list survives and stops being true.
+//!
+//! That matters because a compile-mode artifact is how a *library* is built, and
+//! the static-merge linker reads this section out of every library it links to
+//! decide whether a reachability specification reaches a body that traps.
+//! Removal is caught (an out-of-range index is refused at parse time); a reorder
+//! that removes nothing leaves every index in range and naming the wrong body,
+//! which nothing downstream can see.
+//!
+//! So the optimization is followed by a marking step: an artifact that carried
+//! the section keeps it, rewritten into the opaque form, which says that some
+//! function of the module traps and that which ones can no longer be told. A
+//! later link reads that as *every* function of the module, which refuses the
+//! verification it can no longer perform instead of performing it against a list
+//! that has quietly gone stale. `--no-wasm-opt`, and `enabled = false` under
+//! `[build.wasm-opt]`, are the way to keep an exact record.
+//!
 //! It lives under `commands/` for the same reason as
 //! [`crate::commands::project_build`]: spawning an external tool and propagating
 //! its outcome is command-execution logic, not manifest/filesystem logic.
@@ -37,6 +61,24 @@ use crate::toolchain::{Platform, ToolchainPaths};
 /// Environment variable that overrides `wasm-opt` resolution, taking priority
 /// over a PATH lookup.
 const WASM_OPT_PATH_ENV: &str = "WASM_OPT_PATH";
+
+/// The custom section recording which functions of a module trap on arithmetic
+/// overflow.
+///
+/// A hand-synchronised copy of the name code generation emits and the linker
+/// reads, kept here rather than pulled in so the CLI does not depend on a
+/// compiler crate for one string. It is held to the wire format by the unit test
+/// below, which spells the string out, and each of the other copies is held to
+/// the same spelling by a test of its own.
+const CHECKED_SECTION_NAME: &str = "inference.checked";
+
+/// The opaque form of that section's payload: a version byte and nothing else.
+///
+/// Version 1 is the exact form — a version, a count and an ascending index list.
+/// Version 2 carries no list, and that absence is the statement: some function
+/// of this module traps when its arithmetic overflows, and which ones is no
+/// longer recorded. Code generation never writes it; this is its one producer.
+const CHECKED_OPAQUE_PAYLOAD: [u8; 1] = [2];
 
 /// Minimum supported Binaryen major version. The forwarded flags
 /// (`--mvp-features` plus the `--enable-*` feature flags) and the `-Os`/`-Oz`
@@ -140,7 +182,7 @@ pub(crate) fn post_build_optimize(
     let wasm_bytes = std::fs::read(&wasm_path)
         .with_context(|| format!("Failed to read {} for optimization", wasm_path.display()))?;
 
-    let uses_bulk_memory = match scan_artifact(&wasm_bytes)? {
+    let (uses_bulk_memory, records_overflow_guards) = match scan_artifact(&wasm_bytes)? {
         ArtifactScan::VerificationConstruct(construct) => bail!(
             "`[build.wasm-opt]` is enabled but `out/main.wasm` contains the \
              verification-only construct `{construct}`, which wasm-opt cannot \
@@ -150,7 +192,10 @@ pub(crate) fn post_build_optimize(
              optimization (`enabled = false` under `[build.wasm-opt]`, or pass \
              `--no-wasm-opt`)."
         ),
-        ArtifactScan::Executable { uses_bulk_memory } => uses_bulk_memory,
+        ArtifactScan::Executable {
+            uses_bulk_memory,
+            records_overflow_guards,
+        } => (uses_bulk_memory, records_overflow_guards),
     };
 
     let wasm_opt = match resolve_wasm_opt_with_source()? {
@@ -161,7 +206,13 @@ pub(crate) fn post_build_optimize(
     check_wasm_opt_version(&wasm_opt)?;
 
     let before = wasm_bytes.len() as u64;
-    optimize_in_place(&wasm_opt, &config.level, &wasm_path, uses_bulk_memory)?;
+    optimize_in_place(
+        &wasm_opt,
+        &config.level,
+        &wasm_path,
+        uses_bulk_memory,
+        records_overflow_guards,
+    )?;
     let after = std::fs::metadata(&wasm_path)
         .with_context(|| format!("Failed to stat optimized {}", wasm_path.display()))?
         .len();
@@ -170,6 +221,15 @@ pub(crate) fn post_build_optimize(
         "wasm-opt -O{}: main.wasm {before} -> {after} bytes",
         config.level
     );
+    if records_overflow_guards {
+        println!(
+            "wasm-opt: main.wasm records overflow guards, and the optimizer has renumbered \
+             its functions, so the record now says only that some function traps. Linking \
+             this artifact as a library refuses any `exists`/`unique` specification that \
+             reaches it; build without `[build.wasm-opt]` (or with `--no-wasm-opt`) to keep \
+             an exact record."
+        );
+    }
     Ok(())
 }
 
@@ -459,14 +519,19 @@ enum ArtifactScan {
     /// A verification-only construct leaked into an ordinary function; the
     /// payload is its source spelling (e.g. `"forall"`, `"i32.uzumaki"`).
     VerificationConstruct(&'static str),
-    /// An ordinary executable artifact, and whether it carries any bulk-memory
-    /// operator.
-    Executable { uses_bulk_memory: bool },
+    /// An ordinary executable artifact: whether it carries any bulk-memory
+    /// operator, and whether it records which of its functions trap on
+    /// arithmetic overflow.
+    Executable {
+        uses_bulk_memory: bool,
+        records_overflow_guards: bool,
+    },
 }
 
-/// Scans `wasm_bytes` once for both facts the optimizer needs up front: whether
-/// a verification-only construct leaked into the artifact, and whether the
-/// artifact carries bulk memory.
+/// Scans `wasm_bytes` once for the three facts the optimizer needs up front:
+/// whether a verification-only construct leaked into the artifact, whether the
+/// artifact carries bulk memory, and whether it records which of its functions
+/// trap on arithmetic overflow.
 ///
 /// Compile-mode builds strip `spec` blocks, so a well-formed executable artifact
 /// carries no verification construct. Finding one means it leaked into an
@@ -474,14 +539,25 @@ enum ArtifactScan {
 /// opaque error, so the scan stops there and lets the caller surface it with
 /// remediation instead.
 ///
+/// The guard record is read from the *input*, before the optimizer runs, because
+/// that is the artifact whose section is still true. Reading it afterwards would
+/// answer the same question about bytes whose functions have already moved.
+///
 /// # Errors
 ///
 /// Errors if the artifact cannot be parsed as WebAssembly.
 fn scan_artifact(wasm_bytes: &[u8]) -> Result<ArtifactScan> {
     let mut uses_bulk_memory = false;
+    let mut records_overflow_guards = false;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
         let payload =
             payload.map_err(|err| anyhow::anyhow!("failed to scan out/main.wasm: {err}"))?;
+        if let Payload::CustomSection(reader) = &payload
+            && reader.name() == CHECKED_SECTION_NAME
+        {
+            records_overflow_guards = true;
+            continue;
+        }
         let Payload::CodeSectionEntry(body) = payload else {
             continue;
         };
@@ -498,7 +574,10 @@ fn scan_artifact(wasm_bytes: &[u8]) -> Result<ArtifactScan> {
             uses_bulk_memory |= is_bulk_memory(&op);
         }
     }
-    Ok(ArtifactScan::Executable { uses_bulk_memory })
+    Ok(ArtifactScan::Executable {
+        uses_bulk_memory,
+        records_overflow_guards,
+    })
 }
 
 /// Whether `op` belongs to the bulk-memory proposal.
@@ -605,6 +684,7 @@ fn optimize_in_place(
     level: &str,
     wasm_path: &Path,
     uses_bulk_memory: bool,
+    records_overflow_guards: bool,
 ) -> Result<()> {
     let tmp_path = optimized_tmp_path(wasm_path);
     let args = wasm_opt_args(level, wasm_path, &tmp_path, uses_bulk_memory);
@@ -646,6 +726,32 @@ fn optimize_in_place(
         );
     }
 
+    // The optimizer has moved the functions the guard record named, so the
+    // record is replaced by the admission that it can no longer name them —
+    // before the artifact is put in place, so a failure here leaves the exact
+    // one where it was.
+    if records_overflow_guards {
+        let marked = match mark_overflow_guards_opaque(&optimized) {
+            Ok(marked) => marked,
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(err.context(format!(
+                    "wasm-opt succeeded but its output could not be marked as an artifact \
+                     whose overflow-guard record no longer names its functions. The original \
+                     {} is unchanged; try `--no-wasm-opt`.",
+                    wasm_path.display()
+                )));
+            }
+        };
+        if let Err(err) = std::fs::write(&tmp_path, &marked) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow::Error::from(err).context(format!(
+                "Failed to write the marked artifact for {}",
+                wasm_path.display()
+            )));
+        }
+    }
+
     std::fs::rename(&tmp_path, wasm_path).map_err(|err| {
         let _ = std::fs::remove_file(&tmp_path);
         anyhow::Error::from(err).context(format!(
@@ -664,6 +770,125 @@ fn optimized_tmp_path(wasm_path: &Path) -> PathBuf {
     let mut tmp = wasm_path.as_os_str().to_os_string();
     tmp.push(".opt");
     PathBuf::from(tmp)
+}
+
+/// Returns `optimized` with its `inference.checked` section rewritten into the
+/// opaque form — the statement that some function of the module traps on
+/// arithmetic overflow and that which ones is no longer recorded.
+///
+/// Every other section is copied out of `optimized` byte for byte, and the two
+/// modules are then compared section by section to prove exactly that: this
+/// function runs over an artifact the pipeline is about to ship, so "only the
+/// custom section changed" has to be a checked fact rather than a property of
+/// the loop above it.
+///
+/// The section is *appended* when the optimized artifact no longer carries one.
+/// Binaryen has been measured to carry it through, so that branch is not the
+/// expected path — but the fact being recorded is a fact about the input, and
+/// dropping it because the optimizer dropped the section would turn a marker
+/// into silence, which reads downstream as "nothing here traps".
+///
+/// # Errors
+///
+/// Errors if `optimized` cannot be parsed, or if the rebuilt module differs from
+/// it anywhere but in that one section.
+fn mark_overflow_guards_opaque(optimized: &[u8]) -> Result<Vec<u8>> {
+    let mut module = wasm_encoder::Module::new();
+    let mut replaced = false;
+    for payload in Parser::new(0).parse_all(optimized) {
+        let payload = payload
+            .map_err(|err| anyhow::anyhow!("failed to parse the optimized artifact: {err}"))?;
+        if let Payload::CustomSection(reader) = &payload
+            && reader.name() == CHECKED_SECTION_NAME
+        {
+            push_opaque_guard_record(&mut module);
+            replaced = true;
+            continue;
+        }
+        if let Some((id, range)) = payload.as_section() {
+            module.section(&wasm_encoder::RawSection {
+                id,
+                data: &optimized[range],
+            });
+        }
+    }
+    if !replaced {
+        push_opaque_guard_record(&mut module);
+    }
+    let marked = module.finish();
+    assert_only_guard_record_changed(optimized, &marked)?;
+    Ok(marked)
+}
+
+/// Appends the opaque `inference.checked` section to `module`.
+fn push_opaque_guard_record(module: &mut wasm_encoder::Module) {
+    module.section(&wasm_encoder::CustomSection {
+        name: CHECKED_SECTION_NAME.into(),
+        data: (&CHECKED_OPAQUE_PAYLOAD[..]).into(),
+    });
+}
+
+/// The sections of `wasm` as `(id, custom-section name, contents)`, in order.
+///
+/// The name is empty for a non-custom section, whose id already identifies it.
+/// Contents are the section body as it appears in the input, which for a custom
+/// section includes its name — so two sections compare equal only when they are
+/// the same section with the same bytes.
+///
+/// # Errors
+///
+/// Errors if `wasm` cannot be parsed.
+fn section_shape(wasm: &[u8]) -> Result<Vec<(u8, String, &[u8])>> {
+    let mut shape = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload
+            .map_err(|err| anyhow::anyhow!("failed to parse a WebAssembly module: {err}"))?;
+        let name = match &payload {
+            Payload::CustomSection(reader) => reader.name().to_string(),
+            _ => String::new(),
+        };
+        if let Some((id, range)) = payload.as_section() {
+            shape.push((id, name, &wasm[range]));
+        }
+    }
+    Ok(shape)
+}
+
+/// Checks that `marked` differs from `before` in the `inference.checked` section
+/// and nowhere else.
+///
+/// Compares the two section lists with that one section removed from each, so a
+/// section reordered, dropped, re-encoded or added is caught as readily as one
+/// whose bytes changed.
+///
+/// # Errors
+///
+/// Errors if either module cannot be parsed, or if the two disagree anywhere but
+/// in that section.
+fn assert_only_guard_record_changed(before: &[u8], marked: &[u8]) -> Result<()> {
+    let strip = |wasm: &[u8]| -> Result<Vec<(u8, String, Vec<u8>)>> {
+        Ok(section_shape(wasm)?
+            .into_iter()
+            .filter(|(_, name, _)| name != CHECKED_SECTION_NAME)
+            .map(|(id, name, data)| (id, name, data.to_vec()))
+            .collect())
+    };
+    let before_shape = strip(before)?;
+    let marked_shape = strip(marked)?;
+    if before_shape != marked_shape {
+        bail!(
+            "marking the overflow-guard record rewrote {} section(s) it must have copied \
+             verbatim (the optimized artifact has {} such section(s), the marked one {})",
+            before_shape
+                .iter()
+                .zip(&marked_shape)
+                .filter(|(a, b)| a != b)
+                .count(),
+            before_shape.len(),
+            marked_shape.len()
+        );
+    }
+    Ok(())
 }
 
 /// Re-validates `bytes` against the narrowest envelope the input artifact
@@ -1109,6 +1334,136 @@ mod tests {
         );
     }
 
+    /// [`module_with_raw_body`] plus one custom section, for the guard-record
+    /// tests. `name` is taken as written so a test can build a module whose
+    /// section is *not* the guard record.
+    fn module_with_custom_section(body: &[u8], name: &str, payload: &[u8]) -> Vec<u8> {
+        use wasm_encoder::{
+            CodeSection, CustomSection, Function, FunctionSection, Module, TypeSection,
+        };
+        let mut module = Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], []);
+        module.section(&types);
+        let mut funcs = FunctionSection::new();
+        funcs.function(0);
+        module.section(&funcs);
+        let mut code = CodeSection::new();
+        let mut f = Function::new([]);
+        f.raw(body.iter().copied());
+        code.function(&f);
+        module.section(&code);
+        module.section(&CustomSection {
+            name: name.into(),
+            data: payload.into(),
+        });
+        module.finish()
+    }
+
+    #[test]
+    fn the_guard_record_is_spelled_as_the_wire_format_has_it() {
+        // This crate's copy of the section name and of the opaque payload, held
+        // to the wire format by spelling both out. Code generation and the
+        // static-merge linker keep copies of their own, each pinned the same
+        // way, so a drift in any one of the three fails somewhere.
+        assert_eq!(CHECKED_SECTION_NAME, "inference.checked");
+        assert_eq!(CHECKED_OPAQUE_PAYLOAD, [2]);
+    }
+
+    #[test]
+    fn scan_artifact_reports_an_artifact_that_records_overflow_guards() {
+        let module = module_with_custom_section(&[0x0b], CHECKED_SECTION_NAME, &[1, 1, 0]);
+        assert_eq!(
+            scan_artifact(&module).unwrap(),
+            ArtifactScan::Executable {
+                uses_bulk_memory: false,
+                records_overflow_guards: true
+            }
+        );
+    }
+
+    #[test]
+    fn scan_artifact_reads_no_guard_record_from_another_custom_section() {
+        // The verdict keys on the section's name, not on there being a custom
+        // section at all -- a `name` or `producers` section says nothing about
+        // overflow, and marking an artifact that records no guards would put a
+        // claim in it its producer never made.
+        let module = module_with_custom_section(&[0x0b], "producers", &[0]);
+        assert_eq!(
+            scan_artifact(&module).unwrap(),
+            ArtifactScan::Executable {
+                uses_bulk_memory: false,
+                records_overflow_guards: false
+            }
+        );
+    }
+
+    #[test]
+    fn marking_replaces_the_guard_record_and_leaves_every_other_section_alone() {
+        let module = module_with_custom_section(&[0x0b], CHECKED_SECTION_NAME, &[1, 2, 0, 3]);
+        let marked = mark_overflow_guards_opaque(&module).expect("the module marks");
+
+        let record: Vec<&[u8]> = section_shape(&marked)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, name, _)| name == CHECKED_SECTION_NAME)
+            .map(|(_, _, data)| data)
+            .collect();
+        assert_eq!(record.len(), 1, "exactly one guard record survives");
+        assert!(
+            record[0].ends_with(&CHECKED_OPAQUE_PAYLOAD),
+            "the surviving record carries the opaque payload: {:?}",
+            record[0]
+        );
+
+        let others = |wasm: &[u8]| -> Vec<(u8, String, Vec<u8>)> {
+            section_shape(wasm)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, name, _)| name != CHECKED_SECTION_NAME)
+                .map(|(id, name, data)| (id, name, data.to_vec()))
+                .collect()
+        };
+        assert_eq!(others(&module), others(&marked));
+    }
+
+    #[test]
+    fn marking_appends_the_record_when_the_optimizer_dropped_it() {
+        // The fact recorded is a fact about the *input*, which carried a record.
+        // An optimizer that dropped the section would otherwise turn the marker
+        // into silence -- and silence reads downstream as "no function here
+        // traps", the one reading the marker exists to prevent.
+        let module = module_with_raw_body(&[0x0b]);
+        let marked = mark_overflow_guards_opaque(&module).expect("the module marks");
+        let record: Vec<&[u8]> = section_shape(&marked)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, name, _)| name == CHECKED_SECTION_NAME)
+            .map(|(_, _, data)| data)
+            .collect();
+        assert_eq!(record.len(), 1, "the record is appended, not lost");
+        assert!(record[0].ends_with(&CHECKED_OPAQUE_PAYLOAD));
+    }
+
+    #[test]
+    fn the_marked_artifact_is_validated_against_the_one_it_came_from() {
+        // The invariant the marking rests on, checked against a pair that
+        // violates it: two modules differing in their code section are not each
+        // other's marked form, whatever their guard records say.
+        let before = module_with_custom_section(&[0x0b], CHECKED_SECTION_NAME, &[1, 1, 0]);
+        let elsewhere = module_with_custom_section(
+            &[0x41, 0x00, 0x1a, 0x0b],
+            CHECKED_SECTION_NAME,
+            &CHECKED_OPAQUE_PAYLOAD,
+        );
+        let err = assert_only_guard_record_changed(&before, &elsewhere)
+            .expect_err("a body that changed must be caught");
+        assert!(
+            err.to_string().contains("copied verbatim"),
+            "got: {err:#}"
+        );
+    }
+
     #[test]
     fn scan_artifact_reports_a_plain_body_as_bulk_free() {
         // An ordinary executable body (just `end`) carries neither a
@@ -1117,7 +1472,8 @@ mod tests {
         assert_eq!(
             scan_artifact(&module).unwrap(),
             ArtifactScan::Executable {
-                uses_bulk_memory: false
+                uses_bulk_memory: false,
+                records_overflow_guards: false
             }
         );
     }
@@ -1141,7 +1497,8 @@ mod tests {
             assert_eq!(
                 scan_artifact(&module).unwrap(),
                 ArtifactScan::Executable {
-                    uses_bulk_memory: true
+                    uses_bulk_memory: true,
+                    records_overflow_guards: false
                 },
                 "{name} must be reported as bulk memory"
             );
@@ -1197,7 +1554,7 @@ mod tests {
 
         let fake = write_failing_wasm_opt(&dir);
         let err = crate::testing::retry_while_exec_busy(|| {
-            optimize_in_place(&fake, "z", &wasm_path, false)
+            optimize_in_place(&fake, "z", &wasm_path, false, false)
         })
         .unwrap_err();
         assert!(

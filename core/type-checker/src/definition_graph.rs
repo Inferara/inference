@@ -336,6 +336,14 @@ fn resolve_ref(
 /// identifiers and the leaf of any `::`-qualified path. Recurses through the
 /// arithmetic and access expression forms a const initializer can contain.
 fn collect_expr_refs(arena: &AstArena, expr_id: ExprId, out: &mut Vec<String>) {
+    // Parentheses and the arithmetic-mode annotations contribute no name of
+    // their own and are peeled together, so `const B: i32 = checked(A + 1);`
+    // records the same dependency on `A` that `(A + 1)` does. Losing it would
+    // order the two constants by nothing.
+    if let Some(inner) = arena.transparent_inner(expr_id) {
+        collect_expr_refs(arena, inner, out);
+        return;
+    }
     match &arena[expr_id].kind {
         Expr::Identifier(ident_id) => out.push(arena[*ident_id].name.clone()),
         Expr::TypeMemberAccess { expr, name } => {
@@ -351,7 +359,7 @@ fn collect_expr_refs(arena: &AstArena, expr_id: ExprId, out: &mut Vec<String>) {
             collect_expr_refs(arena, *left, out);
             collect_expr_refs(arena, *right, out);
         }
-        Expr::PrefixUnary { expr, .. } | Expr::Parenthesized { expr } => {
+        Expr::PrefixUnary { expr, .. } => {
             collect_expr_refs(arena, *expr, out);
         }
         Expr::ArrayIndexAccess { array, index } => {
@@ -396,5 +404,88 @@ fn flatten_path(arena: &AstArena, expr_id: ExprId) -> Option<String> {
         Some(segments.join("::"))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_expr_refs;
+    use inference_ast::arena::AstArena;
+    use inference_ast::ids::ExprId;
+    use inference_ast::nodes::{ArithMode, Expr, ExprData, Ident, Location};
+
+    fn push(arena: &mut AstArena, kind: Expr) -> ExprId {
+        arena.exprs.alloc(ExprData {
+            location: Location::default(),
+            kind,
+        })
+    }
+
+    fn name(arena: &mut AstArena, text: &str) -> ExprId {
+        let ident = arena.idents.alloc(Ident {
+            location: Location::default(),
+            name: text.to_string(),
+        });
+        push(arena, Expr::Identifier(ident))
+    }
+
+    fn refs(arena: &AstArena, expr_id: ExprId) -> Vec<String> {
+        let mut out = Vec::new();
+        collect_expr_refs(arena, expr_id, &mut out);
+        out
+    }
+
+    /// Every grouping spelling contributes the same dependency edges.
+    ///
+    /// A constant initializer decides the order two constants are laid out in.
+    /// If an annotation hid the name inside it, `const B: i32 = checked(A + 1);`
+    /// would look independent of `A`, which is how a constant gets emitted
+    /// before the value it is built from.
+    #[test]
+    fn each_grouping_form_collects_the_same_references() {
+        let mut arena = AstArena::default();
+        let a = name(&mut arena, "A");
+        let one = push(
+            &mut arena,
+            Expr::NumberLiteral {
+                value: "1".to_string(),
+            },
+        );
+        let sum = push(
+            &mut arena,
+            Expr::Binary {
+                left: a,
+                right: one,
+                op: inference_ast::nodes::OperatorKind::Add,
+            },
+        );
+
+        let bare = refs(&arena, sum);
+        assert_eq!(bare, vec!["A".to_string()]);
+
+        let wrappers: Vec<ExprId> = vec![
+            push(&mut arena, Expr::Parenthesized { expr: sum }),
+            push(
+                &mut arena,
+                Expr::ArithMode {
+                    mode: ArithMode::Checked,
+                    expr: sum,
+                },
+            ),
+            push(
+                &mut arena,
+                Expr::ArithMode {
+                    mode: ArithMode::Wrapping,
+                    expr: sum,
+                },
+            ),
+        ];
+        for wrapper in wrappers {
+            assert_eq!(
+                refs(&arena, wrapper),
+                bare,
+                "a grouping form changed the collected references"
+            );
+        }
     }
 }

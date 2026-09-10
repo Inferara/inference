@@ -218,6 +218,29 @@
 //!   language and survives monomorphization. See
 //!   [`rules::generic_not_supported`].
 //!
+//! ### Arithmetic-Mode Annotations (A053, A054)
+//!
+//! - A053: `checked(e)` and `wrapping(e)` must contain an operator to govern.
+//!   The annotation reaches the `+`, `-`, `*` and unary `-` written between its
+//!   own parentheses and nothing else — not the body of a function called
+//!   inside it, and not a glued negative literal such as `-2147483648`, which is
+//!   one token carrying its own sign rather than a negation. An error rather
+//!   than a warning, because this is a typo: the annotation is somewhere other
+//!   than where it was meant to go, and no default makes it right. Two wordings,
+//!   because a `wrapping(...)` with nothing to govern is inert while a
+//!   `checked(...)` reads as a guarantee nothing backs. See
+//!   [`rules::arith_mode_governs_nothing`].
+//! - A054: an annotation naming the mode already in force where it is written —
+//!   from the language's default at the top level, or from an enclosing
+//!   annotation of the same mode — changes no arithmetic. A **warning**: which
+//!   spelling is redundant is decided by the default, so a rule that made the
+//!   redundant one a hard error would break source the previous release taught
+//!   people to write. The comparison is against the enclosing effective mode, so
+//!   `checked(a * wrapping(b + c))` is redundant nowhere; a stack of same-mode
+//!   annotations reports its outermost member once, the convention A048 and A049
+//!   already use. An annotation A053 owns is skipped. See
+//!   [`rules::arith_mode_changes_nothing`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -393,6 +416,8 @@ mod tests {
             AnalysisDiagnostic::UnitAsValue { position: "a value", location: dummy_location() },
             AnalysisDiagnostic::UnnamedParameter { function: "f".to_string(), index: 0, ty: "i32".to_string(), location: dummy_location() },
             AnalysisDiagnostic::GenericNotSupported { site: errors::GenericSite::Declaration { function: "f".to_string(), params: "T'".to_string() }, location: dummy_location() },
+            AnalysisDiagnostic::ArithModeGovernsNothing { mode: inference_ast::nodes::ArithMode::Wrapping, location: dummy_location() },
+            AnalysisDiagnostic::ArithModeChangesNothing { mode: inference_ast::nodes::ArithMode::Wrapping, enclosure: errors::RedundantArithMode::AgainstTheDefault, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

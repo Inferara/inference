@@ -581,6 +581,30 @@ pub(crate) fn proof_wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<
     .to_vec()
 }
 
+/// The fallible, analysis-free, proof-mode multi-file helper.
+///
+/// [`proof_wasm_codegen_multi_file`]'s counterpart for the negative tests: a
+/// program a `P0xx` diagnostic rejects must be reachable across files without
+/// analysis first refusing it for an unrelated reason, and the rejection is the
+/// return value rather than a panic.
+///
+/// # Panics
+/// Panics if any file has a syntax error or if type checking fails.
+pub(crate) fn try_proof_codegen_multi_file_no_analysis(
+    files: &[(Vec<&str>, &str)],
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let typed_context = try_type_check_multi_file(files)
+        .expect("multi-file proof-mode test source should type-check");
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        "output",
+        inference_wasm_codegen::CodegenOptions {
+            mode: inference_wasm_codegen::CompilationMode::Proof,
+            ..Default::default()
+        },
+    )
+}
+
 /// Like [`wasm_codegen_project`] but returns the error instead of panicking, for
 /// negative tests that assert a multi-file program is rejected.
 pub(crate) fn try_codegen_project(
@@ -848,7 +872,7 @@ fn collect_exprs_from_expr(
         Expr::PrefixUnary { expr, .. } => {
             collect_exprs_from_expr(arena, *expr, predicate, results);
         }
-        Expr::Parenthesized { expr } => {
+        Expr::Parenthesized { expr } | Expr::ArithMode { expr, .. } => {
             collect_exprs_from_expr(arena, *expr, predicate, results);
         }
         Expr::FunctionCall { function, args, .. } => {

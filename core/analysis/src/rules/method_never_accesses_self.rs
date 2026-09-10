@@ -114,6 +114,7 @@ fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
         }
         Expr::PrefixUnary { expr, .. }
         | Expr::Parenthesized { expr }
+        | Expr::ArithMode { expr, .. }
         | Expr::MemberAccess { expr, .. }
         | Expr::TypeMemberAccess { expr, .. } => expr_references_self(arena, *expr),
         Expr::FunctionCall {
